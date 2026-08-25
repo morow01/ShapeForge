@@ -6,7 +6,13 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "preversion": "npm run build",
+    "postversion": "git push && git push --tags",
+    "release": "npm run release:patch",
+    "release:patch": "npm version patch -m \"Release v%s\"",
+    "release:minor": "npm version minor -m \"Release v%s\"",
+    "release:major": "npm version major -m \"Release v%s\""
   },
   "devDependencies": {
     "@types/react": "^19.2.18",
