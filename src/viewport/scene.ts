@@ -570,41 +570,49 @@ export class Scene {
     const caught: string[] = [];
     for (const [id, view] of this.parts) {
       if (!view.group.visible) continue;
-      const b = this.screenBoundsOf(view.group, rect);
+      const b = this.screenBoundsOf(view, rect);
       if (!b) continue;
       if (b.minX >= rx0 && b.maxX <= rx1 && b.minY >= ry0 && b.maxY <= ry1) caught.push(id);
     }
     this.onSelectMany?.(caught, m.additive);
   }
 
-  /** Screen-space (canvas-relative pixel) bounding box of an object's world
-   *  AABB, by projecting all 8 corners — cheap, and exact enough for a
-   *  containment test even though it is not the tightest possible box. */
+  /**
+   * Tight screen-space (canvas-relative pixel) bounding box of a part, by
+   * projecting every vertex of its ACTUAL mesh rather than its 3D AABB's 8
+   * corners. The AABB approach undercounted nothing geometrically, but for
+   * any round or tapered shape it is a real over-estimate on screen: a
+   * cone's box is exactly as wide as its base circle, so the box's corners
+   * sit out past the visible edge by a factor of √2 — measured on a typical
+   * cone, that inflated the required marquee by 83px horizontally and 55px
+   * vertically beyond what was actually visible, so a rectangle drawn
+   * snugly around the rendered shape (the natural thing to do) failed the
+   * containment test. Only run at marquee-release, not per frame, so
+   * walking every vertex (a few thousand, even for a sphere) costs nothing
+   * noticeable.
+   */
   private screenBoundsOf(
-    object: THREE.Object3D,
+    view: PartView,
     rect: DOMRect,
   ): { minX: number; minY: number; maxX: number; maxY: number } | null {
-    const b = this.boundsOf(object);
+    const pos = view.mesh.geometry.attributes.position;
+    const m = view.group.matrixWorld;
     let minX = Infinity;
     let minY = Infinity;
     let maxX = -Infinity;
     let maxY = -Infinity;
     const v = new THREE.Vector3();
 
-    for (const x of [b.min[0], b.max[0]]) {
-      for (const y of [b.min[1], b.max[1]]) {
-        for (const z of [b.min[2], b.max[2]]) {
-          v.set(x, y, z).project(this.camera);
-          // Behind the camera: this corner has no meaningful screen position.
-          if (v.z > 1) return null;
-          const px = ((v.x + 1) / 2) * rect.width;
-          const py = ((1 - v.y) / 2) * rect.height;
-          if (px < minX) minX = px;
-          if (px > maxX) maxX = px;
-          if (py < minY) minY = py;
-          if (py > maxY) maxY = py;
-        }
-      }
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i).applyMatrix4(m).project(this.camera);
+      // Behind the camera: this vertex has no meaningful screen position.
+      if (v.z > 1) return null;
+      const px = ((v.x + 1) / 2) * rect.width;
+      const py = ((1 - v.y) / 2) * rect.height;
+      if (px < minX) minX = px;
+      if (px > maxX) maxX = px;
+      if (py < minY) minY = py;
+      if (py > maxY) maxY = py;
     }
     return { minX, minY, maxX, maxY };
   }
