@@ -27,8 +27,40 @@ function init(): Promise<void> {
   return booted;
 }
 
-function toMesh(name: string, s: Shape3D): KernelMesh {
-  return { name, faces: s.mesh(), edges: s.meshEdges() };
+interface MeshQuality {
+  tolerance: number;
+  angularTolerance: number;
+}
+
+/**
+ * Tessellation quality for the live editing view — favors speed. OCCT's
+ * default tolerance (~0.001mm) is an ABSOLUTE deviation, so a curved
+ * primitive's triangle count grows with its own size, not just its
+ * curvature: a 20mm-radius sphere alone came out to 201,198 triangles and
+ * took 3.3 seconds to tessellate at the default; a 100mm one didn't finish
+ * before exhausting the WASM instance's memory and crashing it. A box or
+ * cylinder never showed this because flat faces need only 2 triangles
+ * regardless of size, and a cylinder is curved in only one direction — a
+ * sphere is curved everywhere, so it is by far the worst case.
+ *
+ * This setting keeps any single primitive at a few thousand triangles and
+ * comfortably under 100ms even at a 100mm radius (measured), which is
+ * already smoother than a viewport needs while dragging a slider live.
+ */
+const EDIT_QUALITY: MeshQuality = { tolerance: 0.05, angularTolerance: 0.4 };
+
+/**
+ * Tessellation quality for the merged result preview and STL export — a
+ * one-time cost, so it can afford to be finer, but still nowhere near OCCT's
+ * default: at 0.001mm that default is finer than any FDM or resin printer's
+ * real-world accuracy (typically 0.05–0.2mm), so it is detail no printer can
+ * express, paid for in file size, slicer load time, and the same crash risk
+ * as above. 0.02mm is already smoother than what shows up in a print.
+ */
+const EXPORT_QUALITY: MeshQuality = { tolerance: 0.02, angularTolerance: 0.3 };
+
+function toMesh(name: string, s: Shape3D, quality: MeshQuality): KernelMesh {
+  return { name, faces: s.mesh(quality), edges: s.meshEdges(quality) };
 }
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -120,7 +152,7 @@ const api = {
       try {
         const solid = makeLocal(spec, onError);
         if (solid) {
-          const mesh = toMesh(spec.id, solid);
+          const mesh = toMesh(spec.id, solid, EDIT_QUALITY);
           meshCache.set(spec.id, { key, mesh });
           parts.push({ id: spec.id, isHole: spec.isHole, mesh });
         } else {
@@ -151,7 +183,7 @@ const api = {
     if (!solid) return { mesh: null, volume: 0, faceCount: 0, errors, buildMs: 0 };
 
     return {
-      mesh: toMesh("result", solid),
+      mesh: toMesh("result", solid, EXPORT_QUALITY),
       volume: measureVolume(solid),
       faceCount: solid.faces.length,
       errors,
@@ -164,7 +196,9 @@ const api = {
     await init();
     const { onError } = collector();
     const solid = evaluateRoots(specs, onError);
-    return solid ? solid.blobSTL() : null;
+    // binary: true — smaller and faster to write/read than the ASCII default,
+    // and every slicer (including Bambu Studio) reads it fine.
+    return solid ? solid.blobSTL({ ...EXPORT_QUALITY, binary: true }) : null;
   },
 };
 
