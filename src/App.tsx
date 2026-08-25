@@ -60,6 +60,7 @@ export function App() {
     addPrimitive,
     removeSelected,
     select,
+    selectMany,
     setParam,
     setTransform,
     setHole,
@@ -219,6 +220,10 @@ export function App() {
     (id: string | null, additive: boolean) => select(id, additive),
     [select],
   );
+  const onSelectMany = useCallback(
+    (ids: string[], additive: boolean) => selectMany(ids, additive),
+    [selectMany],
+  );
   const onTransform = useCallback(
     (id: string, patch: Parameters<typeof setTransform>[1]) => setTransform(id, patch),
     [setTransform],
@@ -336,6 +341,7 @@ export function App() {
         gizmoMode={gizmoMode}
         showResult={showResult}
         onSelect={onSelect}
+        onSelectMany={onSelectMany}
         onTransform={onTransform}
         onDragChange={onDragChange}
       />

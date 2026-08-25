@@ -13,6 +13,8 @@ interface Props {
   gizmoMode: GizmoMode;
   showResult: boolean;
   onSelect: (id: string | null, additive: boolean) => void;
+  /** Marquee-select release: every id caught inside the drawn rectangle. */
+  onSelectMany: (ids: string[], additive: boolean) => void;
   onTransform: (id: string, patch: { position?: Vec3; rotation?: Vec3 }) => void;
   onDragChange: (dragging: boolean) => void;
 }
@@ -34,6 +36,7 @@ export function Viewport(props: Props) {
 
     const scene = new Scene(host);
     scene.onSelectObject = (id, additive) => latest.current.onSelect(id, additive);
+    scene.onSelectMany = (ids, additive) => latest.current.onSelectMany(ids, additive);
     scene.onTransformObject = (id, patch) => latest.current.onTransform(id, patch);
     scene.onDragChange = (dragging) => latest.current.onDragChange(dragging);
 

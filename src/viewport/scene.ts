@@ -18,6 +18,25 @@ const CLICK_SLOP_PX = 4;
 const SNAP_TOLERANCE_PX = 10;
 const DEG = Math.PI / 180;
 
+interface BodyGrab {
+  id: string;
+  downScreen: { x: number; y: number };
+  /** False until the pointer moves past the click threshold — before that it
+   *  might still turn out to be a plain click, handled entirely by pick(). */
+  active: boolean;
+  /** Horizontal plane at the object's own height, so a body-drag slides it
+   *  under the cursor at constant Z rather than dragging it down to Z=0. */
+  plane: THREE.Plane;
+  grabPoint: THREE.Vector3;
+  startPos: THREE.Vector3;
+}
+
+interface Marquee {
+  downScreen: { x: number; y: number };
+  active: boolean;
+  additive: boolean;
+}
+
 interface PartView {
   group: THREE.Group;
   mesh: THREE.Mesh;
@@ -92,8 +111,18 @@ export class Scene {
    *  exists, instead of sitting at the origin until some unrelated state
    *  change happens to call setPlacements again. */
   private lastNodes: SceneNode[] = [];
+  /** In-progress click-and-drag-the-body move, TinkerCAD style — separate
+   *  from the gizmo's own arrow-drag. See onPointerDown/onPointerMove. */
+  private grab: BodyGrab | null = null;
+  /** In-progress rubber-band select, started by dragging from empty space —
+   *  TinkerCAD's way of selecting several objects at once. */
+  private marquee: Marquee | null = null;
+  private marqueeEl: HTMLDivElement;
 
   onSelectObject: ((id: string | null, additive: boolean) => void) | null = null;
+  /** Marquee release: every id whose screen-space bounds landed fully inside
+   *  the drawn rectangle, in no particular order. */
+  onSelectMany: ((ids: string[], additive: boolean) => void) | null = null;
   onTransformObject:
     | ((id: string, patch: { position?: Vec3; rotation?: Vec3 }) => void)
     | null = null;
@@ -108,6 +137,15 @@ export class Scene {
     this.renderer.setPixelRatio(window.devicePixelRatio);
     this.renderer.setSize(host.clientWidth, host.clientHeight);
     host.appendChild(this.renderer.domElement);
+
+    // The marquee rectangle is inherently a 2D screen-space overlay, so it is
+    // plain DOM/CSS rather than a projected 3D object — simpler and pixel-exact.
+    this.marqueeEl = document.createElement("div");
+    this.marqueeEl.style.cssText =
+      "position:absolute;display:none;pointer-events:none;" +
+      "border:1px solid #ffa53d;background:rgba(255,165,61,0.15);";
+    if (getComputedStyle(host).position === "static") host.style.position = "relative";
+    host.appendChild(this.marqueeEl);
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x1a1d21);
@@ -132,6 +170,7 @@ export class Scene {
     this.addGrid();
 
     this.renderer.domElement.addEventListener("pointerdown", this.onPointerDown);
+    this.renderer.domElement.addEventListener("pointermove", this.onPointerMove);
     this.renderer.domElement.addEventListener("pointerup", this.onPointerUp);
     // Right-click drives the camera (orbit), never the browser's menu.
     this.renderer.domElement.addEventListener("contextmenu", this.onContextMenu);
@@ -234,8 +273,9 @@ export class Scene {
     for (const o of this.lastNodes) {
       const view = this.parts.get(o.id);
       if (!view) continue;
-      // Skip the part being dragged, so the gizmo is not fighting React state.
+      // Skip the part being dragged, so the drag is not fighting React state.
       if (this.gizmo.dragging && this.gizmo.object === view.group) continue;
+      if (this.grab?.active && this.grab.id === o.id) continue;
       view.group.position.set(o.position[0], o.position[1], o.position[2]);
       view.group.rotation.set(o.rotation[0] * DEG, o.rotation[1] * DEG, o.rotation[2] * DEG);
       view.isHole = o.isHole;
@@ -372,25 +412,209 @@ export class Scene {
     if (this.altDown) this.guides.clear();
   };
 
-  // ---- picking ----------------------------------------------------------
+  // ---- picking ------------------------------------------------------------
 
   private onPointerDown = (e: PointerEvent) => {
-    // Only the left button ever selects — right/middle are reserved for
-    // orbit/pan and must never be misread as a click on release.
+    // Only the left button ever selects/drags — right/middle are reserved
+    // for orbit/pan and must never be misread as a click on release.
     if (e.button !== 0) return;
     this.downAt = { x: e.clientX, y: e.clientY };
+
+    // A gizmo-handle drag claims the event first: its own pointerdown
+    // listener is registered on this same canvas before this one, so by the
+    // time this runs, gizmo.dragging already reflects whether the click hit
+    // an arrow. Do not ALSO start a body-drag on top of that.
+    if (this.showResult || this.gizmo.dragging) return;
+
+    const id = this.hitTest(e);
+    if (!id) {
+      // Empty space: this might turn out to be a rubber-band select, once the
+      // pointer clears the click threshold (see onPointerMove). If it never
+      // does, onPointerUp's existing pick()-on-empty-space path (deselect)
+      // still runs exactly as before.
+      this.marquee = {
+        downScreen: { x: e.clientX, y: e.clientY },
+        active: false,
+        additive: e.ctrlKey || e.metaKey || e.shiftKey,
+      };
+      return;
+    }
+
+    const view = this.parts.get(id);
+    if (!view) return;
+
+    const planeZ = view.group.position.z;
+    const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -planeZ);
+    const grabPoint = this.rayPlaneHit(e, plane);
+    if (!grabPoint) return;
+
+    this.grab = {
+      id,
+      downScreen: { x: e.clientX, y: e.clientY },
+      active: false,
+      plane,
+      grabPoint,
+      startPos: view.group.position.clone(),
+    };
+  };
+
+  /**
+   * Click-and-drag an object's BODY to move it — TinkerCAD's primary way of
+   * repositioning something, distinct from the gizmo's small arrow handles.
+   * Slides the object under the cursor at constant height (X/Y only); lifting
+   * it in Z is still the gizmo's job. Only engages once the pointer clears the
+   * click threshold, so a plain click still falls through to pick() exactly
+   * as before — this never changes what a non-dragging click does.
+   */
+  private onPointerMove = (e: PointerEvent) => {
+    if (this.marquee) {
+      this.updateMarquee(e);
+      return;
+    }
+
+    const g = this.grab;
+    if (!g) return;
+
+    if (!g.active) {
+      if (Math.hypot(e.clientX - g.downScreen.x, e.clientY - g.downScreen.y) <= CLICK_SLOP_PX) {
+        return;
+      }
+      g.active = true;
+      this.onSelectObject?.(g.id, false);
+      this.onDragChange?.(true);
+    }
+
+    const view = this.parts.get(g.id);
+    const hit = this.rayPlaneHit(e, g.plane);
+    if (!view || !hit) return;
+
+    view.group.position.set(
+      g.startPos.x + (hit.x - g.grabPoint.x),
+      g.startPos.y + (hit.y - g.grabPoint.y),
+      g.startPos.z,
+    );
+    view.group.updateWorldMatrix(true, true);
+
+    this.applySmartSnap(g.id, view.group);
+    this.onTransformObject?.(g.id, {
+      position: [view.group.position.x, view.group.position.y, view.group.position.z],
+    });
   };
 
   private onPointerUp = (e: PointerEvent) => {
     const down = this.downAt;
     this.downAt = null;
+
+    const m = this.marquee;
+    this.marquee = null;
+    if (m) {
+      if (m.active) {
+        this.finishMarquee(e, m);
+        this.marqueeEl.style.display = "none";
+        return; // a rubber-band select happened; this was not a click.
+      }
+      // Never activated (pointer stayed within the click threshold) — fall
+      // through to the normal empty-space click below, unchanged.
+    }
+
+    const g = this.grab;
+    this.grab = null;
+    if (g?.active) {
+      this.guides.clear();
+      this.onDragChange?.(false);
+      return; // a body-drag happened; this was not a click.
+    }
+
     if (!down || this.gizmo.dragging) return;
     if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > CLICK_SLOP_PX) return;
     this.pick(e, e.ctrlKey || e.metaKey || e.shiftKey);
   };
 
+  /** Grows the rectangle live and, past the click threshold, shows it. */
+  private updateMarquee(e: PointerEvent) {
+    const m = this.marquee;
+    if (!m) return;
+    if (
+      !m.active &&
+      Math.hypot(e.clientX - m.downScreen.x, e.clientY - m.downScreen.y) <= CLICK_SLOP_PX
+    ) {
+      return;
+    }
+    m.active = true;
+
+    const hostRect = this.host.getBoundingClientRect();
+    const x0 = m.downScreen.x - hostRect.left;
+    const y0 = m.downScreen.y - hostRect.top;
+    const x1 = e.clientX - hostRect.left;
+    const y1 = e.clientY - hostRect.top;
+
+    this.marqueeEl.style.display = "block";
+    this.marqueeEl.style.left = `${Math.min(x0, x1)}px`;
+    this.marqueeEl.style.top = `${Math.min(y0, y1)}px`;
+    this.marqueeEl.style.width = `${Math.abs(x1 - x0)}px`;
+    this.marqueeEl.style.height = `${Math.abs(y1 - y0)}px`;
+  }
+
+  /**
+   * Selects every visible part whose screen-space bounds land FULLY inside
+   * the drawn rectangle — "dragging a rectangle around the objects", per
+   * TinkerCAD's own description, i.e. containment rather than mere overlap.
+   */
+  private finishMarquee(e: PointerEvent, m: Marquee) {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const rx0 = Math.min(m.downScreen.x, e.clientX) - rect.left;
+    const ry0 = Math.min(m.downScreen.y, e.clientY) - rect.top;
+    const rx1 = Math.max(m.downScreen.x, e.clientX) - rect.left;
+    const ry1 = Math.max(m.downScreen.y, e.clientY) - rect.top;
+
+    const caught: string[] = [];
+    for (const [id, view] of this.parts) {
+      if (!view.group.visible) continue;
+      const b = this.screenBoundsOf(view.group, rect);
+      if (!b) continue;
+      if (b.minX >= rx0 && b.maxX <= rx1 && b.minY >= ry0 && b.maxY <= ry1) caught.push(id);
+    }
+    this.onSelectMany?.(caught, m.additive);
+  }
+
+  /** Screen-space (canvas-relative pixel) bounding box of an object's world
+   *  AABB, by projecting all 8 corners — cheap, and exact enough for a
+   *  containment test even though it is not the tightest possible box. */
+  private screenBoundsOf(
+    object: THREE.Object3D,
+    rect: DOMRect,
+  ): { minX: number; minY: number; maxX: number; maxY: number } | null {
+    const b = this.boundsOf(object);
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    const v = new THREE.Vector3();
+
+    for (const x of [b.min[0], b.max[0]]) {
+      for (const y of [b.min[1], b.max[1]]) {
+        for (const z of [b.min[2], b.max[2]]) {
+          v.set(x, y, z).project(this.camera);
+          // Behind the camera: this corner has no meaningful screen position.
+          if (v.z > 1) return null;
+          const px = ((v.x + 1) / 2) * rect.width;
+          const py = ((1 - v.y) / 2) * rect.height;
+          if (px < minX) minX = px;
+          if (px > maxX) maxX = px;
+          if (py < minY) minY = py;
+          if (py > maxY) maxY = py;
+        }
+      }
+    }
+    return { minX, minY, maxX, maxY };
+  }
+
   private pick(e: PointerEvent, additive: boolean) {
     if (this.showResult) return;
+    this.onSelectObject?.(this.hitTest(e), additive);
+  }
+
+  private hitTest(e: { clientX: number; clientY: number }): string | null {
     const rect = this.renderer.domElement.getBoundingClientRect();
     this.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
@@ -398,16 +622,25 @@ export class Scene {
 
     const targets = [...this.parts.values()].map((v) => v.mesh);
     const hit = this.raycaster.intersectObjects(targets, false)[0];
-    if (!hit) {
-      this.onSelectObject?.(null, additive);
-      return;
-    }
+    if (!hit) return null;
     for (const [id, view] of this.parts) {
-      if (view.mesh === hit.object) {
-        this.onSelectObject?.(id, additive);
-        return;
-      }
+      if (view.mesh === hit.object) return id;
     }
+    return null;
+  }
+
+  private rayPlaneHit(
+    e: { clientX: number; clientY: number },
+    plane: THREE.Plane,
+  ): THREE.Vector3 | null {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(
+      ((e.clientX - rect.left) / rect.width) * 2 - 1,
+      -((e.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    this.raycaster.setFromCamera(ndc, this.camera);
+    const out = new THREE.Vector3();
+    return this.raycaster.ray.intersectPlane(plane, out) ? out : null;
   }
 
   // ---- camera -----------------------------------------------------------
@@ -525,6 +758,7 @@ export class Scene {
   dispose() {
     cancelAnimationFrame(this.frame);
     this.renderer.domElement.removeEventListener("pointerdown", this.onPointerDown);
+    this.renderer.domElement.removeEventListener("pointermove", this.onPointerMove);
     this.renderer.domElement.removeEventListener("pointerup", this.onPointerUp);
     this.renderer.domElement.removeEventListener("contextmenu", this.onContextMenu);
     this.host.removeEventListener("pointerdown", this.onGlobalPointerDown, { capture: true });
@@ -538,5 +772,6 @@ export class Scene {
     this.guides.dispose();
     this.renderer.dispose();
     this.host.removeChild(this.renderer.domElement);
+    this.host.removeChild(this.marqueeEl);
   }
 }

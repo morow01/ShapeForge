@@ -83,6 +83,7 @@ interface DocState {
   addPrimitive: (kind: PrimitiveKind) => void;
   removeSelected: () => void;
   select: (id: string | null, additive?: boolean) => void;
+  selectMany: (ids: string[], additive?: boolean) => void;
   setParam: (id: string, key: string, value: number) => void;
   setTransform: (id: string, patch: { position?: Vec3; rotation?: Vec3 }) => void;
   setHole: (id: string, isHole: boolean) => void;
@@ -142,6 +143,18 @@ export const useDoc = create<DocState>()(
           return s.selectedIds.includes(id)
             ? { selectedIds: s.selectedIds.filter((x) => x !== id) }
             : { selectedIds: [...s.selectedIds, id] };
+        }),
+
+      /** Marquee (rubber-band) select — replaces the selection with `ids` in
+       *  one atomic update, or unions it into the current one when additive
+       *  (shift/ctrl held). Order matters (the LAST id drives the gizmo), so
+       *  additive appends newly-caught ids after the ones already selected. */
+      selectMany: (ids, additive = false) =>
+        set((s) => {
+          if (!additive) return { selectedIds: ids };
+          const merged = [...s.selectedIds];
+          for (const id of ids) if (!merged.includes(id)) merged.push(id);
+          return { selectedIds: merged };
         }),
 
       setParam: (id, key, value) => {
