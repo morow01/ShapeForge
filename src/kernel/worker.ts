@@ -8,6 +8,7 @@ import ManifoldModule from "manifold-3d";
 import manifoldWasmUrl from "manifold-3d/manifold.wasm?url";
 import { setOC, setManifold, measureVolume, MeshShape } from "replicad";
 import { hasImport, isMesh, makeLocal } from "./shape";
+import { loadSTLPreview } from "./stlPreview";
 import type { AnySolid } from "./shape";
 import type {
   BuildError,
@@ -214,13 +215,24 @@ const api = {
       }
 
       try {
-        const solid = await makeLocal(spec, onError, onProgress);
-        if (solid) {
-          const mesh = toMesh(spec.id, solid, EDIT_QUALITY);
+        // A standalone import needs no repair or boolean work in the editing
+        // view. Parse its triangles directly, like a slicer does. Imported
+        // children inside a group still go through makeLocal because the
+        // group's displayed shape is the evaluated boolean result.
+        if (spec.type === "import") {
+          onProgress?.(spec.id);
+          const mesh = await loadSTLPreview(spec.id, spec.blobId);
           meshCache.set(spec.id, { key, mesh });
           parts.push({ id: spec.id, isHole: spec.isHole, mesh });
         } else {
-          meshCache.delete(spec.id);
+          const solid = await makeLocal(spec, onError, onProgress);
+          if (solid) {
+            const mesh = toMesh(spec.id, solid, EDIT_QUALITY);
+            meshCache.set(spec.id, { key, mesh });
+            parts.push({ id: spec.id, isHole: spec.isHole, mesh });
+          } else {
+            meshCache.delete(spec.id);
+          }
         }
       } catch (e) {
         meshCache.delete(spec.id);

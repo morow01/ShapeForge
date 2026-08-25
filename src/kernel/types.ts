@@ -1,16 +1,18 @@
 import type { BooleanOp, PrimitiveKind, Vec3 } from "../document/types";
 
-/** Mesh payloads crossing the worker boundary. All plain arrays, so they
- *  structured-clone without any special handling. */
+/** Typed arrays keep large imported scans compact while structured-cloning
+ *  efficiently across the worker boundary. Replicad's own meshes use arrays. */
+export type NumericArray = number[] | Float32Array | Uint32Array;
+
 export interface MeshedFaces {
-  vertices: number[];
-  triangles: number[];
-  normals: number[];
+  vertices: NumericArray;
+  triangles: NumericArray;
+  normals: NumericArray;
   faceGroups: { start: number; count: number; faceId: number }[];
 }
 
 export interface MeshedEdges {
-  lines: number[];
+  lines: NumericArray;
   edgeGroups: { start: number; count: number; edgeId: number }[];
 }
 

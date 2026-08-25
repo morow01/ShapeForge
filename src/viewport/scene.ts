@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
 import { syncGeometries } from "replicad-threejs-helper";
-import type { ThreeGeometry } from "replicad-threejs-helper";
+import type { ReplicadMesh, ThreeGeometry } from "replicad-threejs-helper";
 import type { KernelMesh, ScenePart } from "../kernel/types";
 import type { SceneNode, Vec3 } from "../document/types";
 import { snapBounds } from "../snapping/snap";
@@ -46,10 +46,10 @@ interface PartView {
 }
 
 const MATERIALS = {
-  solid: new THREE.MeshStandardMaterial({ color: 0x6f8fbf, metalness: 0.1, roughness: 0.55 }),
+  solid: new THREE.MeshStandardMaterial({ color: 0x43aede, metalness: 0.04, roughness: 0.6 }),
   solidSelected: new THREE.MeshStandardMaterial({
-    color: 0xffa53d,
-    metalness: 0.1,
+    color: 0xf2a33a,
+    metalness: 0.04,
     roughness: 0.45,
   }),
   // Holes are translucent but still participate in depth testing, so they are
@@ -69,7 +69,7 @@ const MATERIALS = {
   // solid moving even though its transform never changes. FrontSide removes
   // the competing back faces entirely, so there is nothing left to mis-sort.
   hole: new THREE.MeshStandardMaterial({
-    color: 0xe05c5c,
+    color: 0xe06a72,
     transparent: true,
     opacity: 0.38,
     depthWrite: false,
@@ -77,15 +77,60 @@ const MATERIALS = {
     roughness: 0.6,
   }),
   holeSelected: new THREE.MeshStandardMaterial({
-    color: 0xffa53d,
+    color: 0xf2a33a,
     transparent: true,
     opacity: 0.5,
     depthWrite: false,
     depthTest: true,
     roughness: 0.5,
   }),
-  result: new THREE.MeshStandardMaterial({ color: 0x8fb98f, metalness: 0.1, roughness: 0.5 }),
+  result: new THREE.MeshStandardMaterial({ color: 0x5bbf87, metalness: 0.04, roughness: 0.55 }),
 };
+
+/**
+ * Replicad's helper expects triangle indices as a plain number[]. Fast STL
+ * previews deliberately use typed arrays to avoid ballooning a large scan in
+ * memory, so build their Three.js buffers directly. Ordinary CAD meshes keep
+ * using the helper unchanged.
+ */
+function syncKernelGeometry(mesh: KernelMesh, previous: ThreeGeometry[] = []): ThreeGeometry[] {
+  if (Array.isArray(mesh.faces.triangles)) {
+    return syncGeometries([mesh as unknown as ReplicadMesh], previous);
+  }
+
+  for (const geometry of previous) {
+    geometry.faces.dispose();
+    geometry.lines.dispose();
+  }
+
+  const faces = new THREE.BufferGeometry();
+  const vertices =
+    mesh.faces.vertices instanceof Float32Array
+      ? mesh.faces.vertices
+      : Float32Array.from(mesh.faces.vertices);
+  const triangles =
+    mesh.faces.triangles instanceof Uint32Array
+      ? mesh.faces.triangles
+      : Uint32Array.from(mesh.faces.triangles);
+  faces.setAttribute("position", new THREE.BufferAttribute(vertices, 3));
+  faces.setIndex(new THREE.BufferAttribute(triangles, 1));
+
+  if (mesh.faces.normals.length) {
+    const normals =
+      mesh.faces.normals instanceof Float32Array
+        ? mesh.faces.normals
+        : Float32Array.from(mesh.faces.normals);
+    faces.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
+  } else {
+    faces.computeVertexNormals();
+  }
+  for (const group of mesh.faces.faceGroups) faces.addGroup(group.start, group.count, 0);
+  faces.computeBoundingBox();
+
+  const lines = new THREE.BufferGeometry();
+  lines.setAttribute("position", new THREE.BufferAttribute(new Float32Array(), 3));
+  return [{ faces, lines }];
+}
 
 export class Scene {
   private host: HTMLElement;
@@ -148,7 +193,7 @@ export class Scene {
     host.appendChild(this.marqueeEl);
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x1a1d21);
+    this.scene.background = new THREE.Color(0xedf1f4);
 
     this.camera = this.makePerspective();
     this.camera.position.set(70, -70, 55);
@@ -208,7 +253,7 @@ export class Scene {
 
   private addGrid() {
     // 10 mm cells over a 200 mm bed.
-    const grid = new THREE.GridHelper(200, 20, 0x4a5058, 0x2c3138);
+    const grid = new THREE.GridHelper(200, 20, 0xaebac2, 0xd8e0e5);
     grid.rotation.x = Math.PI / 2;
     this.scene.add(grid);
     this.scene.add(new THREE.AxesHelper(25));
@@ -217,12 +262,12 @@ export class Scene {
   // ---- parts ------------------------------------------------------------
 
   private makeView(mesh: KernelMesh, isHole: boolean): PartView {
-    const geom = syncGeometries([mesh], []);
+    const geom = syncKernelGeometry(mesh);
     const group = new THREE.Group();
     const m = new THREE.Mesh(geom[0].faces, isHole ? MATERIALS.hole : MATERIALS.solid);
     const wire = new THREE.LineSegments(
       geom[0].lines,
-      new THREE.LineBasicMaterial({ color: 0x11151a }),
+      new THREE.LineBasicMaterial({ color: 0x38505f, transparent: true, opacity: 0.7 }),
     );
     group.add(m, wire);
     this.scene.add(group);
@@ -237,7 +282,7 @@ export class Scene {
       seen.add(part.id);
       const existing = this.parts.get(part.id);
       if (existing) {
-        existing.geom = syncGeometries([part.mesh], existing.geom);
+        existing.geom = syncKernelGeometry(part.mesh, existing.geom);
         existing.mesh.geometry = existing.geom[0].faces;
         existing.wire.geometry = existing.geom[0].lines;
         existing.isHole = part.isHole;

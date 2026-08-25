@@ -466,24 +466,103 @@ export function App() {
   }, [removeSelected, undo, redo, group, ungroup]);
 
   return (
-    <div className="app">
-      <aside className="panel left">
+    <div className="app-shell">
+      <header className="topbar">
         <div className="brand">
+          <span className="brand-mark">S</span>
           <span className="brand-name">{APP_NAME}</span>
           <span className="brand-version">v{APP_VERSION}</span>
         </div>
-
-        <h1>Add</h1>
-        <div className="grid2">
-          {(Object.keys(PRIMITIVES) as PrimitiveKind[]).map((kind) => (
-            <button key={kind} onClick={() => addPrimitive(kind)}>
-              {PRIMITIVES[kind].label}
-            </button>
-          ))}
+        <div className="toolbar-group">
+          <button onClick={() => undo()} disabled={!canUndo} title="Undo (Ctrl+Z)">↶ Undo</button>
+          <button onClick={() => redo()} disabled={!canRedo} title="Redo (Ctrl+Shift+Z)">↷ Redo</button>
         </div>
-        <button className="import-btn" onClick={() => importInputRef.current?.click()}>
-          Import STL…
-        </button>
+        <div className="toolbar-group">
+          <button onClick={group} disabled={!canGroup} title="Ctrl+G">Group</button>
+          <button onClick={ungroup} disabled={!canUngroup} title="Ctrl+Shift+G">Ungroup</button>
+        </div>
+        <div className="toolbar-group view-tools">
+          <button className={gizmoMode === "translate" ? "on" : ""} onClick={() => setGizmoMode("translate")}>Move</button>
+          <button className={gizmoMode === "rotate" ? "on" : ""} onClick={() => setGizmoMode("rotate")}>Rotate</button>
+          <button className={cameraMode === "perspective" ? "on" : ""} onClick={() => setCameraMode("perspective")}>Perspective</button>
+          <button className={cameraMode === "orthographic" ? "on" : ""} onClick={() => setCameraMode("orthographic")}>Ortho</button>
+        </div>
+        <div className="toolbar-spacer" />
+        <span className={["status-pill", error ? "error" : busy ? "busy" : ""].filter(Boolean).join(" ")}>
+          {error ? "Needs attention" : busy ? "Building…" : "Ready"}
+        </span>
+        <button className="export-btn" onClick={exportSTL}>Export STL</button>
+      </header>
+
+      <aside className="panel object-panel">
+        <div className="panel-heading">
+          <div>
+            <h1>Objects</h1>
+            <p>{nodes.length} in design</p>
+          </div>
+          <button
+            className="icon-button"
+            onClick={() => {
+              if (!nodes.length || confirm("Discard this design and start a new one?")) clearAll();
+            }}
+            disabled={!nodes.length}
+            title="New design"
+          >
+            ＋
+          </button>
+        </div>
+        {nodes.length === 0 && <div className="empty-state">Add a shape from the library to begin.</div>}
+        <Tree
+          nodes={nodes}
+          selectedIds={selectedIds}
+          invalid={invalid}
+          onSelect={onSelect}
+          onToggleCollapsed={toggleCollapsed}
+        />
+        <div className="panel-footer">
+          <span>{saveLabel}</span>
+          <span>{selectedIds.length} selected</span>
+        </div>
+      </aside>
+
+      <main className="workspace">
+        <Viewport
+          parts={parts}
+          result={result}
+          nodes={nodes}
+          selectedIds={selectedIds}
+          cameraMode={cameraMode}
+          gizmoMode={gizmoMode}
+          showResult={showResult}
+          onSelect={onSelect}
+          onSelectMany={onSelectMany}
+          onTransform={onTransform}
+          onDragChange={onDragChange}
+        />
+        <div className="canvas-help">Drag to select · Right-drag to orbit · Scroll to zoom · Alt bypasses snap</div>
+        {error && <div className="canvas-error">{error}</div>}
+        {!error && busy && busySince && busyNow - busySince > 8000 && (
+          <div className="canvas-notice">
+            Large or complex files can take a few minutes. ShapeForge will stop after {Math.round(WATCHDOG_MS / 60_000)} min.
+          </div>
+        )}
+      </main>
+
+      <aside className="panel tools-panel">
+        <section className="tool-section shape-library">
+          <div className="panel-heading compact">
+            <div><h1>Shape library</h1><p>Drag or click to add</p></div>
+          </div>
+          <div className="shape-grid">
+            {(Object.keys(PRIMITIVES) as PrimitiveKind[]).map((kind) => (
+              <button key={kind} className="shape-card" onClick={() => addPrimitive(kind)}>
+                <span className={`shape-icon shape-${kind}`} />
+                <span>{PRIMITIVES[kind].label}</span>
+              </button>
+            ))}
+          </div>
+          <button className="import-btn" onClick={() => importInputRef.current?.click()}>↑ Import STL</button>
+        </section>
         <input
           ref={importInputRef}
           type="file"
@@ -495,97 +574,26 @@ export function App() {
             if (file) void importSTLFile(file);
           }}
         />
+        <section className="tool-section inspector-section">
+          <div className="panel-heading compact"><div><h1>Properties</h1><p>{selected ? selected.name : "Nothing selected"}</p></div></div>
+          {selected ? (
+            <Inspector
+              node={selected}
+              error={invalid[selected.id] ?? null}
+              onParam={(k, v) => setParam(selected.id, k, v)}
+              onTransform={(patch) => setTransform(selected.id, patch)}
+              onHole={(h) => setHole(selected.id, h)}
+              onOp={(op) => setGroupOp(selected.id, op)}
+              onRename={(n) => rename(selected.id, n)}
+              onDelete={removeSelected}
+            />
+          ) : <div className="empty-state small">Select an object to edit its dimensions and position.</div>}
+        </section>
 
-        <h1>Objects</h1>
-        {nodes.length === 0 && <p className="hint">Add a primitive to start.</p>}
-        <Tree
-          nodes={nodes}
-          selectedIds={selectedIds}
-          invalid={invalid}
-          onSelect={onSelect}
-          onToggleCollapsed={toggleCollapsed}
-        />
-
-        <div className="row">
-          <button onClick={group} disabled={!canGroup} title="Ctrl+G">
-            Group
-          </button>
-          <button onClick={ungroup} disabled={!canUngroup} title="Ctrl+Shift+G">
-            Ungroup
-          </button>
-        </div>
-        <p className="hint">Ctrl-click to select more than one.</p>
-
-        <div className="row">
-          <button onClick={() => undo()} disabled={!canUndo}>
-            Undo
-          </button>
-          <button onClick={() => redo()} disabled={!canRedo}>
-            Redo
-          </button>
-        </div>
-
-        <div className="row">
-          <button
-            onClick={() => {
-              if (!nodes.length || confirm("Discard this design and start a new one?")) clearAll();
-            }}
-            disabled={!nodes.length}
-          >
-            New
-          </button>
-        </div>
-        <p className="hint saved">{saveLabel}</p>
-      </aside>
-
-      <Viewport
-        parts={parts}
-        result={result}
-        nodes={nodes}
-        selectedIds={selectedIds}
-        cameraMode={cameraMode}
-        gizmoMode={gizmoMode}
-        showResult={showResult}
-        onSelect={onSelect}
-        onSelectMany={onSelectMany}
-        onTransform={onTransform}
-        onDragChange={onDragChange}
-      />
-
-      <aside className="panel right">
-        <h1>View</h1>
-        <div className="row">
-          <button
-            className={cameraMode === "perspective" ? "on" : ""}
-            onClick={() => setCameraMode("perspective")}
-          >
-            Perspective
-          </button>
-          <button
-            className={cameraMode === "orthographic" ? "on" : ""}
-            onClick={() => setCameraMode("orthographic")}
-          >
-            Ortho
-          </button>
-        </div>
-        <div className="row">
-          <button
-            className={gizmoMode === "translate" ? "on" : ""}
-            onClick={() => setGizmoMode("translate")}
-          >
-            Move
-          </button>
-          <button
-            className={gizmoMode === "rotate" ? "on" : ""}
-            onClick={() => setGizmoMode("rotate")}
-          >
-            Rotate
-          </button>
-        </div>
-        <p className="hint">Move snaps to nearby edges and centres. Hold Alt to bypass.</p>
-
-        <h1>Spacing</h1>
-        <div className="spacing-objects">
+        {selectedIds.length === 2 && (
+        <section className="tool-section spacing-section">
+          <div className="panel-heading compact"><div><h1>Exact spacing</h1><p>Set the gap between two objects</p></div></div>
+          <div className="spacing-objects">
           <div>
             <span className="field-label">Stays fixed</span>
             <strong>{spacingSelection?.fixedNode.name ?? "First selected object"}</strong>
@@ -601,8 +609,8 @@ export function App() {
             <span className="field-label">Moves</span>
             <strong>{spacingSelection?.movingNode.name ?? "Second selected object"}</strong>
           </div>
-        </div>
-        <div className="row">
+          </div>
+          <div className="row axis-row">
           {(["x", "y", "z"] as SnapAxis[]).map((axis) => (
             <button
               key={axis}
@@ -612,8 +620,8 @@ export function App() {
               {axis.toUpperCase()}
             </button>
           ))}
-        </div>
-        <label className="field">
+          </div>
+          <label className="field">
           <span className="field-label">Measure from fixed object</span>
           <select
             className="num"
@@ -624,8 +632,8 @@ export function App() {
             <option value="center">Centre</option>
             <option value="max">Maximum edge</option>
           </select>
-        </label>
-        <label className="field">
+          </label>
+          <label className="field">
           <span className="field-label">Measure to moving object</span>
           <select
             className="num"
@@ -636,17 +644,17 @@ export function App() {
             <option value="center">Centre</option>
             <option value="max">Maximum edge</option>
           </select>
-        </label>
-        <span className="field-label">Direction from fixed reference</span>
-        <div className="row">
+          </label>
+          <span className="field-label">Direction from fixed reference</span>
+          <div className="row">
           <button className={gapDirection === -1 ? "on" : ""} onClick={() => setGapDirection(-1)}>
             Negative
           </button>
           <button className={gapDirection === 1 ? "on" : ""} onClick={() => setGapDirection(1)}>
             Positive
           </button>
-        </div>
-        <label className="field">
+          </div>
+          <label className="field">
           <span className="field-label">Gap (mm)</span>
           <input
             className="num"
@@ -656,74 +664,29 @@ export function App() {
             value={gapMm}
             onChange={(e) => setGapMm(Number(e.target.value))}
           />
-        </label>
-        <button className="primary" disabled={!spacingSelection} onClick={applyGap}>
-          Set exact gap
-        </button>
-        <p className="hint spacing-hint">
+          </label>
+          <button className="primary" disabled={!spacingSelection} onClick={applyGap}>Set exact gap</button>
+          <p className="hint spacing-hint">
           {spacingSelection
             ? `${spacingSelection.fixedNode.name} stays fixed; ${spacingSelection.movingNode.name} moves along ${gapAxis.toUpperCase()}.`
             : "Select exactly two top-level objects. The first stays fixed."}
-        </p>
+          </p>
+        </section>
+        )}
 
-        <label className="check">
+        <section className="tool-section result-section">
+          <label className="check">
           <input
             type="checkbox"
             checked={showResult}
             onChange={(e) => setShowResult(e.target.checked)}
           />
           <span>Show merged result</span>
-        </label>
-
-        <button className="primary" onClick={exportSTL}>
-          Export STL
-        </button>
-
-        {selected ? (
-          <Inspector
-            node={selected}
-            error={invalid[selected.id] ?? null}
-            onParam={(k, v) => setParam(selected.id, k, v)}
-            onTransform={(patch) => setTransform(selected.id, patch)}
-            onHole={(h) => setHole(selected.id, h)}
-            onOp={(op) => setGroupOp(selected.id, op)}
-            onRename={(n) => rename(selected.id, n)}
-            onDelete={removeSelected}
-          />
-        ) : (
-          <p className="hint">Select an object to edit it.</p>
-        )}
-
-        <dl className="stats">
-          <dt>Status</dt>
-          <dd>
-            {error ? (
-              <span className="err">{error}</span>
-            ) : busy ? (
-              "building…"
-            ) : (
-              "ready"
-            )}
-          </dd>
-          {!error && busy && busySince && busyNow - busySince > 8000 && (
-            <dd className="hint" style={{ gridColumn: "1 / -1", textAlign: "left" }}>
-              Large or complex files can take a few minutes — this will keep working
-              or time out on its own after {Math.round(WATCHDOG_MS / 60_000)} min.
-            </dd>
-          )}
-          <dt>Selected</dt>
-          <dd>{selectedIds.length}</dd>
+          </label>
           {showResult && stats && (
-            <>
-              <dt>Volume</dt>
-              <dd>{stats.volume.toFixed(1)} mm³</dd>
-              <dt>Faces</dt>
-              <dd>{stats.faces}</dd>
-              <dt>Boolean</dt>
-              <dd>{Math.round(stats.ms)} ms</dd>
-            </>
+            <div className="result-stats"><span>{stats.volume.toFixed(1)} mm³</span><span>{stats.faces} faces</span><span>{Math.round(stats.ms)} ms</span></div>
           )}
-        </dl>
+        </section>
       </aside>
     </div>
   );
