@@ -71,6 +71,8 @@ export function Inspector({
             {node.children.length} {node.children.length === 1 ? "child" : "children"}
           </p>
         </>
+      ) : node.type === "import" ? (
+        <ImportInfo node={node} />
       ) : (
         <ObjectParams node={node} onParam={onParam} />
       )}
@@ -116,6 +118,27 @@ export function Inspector({
       </button>
     </div>
   );
+}
+
+function ImportInfo({ node }: { node: Extract<SceneNode, { type: "import" }> }) {
+  return (
+    <>
+      <h2>Imported file</h2>
+      <dl className="readout">
+        <dt>File</dt>
+        <dd>{node.fileName}</dd>
+        <dt>Size</dt>
+        <dd>{formatBytes(node.byteSize)}</dd>
+      </dl>
+      <p className="hint">Geometry comes from the file — no dimension controls.</p>
+    </>
+  );
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(2)} MB`;
 }
 
 function ObjectParams({

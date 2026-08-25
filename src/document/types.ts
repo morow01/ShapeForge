@@ -154,6 +154,16 @@ export interface GroupNode extends NodeBase {
   collapsed?: boolean;
 }
 
-export type SceneNode = ObjectNode | GroupNode;
+/** An imported STL. The file bytes live in IndexedDB (see blobStore.ts) keyed
+ *  by blobId — never inline here, so the document itself (autosaved to
+ *  localStorage) stays small no matter how many/how large the imports are. */
+export interface ImportNode extends NodeBase {
+  type: "import";
+  blobId: string;
+  fileName: string;
+  byteSize: number;
+}
+
+export type SceneNode = ObjectNode | GroupNode | ImportNode;
 
 export const isGroup = (n: SceneNode): n is GroupNode => n.type === "group";

@@ -55,6 +55,12 @@ function parseNode(raw: unknown): SceneNode | null {
     return { ...base, type: "object", kind, params };
   }
 
+  if (n.type === "import") {
+    if (typeof n.blobId !== "string" || typeof n.fileName !== "string") return null;
+    if (typeof n.byteSize !== "number") return null;
+    return { ...base, type: "import", blobId: n.blobId, fileName: n.fileName, byteSize: n.byteSize };
+  }
+
   return null;
 }
 

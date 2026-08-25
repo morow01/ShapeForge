@@ -24,6 +24,7 @@
   },
   "dependencies": {
     "comlink": "^4.4.2",
+    "manifold-3d": "^3.5.1",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "replicad": "^1.0.1",

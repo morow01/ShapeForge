@@ -4,12 +4,16 @@
 import * as Comlink from "comlink";
 import opencascade from "replicad-opencascadejs";
 import wasmUrl from "replicad-opencascadejs/wasm?url";
-import { setOC, measureVolume } from "replicad";
-import type { Shape3D } from "replicad";
-import { makeLocal } from "./shape";
+import ManifoldModule from "manifold-3d";
+import manifoldWasmUrl from "manifold-3d/manifold.wasm?url";
+import { setOC, setManifold, measureVolume, MeshShape } from "replicad";
+import { hasImport, isMesh, makeLocal } from "./shape";
+import type { AnySolid } from "./shape";
 import type {
   BuildError,
   KernelMesh,
+  MeshedEdges,
+  MeshedFaces,
   NodeSpec,
   ScenePart,
   SceneBuild,
@@ -18,13 +22,37 @@ import type {
 
 let booted: Promise<void> | null = null;
 
-function init(): Promise<void> {
+function initOC(): Promise<void> {
   if (!booted) {
     booted = opencascade({ locateFile: () => wasmUrl }).then((OC: unknown) => {
       setOC(OC as never);
     });
   }
   return booted;
+}
+
+// manifold-3d is a second, separate WASM module (~530KB, negligible next to
+// OCCT's 22MB) — needed for imported STL geometry. importSTL() (OCCT's own
+// BRep import path) hits a raw, uncatchable WebAssembly exception partway
+// through solid reconstruction in this build — reproduced even round-tripping
+// OCCT's own STL export back through its own importer, so it is not a
+// malformed-file issue, it is this build. Imports go through importSTLAsMesh
+// (manifold-3d) instead — see shape.ts for how that composes with ordinary
+// OCCT primitives in the same boolean.
+let manifoldBooted: Promise<void> | null = null;
+
+function initManifold(): Promise<void> {
+  if (!manifoldBooted) {
+    manifoldBooted = ManifoldModule({ locateFile: () => manifoldWasmUrl }).then((wasm) => {
+      wasm.setup();
+      setManifold(wasm);
+    });
+  }
+  return manifoldBooted;
+}
+
+function init(): Promise<void> {
+  return Promise.all([initOC(), initManifold()]).then(() => undefined);
 }
 
 interface MeshQuality {
@@ -59,8 +87,41 @@ const EDIT_QUALITY: MeshQuality = { tolerance: 0.05, angularTolerance: 0.4 };
  */
 const EXPORT_QUALITY: MeshQuality = { tolerance: 0.02, angularTolerance: 0.3 };
 
-function toMesh(name: string, s: Shape3D, quality: MeshQuality): KernelMesh {
+/** MeshShape (imports, or anything combined with one) has no OCCT face
+ *  topology to preserve, so it becomes one single pickable "face" covering
+ *  the whole triangle set, and there is no separate edge/wireframe data —
+ *  syncGeometries on the Three.js side treats edges as optional. */
+function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdges } {
+  const raw = m.mesh();
+  return {
+    faces: {
+      vertices: raw.vertices,
+      triangles: raw.triangles,
+      normals: raw.normals,
+      faceGroups: [{ start: 0, count: raw.triangles.length, faceId: 0 }],
+    },
+    edges: { lines: [], edgeGroups: [] },
+  };
+}
+
+function toMesh(name: string, s: AnySolid, quality: MeshQuality): KernelMesh {
+  if (isMesh(s)) {
+    const { faces, edges } = meshFromMeshShape(s);
+    return { name, faces, edges };
+  }
   return { name, faces: s.mesh(quality), edges: s.meshEdges(quality) };
+}
+
+function volumeOf(s: AnySolid): number {
+  return isMesh(s) ? s.volume() : measureVolume(s);
+}
+
+function faceCountOf(s: AnySolid): number {
+  return isMesh(s) ? s.numTri() : s.faces.length;
+}
+
+function blobSTLOf(s: AnySolid, quality: MeshQuality): Blob {
+  return isMesh(s) ? s.blobSTL({ binary: true }) : s.blobSTL({ ...quality, binary: true });
 }
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -70,18 +131,19 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
  * would produce) changes. A plain object's own position/rotation are excluded
  * — makeLocal() never reads them, only place() does, later. A group's key
  * does include each child's position/rotation/isHole, since those feed into
- * the group's own combined boolean.
+ * the group's own combined boolean. An import's key is just its blobId, which
+ * never changes for a given node — importSTLAsMesh() only ever runs once.
  */
 function localKey(spec: NodeSpec): string {
-  return JSON.stringify(
-    spec.type === "group"
-      ? [
-          spec.type,
-          spec.op,
-          spec.children.map((c) => [localKey(c), c.position, c.rotation, c.isHole]),
-        ]
-      : [spec.type, spec.kind, spec.params],
-  );
+  if (spec.type === "group") {
+    return JSON.stringify([
+      spec.type,
+      spec.op,
+      spec.children.map((c) => [localKey(c), c.position, c.rotation, c.isHole]),
+    ]);
+  }
+  if (spec.type === "import") return JSON.stringify([spec.type, spec.blobId]);
+  return JSON.stringify([spec.type, spec.kind, spec.params]);
 }
 
 /**
@@ -107,10 +169,11 @@ function collector() {
  * like a union group — solids merge, holes cut — so they are evaluated as one,
  * which also gives them the invalid-union recovery for free.
  */
-function evaluateRoots(
+async function evaluateRoots(
   specs: NodeSpec[],
   onError: (id: string, msg: string) => void,
-): Shape3D | null {
+  onProgress?: (id: string) => void,
+): Promise<AnySolid | null> {
   return makeLocal(
     {
       type: "group",
@@ -122,6 +185,7 @@ function evaluateRoots(
       isHole: false,
     },
     onError,
+    onProgress,
   );
 }
 
@@ -132,7 +196,7 @@ const api = {
    * TinkerCAD does. Placement is applied on the main thread, so moving a node
    * costs nothing here.
    */
-  async buildScene(specs: NodeSpec[]): Promise<SceneBuild> {
+  async buildScene(specs: NodeSpec[], onProgress?: (id: string) => void): Promise<SceneBuild> {
     await init();
     const t0 = performance.now();
     const { errors, onError } = collector();
@@ -150,7 +214,7 @@ const api = {
       }
 
       try {
-        const solid = makeLocal(spec, onError);
+        const solid = await makeLocal(spec, onError, onProgress);
         if (solid) {
           const mesh = toMesh(spec.id, solid, EDIT_QUALITY);
           meshCache.set(spec.id, { key, mesh });
@@ -174,33 +238,37 @@ const api = {
   },
 
   /** Applies every boolean in the tree and meshes the single resulting solid. */
-  async buildResult(specs: NodeSpec[]): Promise<ResultBuild> {
+  async buildResult(specs: NodeSpec[], onProgress?: (id: string) => void): Promise<ResultBuild> {
     await init();
     const t0 = performance.now();
     const { errors, onError } = collector();
 
-    const solid = evaluateRoots(specs, onError);
+    const solid = await evaluateRoots(specs, onError, onProgress);
     if (!solid) return { mesh: null, volume: 0, faceCount: 0, errors, buildMs: 0 };
 
     return {
       mesh: toMesh("result", solid, EXPORT_QUALITY),
-      volume: measureVolume(solid),
-      faceCount: solid.faces.length,
+      volume: volumeOf(solid),
+      faceCount: faceCountOf(solid),
       errors,
       buildMs: performance.now() - t0,
     };
   },
 
   /** Exports the fully booleaned result as a binary STL, ready for the slicer. */
-  async exportSTL(specs: NodeSpec[]): Promise<Blob | null> {
+  async exportSTL(specs: NodeSpec[], onProgress?: (id: string) => void): Promise<Blob | null> {
     await init();
     const { onError } = collector();
-    const solid = evaluateRoots(specs, onError);
+    const solid = await evaluateRoots(specs, onError, onProgress);
     // binary: true — smaller and faster to write/read than the ASCII default,
     // and every slicer (including Bambu Studio) reads it fine.
-    return solid ? solid.blobSTL({ ...EXPORT_QUALITY, binary: true }) : null;
+    return solid ? blobSTLOf(solid, EXPORT_QUALITY) : null;
   },
 };
 
 export type KernelAPI = typeof api;
 Comlink.expose(api);
+
+// Re-exported so a future caller can decide up front whether a build will
+// need manifold-3d at all, without duplicating the recursive check.
+export { hasImport };

@@ -61,7 +61,11 @@ function Row({ node, depth, selectedIds, invalid, onSelect, onToggleCollapsed }:
         ) : (
           <span className="twisty-spacer" />
         )}
-        <span className={node.isHole ? "dot hole" : group ? "dot group" : "dot"} />
+        <span
+          className={
+            node.isHole ? "dot hole" : group ? "dot group" : node.type === "import" ? "dot import" : "dot"
+          }
+        />
         <span className="label">{node.name}</span>
         {group && <span className="op">{node.op[0].toUpperCase()}</span>}
         {bad && <span className="warn">!</span>}

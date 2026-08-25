@@ -2,11 +2,92 @@ import * as Comlink from "comlink";
 import type { KernelAPI } from "./worker";
 import type { NodeSpec } from "./types";
 
-const worker = new Worker(new URL("./worker.ts", import.meta.url), {
-  type: "module",
-});
+function spawnWorker() {
+  const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
+  const raw = Comlink.wrap<KernelAPI>(worker);
+  return { worker, raw };
+}
 
-const raw = Comlink.wrap<KernelAPI>(worker);
+let current = spawnWorker();
+
+/**
+ * A call took long enough that the worker was terminated and replaced rather
+ * than waited on further. nodeId, when known, is the node that was actually
+ * being processed at the time — see withWatchdog for why that is only ever
+ * known on a best-effort basis.
+ */
+export class KernelTimeoutError extends Error {
+  nodeId: string | null;
+  constructor(nodeId: string | null) {
+    super(
+      nodeId
+        ? "This object took too long to process and was skipped so the rest of the scene could keep working."
+        : "The 3D kernel took too long to respond and had to be restarted.",
+    );
+    this.name = "KernelTimeoutError";
+    this.nodeId = nodeId;
+  }
+}
+
+/**
+ * Generous, but not unbounded, ceiling on a single kernel call. OCCT and
+ * manifold-3d calls are synchronous WASM execution — nothing else on that
+ * worker's one thread can run while a call is in flight, so a genuinely
+ * pathological input (a real-world scan STL that is not a clean manifold,
+ * say) can occupy it indefinitely with no way to cancel just that call. The
+ * only way out is terminating the whole worker. 45s is long enough that a
+ * large-but-healthy import is very unlikely to trip it, while still bounding
+ * how long the UI can sit on "building" with no explanation.
+ */
+const WATCHDOG_MS = 45_000;
+
+/**
+ * Runs one call against the current worker, racing it against WATCHDOG_MS.
+ * onProgress (proxied into the worker) reports which node's own work last
+ * started, so a timeout can be attributed to a specific node instead of
+ * leaving the caller to guess — see makeLocal's onProgress parameter in
+ * shape.ts for where that signal originates.
+ *
+ * On timeout the current worker is terminated and swapped for a fresh one
+ * (which reboots both WASM modules on its next call — the existing meshCache
+ * is lost with it, so the following build recomputes every node, but that is
+ * a one-time cost and the alternative is staying stuck). Callers get a
+ * KernelTimeoutError instead of a promise that never settles.
+ */
+function withWatchdog<R>(
+  run: (raw: KernelAPI, onProgress: (id: string) => void) => Promise<R>,
+): Promise<R> {
+  const { worker, raw } = current;
+  let lastProgressId: string | null = null;
+  let settled = false;
+
+  return new Promise<R>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      worker.terminate();
+      current = spawnWorker();
+      reject(new KernelTimeoutError(lastProgressId));
+    }, WATCHDOG_MS);
+
+    run(raw, (id) => {
+      lastProgressId = id;
+    }).then(
+      (r) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(r);
+      },
+      (e: unknown) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
 
 /**
  * Wraps an async function so a call made while a previous call from the same
@@ -57,9 +138,14 @@ function coalesceLatest<Args extends unknown[], R>(
 }
 
 export const kernel = {
-  buildScene: coalesceLatest((specs: NodeSpec[]) => raw.buildScene(specs)),
-  buildResult: coalesceLatest((specs: NodeSpec[]) => raw.buildResult(specs)),
+  buildScene: coalesceLatest((specs: NodeSpec[]) =>
+    withWatchdog((raw, onProgress) => raw.buildScene(specs, Comlink.proxy(onProgress))),
+  ),
+  buildResult: coalesceLatest((specs: NodeSpec[]) =>
+    withWatchdog((raw, onProgress) => raw.buildResult(specs, Comlink.proxy(onProgress))),
+  ),
   // Not coalesced: an explicit user action (the Export STL button), not an
   // edit-triggered rebuild — every click should produce its own file.
-  exportSTL: (specs: NodeSpec[]) => raw.exportSTL(specs),
+  exportSTL: (specs: NodeSpec[]) =>
+    withWatchdog((raw, onProgress) => raw.exportSTL(specs, Comlink.proxy(onProgress))),
 };

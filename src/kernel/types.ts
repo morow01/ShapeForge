@@ -41,7 +41,12 @@ export interface GroupSpec extends SpecBase {
   children: NodeSpec[];
 }
 
-export type NodeSpec = ObjectSpec | GroupSpec;
+export interface ImportSpec extends SpecBase {
+  type: "import";
+  blobId: string;
+}
+
+export type NodeSpec = ObjectSpec | GroupSpec | ImportSpec;
 
 export interface ScenePart {
   id: string;

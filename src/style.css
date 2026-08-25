@@ -72,6 +72,7 @@ button.danger:hover { background: #3a2626; }
 .row { display: flex; gap: 6px; margin-bottom: 6px; }
 .row button { flex: 1; }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.import-btn { width: 100%; margin-top: 6px; }
 
 /* object tree ------------------------------------------------------------ */
 
@@ -229,6 +230,7 @@ select.num { height: 27px; }
 .tree li .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .dot.group { background: #8fb98f; border-radius: 50%; }
+.dot.import { background: #b98fe0; }
 
 .op {
   margin-left: auto;

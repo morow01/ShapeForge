@@ -11,7 +11,15 @@ import {
   isTriangleAngleKey,
   normaliseTriangleAngles,
 } from "../geometry/triangle";
-import type { BooleanOp, GroupNode, ObjectNode, PrimitiveKind, SceneNode, Vec3 } from "./types";
+import type {
+  BooleanOp,
+  GroupNode,
+  ImportNode,
+  ObjectNode,
+  PrimitiveKind,
+  SceneNode,
+  Vec3,
+} from "./types";
 
 // Restored synchronously at module load, so the first render already has the
 // saved document — no hydration flash, and no bogus entry in the undo history.
@@ -81,6 +89,10 @@ interface DocState {
   storageBlocked: boolean;
 
   addPrimitive: (kind: PrimitiveKind) => void;
+  /** Adds a node for a file already written to blobStore — the caller reads
+   *  and stores the bytes first (both are async), so this stays a plain
+   *  synchronous mutation like every other store action. */
+  addImport: (blobId: string, fileName: string, byteSize: number) => void;
   removeSelected: () => void;
   select: (id: string | null, additive?: boolean) => void;
   selectMany: (ids: string[], additive?: boolean) => void;
@@ -123,6 +135,24 @@ export const useDoc = create<DocState>()(
             name: `${def.label} ${n}`,
             params: { ...def.defaults },
             // Offset each new part so they do not stack invisibly.
+            position: [s.nodes.length * 6, 0, 0],
+            rotation: [0, 0, 0],
+            isHole: false,
+          };
+          return { nodes: [...s.nodes, node], selectedIds: [node.id] };
+        }),
+
+      addImport: (blobId, fileName, byteSize) =>
+        set((s) => {
+          const node: ImportNode = {
+            type: "import",
+            id: nextId(),
+            blobId,
+            fileName,
+            byteSize,
+            // Strip a .stl extension for the display name; keep everything
+            // else so two imports of similarly-named files stay distinct.
+            name: fileName.replace(/\.stl$/i, ""),
             position: [s.nodes.length * 6, 0, 0],
             rotation: [0, 0, 0],
             isHole: false,

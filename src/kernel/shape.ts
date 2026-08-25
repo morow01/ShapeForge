@@ -1,10 +1,30 @@
-import { makeBaseBox, makeCylinder, makeSphere, draw, measureVolume } from "replicad";
+import {
+  makeBaseBox,
+  makeCylinder,
+  makeSphere,
+  draw,
+  importSTLAsMesh,
+  measureVolume,
+  MeshShape,
+} from "replicad";
 import type { Shape3D } from "replicad";
 import { InvalidShapeError, solveTriangle } from "../geometry/triangle";
+import { getBlob } from "../document/blobStore";
 import type { Vec3 } from "../document/types";
-import type { NodeSpec, ObjectSpec } from "./types";
+import type { ImportSpec, NodeSpec, ObjectSpec } from "./types";
 
 export { InvalidShapeError };
+
+/**
+ * A node's local geometry is a Shape3D (OCCT/BRep) for every ordinary
+ * primitive and boolean, or a MeshShape (manifold-3d) specifically for an
+ * imported STL — see makeImport() for why. Any node that combines the two
+ * (a group containing an import, at any depth) is resolved entirely in
+ * MeshShape terms; see combine().
+ */
+export type AnySolid = Shape3D | MeshShape;
+
+const isMesh = (s: AnySolid): s is MeshShape => s instanceof MeshShape;
 
 /**
  * Builds a primitive in LOCAL space: centred in XY with its base on z = 0,
@@ -54,32 +74,104 @@ export function makePrimitive(spec: ObjectSpec): Shape3D {
     }
   }
 
-  // Normalise to one origin convention regardless of how each constructor
-  // happens to place its shape.
+  return normalise(s) as Shape3D;
+}
+
+/** Centres a shape in XY and drops its base to z = 0 — the one origin
+ *  convention every local shape shares, primitive or imported. */
+function normalise<T extends AnySolid>(s: T): T {
   const [min, max] = s.boundingBox.bounds;
-  return s.translate([-(min[0] + max[0]) / 2, -(min[1] + max[1]) / 2, -min[2]]) as Shape3D;
+  return s.translate([-(min[0] + max[0]) / 2, -(min[1] + max[1]) / 2, -min[2]]) as T;
+}
+
+/**
+ * Loads a previously-imported STL. The file bytes live in IndexedDB (see
+ * blobStore.ts), keyed by blobId — the worker fetches them itself rather than
+ * having the main thread ship the bytes over postMessage on every build.
+ *
+ * Uses importSTLAsMesh (manifold-3d), not importSTL (OCCT/BRep): the BRep
+ * path hits a raw, uncatchable WebAssembly exception partway through solid
+ * reconstruction in this WASM build — reproduced even round-tripping OCCT's
+ * OWN STL export back through its OWN importer, so it is not a malformed-file
+ * issue, it is this build. importSTLAsMesh sidesteps that path entirely.
+ * See combine() for how this then composes with ordinary Shape3D primitives.
+ *
+ * Memoized by blobId (never a cache-miss twice for the same file): parsing +
+ * manifold repair is the single most expensive step an import can trigger,
+ * and blobId never changes for a node's lifetime, so every caller — the edit
+ * view, the merged-result preview, export, or the same file imported more
+ * than once — shares one parse instead of repeating it.
+ */
+const importCache = new Map<string, Promise<MeshShape>>();
+
+async function makeImport(spec: ImportSpec): Promise<MeshShape> {
+  let cached = importCache.get(spec.blobId);
+  if (!cached) {
+    cached = loadImport(spec.blobId);
+    // A failed parse must not stick around as a poisoned cache entry — the
+    // next attempt (e.g. after the user re-imports) should get a clean try.
+    cached.catch(() => importCache.delete(spec.blobId));
+    importCache.set(spec.blobId, cached);
+  }
+  return cached;
+}
+
+async function loadImport(blobId: string): Promise<MeshShape> {
+  const bytes = await getBlob(blobId);
+  if (!bytes) {
+    throw new InvalidShapeError(
+      "This imported file is missing from browser storage (site data may have been cleared).",
+    );
+  }
+  const blob = new Blob([bytes], { type: "model/stl" });
+  const shape = await importSTLAsMesh(blob);
+  return normalise(shape);
+}
+
+/** True if a node or any of its descendants is an imported STL — those are
+ *  MeshShapes, not Shape3Ds, so a group containing one anywhere below it must
+ *  combine in MeshShape terms all the way up, not just at that one group. */
+function hasImport(spec: NodeSpec): boolean {
+  if (spec.type === "import") return true;
+  if (spec.type === "group") return spec.children.some(hasImport);
+  return false;
 }
 
 /**
  * Combines already-placed children. Children keep their own world transforms,
  * so a group introduces no frame of its own beyond its node transform.
+ *
+ * If nothing here is (or contains) an import, this runs entirely in Shape3D/
+ * OCCT terms, unchanged from before imports existed. The moment an import is
+ * involved, EVERY operand is converted to MeshShape first (Shape3D.meshShape()
+ * is a direct, supported conversion) and the whole boolean runs on manifold-3d
+ * instead — never the other direction, which is the broken path.
  */
 export function combine(
   op: GroupOp,
-  children: { solid: Shape3D; isHole: boolean }[],
-): Shape3D | null {
+  children: { solid: AnySolid; isHole: boolean }[],
+): AnySolid | null {
   if (!children.length) return null;
 
+  if (children.some((c) => isMesh(c.solid))) {
+    const meshed = children.map((c) => ({
+      solid: isMesh(c.solid) ? c.solid : (c.solid as Shape3D).meshShape(),
+      isHole: c.isHole,
+    }));
+    return combineMesh(op, meshed);
+  }
+  return combineShape(op, children as { solid: Shape3D; isHole: boolean }[]);
+}
+
+function combineShape(
+  op: GroupOp,
+  children: { solid: Shape3D; isHole: boolean }[],
+): Shape3D | null {
   if (op === "subtract") {
-    // First child minus the rest, regardless of hole flags — the flag is what
-    // "union" uses, this op is the explicit version.
     let result = children[0].solid;
-    for (let i = 1; i < children.length; i++) {
-      result = result.cut(children[i].solid) as Shape3D;
-    }
+    for (let i = 1; i < children.length; i++) result = result.cut(children[i].solid) as Shape3D;
     return result;
   }
-
   if (op === "intersect") {
     let result = children[0].solid;
     for (let i = 1; i < children.length; i++) {
@@ -87,58 +179,72 @@ export function combine(
     }
     return result;
   }
-
-  // union: fuse the solids, then cut away anything flagged as a hole.
   const solids = children.filter((c) => !c.isHole);
   const holes = children.filter((c) => c.isHole);
   if (!solids.length) return null;
-
   let result = solids[0].solid;
-  for (let i = 1; i < solids.length; i++) {
-    result = result.fuse(solids[i].solid) as Shape3D;
+  for (let i = 1; i < solids.length; i++) result = result.fuse(solids[i].solid) as Shape3D;
+  for (const h of holes) result = result.cut(h.solid) as Shape3D;
+  return result;
+}
+
+/** Same three ops, run through manifold-3d instead of OCCT — used whenever an
+ *  import is anywhere in the operands. */
+function combineMesh(
+  op: GroupOp,
+  children: { solid: MeshShape; isHole: boolean }[],
+): MeshShape | null {
+  if (op === "subtract") {
+    let result = children[0].solid;
+    for (let i = 1; i < children.length; i++) result = result.cut(children[i].solid);
+    return result;
   }
-  for (const h of holes) {
-    result = result.cut(h.solid) as Shape3D;
+  if (op === "intersect") {
+    let result = children[0].solid;
+    for (let i = 1; i < children.length; i++) result = result.intersect(children[i].solid);
+    return result;
   }
+  const solids = children.filter((c) => !c.isHole);
+  const holes = children.filter((c) => c.isHole);
+  if (!solids.length) return null;
+  let result = solids[0].solid;
+  for (let i = 1; i < solids.length; i++) result = result.fuse(solids[i].solid);
+  for (const h of holes) result = result.cut(h.solid);
   return result;
 }
 
 type GroupOp = "union" | "subtract" | "intersect";
 
-/** Applies rotation (about the node origin) then translation. */
-export function place(s: Shape3D, spec: NodeSpec): Shape3D {
+/** Applies rotation (about the node origin) then translation. Works on either
+ *  kernel's solid — both expose the same translate/rotate signatures. */
+export function place<T extends AnySolid>(s: T, spec: NodeSpec): T {
   const [rx, ry, rz] = spec.rotation;
   let out = s;
-  if (rx) out = out.rotate(rx, [0, 0, 0], [1, 0, 0]) as Shape3D;
-  if (ry) out = out.rotate(ry, [0, 0, 0], [0, 1, 0]) as Shape3D;
-  if (rz) out = out.rotate(rz, [0, 0, 0], [0, 0, 1]) as Shape3D;
-  return out.translate(spec.position) as Shape3D;
+  if (rx) out = out.rotate(rx, [0, 0, 0], [1, 0, 0]) as T;
+  if (ry) out = out.rotate(ry, [0, 0, 0], [0, 1, 0]) as T;
+  if (rz) out = out.rotate(rz, [0, 0, 0], [0, 0, 1]) as T;
+  return out.translate(spec.position) as T;
 }
 
-/**
- * A node in its own frame, before its transform is applied.
- * Leaves are normalised primitives; groups are their evaluated children.
- * Returns null when a group has nothing solid to show.
- */
 /**
  * Cheap sanity checks that catch a silently-failed boolean:
  *  - a union can never be smaller than its largest operand;
  *  - a subtraction that removes *everything* is usually a failure, though it
  *    can legitimately happen when the first child is fully enclosed.
+ * Only meaningful for the Shape3D/OCCT path — the sphere-seam bug this guards
+ * against is an OCCT quirk; manifold-3d's booleans do not have it.
  */
 function suspicious(
   op: GroupOp,
-  result: Shape3D,
-  kids: { solid: Shape3D; isHole: boolean }[],
+  result: AnySolid,
+  kids: { solid: AnySolid; isHole: boolean }[],
 ): boolean {
+  if (isMesh(result)) return false;
   try {
     const volume = measureVolume(result);
     if (op === "union") {
-      // A union that also cuts holes is legitimately smaller than its largest
-      // part, so there is nothing to bound it by — checking would cry wolf on
-      // a perfectly good model.
       if (kids.some((k) => k.isHole)) return false;
-      const largest = Math.max(...kids.map((k) => measureVolume(k.solid)));
+      const largest = Math.max(...kids.map((k) => measureVolume(k.solid as Shape3D)));
       return volume < largest - 1e-6;
     }
     if (op === "subtract") return volume <= 1e-9;
@@ -156,17 +262,37 @@ function respin(spec: NodeSpec): NodeSpec {
   return { ...spec, rotation: [rx, ry, rz + 90] as Vec3 };
 }
 
-export function makeLocal(
+/**
+ * A node in its own frame, before its transform is applied.
+ * Leaves are normalised primitives or imports; groups are their evaluated
+ * children. Returns null when a group has nothing solid to show.
+ *
+ * onProgress, when given, fires with a node's id right before that node's
+ * OWN work starts (not for groups themselves — their children each report).
+ * It exists so a caller racing this against a watchdog timeout (see
+ * kernel/client.ts) can tell which node was actually in flight when a call
+ * had to be abandoned — an import's mesh-repair step is the one piece of
+ * this pipeline that can legitimately run long enough to matter.
+ */
+export async function makeLocal(
   spec: NodeSpec,
   onError?: (id: string, msg: string) => void,
-): Shape3D | null {
-  if (spec.type === "object") return makePrimitive(spec);
+  onProgress?: (id: string) => void,
+): Promise<AnySolid | null> {
+  if (spec.type === "object") {
+    onProgress?.(spec.id);
+    return makePrimitive(spec);
+  }
+  if (spec.type === "import") {
+    onProgress?.(spec.id);
+    return makeImport(spec);
+  }
 
-  const build = (spin: boolean, report?: (id: string, msg: string) => void) => {
-    const kids: { solid: Shape3D; isHole: boolean }[] = [];
+  const build = async (spin: boolean, report?: (id: string, msg: string) => void) => {
+    const kids: { solid: AnySolid; isHole: boolean }[] = [];
     for (const child of spec.children) {
       try {
-        const solid = makeWorld(spin ? respin(child) : child, report);
+        const solid = await makeWorld(spin ? respin(child) : child, report, onProgress);
         if (solid) kids.push({ solid, isHole: child.isHole });
       } catch (e) {
         report?.(child.id, e instanceof Error ? e.message : String(e));
@@ -175,23 +301,22 @@ export function makeLocal(
     return kids;
   };
 
-  const kids = build(false, onError);
+  const kids = await build(false, onError);
   const result = combine(spec.op, kids);
   if (!result || !suspicious(spec.op, result, kids)) return result;
 
   // Known OCCT weakness: a sphere's seam meridian crossing the other shape's
   // boundary makes the boolean return an invalid solid. Spinning the seam away
   // is a no-op geometrically and fixes it — so it is only worth retrying when
-  // there is actually a sphere involved.
+  // there is actually a sphere involved. (suspicious() already short-circuits
+  // to false for MeshShape results, so this never fires on the import path.)
   const hasSphere = spec.children.some((c) => c.type === "object" && c.kind === "sphere");
   if (hasSphere) {
-    const retryKids = build(true);
+    const retryKids = await build(true);
     const retry = combine(spec.op, retryKids);
     if (retry && !suspicious(spec.op, retry, retryKids)) return retry;
   }
 
-  // A union that is smaller than one of its own parts is provably broken; an
-  // empty subtraction may simply mean the part was fully enclosed.
   if (spec.op === "union") {
     onError?.(spec.id, "This union produced an invalid solid — try moving or rotating a part.");
   }
@@ -199,10 +324,13 @@ export function makeLocal(
 }
 
 /** A node placed into its parent's frame. */
-export function makeWorld(
+export async function makeWorld(
   spec: NodeSpec,
   onError?: (id: string, msg: string) => void,
-): Shape3D | null {
-  const local = makeLocal(spec, onError);
+  onProgress?: (id: string) => void,
+): Promise<AnySolid | null> {
+  const local = await makeLocal(spec, onError, onProgress);
   return local ? place(local, spec) : null;
 }
+
+export { hasImport, isMesh };
