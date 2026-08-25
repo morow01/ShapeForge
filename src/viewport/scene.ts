@@ -118,6 +118,7 @@ export class Scene {
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
+    this.applyControlBindings();
 
     this.gizmo = new TransformControls(this.camera, this.renderer.domElement);
     this.gizmo.setTranslationSnap(1); // 1 mm
@@ -132,6 +133,14 @@ export class Scene {
 
     this.renderer.domElement.addEventListener("pointerdown", this.onPointerDown);
     this.renderer.domElement.addEventListener("pointerup", this.onPointerUp);
+    // Right-click drives the camera (orbit), never the browser's menu.
+    this.renderer.domElement.addEventListener("contextmenu", this.onContextMenu);
+    // Capture phase on an ANCESTOR of the canvas — this is what lets it run
+    // before TransformControls' own pointerdown listener (registered on the
+    // canvas itself, and with no button check of its own) regardless of
+    // which of the two was constructed first. See onGlobalPointerDown.
+    this.host.addEventListener("pointerdown", this.onGlobalPointerDown, { capture: true });
+    this.host.addEventListener("pointerup", this.onGlobalPointerUp, { capture: true });
     window.addEventListener("keydown", this.onModifierChange);
     window.addEventListener("keyup", this.onModifierChange);
 
@@ -366,6 +375,9 @@ export class Scene {
   // ---- picking ----------------------------------------------------------
 
   private onPointerDown = (e: PointerEvent) => {
+    // Only the left button ever selects — right/middle are reserved for
+    // orbit/pan and must never be misread as a click on release.
+    if (e.button !== 0) return;
     this.downAt = { x: e.clientX, y: e.clientY };
   };
 
@@ -400,6 +412,41 @@ export class Scene {
 
   // ---- camera -----------------------------------------------------------
 
+  /**
+   * TinkerCAD's scheme: left click selects/drags, right-drag orbits,
+   * middle-drag pans, wheel zooms (wheel is wired into OrbitControls
+   * already and is unaffected by this remap). Reapplied after
+   * setCameraMode() swaps in a fresh OrbitControls instance, which would
+   * otherwise reset to three.js's own default (left=rotate, right=pan).
+   */
+  private applyControlBindings() {
+    this.controls.mouseButtons = {
+      LEFT: null,
+      MIDDLE: THREE.MOUSE.PAN,
+      RIGHT: THREE.MOUSE.ROTATE,
+    };
+  }
+
+  private onContextMenu = (e: MouseEvent) => e.preventDefault();
+
+  /**
+   * TransformControls has no concept of "ignore this button" — it hit-tests
+   * and starts dragging a handle for ANY pointer button. Without this, a
+   * right-click that happens to land on a gizmo arrow would try to drag it
+   * instead of orbiting, which is exactly backwards from TinkerCAD's "right
+   * mouse always orbits, everywhere" behaviour. Disabling the gizmo here
+   * runs before its own pointerdown handler ever sees the event (ancestor
+   * capture-phase always precedes the target phase, independent of
+   * registration order), so it never starts a drag in the first place.
+   */
+  private onGlobalPointerDown = (e: PointerEvent) => {
+    if (e.button !== 0) this.gizmo.enabled = false;
+  };
+
+  private onGlobalPointerUp = () => {
+    this.gizmo.enabled = true;
+  };
+
   setCameraMode(mode: CameraMode) {
     const isOrtho = this.camera instanceof THREE.OrthographicCamera;
     if ((mode === "orthographic") === isOrtho) return;
@@ -424,6 +471,7 @@ export class Scene {
     this.camera = next;
     this.controls = new OrbitControls(next, this.renderer.domElement);
     this.controls.enableDamping = true;
+    this.applyControlBindings();
     this.controls.target.copy(target);
     this.controls.update();
     this.gizmo.camera = next;
@@ -478,6 +526,9 @@ export class Scene {
     cancelAnimationFrame(this.frame);
     this.renderer.domElement.removeEventListener("pointerdown", this.onPointerDown);
     this.renderer.domElement.removeEventListener("pointerup", this.onPointerUp);
+    this.renderer.domElement.removeEventListener("contextmenu", this.onContextMenu);
+    this.host.removeEventListener("pointerdown", this.onGlobalPointerDown, { capture: true });
+    this.host.removeEventListener("pointerup", this.onGlobalPointerUp, { capture: true });
     window.removeEventListener("keydown", this.onModifierChange);
     window.removeEventListener("keyup", this.onModifierChange);
     this.gizmo.removeEventListener("dragging-changed", this.onDraggingChanged);
