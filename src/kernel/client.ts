@@ -21,7 +21,9 @@ export class KernelTimeoutError extends Error {
   constructor(nodeId: string | null) {
     super(
       nodeId
-        ? "This object took too long to process and was skipped so the rest of the scene could keep working."
+        ? "This object is very complex and was skipped after taking too long, so the rest of the scene " +
+            "could keep working. A large scanned/downloaded STL can genuinely take minutes to merge or " +
+            "export — if it keeps timing out, try simplifying it (fewer triangles) in a mesh tool first."
         : "The 3D kernel took too long to respond and had to be restarted.",
     );
     this.name = "KernelTimeoutError";
@@ -39,7 +41,18 @@ export class KernelTimeoutError extends Error {
  * large-but-healthy import is very unlikely to trip it, while still bounding
  * how long the UI can sit on "building" with no explanation.
  */
-const WATCHDOG_MS = 45_000;
+/**
+ * Measured against a real 42MB / ~887k-triangle scanned STL (not a synthetic
+ * test file): a standalone import meshes for the edit view in ~20s, but the
+ * merged-result/export path — which re-meshes through manifold-3d's own
+ * mesh() with no simplification step available to skip — routinely ran past
+ * two minutes for the SAME file even with nothing else to combine with, and
+ * once (grouped with two small primitives, forcing an actual boolean fuse)
+ * never completed inside 10 minutes. There is no timeout that turns a
+ * genuinely too-complex file into a fast one; this bounds the wait to
+ * something tolerable rather than promising every large file will finish.
+ */
+export const WATCHDOG_MS = 3 * 60_000;
 
 /**
  * Runs one call against the current worker, racing it against WATCHDOG_MS.

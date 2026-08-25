@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { kernel, KernelTimeoutError } from "./kernel/client";
+import { kernel, KernelTimeoutError, WATCHDOG_MS } from "./kernel/client";
 import { Viewport } from "./viewport/Viewport";
 import { Inspector } from "./ui/Inspector";
 import { Tree } from "./ui/Tree";
@@ -154,7 +154,35 @@ export function App() {
   const [gapDirection, setGapDirection] = useState<-1 | 1>(1);
   const [spacingSwapped, setSpacingSwapped] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  // Tracked separately, not as one shared flag: buildScene and buildResult
+  // are independent kernel calls, and — because they share one single-
+  // threaded worker — an abandoned buildResult (say, from toggling "Show
+  // merged result" off before a slow one finished) can go on occupying the
+  // worker for a while after the user stopped caring about it, which would
+  // otherwise make a totally ordinary, fast buildScene edit right after LOOK
+  // stuck too, since a shared flag would already read "busy" from a stretch
+  // that has nothing to do with what the user just did.
+  const [sceneBusy, setSceneBusy] = useState(false);
+  const [resultBusy, setResultBusy] = useState(false);
+  const busy = sceneBusy || resultBusy;
+  // Timestamp sceneBusy last turned true, so the "still working" hint (below)
+  // only shows up once it's genuinely been a while — an ordinary rebuild
+  // finishes in well under a second, and flashing a "this can take minutes"
+  // note for every routine edit would just be noise. Scoped to sceneBusy
+  // specifically (see above) rather than the combined busy flag, so it can't
+  // be left showing a stale multi-minute stretch attributable to a
+  // buildResult call the user no longer cares about.
+  const [busySince, setBusySince] = useState<number | null>(null);
+  const [busyNow, setBusyNow] = useState(Date.now());
+  useEffect(() => {
+    if (!sceneBusy) {
+      setBusySince(null);
+      return;
+    }
+    setBusySince((prev) => prev ?? Date.now());
+    const t = setInterval(() => setBusyNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [sceneBusy]);
 
   const saveLabel = storageBlocked
     ? "⚠ Autosave unavailable — this browser is blocking local storage."
@@ -243,7 +271,7 @@ export function App() {
     }
     const id = ++buildId.current;
     const t = setTimeout(() => {
-      setBusy(true);
+      setSceneBusy(true);
       kernel
         .buildScene(specs)
         .then((res) => {
@@ -271,7 +299,7 @@ export function App() {
           }
         })
         .finally(() => {
-          if (id === buildId.current) setBusy(false);
+          if (id === buildId.current) setSceneBusy(false);
         });
     }, 32);
     return () => clearTimeout(t);
@@ -288,7 +316,7 @@ export function App() {
     const specs = pruneSkipped(useDoc.getState().nodes, skippedIds).map(toSpec);
     let stale = false;
     const t = setTimeout(() => {
-      setBusy(true);
+      setResultBusy(true);
       kernel
         .buildResult(specs)
         .then((res) => {
@@ -310,7 +338,7 @@ export function App() {
             setError(msg(e));
           }
         })
-        .finally(() => !stale && setBusy(false));
+        .finally(() => !stale && setResultBusy(false));
     }, 32);
     return () => {
       stale = true;
@@ -668,7 +696,21 @@ export function App() {
 
         <dl className="stats">
           <dt>Status</dt>
-          <dd>{error ? <span className="err">{error}</span> : busy ? "building…" : "ready"}</dd>
+          <dd>
+            {error ? (
+              <span className="err">{error}</span>
+            ) : busy ? (
+              "building…"
+            ) : (
+              "ready"
+            )}
+          </dd>
+          {!error && busy && busySince && busyNow - busySince > 8000 && (
+            <dd className="hint" style={{ gridColumn: "1 / -1", textAlign: "left" }}>
+              Large or complex files can take a few minutes — this will keep working
+              or time out on its own after {Math.round(WATCHDOG_MS / 60_000)} min.
+            </dd>
+          )}
           <dt>Selected</dt>
           <dd>{selectedIds.length}</dd>
           {showResult && stats && (
