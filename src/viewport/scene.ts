@@ -210,6 +210,11 @@ export class Scene {
   /** Fires as a gizmo drag begins and ends, so the whole drag can become a
    *  single undo step instead of one per frame. */
   onDragChange: ((dragging: boolean) => void) | null = null;
+  /** Alt-drag: creates a document-side copy of `id` at its current position
+   *  and returns the copy's id (or null if it no longer exists), all
+   *  synchronously — the caller then drags that id instead of the original,
+   *  with no kernel rebuild to wait for. */
+  onDuplicateObject: ((id: string) => string | null) | null = null;
 
   constructor(host: HTMLElement) {
     this.host = host;
@@ -392,6 +397,31 @@ export class Scene {
     group.add(m, wire);
     this.scene.add(group);
     return { group, mesh: m, wire, geom, pivot, isHole };
+  }
+
+  /** Alt-drag needs a real Object3D to drag the instant the gesture starts —
+   *  long before a document-side duplicate could round-trip through the
+   *  kernel and arrive via setParts(). Cloning the source view's geometry
+   *  stands in perfectly until then. The geometry buffers are deep-cloned
+   *  (not shared) since setParts() later mutates a part's own geom in place
+   *  as its shape changes — sharing them would let an edit to either node
+   *  corrupt the other's mesh. Materials ARE shared: they are static
+   *  singletons already (see MATERIALS), swapped by applyMaterials(), never
+   *  owned by one part. setParts() will happily adopt this entry — reusing
+   *  the id — once the duplicate's own build finally lands. */
+  private cloneView(source: PartView): PartView {
+    const faces = source.geom[0].faces.clone();
+    const lines = source.geom[0].lines.clone();
+    const geom: ThreeGeometry[] = [{ faces, lines }];
+    const mesh = new THREE.Mesh(faces, source.mesh.material);
+    const wire = new THREE.LineSegments(lines, source.wire.material);
+    const group = new THREE.Group();
+    group.position.copy(source.group.position);
+    group.rotation.copy(source.group.rotation);
+    group.scale.copy(source.group.scale);
+    group.add(mesh, wire);
+    this.scene.add(group);
+    return { group, mesh, wire, geom, pivot: source.pivot.clone(), isHole: source.isHole };
   }
 
   /** Centres both render geometries around their visible bounds. The outer
@@ -715,6 +745,10 @@ export class Scene {
   };
 
   private applySmartSnap(id: string, obj: THREE.Object3D) {
+    // Alt bypasses snapping so a free-placed copy never gets pulled onto a
+    // guide. Shift does NOT bypass it — shift-constrain only locks the drag
+    // to a straight line; Smart Guides still snap along that line exactly
+    // as they would without shift, matching Illustrator.
     if (this.altDown) {
       this.guides.clear();
       return;
@@ -894,19 +928,46 @@ export class Scene {
         return;
       }
       g.active = true;
-      this.onSelectObject?.(g.id, false);
-      this.onDragChange?.(true);
+      // Adobe-style alt-drag: the object under the cursor is left in place
+      // and a copy of it is what actually gets dragged. onDragChange fires
+      // FIRST so the duplication and the drag that follows land in the same
+      // undo batch — one alt-drag, one undo step, exactly like an ordinary
+      // move. this.selectedIds is set directly (not through onSelectObject)
+      // so the new id reads as selected immediately, without waiting for a
+      // render round-trip back through setPlacements().
+      const source = e.altKey ? this.parts.get(g.id) : undefined;
+      const copyId = source ? this.onDuplicateObject?.(g.id) : null;
+      if (source && copyId) {
+        this.onDragChange?.(true);
+        this.parts.set(copyId, this.cloneView(source));
+        g.id = copyId;
+        this.selectedIds = [copyId];
+        this.applyMaterials();
+      } else {
+        this.onSelectObject?.(g.id, false);
+        this.onDragChange?.(true);
+      }
     }
 
     const view = this.parts.get(g.id);
     const hit = this.rayPlaneHit(e, g.plane);
     if (!view || !hit) return;
 
-    view.group.position.set(
-      g.startPos.x + (hit.x - g.grabPoint.x),
-      g.startPos.y + (hit.y - g.grabPoint.y),
-      g.startPos.z,
-    );
+    // Adobe-style shift-constrain: lock the body-drag (plain move, or an
+    // alt-drag copy — this runs after that branch has already retargeted
+    // g.id) to the nearest horizontal/vertical/45° line through its start
+    // point, exactly like Illustrator. Smart-snap sits back down for the
+    // rest of the drag once shift releases.
+    let dx = hit.x - g.grabPoint.x;
+    let dy = hit.y - g.grabPoint.y;
+    if (e.shiftKey) {
+      const step = Math.PI / 4;
+      const angle = Math.round(Math.atan2(dy, dx) / step) * step;
+      const dist = Math.hypot(dx, dy);
+      dx = Math.cos(angle) * dist;
+      dy = Math.sin(angle) * dist;
+    }
+    view.group.position.set(g.startPos.x + dx, g.startPos.y + dy, g.startPos.z);
     view.group.updateWorldMatrix(true, true);
 
     this.applySmartSnap(g.id, view.group);

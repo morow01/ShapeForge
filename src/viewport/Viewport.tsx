@@ -18,6 +18,9 @@ interface Props {
   onSelectMany: (ids: string[], additive: boolean) => void;
   onTransform: (id: string, patch: { position?: Vec3; rotation?: Vec3; scale?: Vec3 }) => void;
   onAlign: (updates: { id: string; position: Vec3 }[]) => void;
+  /** Alt-drag: creates a copy of `id` and returns its new id (or null),
+   *  synchronously, so the Scene can keep dragging that id instead. */
+  onDuplicate: (id: string) => string | null;
   onDragChange: (dragging: boolean) => void;
 }
 
@@ -41,6 +44,7 @@ export function Viewport(props: Props) {
     scene.onSelectMany = (ids, additive) => latest.current.onSelectMany(ids, additive);
     scene.onTransformObject = (id, patch) => latest.current.onTransform(id, patch);
     scene.onAlignObjects = (updates) => latest.current.onAlign(updates);
+    scene.onDuplicateObject = (id) => latest.current.onDuplicate(id);
     scene.onDragChange = (dragging) => latest.current.onDragChange(dragging);
 
     scene.setParts(latest.current.parts);

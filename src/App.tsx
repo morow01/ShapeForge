@@ -3,7 +3,14 @@ import { kernel, KernelTimeoutError, WATCHDOG_MS } from "./kernel/client";
 import { Viewport } from "./viewport/Viewport";
 import { Inspector } from "./ui/Inspector";
 import { Tree } from "./ui/Tree";
-import { beginHistoryBatch, endHistoryBatch, useDoc, useTemporal } from "./document/store";
+import {
+  beginHistoryBatch,
+  copySelected,
+  endHistoryBatch,
+  pasteClipboard,
+  useDoc,
+  useTemporal,
+} from "./document/store";
 import { PRIMITIVES, isGroup } from "./document/types";
 import { findNode } from "./document/tree";
 import { putBlob } from "./document/blobStore";
@@ -114,6 +121,7 @@ export function App() {
     setParam,
     setTransform,
     setPositions,
+    duplicateNodes,
     setHole,
     setGroupOp,
     toggleCollapsed,
@@ -363,6 +371,17 @@ export function App() {
     (id: string, patch: Parameters<typeof setTransform>[1]) => setTransform(id, patch),
     [setTransform],
   );
+  // Alt-drag: the viewport clones the Three.js view itself (for an instant
+  // drag start, with no rebuild to wait for) and only needs the new node's
+  // id back, to know which id to keep dragging and reporting moves for.
+  const onDuplicate = useCallback(
+    (id: string) => {
+      const node = findNode(useDoc.getState().nodes, id);
+      if (!node) return null;
+      return duplicateNodes([node], [0, 0, 0])[0] ?? null;
+    },
+    [duplicateNodes],
+  );
   // A gizmo drag emits a change every frame; collapse the whole drag into one
   // undo step so undo jumps back to where the drag started.
   const onDragChange = useCallback(
@@ -464,6 +483,12 @@ export function App() {
         e.preventDefault();
         if (e.shiftKey) redo();
         else undo();
+      } else if (mod && e.key.toLowerCase() === "c") {
+        e.preventDefault();
+        copySelected();
+      } else if (mod && e.key.toLowerCase() === "v") {
+        e.preventDefault();
+        pasteClipboard();
       } else if (!mod && e.key.toLowerCase() === "v") {
         setToolMode("select");
       } else if (!mod && e.key.toLowerCase() === "m") {
@@ -579,12 +604,13 @@ export function App() {
           onSelectMany={onSelectMany}
           onTransform={onTransform}
           onAlign={setPositions}
+          onDuplicate={onDuplicate}
           onDragChange={onDragChange}
         />
         <div className="canvas-help">
           {toolMode === "align"
             ? "Click a dot to align minimum, centre, or maximum · A Align · Esc Select"
-            : "V Select · M Move · R Rotate · A Align · Right-drag orbit · Scroll zoom"}
+            : "V Select · M Move · R Rotate · A Align · Alt-drag duplicate · Shift-drag straight · Right-drag orbit · Scroll zoom"}
         </div>
         {error && <div className="canvas-error">{error}</div>}
         {!error && busy && busySince && busyNow - busySince > 8000 && (

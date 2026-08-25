@@ -77,6 +77,20 @@ function nextParams(o: ObjectNode, key: string, value: number): Record<string, n
   return { ...o.params, [key]: value };
 }
 
+/** Clones a node subtree with a fresh id at every level — a duplicated
+ *  group's children get new ids too, not just the group itself, so the copy
+ *  is fully independent of the original. Only the subtree's own root is
+ *  offset; children keep their position relative to their parent group. */
+function cloneSubtree(n: SceneNode, offset: Vec3): SceneNode {
+  const position: Vec3 = [
+    n.position[0] + offset[0],
+    n.position[1] + offset[1],
+    n.position[2] + offset[2],
+  ];
+  const clone = { ...n, id: nextId(), position };
+  return isGroup(clone) ? { ...clone, children: clone.children.map((c) => cloneSubtree(c, [0, 0, 0])) } : clone;
+}
+
 interface DocState {
   nodes: SceneNode[];
   /** Multi-select, in click order. */
@@ -99,6 +113,11 @@ interface DocState {
   setParam: (id: string, key: string, value: number) => void;
   setTransform: (id: string, patch: { position?: Vec3; rotation?: Vec3; scale?: Vec3 }) => void;
   setPositions: (updates: { id: string; position: Vec3 }[]) => void;
+  /** Clones whole subtrees (fresh ids throughout, so a cloned group's
+   *  children are independent of the originals) offset by `offset`, appends
+   *  them, and selects the new copies. Returns the new top-level ids, in the
+   *  same order as `source`. */
+  duplicateNodes: (source: SceneNode[], offset: Vec3) => string[];
   setHole: (id: string, isHole: boolean) => void;
   setGroupOp: (id: string, op: BooleanOp) => void;
   toggleCollapsed: (id: string) => void;
@@ -216,6 +235,13 @@ export const useDoc = create<DocState>()(
         }));
       },
 
+      duplicateNodes: (source, offset) => {
+        const clones = source.map((n) => cloneSubtree(n, offset));
+        set((s) => ({ nodes: [...s.nodes, ...clones], selectedIds: clones.map((c) => c.id) }));
+        afterBatchedMutation();
+        return clones.map((c) => c.id);
+      },
+
       setHole: (id, isHole) =>
         set((s) => ({ nodes: updateNode(s.nodes, id, (n) => ({ ...n, isHole })) })),
 
@@ -313,6 +339,35 @@ export const useDoc = create<DocState>()(
 /** Subscribe to undo/redo state. zundo keeps its history in a separate store. */
 export function useTemporal<T>(selector: (s: TemporalState<{ nodes: SceneNode[] }>) => T): T {
   return useStore(useDoc.temporal, selector);
+}
+
+/* ---- clipboard -------------------------------------------------------
+ * Lives outside the document itself: it is not part of any design, so it
+ * must never enter undo history or get written to the autosave. A plain
+ * module variable does that for free — it just lives for the tab's session.
+ */
+let clipboard: SceneNode[] | null = null;
+/** How many times Ctrl+V has fired since the last Ctrl+C, so repeated pastes
+ *  step further away from the original instead of stacking exactly on it. */
+let pasteRun = 0;
+const PASTE_STEP: Vec3 = [8, 8, 0];
+
+/** Ctrl+C: snapshots the current selection. Copying again replaces it. */
+export function copySelected() {
+  const s = useDoc.getState();
+  const ids = new Set(s.selectedIds);
+  const picked = s.nodes.filter((n) => ids.has(n.id));
+  if (!picked.length) return;
+  clipboard = picked;
+  pasteRun = 0;
+}
+
+/** Ctrl+V: pastes fresh copies of whatever was last copied, selecting them. */
+export function pasteClipboard() {
+  if (!clipboard?.length) return;
+  pasteRun++;
+  const offset: Vec3 = [PASTE_STEP[0] * pasteRun, PASTE_STEP[1] * pasteRun, PASTE_STEP[2] * pasteRun];
+  useDoc.getState().duplicateNodes(clipboard, offset);
 }
 
 /* ---- autosave ------------------------------------------------------------
