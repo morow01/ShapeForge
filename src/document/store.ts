@@ -98,6 +98,7 @@ interface DocState {
   selectMany: (ids: string[], additive?: boolean) => void;
   setParam: (id: string, key: string, value: number) => void;
   setTransform: (id: string, patch: { position?: Vec3; rotation?: Vec3; scale?: Vec3 }) => void;
+  setPositions: (updates: { id: string; position: Vec3 }[]) => void;
   setHole: (id: string, isHole: boolean) => void;
   setGroupOp: (id: string, op: BooleanOp) => void;
   toggleCollapsed: (id: string) => void;
@@ -201,6 +202,18 @@ export const useDoc = create<DocState>()(
       setTransform: (id, patch) => {
         set((s) => ({ nodes: updateNode(s.nodes, id, (n) => ({ ...n, ...patch })) }));
         afterBatchedMutation();
+      },
+
+      // One alignment click may move several objects, but it is one user
+      // action and therefore one immutable state transition / undo step.
+      setPositions: (updates) => {
+        const byId = new Map(updates.map((update) => [update.id, update.position]));
+        set((s) => ({
+          nodes: s.nodes.map((node) => {
+            const position = byId.get(node.id);
+            return position ? { ...node, position } : node;
+          }),
+        }));
       },
 
       setHole: (id, isHole) =>

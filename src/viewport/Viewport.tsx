@@ -17,6 +17,7 @@ interface Props {
   /** Marquee-select release: every id caught inside the drawn rectangle. */
   onSelectMany: (ids: string[], additive: boolean) => void;
   onTransform: (id: string, patch: { position?: Vec3; rotation?: Vec3; scale?: Vec3 }) => void;
+  onAlign: (updates: { id: string; position: Vec3 }[]) => void;
   onDragChange: (dragging: boolean) => void;
 }
 
@@ -39,6 +40,7 @@ export function Viewport(props: Props) {
     scene.onSelectObject = (id, additive) => latest.current.onSelect(id, additive);
     scene.onSelectMany = (ids, additive) => latest.current.onSelectMany(ids, additive);
     scene.onTransformObject = (id, patch) => latest.current.onTransform(id, patch);
+    scene.onAlignObjects = (updates) => latest.current.onAlign(updates);
     scene.onDragChange = (dragging) => latest.current.onDragChange(dragging);
 
     scene.setParts(latest.current.parts);

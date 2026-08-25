@@ -10,7 +10,9 @@ import type { Bounds3, SnapTarget } from "../snapping/snap";
 import { SmartGuides } from "./guides";
 
 export type CameraMode = "perspective" | "orthographic";
-export type ToolMode = "select" | "move" | "rotate";
+export type ToolMode = "select" | "move" | "rotate" | "align";
+type AlignAxis = 0 | 1 | 2;
+type AlignAnchor = "min" | "center" | "max";
 
 /** How far the pointer may move between down and up and still count as a click
  *  rather than an orbit drag. */
@@ -165,6 +167,9 @@ export class Scene {
   private resizeBox = new THREE.Box3Helper(new THREE.Box3(), 0x00a9b7);
   private resizeHandles = new THREE.Group();
   private resizeHandleMeshes: THREE.Mesh[] = [];
+  private alignBox = new THREE.Box3Helper(new THREE.Box3(), 0x00a9b7);
+  private alignHandles = new THREE.Group();
+  private alignHandleMeshes: THREE.Mesh[] = [];
   private dimensionInputs: HTMLInputElement[] = [];
   private resizeDrag: ResizeDrag | null = null;
   private resizeConstrained = true;
@@ -201,6 +206,7 @@ export class Scene {
   onTransformObject:
     | ((id: string, patch: { position?: Vec3; rotation?: Vec3; scale?: Vec3 }) => void)
     | null = null;
+  onAlignObjects: ((updates: { id: string; position: Vec3 }[]) => void) | null = null;
   /** Fires as a gizmo drag begins and ends, so the whole drag can become a
    *  single undo step instead of one per frame. */
   onDragChange: ((dragging: boolean) => void) | null = null;
@@ -223,6 +229,7 @@ export class Scene {
     host.appendChild(this.marqueeEl);
 
     this.setupResizeOverlay();
+    this.setupAlignOverlay();
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0xedf1f4);
@@ -242,7 +249,7 @@ export class Scene {
     this.gizmo.addEventListener("objectChange", this.onGizmoChange);
     this.scene.add(this.gizmo.getHelper());
     this.scene.add(this.guides.group);
-    this.scene.add(this.resizeBox, this.resizeHandles);
+    this.scene.add(this.resizeBox, this.resizeHandles, this.alignBox, this.alignHandles);
 
     this.addLights();
     this.addGrid();
@@ -335,6 +342,36 @@ export class Scene {
       this.host.appendChild(input);
       this.dimensionInputs.push(input);
     }
+  }
+
+  private setupAlignOverlay() {
+    this.alignBox.visible = false;
+    const boxMaterial = Array.isArray(this.alignBox.material)
+      ? this.alignBox.material[0]
+      : this.alignBox.material;
+    boxMaterial.depthTest = false;
+    boxMaterial.transparent = true;
+    boxMaterial.opacity = 0.8;
+    this.alignBox.renderOrder = 24;
+
+    const geometry = new THREE.SphereGeometry(1, 20, 14);
+    for (let axis = 0; axis < 3; axis++) {
+      for (const anchor of ["min", "center", "max"] as AlignAnchor[]) {
+        const handle = new THREE.Mesh(
+          geometry,
+          new THREE.MeshBasicMaterial({
+            color: anchor === "center" ? 0x222a30 : 0x87939a,
+            depthTest: false,
+          }),
+        );
+        handle.userData.alignAxis = axis;
+        handle.userData.alignAnchor = anchor;
+        handle.renderOrder = 25;
+        this.alignHandles.add(handle);
+        this.alignHandleMeshes.push(handle);
+      }
+    }
+    this.alignHandles.visible = false;
   }
 
   setResizeConstrained(value: boolean) {
@@ -443,6 +480,7 @@ export class Scene {
     }
     if (this.resultView) this.resultView.group.visible = this.showResult;
     this.updateResizeOverlay();
+    this.updateAlignOverlay();
   }
 
   /** Draws a TinkerCAD-style bounds cage, eight corner handles, and editable
@@ -503,6 +541,85 @@ export class Scene {
     }
   }
 
+  /** Combined multi-selection cage with TinkerCAD-style min/centre/max dots. */
+  private updateAlignOverlay() {
+    const views = this.selectedIds
+      .map((id) => this.parts.get(id))
+      .filter((view): view is PartView => !!view && view.group.visible);
+    const visible = this.toolMode === "align" && views.length >= 2 && !this.showResult;
+    this.alignBox.visible = visible;
+    this.alignHandles.visible = visible;
+    if (!visible) return;
+
+    const box = new THREE.Box3();
+    for (const view of views) {
+      view.group.updateWorldMatrix(true, true);
+      box.expandByObject(view.group);
+    }
+    this.alignBox.box.copy(box);
+    this.alignBox.updateMatrixWorld(true);
+
+    const centre = box.getCenter(new THREE.Vector3());
+    const offset = Math.max(2, this.worldSnapTolerance(centre) * 3.2);
+    const anchors = (min: number, mid: number, max: number) => [min, mid, max];
+    const xs = anchors(box.min.x, centre.x, box.max.x);
+    const ys = anchors(box.min.y, centre.y, box.max.y);
+    const zs = anchors(box.min.z, centre.z, box.max.z);
+    for (let i = 0; i < 3; i++) {
+      this.alignHandleMeshes[i].position.set(xs[i], box.min.y - offset, box.min.z);
+      this.alignHandleMeshes[3 + i].position.set(box.min.x - offset, ys[i], box.min.z);
+      this.alignHandleMeshes[6 + i].position.set(box.max.x + offset, box.max.y, zs[i]);
+    }
+    const handleSize = Math.max(0.75, this.worldSnapTolerance(centre) * 1.05);
+    for (const handle of this.alignHandleMeshes) handle.scale.setScalar(handleSize);
+  }
+
+  private beginAlign(e: PointerEvent): boolean {
+    if (!this.alignHandles.visible) return false;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    const hit = this.raycaster.intersectObjects(this.alignHandleMeshes, false)[0]?.object as THREE.Mesh | undefined;
+    if (!hit) return false;
+    this.alignSelection(hit.userData.alignAxis as AlignAxis, hit.userData.alignAnchor as AlignAnchor);
+    e.preventDefault();
+    return true;
+  }
+
+  private alignSelection(axis: AlignAxis, anchor: AlignAnchor) {
+    const selected = this.selectedIds
+      .map((id) => ({ id, view: this.parts.get(id), node: this.lastNodes.find((n) => n.id === id) }))
+      .filter((item): item is { id: string; view: PartView; node: SceneNode } => !!item.view && !!item.node);
+    if (selected.length < 2) return;
+
+    const boxes = selected.map(({ view }) => new THREE.Box3().setFromObject(view.group));
+    const overall = boxes.reduce((all, box) => all.union(box.clone()), new THREE.Box3());
+    const target = anchor === "min"
+      ? overall.min.getComponent(axis)
+      : anchor === "max"
+        ? overall.max.getComponent(axis)
+        : overall.getCenter(new THREE.Vector3()).getComponent(axis);
+
+    const updates: { id: string; position: Vec3 }[] = [];
+    selected.forEach(({ id, view, node }, index) => {
+      const box = boxes[index];
+      const current = anchor === "min"
+        ? box.min.getComponent(axis)
+        : anchor === "max"
+          ? box.max.getComponent(axis)
+          : box.getCenter(new THREE.Vector3()).getComponent(axis);
+      const delta = target - current;
+      if (Math.abs(delta) < 1e-9) return;
+      const position = [...node.position] as Vec3;
+      position[axis] += delta;
+      view.group.position.setComponent(axis, view.group.position.getComponent(axis) + delta);
+      updates.push({ id, position });
+    });
+    if (updates.length) this.onAlignObjects?.(updates);
+    this.updateAlignOverlay();
+  }
+
   private applyTypedDimension(input: HTMLInputElement) {
     const id = input.dataset.nodeId;
     const current = Number(input.dataset.currentSize);
@@ -549,9 +666,10 @@ export class Scene {
 
   setToolMode(mode: ToolMode) {
     this.toolMode = mode;
-    if (mode !== "select") this.gizmo.setMode(mode === "move" ? "translate" : "rotate");
+    if (mode === "move" || mode === "rotate") this.gizmo.setMode(mode === "move" ? "translate" : "rotate");
     this.attachGizmo();
     this.updateResizeOverlay();
+    this.updateAlignOverlay();
   }
 
   /** The gizmo drives one node at a time — the most recently selected. */
@@ -562,7 +680,7 @@ export class Scene {
   private attachGizmo() {
     const id = this.gizmoTarget();
     const view = id ? this.parts.get(id) : undefined;
-    if (view && !this.showResult && this.toolMode !== "select") {
+    if (view && !this.showResult && (this.toolMode === "move" || this.toolMode === "rotate")) {
       if (this.gizmo.object !== view.group) this.gizmo.attach(view.group);
     } else if (this.gizmo.object) {
       this.gizmo.detach();
@@ -657,6 +775,10 @@ export class Scene {
     if (e.button !== 0) return;
     this.downAt = { x: e.clientX, y: e.clientY };
 
+    if (this.beginAlign(e)) {
+      this.downAt = null;
+      return;
+    }
     if (this.beginResize(e)) return;
 
     // A gizmo-handle drag claims the event first: its own pointerdown
@@ -1139,6 +1261,7 @@ export class Scene {
     this.syncSize();
     this.controls.update();
     this.updateResizeOverlay();
+    this.updateAlignOverlay();
     this.renderer.render(this.scene, this.camera);
   }
 
@@ -1162,6 +1285,8 @@ export class Scene {
     this.gizmo.dispose();
     this.controls.dispose();
     this.guides.dispose();
+    this.alignHandleMeshes[0]?.geometry.dispose();
+    for (const handle of this.alignHandleMeshes) (handle.material as THREE.Material).dispose();
     this.renderer.dispose();
     for (const input of this.dimensionInputs) input.remove();
     this.host.removeChild(this.renderer.domElement);

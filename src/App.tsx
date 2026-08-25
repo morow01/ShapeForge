@@ -113,6 +113,7 @@ export function App() {
     selectMany,
     setParam,
     setTransform,
+    setPositions,
     setHole,
     setGroupOp,
     toggleCollapsed,
@@ -469,6 +470,8 @@ export function App() {
         setToolMode("move");
       } else if (!mod && e.key.toLowerCase() === "r") {
         setToolMode("rotate");
+      } else if (!mod && e.key.toLowerCase() === "a") {
+        setToolMode("align");
       } else if (e.key === "Escape") {
         setToolMode("select");
       }
@@ -555,6 +558,13 @@ export function App() {
             title="Rotate (R)"
             aria-label="Rotate tool"
           ><span className="tool-symbol">↻</span></button>
+          <button
+            className={toolMode === "align" ? "active" : ""}
+            onClick={() => setToolMode("align")}
+            title="Align selected objects (A)"
+            aria-label="Align tool"
+            disabled={selectedIds.length < 2}
+          ><span className="tool-symbol">⋮</span></button>
         </div>
         <Viewport
           parts={parts}
@@ -568,9 +578,14 @@ export function App() {
           onSelect={onSelect}
           onSelectMany={onSelectMany}
           onTransform={onTransform}
+          onAlign={setPositions}
           onDragChange={onDragChange}
         />
-        <div className="canvas-help">V Select · M Move · R Rotate · Right-drag orbit · Scroll zoom</div>
+        <div className="canvas-help">
+          {toolMode === "align"
+            ? "Click a dot to align minimum, centre, or maximum · A Align · Esc Select"
+            : "V Select · M Move · R Rotate · A Align · Right-drag orbit · Scroll zoom"}
+        </div>
         {error && <div className="canvas-error">{error}</div>}
         {!error && busy && busySince && busyNow - busySince > 8000 && (
           <div className="canvas-notice">
