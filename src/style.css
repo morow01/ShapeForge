@@ -83,6 +83,35 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 .viewport { position: absolute; inset: 0; overflow: hidden; }
 .viewport canvas { display: block; }
 
+.tool-rail {
+  position: absolute;
+  z-index: 4;
+  top: 14px;
+  left: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 5px;
+  background: rgb(255 255 255 / 94%);
+  border: 1px solid #d3dce1;
+  border-radius: 9px;
+  box-shadow: 0 4px 15px rgb(31 50 62 / 15%);
+  backdrop-filter: blur(7px);
+}
+.tool-rail button {
+  display: grid;
+  place-items: center;
+  width: 43px;
+  height: 39px;
+  min-height: 39px;
+  padding: 2px;
+  border-color: transparent;
+  background: transparent;
+}
+.tool-rail button.active { color: #087a79; background: #dff5f4; border-color: #55c5c3; }
+.tool-symbol { font-size: 20px; line-height: 1; }
+.cursor-symbol { transform: rotate(-40deg); font-size: 18px; }
+
 .panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 3px 14px; }
 .panel-heading.compact { margin-bottom: 12px; }
 .panel-heading h1, .tool-section > h1 { margin: 0; color: #273640; font-size: 13px; font-weight: 750; letter-spacing: .01em; }
@@ -135,6 +164,9 @@ select.num { height: 31px; }
 .field-row input[type="range"] { flex: 1; min-width: 0; accent-color: #00a7a5; }
 .field-row .num { width: 68px; flex: none; }
 .triple { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.triangle-mode { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
+.triangle-mode button { min-height: 42px; padding: 5px; font-size: 9px; line-height: 1.15; }
+.triangle-hint { margin-top: 6px; }
 .check { display: flex; align-items: center; gap: 7px; margin: 10px 0; color: #52616c; font-size: 11px; cursor: pointer; }
 .check input { accent-color: #00a7a5; }
 .hint { margin: 0; color: #89959d; font-size: 10px; }

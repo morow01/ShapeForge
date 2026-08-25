@@ -9,7 +9,7 @@ import { findNode } from "./document/tree";
 import { putBlob } from "./document/blobStore";
 import type { PrimitiveKind, SceneNode } from "./document/types";
 import type { KernelMesh, NodeSpec, ScenePart } from "./kernel/types";
-import type { CameraMode, GizmoMode } from "./viewport/scene";
+import type { CameraMode, ToolMode } from "./viewport/scene";
 import { APP_NAME, APP_VERSION } from "./version";
 import { positionWithReferenceGap } from "./snapping/spacing";
 import type { SnapAnchor, SnapAxis } from "./snapping/snap";
@@ -25,6 +25,7 @@ const toSpec = (n: SceneNode): NodeSpec => {
       children: n.children.map(toSpec),
       position: n.position,
       rotation: n.rotation,
+      scale: n.scale,
       isHole: n.isHole,
     };
   }
@@ -35,6 +36,7 @@ const toSpec = (n: SceneNode): NodeSpec => {
       blobId: n.blobId,
       position: n.position,
       rotation: n.rotation,
+      scale: n.scale,
       isHole: n.isHole,
     };
   }
@@ -45,6 +47,7 @@ const toSpec = (n: SceneNode): NodeSpec => {
     params: n.params,
     position: n.position,
     rotation: n.rotation,
+    scale: n.scale,
     isHole: n.isHole,
   };
 };
@@ -88,7 +91,7 @@ const shapeOf = (n: SceneNode): unknown => {
       n.op,
       // A child's hole flag affects this group's boolean, while this group's
       // own hole flag only affects its parent (or root display material).
-      n.children.map((c) => [shapeOf(c), c.position, c.rotation, c.isHole]),
+      n.children.map((c) => [shapeOf(c), c.position, c.rotation, c.scale, c.isHole]),
     ];
   }
   // blobId never changes for an import node, so this is stable — importSTL()
@@ -146,7 +149,8 @@ export function App() {
    *  so the user can delete or replace it. */
   const [skippedIds, setSkippedIds] = useState<Set<string>>(new Set());
   const [cameraMode, setCameraMode] = useState<CameraMode>("perspective");
-  const [gizmoMode, setGizmoMode] = useState<GizmoMode>("translate");
+  const [toolMode, setToolMode] = useState<ToolMode>("select");
+  const [resizeConstrained, setResizeConstrained] = useState(true);
   const [gapAxis, setGapAxis] = useState<SnapAxis>("x");
   const [gapMm, setGapMm] = useState(10);
   const [fixedAnchor, setFixedAnchor] = useState<SnapAnchor>("max");
@@ -459,6 +463,14 @@ export function App() {
         e.preventDefault();
         if (e.shiftKey) redo();
         else undo();
+      } else if (!mod && e.key.toLowerCase() === "v") {
+        setToolMode("select");
+      } else if (!mod && e.key.toLowerCase() === "m") {
+        setToolMode("move");
+      } else if (!mod && e.key.toLowerCase() === "r") {
+        setToolMode("rotate");
+      } else if (e.key === "Escape") {
+        setToolMode("select");
       }
     };
     window.addEventListener("keydown", onKey);
@@ -482,8 +494,6 @@ export function App() {
           <button onClick={ungroup} disabled={!canUngroup} title="Ctrl+Shift+G">Ungroup</button>
         </div>
         <div className="toolbar-group view-tools">
-          <button className={gizmoMode === "translate" ? "on" : ""} onClick={() => setGizmoMode("translate")}>Move</button>
-          <button className={gizmoMode === "rotate" ? "on" : ""} onClick={() => setGizmoMode("rotate")}>Rotate</button>
           <button className={cameraMode === "perspective" ? "on" : ""} onClick={() => setCameraMode("perspective")}>Perspective</button>
           <button className={cameraMode === "orthographic" ? "on" : ""} onClick={() => setCameraMode("orthographic")}>Ortho</button>
         </div>
@@ -526,20 +536,41 @@ export function App() {
       </aside>
 
       <main className="workspace">
+        <div className="tool-rail" role="toolbar" aria-label="Design tools">
+          <button
+            className={toolMode === "select" ? "active" : ""}
+            onClick={() => setToolMode("select")}
+            title="Select and resize (V)"
+            aria-label="Select tool"
+          ><span className="tool-symbol cursor-symbol">➤</span></button>
+          <button
+            className={toolMode === "move" ? "active" : ""}
+            onClick={() => setToolMode("move")}
+            title="Move with axis controls (M)"
+            aria-label="Move tool"
+          ><span className="tool-symbol">✥</span></button>
+          <button
+            className={toolMode === "rotate" ? "active" : ""}
+            onClick={() => setToolMode("rotate")}
+            title="Rotate (R)"
+            aria-label="Rotate tool"
+          ><span className="tool-symbol">↻</span></button>
+        </div>
         <Viewport
           parts={parts}
           result={result}
           nodes={nodes}
           selectedIds={selectedIds}
           cameraMode={cameraMode}
-          gizmoMode={gizmoMode}
+          toolMode={toolMode}
+          resizeConstrained={resizeConstrained}
           showResult={showResult}
           onSelect={onSelect}
           onSelectMany={onSelectMany}
           onTransform={onTransform}
           onDragChange={onDragChange}
         />
-        <div className="canvas-help">Drag to select · Right-drag to orbit · Scroll to zoom · Alt bypasses snap</div>
+        <div className="canvas-help">V Select · M Move · R Rotate · Right-drag orbit · Scroll zoom</div>
         {error && <div className="canvas-error">{error}</div>}
         {!error && busy && busySince && busyNow - busySince > 8000 && (
           <div className="canvas-notice">
@@ -582,6 +613,8 @@ export function App() {
               error={invalid[selected.id] ?? null}
               onParam={(k, v) => setParam(selected.id, k, v)}
               onTransform={(patch) => setTransform(selected.id, patch)}
+              resizeConstrained={resizeConstrained}
+              onResizeConstrained={setResizeConstrained}
               onHole={(h) => setHole(selected.id, h)}
               onOp={(op) => setGroupOp(selected.id, op)}
               onRename={(n) => rename(selected.id, n)}

@@ -8,7 +8,11 @@ function spawnWorker() {
   return { worker, raw };
 }
 
-let current = spawnWorker();
+// Interactive scene edits must never queue behind an expensive merged result
+// or STL export. A complex imported/grouped model can occupy manifold for
+// minutes, so the two workloads use independent workers.
+let sceneCurrent = spawnWorker();
+let heavyCurrent = spawnWorker();
 
 /**
  * A call took long enough that the worker was terminated and replaced rather
@@ -68,8 +72,10 @@ export const WATCHDOG_MS = 3 * 60_000;
  * KernelTimeoutError instead of a promise that never settles.
  */
 function withWatchdog<R>(
+  lane: "scene" | "heavy",
   run: (raw: KernelAPI, onProgress: (id: string) => void) => Promise<R>,
 ): Promise<R> {
+  const current = lane === "scene" ? sceneCurrent : heavyCurrent;
   const { worker, raw } = current;
   let lastProgressId: string | null = null;
   let settled = false;
@@ -79,7 +85,8 @@ function withWatchdog<R>(
       if (settled) return;
       settled = true;
       worker.terminate();
-      current = spawnWorker();
+      if (lane === "scene") sceneCurrent = spawnWorker();
+      else heavyCurrent = spawnWorker();
       reject(new KernelTimeoutError(lastProgressId));
     }, WATCHDOG_MS);
 
@@ -152,13 +159,13 @@ function coalesceLatest<Args extends unknown[], R>(
 
 export const kernel = {
   buildScene: coalesceLatest((specs: NodeSpec[]) =>
-    withWatchdog((raw, onProgress) => raw.buildScene(specs, Comlink.proxy(onProgress))),
+    withWatchdog("scene", (raw, onProgress) => raw.buildScene(specs, Comlink.proxy(onProgress))),
   ),
   buildResult: coalesceLatest((specs: NodeSpec[]) =>
-    withWatchdog((raw, onProgress) => raw.buildResult(specs, Comlink.proxy(onProgress))),
+    withWatchdog("heavy", (raw, onProgress) => raw.buildResult(specs, Comlink.proxy(onProgress))),
   ),
   // Not coalesced: an explicit user action (the Export STL button), not an
   // edit-triggered rebuild — every click should produce its own file.
   exportSTL: (specs: NodeSpec[]) =>
-    withWatchdog((raw, onProgress) => raw.exportSTL(specs, Comlink.proxy(onProgress))),
+    withWatchdog("heavy", (raw, onProgress) => raw.exportSTL(specs, Comlink.proxy(onProgress))),
 };

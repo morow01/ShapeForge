@@ -97,7 +97,7 @@ interface DocState {
   select: (id: string | null, additive?: boolean) => void;
   selectMany: (ids: string[], additive?: boolean) => void;
   setParam: (id: string, key: string, value: number) => void;
-  setTransform: (id: string, patch: { position?: Vec3; rotation?: Vec3 }) => void;
+  setTransform: (id: string, patch: { position?: Vec3; rotation?: Vec3; scale?: Vec3 }) => void;
   setHole: (id: string, isHole: boolean) => void;
   setGroupOp: (id: string, op: BooleanOp) => void;
   toggleCollapsed: (id: string) => void;
@@ -137,6 +137,7 @@ export const useDoc = create<DocState>()(
             // Offset each new part so they do not stack invisibly.
             position: [s.nodes.length * 6, 0, 0],
             rotation: [0, 0, 0],
+            scale: [1, 1, 1],
             isHole: false,
           };
           return { nodes: [...s.nodes, node], selectedIds: [node.id] };
@@ -155,6 +156,7 @@ export const useDoc = create<DocState>()(
             name: fileName.replace(/\.stl$/i, ""),
             position: [s.nodes.length * 6, 0, 0],
             rotation: [0, 0, 0],
+            scale: [1, 1, 1],
             isHole: false,
           };
           return { nodes: [...s.nodes, node], selectedIds: [node.id] };
@@ -247,6 +249,7 @@ export const useDoc = create<DocState>()(
             children: removed,
             position: [0, 0, 0],
             rotation: [0, 0, 0],
+            scale: [1, 1, 1],
             isHole: false,
           };
           const nodes = [...remaining];

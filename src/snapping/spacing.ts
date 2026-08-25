@@ -15,11 +15,20 @@ export function meshBounds(mesh: KernelMesh, node: SceneNode): Bounds3 {
     "XYZ",
   );
   const point = new THREE.Vector3();
+  const localMin = new THREE.Vector3(Infinity, Infinity, Infinity);
+  const localMax = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+  for (let i = 0; i < vertices.length; i += 3) {
+    point.set(vertices[i], vertices[i + 1], vertices[i + 2]);
+    localMin.min(point);
+    localMax.max(point);
+  }
+  const localCentre = localMin.add(localMax).multiplyScalar(0.5);
   const min: Vec3 = [Infinity, Infinity, Infinity];
   const max: Vec3 = [-Infinity, -Infinity, -Infinity];
 
   for (let i = 0; i < vertices.length; i += 3) {
     point.set(vertices[i], vertices[i + 1], vertices[i + 2]);
+    point.sub(localCentre).multiply(new THREE.Vector3(...node.scale)).add(localCentre);
     point.applyEuler(rotation);
     point.x += node.position[0];
     point.y += node.position[1];

@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { Scene } from "./scene";
-import type { CameraMode, GizmoMode } from "./scene";
+import type { CameraMode, ToolMode } from "./scene";
 import type { KernelMesh, ScenePart } from "../kernel/types";
 import type { SceneNode, Vec3 } from "../document/types";
 
@@ -10,17 +10,18 @@ interface Props {
   nodes: SceneNode[];
   selectedIds: string[];
   cameraMode: CameraMode;
-  gizmoMode: GizmoMode;
+  toolMode: ToolMode;
+  resizeConstrained: boolean;
   showResult: boolean;
   onSelect: (id: string | null, additive: boolean) => void;
   /** Marquee-select release: every id caught inside the drawn rectangle. */
   onSelectMany: (ids: string[], additive: boolean) => void;
-  onTransform: (id: string, patch: { position?: Vec3; rotation?: Vec3 }) => void;
+  onTransform: (id: string, patch: { position?: Vec3; rotation?: Vec3; scale?: Vec3 }) => void;
   onDragChange: (dragging: boolean) => void;
 }
 
 export function Viewport(props: Props) {
-  const { parts, result, nodes, selectedIds, cameraMode, gizmoMode, showResult } = props;
+  const { parts, result, nodes, selectedIds, cameraMode, toolMode, resizeConstrained, showResult } = props;
 
   const hostRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<Scene | null>(null);
@@ -44,7 +45,8 @@ export function Viewport(props: Props) {
     scene.setResult(latest.current.result);
     scene.setPlacements(latest.current.nodes, latest.current.selectedIds);
     scene.setCameraMode(latest.current.cameraMode);
-    scene.setGizmoMode(latest.current.gizmoMode);
+    scene.setToolMode(latest.current.toolMode);
+    scene.setResizeConstrained(latest.current.resizeConstrained);
     scene.setShowResult(latest.current.showResult);
 
     sceneRef.current = scene;
@@ -76,8 +78,12 @@ export function Viewport(props: Props) {
   }, [cameraMode]);
 
   useEffect(() => {
-    sceneRef.current?.setGizmoMode(gizmoMode);
-  }, [gizmoMode]);
+    sceneRef.current?.setToolMode(toolMode);
+  }, [toolMode]);
+
+  useEffect(() => {
+    sceneRef.current?.setResizeConstrained(resizeConstrained);
+  }, [resizeConstrained]);
 
   useEffect(() => {
     sceneRef.current?.setShowResult(showResult);

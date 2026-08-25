@@ -140,7 +140,7 @@ function localKey(spec: NodeSpec): string {
     return JSON.stringify([
       spec.type,
       spec.op,
-      spec.children.map((c) => [localKey(c), c.position, c.rotation, c.isHole]),
+      spec.children.map((c) => [localKey(c), c.position, c.rotation, c.scale, c.isHole]),
     ]);
   }
   if (spec.type === "import") return JSON.stringify([spec.type, spec.blobId]);
@@ -183,6 +183,7 @@ async function evaluateRoots(
       children: specs,
       position: [0, 0, 0],
       rotation: [0, 0, 0],
+      scale: [1, 1, 1],
       isHole: false,
     },
     onError,

@@ -1,7 +1,7 @@
 import { Fragment } from "react";
 import { BOOLEAN_OPS, PRIMITIVES, isGroup, visibleFields } from "../document/types";
 import { beginHistoryBatch, endHistoryBatch } from "../document/store";
-import { TRI_BY_ANGLES, TRI_BY_SIDE_ANGLE, solveTriangle } from "../geometry/triangle";
+import { TRI_BY_ANGLES, TRI_BY_SIDE_ANGLE, TRI_BY_SIDES, solveTriangle } from "../geometry/triangle";
 import type { TriangleSolution } from "../geometry/triangle";
 import type { BooleanOp, ParamField, SceneNode, Vec3 } from "../document/types";
 
@@ -9,7 +9,9 @@ interface Props {
   node: SceneNode;
   error: string | null;
   onParam: (key: string, value: number) => void;
-  onTransform: (patch: { position?: Vec3; rotation?: Vec3 }) => void;
+  onTransform: (patch: { position?: Vec3; rotation?: Vec3; scale?: Vec3 }) => void;
+  resizeConstrained: boolean;
+  onResizeConstrained: (value: boolean) => void;
   onHole: (isHole: boolean) => void;
   onOp: (op: BooleanOp) => void;
   onRename: (name: string) => void;
@@ -23,6 +25,8 @@ export function Inspector({
   error,
   onParam,
   onTransform,
+  resizeConstrained,
+  onResizeConstrained,
   onHole,
   onOp,
   onRename,
@@ -77,6 +81,45 @@ export function Inspector({
         <ObjectParams node={node} onParam={onParam} />
       )}
 
+      <h2>Size</h2>
+      <label className="check">
+        <input
+          type="checkbox"
+          checked={resizeConstrained}
+          onChange={(e) => onResizeConstrained(e.target.checked)}
+        />
+        <span>Lock proportions</span>
+      </label>
+      <div className="triple">
+        {AXES.map((axis, i) => (
+          <label key={axis}>
+            <span className="field-label">{axis} %</span>
+            <input
+              className="num"
+              type="number"
+              min={1}
+              max={1000}
+              step={1}
+              value={round(node.scale[i] * 100)}
+              onFocus={beginHistoryBatch}
+              onBlur={endHistoryBatch}
+              onChange={(e) => {
+                const value = Math.max(0.01, Number(e.target.value) / 100);
+                const scale = resizeConstrained
+                  ? [value, value, value] as Vec3
+                  : node.scale.map((v, at) => at === i ? value : v) as Vec3;
+                onTransform({ scale });
+              }}
+            />
+          </label>
+        ))}
+      </div>
+      <p className="hint">
+        {resizeConstrained
+          ? "Corner and size edits preserve proportions."
+          : "White corners resize width/depth freely; teal middle handles change one axis."}
+      </p>
+
       <h2>Position (mm)</h2>
       <div className="triple">
         {AXES.map((axis, i) => (
@@ -130,7 +173,7 @@ function ImportInfo({ node }: { node: Extract<SceneNode, { type: "import" }> }) 
         <dt>Size</dt>
         <dd>{formatBytes(node.byteSize)}</dd>
       </dl>
-      <p className="hint">Geometry comes from the file — no dimension controls.</p>
+      <p className="hint">Original geometry is preserved; use Scale to resize it proportionally.</p>
     </>
   );
 }
@@ -149,10 +192,37 @@ function ObjectParams({
   onParam: (key: string, value: number) => void;
 }) {
   const def = PRIMITIVES[node.kind];
-  const fields = visibleFields(def, node.params);
+  const fields = visibleFields(def, node.params).filter((f) => f.key !== "mode");
 
   return (
     <>
+      {node.kind === "triangle" && (
+        <>
+          <h2>Triangle definition</h2>
+          <div className="triangle-mode" role="group" aria-label="Triangle definition method">
+            {[
+              [TRI_BY_SIDES, "3 sides"],
+              [TRI_BY_SIDE_ANGLE, "2 sides + angle"],
+              [TRI_BY_ANGLES, "Corner angles"],
+            ].map(([value, label]) => (
+              <button
+                key={value}
+                className={node.params.mode === value ? "on" : ""}
+                onClick={() => onParam("mode", value as number)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <p className="hint triangle-hint">
+            {node.params.mode === TRI_BY_SIDES
+              ? "Set all three side lengths."
+              : node.params.mode === TRI_BY_SIDE_ANGLE
+                ? "Set the base, left side, and the angle between them."
+                : "Set the base and corner angles; the total stays at 180°."}
+          </p>
+        </>
+      )}
       <h2>Dimensions</h2>
       {fields.map((f) => (
         <Field

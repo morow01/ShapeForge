@@ -137,6 +137,8 @@ interface NodeBase {
   position: Vec3;
   /** Euler angles in degrees, applied X then Y then Z about the origin. */
   rotation: Vec3;
+  /** Independent X/Y/Z size multipliers. */
+  scale: Vec3;
   /** TinkerCAD-style hole: subtracts from its siblings instead of adding. */
   isHole: boolean;
 }

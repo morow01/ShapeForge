@@ -63,4 +63,69 @@ Each of these runs `npm version`, which:
 
 ## Status
 
-Early and actively evolving — see the version badge in the app's left panel.
+Early and actively evolving — see the version badge in the app header.
+
+### Implemented
+
+- Light, TinkerCAD-inspired workspace with an object tree on the left, the
+  canvas in the centre, and contextual properties on the right.
+- Illustrator-style Select, Move, and Rotate tool rail with `V`, `M`, and `R`
+  shortcuts.
+- Primitive creation, object/group renaming, grouping, holes, boolean merged
+  results, and STL export.
+- TinkerCAD-style resize frame with editable dimensions, proportional or
+  independent X/Y/Z scaling, corner handles, and anchored side handles.
+- Triangle construction using three sides, two sides plus an included angle,
+  or a base plus corner angles.
+- STL import with a fast direct-triangle editing preview. Expensive mesh repair
+  is deferred until a boolean, merged result, or export actually needs it.
+- Smart-guide snapping and exact gaps between two selected objects.
+- Browser autosave, new-design action, selection tools, and undo/redo history.
+
+### What “Show merged result” does
+
+The normal editing view displays each top-level object independently. **Show
+merged result** asks the modeling kernel to evaluate the complete design as one
+printable solid: solid objects are combined, holes are subtracted, and group
+operations are applied. This is a useful preview before STL export, but it can
+be much more expensive than the editing view for large scanned meshes. Heavy
+merge/export work runs separately so it does not block ordinary editing.
+
+### Roadmap and open questions
+
+- Save projects to a file, open existing project files, and improve the new
+  project workflow. Browser autosave exists, but portable project files do not.
+- Per-object colours, a `T` transparency shortcut, and an optional wireframe
+  view.
+- Edge, vertex, and face selection with context-specific modeling operations.
+- Audit and improve undo/redo across every interaction.
+- Decide whether right-click should open a compact contextual menu while the
+  full properties inspector remains in the right panel.
+- Add an Illustrator-like Shape Builder workflow: select overlapping objects,
+  then click to add regions or Alt-click to remove regions.
+- SVG import with an import-time size control.
+- Investigate additional Illustrator-friendly vector formats. SVG should be
+  the primary interchange format; PDF may be practical with path extraction,
+  while EPS would require a conversion/parser dependency.
+- Add 3MF import. This is possible, but unlike STL it requires reading a ZIP
+  package, model XML, transforms, units, components, and potentially colours
+  and materials.
+- Continue improving snapping and smart guides.
+
+### Large STL notes
+
+A downloaded/scanned STL can be tens of megabytes and contain hundreds of
+thousands or millions of triangles. ShapeForge opens standalone STLs quickly by
+rendering their triangles directly, similar to a slicer. Combining, repairing,
+or exporting the same mesh can still take much longer because those operations
+must construct valid manifold geometry. If a 42.29 MB skull or another scan
+times out during a boolean or export, simplifying/decimating it in a mesh tool
+is still the most reliable workaround.
+
+## GitHub deployment
+
+This repository currently has source code but no GitHub Pages or other GitHub
+deployment workflow. Consequently, the repository's `/deployments` URL may
+return 404 or show nothing. A deployment will appear only after a hosting
+workflow (for example GitHub Pages via GitHub Actions) is configured and run.
+Local development remains available through `npm run dev`.

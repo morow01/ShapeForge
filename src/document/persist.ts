@@ -32,6 +32,11 @@ function parseNode(raw: unknown): SceneNode | null {
     name: n.name,
     position: n.position,
     rotation: n.rotation,
+    scale: isVec3(n.scale)
+      ? n.scale.map((v) => Math.max(0.01, v)) as Vec3
+      : typeof n.scale === "number" && Number.isFinite(n.scale) && n.scale > 0
+        ? [n.scale, n.scale, n.scale] as Vec3
+        : [1, 1, 1] as Vec3,
     isHole: n.isHole === true,
   };
 

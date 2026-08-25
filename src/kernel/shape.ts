@@ -217,13 +217,32 @@ type GroupOp = "union" | "subtract" | "intersect";
 
 /** Applies rotation (about the node origin) then translation. Works on either
  *  kernel's solid — both expose the same translate/rotate signatures. */
-export function place<T extends AnySolid>(s: T, spec: NodeSpec): T {
+export function place(s: AnySolid, spec: NodeSpec): AnySolid {
   const [rx, ry, rz] = spec.rotation;
   let out = s;
-  if (rx) out = out.rotate(rx, [0, 0, 0], [1, 0, 0]) as T;
-  if (ry) out = out.rotate(ry, [0, 0, 0], [0, 1, 0]) as T;
-  if (rz) out = out.rotate(rz, [0, 0, 0], [0, 0, 1]) as T;
-  return out.translate(spec.position) as T;
+  if (spec.scale.some((v) => v !== 1)) {
+    const [min, max] = out.boundingBox.bounds;
+    const center: Vec3 = [
+      (min[0] + max[0]) / 2,
+      (min[1] + max[1]) / 2,
+      (min[2] + max[2]) / 2,
+    ];
+    const [sx, sy, sz] = spec.scale;
+    if (Math.abs(sx - sy) < 1e-9 && Math.abs(sx - sz) < 1e-9) {
+      out = out.scale(sx, center);
+    } else {
+      const mesh = isMesh(out) ? out : out.meshShape();
+      const transformed = mesh.wrapped
+        .translate([-center[0], -center[1], -center[2]])
+        .scale(spec.scale)
+        .translate(center);
+      out = new MeshShape(transformed);
+    }
+  }
+  if (rx) out = out.rotate(rx, [0, 0, 0], [1, 0, 0]);
+  if (ry) out = out.rotate(ry, [0, 0, 0], [0, 1, 0]);
+  if (rz) out = out.rotate(rz, [0, 0, 0], [0, 0, 1]);
+  return out.translate(spec.position);
 }
 
 /**
