@@ -33,6 +33,34 @@ function toMesh(name: string, s: Shape3D): KernelMesh {
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
+/**
+ * A string that changes if and only if a node's LOCAL mesh (what makeLocal()
+ * would produce) changes. A plain object's own position/rotation are excluded
+ * — makeLocal() never reads them, only place() does, later. A group's key
+ * does include each child's position/rotation/isHole, since those feed into
+ * the group's own combined boolean.
+ */
+function localKey(spec: NodeSpec): string {
+  return JSON.stringify(
+    spec.type === "group"
+      ? [
+          spec.type,
+          spec.op,
+          spec.children.map((c) => [localKey(c), c.position, c.rotation, c.isHole]),
+        ]
+      : [spec.type, spec.kind, spec.params],
+  );
+}
+
+/**
+ * Per-node mesh cache, keyed by node id. Without this, dragging a slider on
+ * one object rebuilds every OTHER object in the scene too — buildScene() has
+ * no way to know only one node changed — so editing got slower the more
+ * objects existed, even though only one of them was actually being touched.
+ * A cache hit skips the OCCT call entirely, not just the retriangulation.
+ */
+const meshCache = new Map<string, { key: string; mesh: KernelMesh }>();
+
 /** Collects per-node failures so one bad node cannot blank the whole scene. */
 function collector() {
   const errors: BuildError[] = [];
@@ -76,16 +104,40 @@ const api = {
     await init();
     const t0 = performance.now();
     const { errors, onError } = collector();
+    const seen = new Set<string>();
 
     const parts: ScenePart[] = [];
     for (const spec of specs) {
+      seen.add(spec.id);
+      const key = localKey(spec);
+      const cached = meshCache.get(spec.id);
+
+      if (cached && cached.key === key) {
+        parts.push({ id: spec.id, isHole: spec.isHole, mesh: cached.mesh });
+        continue;
+      }
+
       try {
         const solid = makeLocal(spec, onError);
-        if (solid) parts.push({ id: spec.id, isHole: spec.isHole, mesh: toMesh(spec.id, solid) });
+        if (solid) {
+          const mesh = toMesh(spec.id, solid);
+          meshCache.set(spec.id, { key, mesh });
+          parts.push({ id: spec.id, isHole: spec.isHole, mesh });
+        } else {
+          meshCache.delete(spec.id);
+        }
       } catch (e) {
+        meshCache.delete(spec.id);
         onError(spec.id, message(e));
       }
     }
+
+    // Drop entries for nodes that no longer exist, so deleting objects over a
+    // long session does not leak memory here.
+    for (const id of meshCache.keys()) {
+      if (!seen.has(id)) meshCache.delete(id);
+    }
+
     return { parts, errors, buildMs: performance.now() - t0 };
   },
 

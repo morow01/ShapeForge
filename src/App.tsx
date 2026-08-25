@@ -152,6 +152,12 @@ export function App() {
 
   const buildId = useRef(0);
 
+  // A slider fires far more onChange events than there are meaningful
+  // rebuilds worth doing — a short debounce coalesces a drag's burst into one
+  // request shortly after it settles. 32ms is under a frame at 30fps, so it
+  // still reads as live. The kernel-side per-node cache (see worker.ts) is
+  // the fix for cost scaling with total object count; this cuts how often we
+  // even ask, on top of that.
   useEffect(() => {
     const specs = useDoc.getState().nodes.map(toSpec);
     if (!specs.length) {
@@ -160,24 +166,29 @@ export function App() {
       return;
     }
     const id = ++buildId.current;
-    setBusy(true);
-    kernel
-      .buildScene(specs)
-      .then((res) => {
-        if (id !== buildId.current) return;
-        setParts(res.parts);
-        setInvalid(Object.fromEntries(res.errors.map((e) => [e.id, e.message])));
-        setError(null);
-      })
-      .catch((e: unknown) => {
-        if (id === buildId.current) setError(msg(e));
-      })
-      .finally(() => {
-        if (id === buildId.current) setBusy(false);
-      });
+    const t = setTimeout(() => {
+      setBusy(true);
+      kernel
+        .buildScene(specs)
+        .then((res) => {
+          if (id !== buildId.current) return;
+          setParts(res.parts);
+          setInvalid(Object.fromEntries(res.errors.map((e) => [e.id, e.message])));
+          setError(null);
+        })
+        .catch((e: unknown) => {
+          if (id === buildId.current) setError(msg(e));
+        })
+        .finally(() => {
+          if (id === buildId.current) setBusy(false);
+        });
+    }, 32);
+    return () => clearTimeout(t);
   }, [shapeKey]);
 
-  // The fully booleaned result is expensive, so only compute it when shown.
+  // The fully booleaned result is expensive, so only compute it when shown —
+  // and, same reasoning as above, debounced so it does not rebuild on every
+  // slider tick while it is visible.
   useEffect(() => {
     if (!showResult) {
       setResult(null);
@@ -185,19 +196,22 @@ export function App() {
     }
     const specs = useDoc.getState().nodes.map(toSpec);
     let stale = false;
-    setBusy(true);
-    kernel
-      .buildResult(specs)
-      .then((res) => {
-        if (stale) return;
-        setResult(res.mesh);
-        setStats({ volume: res.volume, faces: res.faceCount, ms: res.buildMs });
-        setError(null);
-      })
-      .catch((e: unknown) => !stale && setError(msg(e)))
-      .finally(() => !stale && setBusy(false));
+    const t = setTimeout(() => {
+      setBusy(true);
+      kernel
+        .buildResult(specs)
+        .then((res) => {
+          if (stale) return;
+          setResult(res.mesh);
+          setStats({ volume: res.volume, faces: res.faceCount, ms: res.buildMs });
+          setError(null);
+        })
+        .catch((e: unknown) => !stale && setError(msg(e)))
+        .finally(() => !stale && setBusy(false));
+    }, 32);
     return () => {
       stale = true;
+      clearTimeout(t);
     };
   }, [showResult, worldKey]);
 
