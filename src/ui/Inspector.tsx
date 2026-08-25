@@ -3,7 +3,7 @@ import { BOOLEAN_OPS, PRIMITIVES, isGroup, visibleFields } from "../document/typ
 import { beginHistoryBatch, endHistoryBatch } from "../document/store";
 import { TRI_BY_ANGLES, TRI_BY_SIDE_ANGLE, TRI_BY_SIDES, solveTriangle } from "../geometry/triangle";
 import type { TriangleSolution } from "../geometry/triangle";
-import type { BooleanOp, ParamField, SceneNode, Vec3 } from "../document/types";
+import type { BooleanOp, ParamField, PrimitiveKind, SceneNode, Vec3 } from "../document/types";
 
 interface Props {
   node: SceneNode;
@@ -78,7 +78,7 @@ export function Inspector({
       ) : node.type === "import" ? (
         <ImportInfo node={node} />
       ) : (
-        <ObjectParams node={node} onParam={onParam} />
+        <ObjectParams node={node} onParam={onParam} onTransform={onTransform} />
       )}
 
       <h2>Size</h2>
@@ -184,15 +184,38 @@ function formatBytes(n: number): string {
   return `${(n / (1024 * 1024)).toFixed(2)} MB`;
 }
 
+/**
+ * Which scale axis (or axes) each dimension field draws its size along, in
+ * world space — see makePrimitive() in kernel/shape.ts for the geometry this
+ * mirrors. A field absent here (fillet, angles, triangle side lengths that
+ * aren't axis-aligned) always reads/writes its raw base parameter, unchanged.
+ *
+ * Fields naming more than one axis (a radius shared by X and Y, or a
+ * sphere's radius shared by all three) can only be shown/edited as a single
+ * resolved size while those axes still match — once a shape has been
+ * distorted non-uniformly along them, there is no one number that describes
+ * it, so the field falls back to its raw base value.
+ */
+const DIM_AXES: Partial<Record<PrimitiveKind, Record<string, number[]>>> = {
+  box: { width: [0], depth: [1], height: [2] },
+  cylinder: { radius: [0, 1], height: [2] },
+  sphere: { radius: [0, 1, 2] },
+  cone: { bottomRadius: [0, 1], topRadius: [0, 1], height: [2] },
+  triangle: { thickness: [2] },
+};
+
 function ObjectParams({
   node,
   onParam,
+  onTransform,
 }: {
   node: Extract<SceneNode, { type: "object" }>;
   onParam: (key: string, value: number) => void;
+  onTransform: (patch: { position?: Vec3; rotation?: Vec3; scale?: Vec3 }) => void;
 }) {
   const def = PRIMITIVES[node.kind];
   const fields = visibleFields(def, node.params).filter((f) => f.key !== "mode");
+  const axesByKey = DIM_AXES[node.kind] ?? {};
 
   return (
     <>
@@ -224,14 +247,31 @@ function ObjectParams({
         </>
       )}
       <h2>Dimensions</h2>
-      {fields.map((f) => (
-        <Field
-          key={f.key}
-          field={f}
-          value={node.params[f.key] ?? 0}
-          onChange={(v) => onParam(f.key, v)}
-        />
-      ))}
+      {fields.map((f) => {
+        const base = node.params[f.key] ?? 0;
+        const axes = axesByKey[f.key];
+        // Only trust a shared-axis field (a radius spanning X and Y, say)
+        // while those axes still agree — once resized apart there is no
+        // single number left that describes it, so it drops back to raw.
+        const uniform = !!axes && axes.every((a) => Math.abs(node.scale[a] - node.scale[axes[0]]) < 1e-9);
+        if (!axes || !uniform || base <= 0) {
+          return <Field key={f.key} field={f} value={base} onChange={(v) => onParam(f.key, v)} />;
+        }
+        const factor = node.scale[axes[0]];
+        return (
+          <Field
+            key={f.key}
+            field={{ ...f, min: f.min * factor, max: f.max * factor, step: Math.max(0.01, f.step * factor) }}
+            value={round(base * factor)}
+            onChange={(v) => {
+              if (!Number.isFinite(v) || v <= 0) return;
+              const scale = [...node.scale] as Vec3;
+              for (const a of axes) scale[a] = Math.max(0.0001, v / base);
+              onTransform({ scale });
+            }}
+          />
+        );
+      })}
       {node.kind === "triangle" && <TriangleReadout params={node.params} />}
     </>
   );
