@@ -86,6 +86,12 @@ export class Scene {
   private resultView: PartView | null = null;
   private showResult = false;
   private selectedIds: string[] = [];
+  /** Most recent nodes passed to setPlacements, so a part that is (re)created
+   *  by setParts — which runs on its own async schedule from the kernel and
+   *  has no node data of its own — can be placed correctly the moment it
+   *  exists, instead of sitting at the origin until some unrelated state
+   *  change happens to call setPlacements again. */
+  private lastNodes: SceneNode[] = [];
 
   onSelectObject: ((id: string | null, additive: boolean) => void) | null = null;
   onTransformObject:
@@ -197,14 +203,26 @@ export class Scene {
       this.scene.remove(view.group);
       this.parts.delete(id);
     }
+    // A part that was just created above has never had a node transform
+    // applied to it (that is setPlacements' job, and nothing guarantees it
+    // runs again just because the kernel finished) — apply the last-known
+    // transforms now so it never renders at the origin, even momentarily.
+    this.applyPlacements();
     this.applyMaterials();
     this.attachGizmo();
   }
 
   /** Cheap: placement and selection only, no kernel involvement. */
   setPlacements(objects: SceneNode[], selectedIds: string[]) {
+    this.lastNodes = objects;
     this.selectedIds = selectedIds;
-    for (const o of objects) {
+    this.applyPlacements();
+    this.applyMaterials();
+    this.attachGizmo();
+  }
+
+  private applyPlacements() {
+    for (const o of this.lastNodes) {
       const view = this.parts.get(o.id);
       if (!view) continue;
       // Skip the part being dragged, so the gizmo is not fighting React state.
@@ -213,8 +231,6 @@ export class Scene {
       view.group.rotation.set(o.rotation[0] * DEG, o.rotation[1] * DEG, o.rotation[2] * DEG);
       view.isHole = o.isHole;
     }
-    this.applyMaterials();
-    this.attachGizmo();
   }
 
   private applyMaterials() {
