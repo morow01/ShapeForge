@@ -318,23 +318,26 @@ function pushPullMesh(solid: MeshShape, op: PushPullOp): MeshShape | null {
   vertices.push(...points.flatMap(([x, y, z]) => [x + nx * endOffset, y + ny * endOffset, z + nz * endOffset]));
   const top = points.length;
   const triangles: number[] = [];
-  // The prism is just an ordinary, outward-wound closed solid — the SAME
-  // winding whether this is a pull (fuse) or a push (cut). It is only the
-  // offsets above that decide which side of the original face the prism
-  // occupies; solid.cut() already accounts for orientation internally when
-  // subtracting, the same way any other cutting tool in this codebase does
-  // (see pushPullFace's basicFaceExtrusion, which never flips winding by
-  // sign either). An earlier version of this function additionally flipped
-  // every triangle's winding for a negative distance, which double-negated
-  // that internal handling and hands manifold-3d an inside-out cutting
-  // tool — its boolean then does the wrong thing rather than failing loudly,
-  // producing exactly the torn/sliver geometry this was reported as.
+  // The winding MUST depend on the sign, because the sign flips which end of
+  // the prism the two vertex sets land on. The `a,b,c` set sits at
+  // baseOffset and the `a+top` set at endOffset: for a pull (distance > 0)
+  // that puts a,b,c BELOW and a+top ABOVE, but for a push (distance < 0) it
+  // is the other way round. Manifold needs a consistently outward-wound
+  // closed solid either way, so the cap that ends up facing along +normal
+  // keeps the original triangle's winding and the one facing -normal is
+  // reversed — which is the opposite assignment in each case. Feeding it a
+  // prism wound for the wrong sign yields an inside-out solid, and its
+  // boolean then silently does nothing (or worse) rather than erroring:
+  // a push that visibly removes no material at all.
+  const positive = op.distance > 0;
   for (const [a, b, c] of selected) {
-    triangles.push(a, c, b, a + top, b + top, c + top);
+    if (positive) triangles.push(a, c, b, a + top, b + top, c + top);
+    else triangles.push(a, b, c, a + top, c + top, b + top);
   }
   for (const { a, b, count } of edges.values()) {
     if (count !== 1) continue;
-    triangles.push(a, b, b + top, a, b + top, a + top);
+    if (positive) triangles.push(a, b, b + top, a, b + top, a + top);
+    else triangles.push(a, b + top, b, a, a + top, b + top);
   }
   const prism = new MeshShape(new manifold.Manifold(new manifold.Mesh({
     numProp: 3,
