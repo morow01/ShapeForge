@@ -29,6 +29,11 @@ A browser-based 3D modeling tool for 3D printing, inspired by TinkerCAD (base UI
 - Point snapping — select a vertex on one object and a vertex on another to snap/join at that point
 - Parametric triangle tool — set each side length or each angle numerically (e.g. for gusset/support triangles in brackets)
 
+## Known Issues / Next Up
+- Align tool — give the alignment circles a hover state, so it's clear they're active/clickable before committing to one
+- Align tool — keep one object static when aligning, instead of every selected object moving
+- Multi-select move — selecting more than one object and dragging moves only a single object; the whole selection should move together
+
 ## Deferred / Future Features
 - Revolve
 - Array/copy along a path
