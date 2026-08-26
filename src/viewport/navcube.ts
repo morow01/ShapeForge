@@ -1,10 +1,11 @@
 import * as THREE from "three";
 
 /**
- * TinkerCAD-style view cube: a small labelled cube, rendered into a corner
- * of the main canvas, that always shows the same orientation as the main
- * camera. Click a face to snap the main view to look straight at it; drag
- * the cube to orbit the main camera freely.
+ * Shapr3D-style view cube: a small, minimal labelled cube with a coloured
+ * XYZ axis indicator, rendered into a corner of the main canvas, that
+ * always shows the same orientation as the main camera. Click a face to
+ * snap the main view to look straight at it; drag the cube to orbit the
+ * main camera freely.
  *
  * Kept as a self-contained scene/camera/mesh bundle so Scene only has to
  * mirror one orientation into it and forward a few pointer events — it does
@@ -23,24 +24,37 @@ export const FACE_DIRECTIONS: { materialIndex: number; dir: THREE.Vector3; label
   { materialIndex: 5, dir: new THREE.Vector3(0, 0, -1), label: "BOTTOM" },
 ];
 
+/** The little red/green/blue X/Y/Z ticks poking out of the cube — purely
+ *  decorative, drawn once along the cube's own (fixed) local axes; the
+ *  camera orbiting around the cube is what makes them appear to turn. */
+const AXIS_TICKS: { dir: THREE.Vector3; color: number; label: string }[] = [
+  { dir: new THREE.Vector3(1, 0, 0), color: 0xd94f4f, label: "X" },
+  { dir: new THREE.Vector3(0, 1, 0), color: 0x4caf6a, label: "Y" },
+  { dir: new THREE.Vector3(0, 0, 1), color: 0x3d8bd4, label: "Z" },
+];
+
 /** Square viewport the cube renders into, and its margin from the corner —
  *  both in CSS pixels, matching every other size in Scene. */
-export const CUBE_PX = 96;
+export const CUBE_PX = 100;
 export const CUBE_MARGIN_PX = 16;
 
-function makeLabelTexture(text: string): THREE.CanvasTexture {
+/** Half the cube's side length — every other placement (axis ticks, camera
+ *  distance/extent) is expressed relative to this one number. */
+const HALF = 0.5;
+
+function makeFaceTexture(text: string): THREE.CanvasTexture {
   const size = 128;
   const canvas = document.createElement("canvas");
   canvas.width = size;
   canvas.height = size;
   const ctx = canvas.getContext("2d")!;
-  ctx.fillStyle = "#eef2f4";
+  ctx.fillStyle = "#fcfdfd";
   ctx.fillRect(0, 0, size, size);
-  ctx.strokeStyle = "#8fa0a8";
-  ctx.lineWidth = 5;
-  ctx.strokeRect(2.5, 2.5, size - 5, size - 5);
-  ctx.fillStyle = "#293841";
-  ctx.font = "700 26px system-ui, -apple-system, Segoe UI, sans-serif";
+  ctx.strokeStyle = "#dde2e5";
+  ctx.lineWidth = 3;
+  ctx.strokeRect(1.5, 1.5, size - 3, size - 3);
+  ctx.fillStyle = "#8a949c";
+  ctx.font = "600 19px system-ui, -apple-system, Segoe UI, sans-serif";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillText(text, size / 2, size / 2 + 1);
@@ -49,26 +63,68 @@ function makeLabelTexture(text: string): THREE.CanvasTexture {
   return tex;
 }
 
+function makeAxisSprite(text: string, color: number): THREE.Sprite {
+  const size = 48;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext("2d")!;
+  ctx.fillStyle = `#${color.toString(16).padStart(6, "0")}`;
+  ctx.beginPath();
+  ctx.arc(size / 2, size / 2, size / 2 - 2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#ffffff";
+  ctx.font = "700 24px system-ui, -apple-system, Segoe UI, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, size / 2, size / 2 + 1);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(
+    new THREE.SpriteMaterial({ map: tex, depthTest: false, sizeAttenuation: false }),
+  );
+  sprite.renderOrder = 10;
+  sprite.scale.set(0.11, 0.11, 1);
+  return sprite;
+}
+
 export class NavCube {
   readonly scene = new THREE.Scene();
   readonly camera: THREE.OrthographicCamera;
   readonly mesh: THREE.Mesh;
-  private materials: THREE.MeshBasicMaterial[];
+  private faceMaterials: THREE.MeshBasicMaterial[];
+  private axisDisposables: { geometry?: THREE.BufferGeometry; material: THREE.Material }[] = [];
 
   constructor() {
     // Matches the main scene's own background — see Scene's constructor —
     // so the little viewport reads as a continuation of it, not a hole.
     this.scene.background = new THREE.Color(0xedf1f4);
 
-    const half = 1.6;
+    const half = 2.1;
     this.camera = new THREE.OrthographicCamera(-half, half, half, -half, 0.1, 20);
     this.camera.up.set(0, 0, 1);
 
-    this.materials = FACE_DIRECTIONS.map(
-      (f) => new THREE.MeshBasicMaterial({ map: makeLabelTexture(f.label) }),
+    this.faceMaterials = FACE_DIRECTIONS.map(
+      (f) => new THREE.MeshBasicMaterial({ map: makeFaceTexture(f.label) }),
     );
-    this.mesh = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), this.materials);
+    this.mesh = new THREE.Mesh(new THREE.BoxGeometry(HALF * 2, HALF * 2, HALF * 2), this.faceMaterials);
     this.scene.add(this.mesh);
+
+    for (const tick of AXIS_TICKS) {
+      const from = tick.dir.clone().multiplyScalar(HALF);
+      const to = tick.dir.clone().multiplyScalar(HALF + 0.55);
+      const geometry = new THREE.BufferGeometry().setFromPoints([from, to]);
+      const material = new THREE.LineBasicMaterial({ color: tick.color, depthTest: false });
+      const line = new THREE.Line(geometry, material);
+      line.renderOrder = 9;
+      this.scene.add(line);
+      this.axisDisposables.push({ geometry, material });
+
+      const sprite = makeAxisSprite(tick.label, tick.color);
+      sprite.position.copy(tick.dir).multiplyScalar(HALF + 0.72);
+      this.scene.add(sprite);
+      this.axisDisposables.push({ material: sprite.material });
+    }
 
     this.scene.add(new THREE.AmbientLight(0xffffff, 1));
   }
@@ -78,7 +134,7 @@ export class NavCube {
    *  here too. Distance is fixed (the cube's own orthographic camera has no
    *  zoom of its own) — only direction matters. */
   syncOrientation(offsetDir: THREE.Vector3, up: THREE.Vector3) {
-    const DIST = 4;
+    const DIST = 6;
     this.camera.position.copy(offsetDir).multiplyScalar(DIST);
     // lookAt is degenerate when the view direction is parallel to `up` (a
     // dead-on top/bottom view) — fall back to a perpendicular up just for
@@ -101,9 +157,15 @@ export class NavCube {
 
   dispose() {
     this.mesh.geometry.dispose();
-    for (const m of this.materials) {
+    for (const m of this.faceMaterials) {
       m.map?.dispose();
       m.dispose();
+    }
+    for (const d of this.axisDisposables) {
+      d.geometry?.dispose();
+      const mat = d.material as THREE.MeshBasicMaterial | THREE.SpriteMaterial;
+      (mat as { map?: THREE.Texture | null }).map?.dispose();
+      d.material.dispose();
     }
   }
 }
