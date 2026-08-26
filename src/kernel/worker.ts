@@ -111,12 +111,68 @@ const EXPORT_QUALITY: MeshQuality = { tolerance: 0.02, angularTolerance: 0.3 };
  *  syncGeometries on the Three.js side treats edges as optional. */
 function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdges } {
   const raw = m.mesh();
+  const triangleCount = raw.triangles.length / 3;
+  const descriptions = Array.from({ length: triangleCount }, (_, triangle) => {
+    const ia = raw.triangles[triangle * 3] * 3;
+    const ib = raw.triangles[triangle * 3 + 1] * 3;
+    const ic = raw.triangles[triangle * 3 + 2] * 3;
+    const ab = [raw.vertices[ib] - raw.vertices[ia], raw.vertices[ib + 1] - raw.vertices[ia + 1], raw.vertices[ib + 2] - raw.vertices[ia + 2]];
+    const ac = [raw.vertices[ic] - raw.vertices[ia], raw.vertices[ic + 1] - raw.vertices[ia + 1], raw.vertices[ic + 2] - raw.vertices[ia + 2]];
+    const cross = [ab[1] * ac[2] - ab[2] * ac[1], ab[2] * ac[0] - ab[0] * ac[2], ab[0] * ac[1] - ab[1] * ac[0]];
+    const length = Math.hypot(...cross) || 1;
+    const normal = cross.map((value) => value / length);
+    return { normal, plane: normal[0] * raw.vertices[ia] + normal[1] * raw.vertices[ia + 1] + normal[2] * raw.vertices[ia + 2] };
+  });
+  const byEdge = new Map<string, number[]>();
+  const positionKey = (vertex: number) => {
+    const i = vertex * 3;
+    // Manifold may duplicate a vertex for normals/material runs even though
+    // it occupies the same geometric point. Quantising removes harmless
+    // floating-point noise while keeping genuinely separate edges apart.
+    return `${Math.round(raw.vertices[i] * 1e5)},${Math.round(raw.vertices[i + 1] * 1e5)},${Math.round(raw.vertices[i + 2] * 1e5)}`;
+  };
+  for (let triangle = 0; triangle < triangleCount; triangle++) {
+    for (let edge = 0; edge < 3; edge++) {
+      const a = raw.triangles[triangle * 3 + edge];
+      const b = raw.triangles[triangle * 3 + (edge + 1) % 3];
+      const ka = positionKey(a);
+      const kb = positionKey(b);
+      const key = ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
+      const list = byEdge.get(key) ?? [];
+      list.push(triangle);
+      byEdge.set(key, list);
+    }
+  }
+  const neighbours = Array.from({ length: triangleCount }, () => new Set<number>());
+  for (const list of byEdge.values()) for (const a of list) for (const b of list) if (a !== b) neighbours[a].add(b);
+  const seen = new Uint8Array(triangleCount);
+  const ordered: number[] = [];
+  const faceGroups: { start: number; count: number; faceId: number }[] = [];
+  for (let seed = 0; seed < triangleCount; seed++) {
+    if (seen[seed]) continue;
+    const start = ordered.length;
+    const queue = [seed];
+    seen[seed] = 1;
+    while (queue.length) {
+      const triangle = queue.pop()!;
+      ordered.push(raw.triangles[triangle * 3], raw.triangles[triangle * 3 + 1], raw.triangles[triangle * 3 + 2]);
+      for (const next of neighbours[triangle]) {
+        const a = descriptions[seed];
+        const b = descriptions[next];
+        if (!seen[next] && a.normal[0] * b.normal[0] + a.normal[1] * b.normal[1] + a.normal[2] * b.normal[2] > 0.9999 && Math.abs(a.plane - b.plane) < 1e-4) {
+          seen[next] = 1;
+          queue.push(next);
+        }
+      }
+    }
+    faceGroups.push({ start, count: ordered.length - start, faceId: faceGroups.length });
+  }
   return {
     faces: {
       vertices: raw.vertices,
-      triangles: raw.triangles,
+      triangles: Uint32Array.from(ordered),
       normals: raw.normals,
-      faceGroups: [{ start: 0, count: raw.triangles.length, faceId: 0 }],
+      faceGroups,
     },
     edges: { lines: [], edgeGroups: [] },
   };
@@ -138,29 +194,71 @@ function toMesh(name: string, s: AnySolid, quality: MeshQuality): KernelMesh {
  *  s.mesh()'s faceGroups[].faceId — both are built by walking the same
  *  solid's s.faces list, so the two line up without needing to agree on it
  *  through any other channel. */
-function faceInfoOf(s: AnySolid): FaceInfo[] | undefined {
-  if (isMesh(s)) return undefined;
-  return s.faces.map((face): FaceInfo => {
-    try {
-      const c = face.center;
-      const n = face.normalAt(c);
-      return {
-        planar: face.geomType === "PLANE",
-        point: [c.x, c.y, c.z],
-        normal: [n.x, n.y, n.z],
-      };
-    } catch {
-      // Some non-planar geometries — a cylinder's curved side, confirmed —
-      // throw a raw, uncatchable-looking WebAssembly exception straight out
-      // of .center/.normalAt() in this replicad-opencascadejs build. Same
-      // family of build-level quirk as importSTL()'s (see shape.ts) — not
-      // fixable here, only worked around. Hover-highlighting this face only
-      // needs its position in this array to line up with the mesh's own
-      // faceGroups order, not a real point/normal, so fall back to a
-      // placeholder and mark it non-planar — push/pull was never offered
-      // for a curved face anyway.
-      return { planar: false, point: [0, 0, 0], normal: [0, 0, 1] };
+function faceInfoOf(mesh: KernelMesh): FaceInfo[] {
+  // Triangle-backed solids now use the manifold prism fallback in shape.ts,
+  // so their reconstructed planar faces are valid push/pull targets too.
+  const pushPullable = true;
+  const { vertices, triangles, normals, faceGroups } = mesh.faces;
+  return faceGroups.map((group): FaceInfo => {
+    const firstVertex = triangles[group.start];
+    if (firstVertex === undefined) return { planar: false, point: [0, 0, 0], normal: [0, 0, 1] };
+
+    const nx = normals[firstVertex * 3] ?? 0;
+    const ny = normals[firstVertex * 3 + 1] ?? 0;
+    const nz = normals[firstVertex * 3 + 2] ?? 1;
+    const px = vertices[firstVertex * 3];
+    const py = vertices[firstVertex * 3 + 1];
+    const pz = vertices[firstVertex * 3 + 2];
+    let interiorPoint: [number, number, number] = [px, py, pz];
+    let largestTriangleArea = -1;
+    let planar = true;
+    for (let offset = group.start; offset < group.start + group.count; offset++) {
+      const vertex = triangles[offset];
+      const distance = nx * (vertices[vertex * 3] - px) +
+        ny * (vertices[vertex * 3 + 1] - py) +
+        nz * (vertices[vertex * 3 + 2] - pz);
+      if (Math.abs(distance) > 1e-4) {
+        planar = false;
+        break;
+      }
     }
+
+    // A face group's first vertex is commonly on an outer/bottom edge. That
+    // made the handle look misplaced and, more importantly, gave OCCT an
+    // ambiguous edge point when it tried to find the face again for a pull.
+    // The centroid of the largest tessellation triangle is guaranteed to be
+    // inside this face and tends to place the handle in its broadest region.
+    for (let offset = group.start; offset + 2 < group.start + group.count; offset += 3) {
+      const ia = triangles[offset] * 3;
+      const ib = triangles[offset + 1] * 3;
+      const ic = triangles[offset + 2] * 3;
+      const abx = vertices[ib] - vertices[ia];
+      const aby = vertices[ib + 1] - vertices[ia + 1];
+      const abz = vertices[ib + 2] - vertices[ia + 2];
+      const acx = vertices[ic] - vertices[ia];
+      const acy = vertices[ic + 1] - vertices[ia + 1];
+      const acz = vertices[ic + 2] - vertices[ia + 2];
+      const area = Math.hypot(
+        aby * acz - abz * acy,
+        abz * acx - abx * acz,
+        abx * acy - aby * acx,
+      );
+      if (area > largestTriangleArea) {
+        largestTriangleArea = area;
+        interiorPoint = [
+          (vertices[ia] + vertices[ib] + vertices[ic]) / 3,
+          (vertices[ia + 1] + vertices[ib + 1] + vertices[ic + 1]) / 3,
+          (vertices[ia + 2] + vertices[ib + 2] + vertices[ic + 2]) / 3,
+        ];
+      }
+    }
+
+    return {
+      planar,
+      pushPullable,
+      point: interiorPoint,
+      normal: [nx, ny, nz],
+    };
   });
 }
 
@@ -290,7 +388,7 @@ const api = {
           const solid = await makeLocal(spec, onError, onProgress);
           if (solid) {
             const mesh = toMesh(spec.id, solid, EDIT_QUALITY);
-            const faces = faceInfoOf(solid);
+            const faces = faceInfoOf(mesh);
             meshCache.set(spec.id, { key, mesh, faces, solid });
             parts.push({ id: spec.id, isHole: spec.isHole, mesh, faces });
           } else {
@@ -404,7 +502,8 @@ const api = {
       // right (see applyPreviewMesh in scene.ts), just the arrow marking it
       // wasn't, and then visibly snapped once that real rebuild landed.
       // Reported live as "the face I was moving jumps a little bit extra."
-      return { mesh: toMesh(spec.id, solid, EDIT_QUALITY), faces: faceInfoOf(solid) };
+      const mesh = toMesh(spec.id, solid, EDIT_QUALITY);
+      return { mesh, faces: faceInfoOf(mesh) };
     } catch {
       // A mid-drag distance can transiently describe something OCCT can't
       // build (e.g. pushing clean through the far side) — just skip this

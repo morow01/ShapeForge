@@ -64,16 +64,14 @@ export type NodeSpec = ObjectSpec | GroupSpec | ImportSpec | EditSpec;
  *  still highlights it the way Shapr3D does — there just isn't a single
  *  well-defined push/pull direction for those, so `planar` gates that.
  *
- * This array's ORDER matches the mesh's own faceGroups order (both are built
- * by walking the same solid's s.faces list — see faceInfoOf() in worker.ts),
- * so the viewport resolves "the pointer hit this triangle" to "which
- * FaceInfo is that" via getFaceIndex()'s group index used as a plain array
- * position into this list — not by matching any id. The mesh's own
- * faceGroups[].faceId is some OCCT-internal value (confirmed empirically:
- * not a small sequential index), so it is deliberately not carried here or
- * relied on for that correlation. */
+ * This array's ORDER is explicitly aligned to the rendered mesh's
+ * faceGroups (see faceInfoOf() in worker.ts). Its point, normal and planar
+ * state are derived from the same triangles the viewport raycasts, avoiding
+ * topology-order differences after angled booleans. */
 export interface FaceInfo {
   planar: boolean;
+  /** False only when a face can be highlighted but has no extrusion path. */
+  pushPullable?: boolean;
   point: Vec3;
   normal: Vec3;
 }

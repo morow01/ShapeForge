@@ -8,6 +8,7 @@ import {
   importSTLAsMesh,
   measureVolume,
   MeshShape,
+  getManifold,
 } from "replicad";
 import type { Face, Shape3D } from "replicad";
 import { InvalidShapeError, solveTriangle } from "../geometry/triangle";
@@ -210,6 +211,139 @@ function pushPullFace(solid: Shape3D, face: Face, distance: number): Shape3D {
   return (distance > 0 ? solid.fuse(prism) : solid.cut(prism)) as Shape3D;
 }
 
+/** Push/pull fallback for a triangle-backed solid (non-uniformly scaled
+ * groups and imports). The selected coplanar triangles are each extruded
+ * into a closed triangular prism; composing them before the boolean avoids
+ * changing unrelated facets of the mesh. */
+function pushPullMesh(solid: MeshShape, op: PushPullOp): MeshShape | null {
+  if (Math.abs(op.distance) < 1e-6) return solid;
+  const raw = solid.mesh();
+  const [nx, ny, nz] = op.normal;
+  const manifold = getManifold();
+  const points: number[][] = [];
+  const pointIndex = new Map<string, number>();
+  const selected: number[][] = [];
+  const edges = new Map<string, { a: number; b: number; count: number }>();
+  const candidates: { rawIds: number[]; centreDistance: number }[] = [];
+  const canonical = (rawId: number) => {
+    const i = rawId * 3;
+    const point = [raw.vertices[i], raw.vertices[i + 1], raw.vertices[i + 2]];
+    const key = `${Math.round(point[0] * 1e5)},${Math.round(point[1] * 1e5)},${Math.round(point[2] * 1e5)}`;
+    let id = pointIndex.get(key);
+    if (id === undefined) {
+      id = points.length;
+      points.push(point);
+      pointIndex.set(key, id);
+    }
+    return id;
+  };
+  const addSelectedTriangle = (rawIds: number[]) => {
+    const ids = rawIds.map(canonical);
+    selected.push(ids);
+    for (let edge = 0; edge < 3; edge++) {
+      const a = ids[edge];
+      const b = ids[(edge + 1) % 3];
+      const key = a < b ? `${a}:${b}` : `${b}:${a}`;
+      const existing = edges.get(key);
+      if (existing) existing.count++;
+      else edges.set(key, { a, b, count: 1 });
+    }
+  };
+
+  for (let offset = 0; offset < raw.triangles.length; offset += 3) {
+    const ids = [raw.triangles[offset], raw.triangles[offset + 1], raw.triangles[offset + 2]];
+    const ia = ids[0] * 3;
+    const ib = ids[1] * 3;
+    const ic = ids[2] * 3;
+    const ab = [raw.vertices[ib] - raw.vertices[ia], raw.vertices[ib + 1] - raw.vertices[ia + 1], raw.vertices[ib + 2] - raw.vertices[ia + 2]];
+    const ac = [raw.vertices[ic] - raw.vertices[ia], raw.vertices[ic + 1] - raw.vertices[ia + 1], raw.vertices[ic + 2] - raw.vertices[ia + 2]];
+    const cross = [ab[1] * ac[2] - ab[2] * ac[1], ab[2] * ac[0] - ab[0] * ac[2], ab[0] * ac[1] - ab[1] * ac[0]];
+    const length = Math.hypot(...cross) || 1;
+    const tx = cross[0] / length;
+    const ty = cross[1] / length;
+    const tz = cross[2] / length;
+    const aligned = tx * nx + ty * ny + tz * nz > 0.9999;
+    const onPlane = Math.abs((raw.vertices[ia] - op.point[0]) * nx + (raw.vertices[ia + 1] - op.point[1]) * ny + (raw.vertices[ia + 2] - op.point[2]) * nz) < 1e-3;
+    if (aligned && onPlane) {
+      const cx = (raw.vertices[ia] + raw.vertices[ib] + raw.vertices[ic]) / 3;
+      const cy = (raw.vertices[ia + 1] + raw.vertices[ib + 1] + raw.vertices[ic + 1]) / 3;
+      const cz = (raw.vertices[ia + 2] + raw.vertices[ib + 2] + raw.vertices[ic + 2]) / 3;
+      candidates.push({ rawIds: ids, centreDistance: Math.hypot(cx - op.point[0], cy - op.point[1], cz - op.point[2]) });
+    }
+  }
+  if (!candidates.length) return null;
+
+  // Several disconnected faces can be coplanar. Only grow from the triangle
+  // containing (or nearest to) the picked interior point; otherwise a pull on
+  // one top patch also extrudes every separate patch on the same Z plane.
+  const candidateEdges = new Map<string, number[]>();
+  const rawPositionKey = (rawId: number) => {
+    const i = rawId * 3;
+    return `${Math.round(raw.vertices[i] * 1e5)},${Math.round(raw.vertices[i + 1] * 1e5)},${Math.round(raw.vertices[i + 2] * 1e5)}`;
+  };
+  candidates.forEach((candidate, index) => {
+    for (let edge = 0; edge < 3; edge++) {
+      const ka = rawPositionKey(candidate.rawIds[edge]);
+      const kb = rawPositionKey(candidate.rawIds[(edge + 1) % 3]);
+      const key = ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
+      const list = candidateEdges.get(key) ?? [];
+      list.push(index);
+      candidateEdges.set(key, list);
+    }
+  });
+  const neighbours = Array.from({ length: candidates.length }, () => new Set<number>());
+  for (const list of candidateEdges.values()) for (const a of list) for (const b of list) if (a !== b) neighbours[a].add(b);
+  let seed = 0;
+  for (let i = 1; i < candidates.length; i++) if (candidates[i].centreDistance < candidates[seed].centreDistance) seed = i;
+  const queue = [seed];
+  const visited = new Uint8Array(candidates.length);
+  visited[seed] = 1;
+  while (queue.length) {
+    const index = queue.pop()!;
+    addSelectedTriangle(candidates[index].rawIds);
+    for (const next of neighbours[index]) if (!visited[next]) {
+      visited[next] = 1;
+      queue.push(next);
+    }
+  }
+
+  // Manifold booleans are unreliable when the cutter starts exactly on the
+  // target surface: the coincident triangles can survive as zero-thickness
+  // sheets. Cross both ends by a tiny amount so this is an unambiguous
+  // overlapping volume without changing the requested dimension visibly.
+  const overlap = 1e-3;
+  const baseOffset = op.distance > 0 ? -overlap : overlap;
+  const endOffset = op.distance > 0 ? op.distance + overlap : op.distance - overlap;
+  const vertices = points.flatMap(([x, y, z]) => [x + nx * baseOffset, y + ny * baseOffset, z + nz * baseOffset]);
+  vertices.push(...points.flatMap(([x, y, z]) => [x + nx * endOffset, y + ny * endOffset, z + nz * endOffset]));
+  const top = points.length;
+  const triangles: number[] = [];
+  // The prism is just an ordinary, outward-wound closed solid — the SAME
+  // winding whether this is a pull (fuse) or a push (cut). It is only the
+  // offsets above that decide which side of the original face the prism
+  // occupies; solid.cut() already accounts for orientation internally when
+  // subtracting, the same way any other cutting tool in this codebase does
+  // (see pushPullFace's basicFaceExtrusion, which never flips winding by
+  // sign either). An earlier version of this function additionally flipped
+  // every triangle's winding for a negative distance, which double-negated
+  // that internal handling and hands manifold-3d an inside-out cutting
+  // tool — its boolean then does the wrong thing rather than failing loudly,
+  // producing exactly the torn/sliver geometry this was reported as.
+  for (const [a, b, c] of selected) {
+    triangles.push(a, c, b, a + top, b + top, c + top);
+  }
+  for (const { a, b, count } of edges.values()) {
+    if (count !== 1) continue;
+    triangles.push(a, b, b + top, a, b + top, a + top);
+  }
+  const prism = new MeshShape(new manifold.Manifold(new manifold.Mesh({
+    numProp: 3,
+    vertProperties: Float32Array.from(vertices),
+    triVerts: Uint32Array.from(triangles),
+  })));
+  return op.distance > 0 ? solid.fuse(prism) : solid.cut(prism);
+}
+
 /**
  * Builds the stable portion of a live push/pull preview: the edit's base and
  * every already-committed operation, excluding the tentative final operation
@@ -243,10 +377,6 @@ async function makeEdit(
 ): Promise<AnySolid | null> {
   const base = await makeLocal(spec.base, onError, onProgress);
   if (!base) return null;
-  if (isMesh(base)) {
-    onError?.(spec.id, "Push/pull isn't supported on an imported mesh.");
-    return base;
-  }
 
   // A skipped op, not an aborted chain: stopping here entirely (as this
   // once did) meant one unrecoverable op anywhere in the history — from an
@@ -261,6 +391,12 @@ async function makeEdit(
   // could not be replayed.
   let solid = base;
   for (const op of spec.ops) {
+    if (isMesh(solid)) {
+      const edited = pushPullMesh(solid, op);
+      if (!edited) onError?.(spec.id, "A pushed/pulled face could not be found after rebuilding — try redoing that edit.");
+      else solid = edited;
+      continue;
+    }
     const face = findFace(solid, op.point, op.normal);
     if (!face) {
       onError?.(
