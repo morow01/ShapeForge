@@ -29,6 +29,16 @@ const DEG = Math.PI / 180;
  *  fast mouse-move can ask for a new one. Short enough to read as live. */
 const PUSH_PULL_PREVIEW_MS = 120;
 
+/**
+ * One colour per axis, indexed X, Y, Z, shared by every measurement readout
+ * and by the edge each one measures. Red/green/blue is the convention the
+ * scene's own AxesHelper already establishes, so a reader who has seen the
+ * axes needs nothing further explained; these are muted versions of it so
+ * three of them can sit over a model without shouting.
+ */
+const AXIS_COLOR = ["#d2544c", "#3f9a55", "#4079d0"] as const;
+const AXIS_COLOR_HEX = [0xd2544c, 0x3f9a55, 0x4079d0] as const;
+
 interface BodyGrab {
   id: string;
   downScreen: { x: number; y: number };
@@ -318,9 +328,22 @@ export class Scene {
   private selectedFace: { partId: string; groupIndex: number } | null = null;
   private pushPullHandleHovered = false;
   private dimensionInputs: HTMLInputElement[] = [];
+  /** The positioned wrapper around each dimension input — the input itself no
+   *  longer carries the layout, since it now sits beside an axis badge. */
+  private dimensionPills: HTMLDivElement[] = [];
+  /** The three cage edges the dimension readouts measure, drawn in their axis
+   *  colours so each number is tied to a specific edge rather than floating
+   *  somewhere near the object. */
+  private dimensionEdges = new THREE.LineSegments(
+    new THREE.BufferGeometry()
+      .setAttribute("position", new THREE.BufferAttribute(new Float32Array(18), 3))
+      .setAttribute("color", new THREE.BufferAttribute(new Float32Array(18), 3)),
+    new THREE.LineBasicMaterial({ vertexColors: true, depthTest: false, transparent: true }),
+  );
   /** Editable X/Y readouts of how far the object has moved from where the
    *  current move began — TinkerCAD's offset display. */
   private moveInputs: HTMLInputElement[] = [];
+  private movePills: HTMLDivElement[] = [];
   /** The L-shaped leader drawn on the build plate from the move's start
    *  point to where the object is now, one leg per axis. */
   private moveGuide = new THREE.Line(
@@ -557,17 +580,13 @@ export class Scene {
     }
     this.resizeHandles.visible = false;
 
-    for (const axis of ["Width", "Depth", "Height"]) {
-      const input = document.createElement("input");
-      input.type = "number";
+    const labels = ["Width", "Depth", "Height"] as const;
+    for (let axis = 0; axis < labels.length; axis++) {
+      const name = labels[axis];
+      const { pill, input } = this.makeMeasurePill(name[0], AXIS_COLOR[axis], `${name} in millimetres`);
       input.min = "0.01";
       input.step = "0.1";
-      input.title = `${axis} in millimetres`;
-      input.setAttribute("aria-label", `${axis} in millimetres`);
-      input.style.cssText =
-        "position:absolute;display:none;z-index:30;width:64px;padding:5px 6px;" +
-        "border:1px solid #00a9b7;border-radius:5px;background:white;color:#25313b;" +
-        "font:12px system-ui;text-align:center;box-shadow:0 2px 7px rgba(0,0,0,.14);";
+      this.dimensionPills.push(pill);
       input.addEventListener("focus", () => this.onDragChange?.(true));
       input.addEventListener("blur", () => {
         this.applyTypedDimension(input);
@@ -578,9 +597,33 @@ export class Scene {
           input.blur();
         }
       });
-      this.host.appendChild(input);
+      this.host.appendChild(pill);
       this.dimensionInputs.push(input);
     }
+  }
+
+  /**
+   * One floating measurement readout: a colour-coded axis badge next to an
+   * editable value. The badge and border carry the axis's own colour, the same
+   * one its edge is drawn in, which is what lets three numbers float over a
+   * model without any of them being ambiguous about what they measure.
+   */
+  private makeMeasurePill(badge: string, color: string, title: string) {
+    const pill = document.createElement("div");
+    pill.className = "measure-pill";
+    pill.style.setProperty("--axis", color);
+
+    const axisLabel = document.createElement("span");
+    axisLabel.className = "measure-axis";
+    axisLabel.textContent = badge;
+    pill.appendChild(axisLabel);
+
+    const input = document.createElement("input");
+    input.type = "number";
+    input.title = title;
+    input.setAttribute("aria-label", title);
+    pill.appendChild(input);
+    return { pill, input };
   }
 
   /** The offset readout: one editable field per ground axis, plus the leader
@@ -590,19 +633,24 @@ export class Scene {
     this.moveGuide.renderOrder = 21;
     this.moveGuide.frustumCulled = false;
     this.scene.add(this.moveGuide);
+    this.dimensionEdges.visible = false;
+    this.dimensionEdges.renderOrder = 22;
+    this.dimensionEdges.frustumCulled = false;
+    this.scene.add(this.dimensionEdges);
 
-    for (const axis of ["X", "Y"] as const) {
-      const input = document.createElement("input");
-      input.type = "number";
+    for (let axis = 0; axis < 2; axis++) {
+      const name = axis === 0 ? "X" : "Y";
+      // Same axis colour as the matching size readout, so the axis is never in
+      // question — the dashed border (is-offset) is what says this one is a
+      // distance travelled rather than a dimension.
+      const { pill, input } = this.makeMeasurePill(
+        `→${name}`,
+        AXIS_COLOR[axis],
+        `Moved along ${name} in millimetres`,
+      );
+      pill.classList.add("is-offset");
+      this.movePills.push(pill);
       input.step = "0.5";
-      input.title = `Moved along ${axis} in millimetres`;
-      input.setAttribute("aria-label", `Moved along ${axis} in millimetres`);
-      // Deliberately distinct from the dimension pills: those are sizes, these
-      // are signed offsets, and confusing the two would be easy at a glance.
-      input.style.cssText =
-        "position:absolute;display:none;z-index:30;width:66px;padding:5px 6px;" +
-        "border:1px solid #8a97a1;border-radius:5px;background:white;color:#25313b;" +
-        "font:12px system-ui;text-align:center;box-shadow:0 2px 7px rgba(0,0,0,.14);";
       input.addEventListener("focus", () => this.onDragChange?.(true));
       input.addEventListener("blur", () => {
         this.applyTypedMove(input);
@@ -616,7 +664,7 @@ export class Scene {
           input.blur();
         }
       });
-      this.host.appendChild(input);
+      this.host.appendChild(pill);
       this.moveInputs.push(input);
     }
   }
@@ -630,7 +678,7 @@ export class Scene {
     if (!this.moveReadout) return;
     this.moveReadout = null;
     this.moveGuide.visible = false;
-    for (const input of this.moveInputs) input.style.display = "none";
+    for (const pill of this.movePills) pill.style.display = "none";
   }
 
   /**
@@ -646,7 +694,7 @@ export class Scene {
       view.group.visible && this.selectedIds.includes(readout.id);
     this.moveGuide.visible = !!visible;
     if (!visible || !readout || !view) {
-      for (const input of this.moveInputs) input.style.display = "none";
+      for (const pill of this.movePills) pill.style.display = "none";
       return;
     }
 
@@ -677,18 +725,19 @@ export class Scene {
     ];
     for (let i = 0; i < this.moveInputs.length; i++) {
       const input = this.moveInputs[i];
+      const pill = this.movePills[i];
       const leg = legs[i];
       // A leg of zero length has no arrow to label and nowhere sensible to sit.
       if (Math.abs(leg.value) < 0.005) {
-        input.style.display = "none";
+        pill.style.display = "none";
         continue;
       }
       const p = leg.at.project(this.camera);
-      input.style.display = "block";
+      pill.style.display = "flex";
       if (document.activeElement !== input) input.value = leg.value.toFixed(2);
-      input.style.left = `${((p.x + 1) / 2) * rect.width}px`;
-      input.style.top = `${((1 - p.y) / 2) * rect.height}px`;
-      input.style.transform = leg.shift;
+      pill.style.left = `${((p.x + 1) / 2) * rect.width}px`;
+      pill.style.top = `${((1 - p.y) / 2) * rect.height}px`;
+      pill.style.transform = leg.shift;
     }
   }
 
@@ -914,7 +963,8 @@ export class Scene {
       !this.showResult && view.group.visible;
     this.resizeBox.visible = visible;
     this.resizeHandles.visible = visible;
-    for (const input of this.dimensionInputs) input.style.display = visible ? "block" : "none";
+    this.dimensionEdges.visible = visible;
+    for (const pill of this.dimensionPills) pill.style.display = visible ? "flex" : "none";
     if (!visible || !view || !node) return;
 
     view.group.updateWorldMatrix(true, true);
@@ -942,22 +992,54 @@ export class Scene {
     for (const handle of this.resizeHandleMeshes) handle.scale.setScalar(handleSize);
 
     const size = box.getSize(new THREE.Vector3());
-    const labelPoints = [
-      new THREE.Vector3(centre.x, min.y, min.z),
-      new THREE.Vector3(max.x, centre.y, min.z),
-      new THREE.Vector3(max.x, max.y, centre.z),
+    // Each readout measures ONE specific edge; drawing that edge in the same
+    // colour as its pill is what makes three numbers over one model readable.
+    // The three chosen edges meet end to end at two corners, so together they
+    // trace a single path across the cage rather than looking scattered.
+    // Stood off the cage rather than drawn along it. Laid on top of the teal
+    // edge a 1px coloured line is nearly invisible (WebGL will not thicken
+    // it), and it reads as part of the selection box instead of as a
+    // measurement. Offsetting turns each into a dimension line clear of the
+    // model, and takes its pill off the object with it. The gap is derived
+    // from the same screen-space helper the handles size themselves by, so it
+    // stays constant on screen at any zoom.
+    const gap = Math.max(1, this.worldSnapTolerance(centre) * 1.6);
+    const edges: [THREE.Vector3, THREE.Vector3][] = [
+      [new THREE.Vector3(min.x, min.y - gap, min.z), new THREE.Vector3(max.x, min.y - gap, min.z)],
+      [new THREE.Vector3(max.x + gap, min.y, min.z), new THREE.Vector3(max.x + gap, max.y, min.z)],
+      [
+        new THREE.Vector3(max.x + gap, max.y + gap, min.z),
+        new THREE.Vector3(max.x + gap, max.y + gap, max.z),
+      ],
     ];
+    const edgePos = this.dimensionEdges.geometry.getAttribute("position") as THREE.BufferAttribute;
+    const edgeCol = this.dimensionEdges.geometry.getAttribute("color") as THREE.BufferAttribute;
+    const tint = new THREE.Color();
+    for (let i = 0; i < edges.length; i++) {
+      const [a, b] = edges[i];
+      edgePos.setXYZ(i * 2, a.x, a.y, a.z);
+      edgePos.setXYZ(i * 2 + 1, b.x, b.y, b.z);
+      tint.setHex(AXIS_COLOR_HEX[i]);
+      edgeCol.setXYZ(i * 2, tint.r, tint.g, tint.b);
+      edgeCol.setXYZ(i * 2 + 1, tint.r, tint.g, tint.b);
+    }
+    edgePos.needsUpdate = true;
+    edgeCol.needsUpdate = true;
+    this.dimensionEdges.geometry.computeBoundingSphere();
+
     const rect = this.renderer.domElement.getBoundingClientRect();
     const values = [size.x, size.y, size.z];
     for (let i = 0; i < this.dimensionInputs.length; i++) {
-      const p = labelPoints[i].project(this.camera);
+      // Sit each pill on the midpoint of the very edge it measures.
+      const p = edges[i][0].clone().lerp(edges[i][1], 0.5).project(this.camera);
       const input = this.dimensionInputs[i];
       if (document.activeElement !== input) input.value = values[i].toFixed(2);
       input.dataset.nodeId = node.id;
       input.dataset.currentSize = String(values[i]);
-      input.style.left = `${((p.x + 1) / 2) * rect.width}px`;
-      input.style.top = `${((1 - p.y) / 2) * rect.height}px`;
-      input.style.transform =
+      const pill = this.dimensionPills[i];
+      pill.style.left = `${((p.x + 1) / 2) * rect.width}px`;
+      pill.style.top = `${((1 - p.y) / 2) * rect.height}px`;
+      pill.style.transform =
         i === 0 ? "translate(-50%, 12px)" : i === 1 ? "translate(12px, 4px)" : "translate(12px, -50%)";
     }
   }
@@ -2516,9 +2598,12 @@ export class Scene {
     for (const handle of this.pushPullHandleMeshes) disposeArrow(handle);
     this.renderer.dispose();
     for (const input of this.dimensionInputs) input.remove();
-    for (const input of this.moveInputs) input.remove();
+    for (const pill of this.movePills) pill.remove();
+    for (const pill of this.dimensionPills) pill.remove();
     this.moveGuide.geometry.dispose();
     (this.moveGuide.material as THREE.Material).dispose();
+    this.dimensionEdges.geometry.dispose();
+    (this.dimensionEdges.material as THREE.Material).dispose();
     this.host.removeChild(this.renderer.domElement);
     this.host.removeChild(this.marqueeEl);
     this.host.removeChild(this.navCubeFrame);

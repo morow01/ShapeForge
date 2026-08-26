@@ -111,6 +111,41 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 .tool-rail button.active { color: #087a79; background: #dff5f4; border-color: #55c5c3; }
 .tool-symbol { font-size: 20px; line-height: 1; }
 .tool-icon { display: block; width: 21px; height: 21px; }
+
+/* Floating measurement readouts in the viewport. --axis carries the colour of
+   whichever axis the value belongs to, matching the highlighted edge in 3D, so
+   a number is never ambiguous about what it measures. */
+.measure-pill {
+  position: absolute;
+  display: none;
+  z-index: 30;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 5px;
+  border: 1px solid var(--axis, #00a9b7);
+  border-radius: 6px;
+  background: #fff;
+  box-shadow: 0 2px 7px rgb(0 0 0 / 16%);
+  line-height: 1;
+}
+.measure-pill > .measure-axis {
+  color: var(--axis, #00a9b7);
+  font: 750 10px system-ui;
+  letter-spacing: .03em;
+}
+.measure-pill > input {
+  width: 50px;
+  padding: 3px 2px;
+  border: 0;
+  background: transparent;
+  color: #25313b;
+  font: 12px system-ui;
+  text-align: center;
+}
+.measure-pill > input:focus { outline: none; }
+/* An offset is a signed distance travelled, not a size — dashed so the two
+   can never be read as the same kind of number at a glance. */
+.measure-pill.is-offset { border-style: dashed; }
 .cursor-symbol { transform: rotate(-40deg); font-size: 18px; }
 
 .panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 3px 14px; }
