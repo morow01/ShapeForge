@@ -222,6 +222,17 @@ async function makeEdit(
     return base;
   }
 
+  // A skipped op, not an aborted chain: stopping here entirely (as this
+  // once did) meant one unrecoverable op anywhere in the history — from an
+  // edit made before findFace() got more precise, say — permanently froze
+  // every op AFTER it too, including any brand new one a user tries to add
+  // going forward (this is exactly the bug behind a report of "the shape
+  // doesn't resize while dragging, then fails on release": the live preview
+  // and the real commit both append the new op at the END of the list, so
+  // both silently never got past the earlier failure to even try it).
+  // Skipping instead means the object stays editable — go-forward edits
+  // keep working — while still surfacing the same error for whichever op
+  // could not be replayed.
   let solid = base;
   for (const op of spec.ops) {
     const face = findFace(solid, op.point, op.normal);
@@ -230,7 +241,7 @@ async function makeEdit(
         spec.id,
         "A pushed/pulled face could not be found after rebuilding — try redoing that edit.",
       );
-      break;
+      continue;
     }
     solid = pushPullFace(solid, face, op.distance);
   }
