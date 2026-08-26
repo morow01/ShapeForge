@@ -23,6 +23,12 @@ interface Props {
   onDuplicate: (id: string) => string | null;
   /** Push/pull: a face on `id` was dragged `distance` mm along its normal. */
   onPushPull: (id: string, op: { point: Vec3; normal: Vec3; distance: number }) => void;
+  /** Live preview during a push/pull drag — see Scene.onPreviewPushPull's own
+   *  doc comment. Not a document edit; just asks for a mesh to show. */
+  onPreviewPushPull: (
+    id: string,
+    op: { point: Vec3; normal: Vec3; distance: number },
+  ) => Promise<KernelMesh | null>;
   onDragChange: (dragging: boolean) => void;
 }
 
@@ -48,6 +54,7 @@ export function Viewport(props: Props) {
     scene.onAlignObjects = (updates) => latest.current.onAlign(updates);
     scene.onDuplicateObject = (id) => latest.current.onDuplicate(id);
     scene.onPushPullFace = (id, op) => latest.current.onPushPull(id, op);
+    scene.onPreviewPushPull = (id, op) => latest.current.onPreviewPushPull(id, op);
     scene.onDragChange = (dragging) => latest.current.onDragChange(dragging);
 
     scene.setParts(latest.current.parts);

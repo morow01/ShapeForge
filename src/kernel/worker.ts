@@ -314,6 +314,32 @@ const api = {
     // and every slicer (including Bambu Studio) reads it fine.
     return solid ? blobSTLOf(solid, EXPORT_QUALITY) : null;
   },
+
+  /**
+   * Meshes ONE node's local shape on its own — no meshCache, no group
+   * wrapping, no error collection beyond "null on failure" — for a live
+   * push/pull drag's preview: the viewport calls this, throttled, with the
+   * dragged distance appended as one more (tentative, not-yet-committed) op
+   * on the spec, and swaps the result into that one part's Three.js geometry
+   * directly. This is a REAL OCCT/manifold rebuild, same as any other edit —
+   * there is no shortcut that keeps it both live AND exact — throttling
+   * (client-side, see kernel/client.ts) is what keeps it from hammering the
+   * worker every mouse-move; the coalesceLatest wrapper below caps how many
+   * of those throttled calls can queue up if one runs long.
+   */
+  async previewLocal(spec: NodeSpec): Promise<KernelMesh | null> {
+    await init();
+    try {
+      const solid = await makeLocal(spec);
+      return solid ? toMesh(spec.id, solid, EDIT_QUALITY) : null;
+    } catch {
+      // A mid-drag distance can transiently describe something OCCT can't
+      // build (e.g. pushing clean through the far side) — just skip this
+      // frame's preview rather than surfacing an error for a value nobody
+      // has committed to yet.
+      return null;
+    }
+  },
 };
 
 export type KernelAPI = typeof api;

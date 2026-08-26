@@ -14,8 +14,8 @@ import {
 import { PRIMITIVES, isGroup } from "./document/types";
 import { findNode } from "./document/tree";
 import { putBlob } from "./document/blobStore";
-import type { PrimitiveKind, SceneNode } from "./document/types";
-import type { KernelMesh, NodeSpec, ScenePart } from "./kernel/types";
+import type { PrimitiveKind, SceneNode, Vec3 } from "./document/types";
+import type { EditSpec, KernelMesh, NodeSpec, ScenePart } from "./kernel/types";
 import type { CameraMode, ToolMode } from "./viewport/scene";
 import { APP_NAME, APP_VERSION } from "./version";
 import { positionWithReferenceGap } from "./snapping/spacing";
@@ -397,6 +397,42 @@ export function App() {
     },
     [duplicateNodes],
   );
+  // Live push/pull preview — a real kernel rebuild of just this one node
+  // with the dragged distance tentatively appended, never written to the
+  // document (see Scene.onPreviewPushPull's own doc comment for why this
+  // exists: a live-updating shape during the drag, not just the arrow).
+  // Reads useDoc.getState() directly rather than depending on `nodes`, same
+  // reasoning as the debounced kernel-call effects above — a fresh read on
+  // every call, not a stale one from whenever this callback was last built.
+  const onPreviewPushPull = useCallback(
+    async (id: string, op: { point: Vec3; normal: Vec3; distance: number }): Promise<KernelMesh | null> => {
+      const node = findNode(useDoc.getState().nodes, id);
+      if (!node) return null;
+      const spec: EditSpec =
+        node.type === "edit"
+          ? { ...(toSpec(node) as EditSpec), ops: [...node.ops, op] }
+          : {
+              type: "edit",
+              id: node.id,
+              base: toSpec(node),
+              ops: [op],
+              position: node.position,
+              rotation: node.rotation,
+              scale: node.scale,
+              isHole: node.isHole,
+            };
+      try {
+        return await kernel.previewLocal(spec);
+      } catch {
+        // A watchdog timeout or other transient failure — this frame's
+        // preview just doesn't update; the drag itself is unaffected, and
+        // the eventual commit (see onPushPull) runs through the normal,
+        // fully error-handled rebuild path regardless.
+        return null;
+      }
+    },
+    [],
+  );
   // A gizmo drag emits a change every frame; collapse the whole drag into one
   // undo step so undo jumps back to where the drag started.
   const onDragChange = useCallback(
@@ -621,6 +657,7 @@ export function App() {
           onAlign={setPositions}
           onDuplicate={onDuplicate}
           onPushPull={pushPullFace}
+          onPreviewPushPull={onPreviewPushPull}
           onDragChange={onDragChange}
         />
         <div className="canvas-help">

@@ -20,6 +20,10 @@ type AlignAnchor = "min" | "center" | "max";
 const CLICK_SLOP_PX = 4;
 const SNAP_TOLERANCE_PX = 10;
 const DEG = Math.PI / 180;
+/** Minimum gap between live push/pull preview rebuilds during a drag — each
+ *  one is a real OCCT/manifold call, not free, so this bounds how often a
+ *  fast mouse-move can ask for a new one. Short enough to read as live. */
+const PUSH_PULL_PREVIEW_MS = 120;
 
 interface BodyGrab {
   id: string;
@@ -74,6 +78,21 @@ interface PushPullDrag {
    *  onPointerUp must remove and dispose it rather than just repositioning
    *  it back, or it would be left behind as an orphan floating arrow. */
   ephemeral: boolean;
+  /** The part being dragged, so the live preview (see requestPushPullPreview)
+   *  can update its actual geometry, not just the arrow. */
+  view: PartView;
+  /** A clone of the part's geometry (and its matching pivot) as it stood
+   *  before any preview update — restored exactly if the drag/pill is
+   *  abandoned (Escape, or nothing ends up applied), since nothing else
+   *  would otherwise revert a live preview back to the real, committed
+   *  shape. Disposed once no longer needed either way (see
+   *  restoreOriginalGeom/commitOrAbandonPushPull). */
+  originalGeom: ThreeGeometry[];
+  originalPivot: THREE.Vector3;
+  /** performance.now() of the last previewLocal() call sent, so a fast drag
+   *  samples at most every PUSH_PULL_PREVIEW_MS instead of on every single
+   *  pointermove — each sample is a real OCCT/manifold rebuild. */
+  lastPreviewAt: number;
 }
 
 interface ResizeDrag {
@@ -251,12 +270,20 @@ export class Scene {
   /** The live push/pull readout — a real input, not just a label, so a plain
    *  click on a face (no drag) can show it ready to type an exact distance
    *  into, the same way the resize handles' dimension inputs work. See
-   *  showPushPullInput()/commitPushPullInput(). */
+   *  showPushPullInput()/commitOrAbandonPushPull(). */
   private pushPullLabelEl: HTMLInputElement;
   /** What the typed-input pill would apply to, while it's open — set by
-   *  showPushPullInput(), read by commitPushPullInput(), cleared once it
-   *  closes (blur/Enter/Escape or a new drag starting elsewhere). */
-  private pushPullPending: { id: string; localPoint: Vec3; localNormal: Vec3 } | null = null;
+   *  showPushPullInput(), read by commitOrAbandonPushPull(), cleared once it
+   *  closes (blur/Enter/Escape). Carries the pre-drag geometry snapshot too,
+   *  so abandoning can revert a live preview exactly. */
+  private pushPullPending: {
+    id: string;
+    localPoint: Vec3;
+    localNormal: Vec3;
+    view: PartView;
+    originalGeom: ThreeGeometry[];
+    originalPivot: THREE.Vector3;
+  } | null = null;
   /** Whichever face the pointer is directly over right now — Shapr3D-style
    *  hover, independent of object selection: any face of any visible part,
    *  planar or curved, not just the arrows on a pre-selected object's own
@@ -319,6 +346,14 @@ export class Scene {
   onPushPullFace:
     | ((id: string, op: { point: Vec3; normal: Vec3; distance: number }) => void)
     | null = null;
+  /** Live preview during a push/pull drag — a real (throttled) kernel
+   *  rebuild of just that one node with the dragged distance tentatively
+   *  applied, NOT committed to the document; see requestPushPullPreview.
+   *  Returns null on failure (a mid-drag distance can transiently describe
+   *  something unbuildable) or if superseded by a newer request. */
+  onPreviewPushPull:
+    | ((id: string, op: { point: Vec3; normal: Vec3; distance: number }) => Promise<KernelMesh | null>)
+    | null = null;
 
   constructor(host: HTMLElement) {
     this.host = host;
@@ -365,11 +400,15 @@ export class Scene {
       "color:#25313b;font:600 12px system-ui,sans-serif;text-align:center;" +
       "box-shadow:0 2px 7px rgba(0,0,0,.14);";
     this.pushPullLabelEl.addEventListener("focus", () => this.onDragChange?.(true));
-    this.pushPullLabelEl.addEventListener("blur", () => this.commitPushPullInput());
+    this.pushPullLabelEl.addEventListener("blur", () => this.commitOrAbandonPushPull(true));
     this.pushPullLabelEl.addEventListener("keydown", (event) => {
-      if (event.key === "Enter") this.pushPullLabelEl.blur();
-      else if (event.key === "Escape") {
-        this.pushPullPending = null; // Escape abandons the edit — see commitPushPullInput()
+      if (event.key === "Enter") {
+        this.pushPullLabelEl.blur();
+      } else if (event.key === "Escape") {
+        // Explicit abandon (reverts any live preview) before blur — blur's
+        // own commitOrAbandonPushPull(true) call then finds pending already
+        // cleared and no-ops, so this never double-applies or double-reverts.
+        this.commitOrAbandonPushPull(false);
         this.pushPullLabelEl.blur();
       }
     });
@@ -1005,11 +1044,22 @@ export class Scene {
       handleBasePosition: handle.position.clone(),
       worldNormal,
       ephemeral: false,
+      view,
+      originalGeom: this.cloneGeom(view.geom),
+      originalPivot: view.pivot.clone(),
+      lastPreviewAt: 0,
     };
     this.controls.enabled = false;
     this.gizmo.enabled = false;
     e.preventDefault();
     return true;
+  }
+
+  /** A deep copy of a part's current render geometry — used to snapshot the
+   *  pre-drag shape so a live push/pull preview can be reverted exactly if
+   *  the drag/pill is abandoned. Mirrors cloneView()'s own geometry clone. */
+  private cloneGeom(geom: ThreeGeometry[]): ThreeGeometry[] {
+    return geom.map((g) => ({ faces: g.faces.clone(), lines: g.lines.clone() }));
   }
 
   /**
@@ -1078,6 +1128,10 @@ export class Scene {
       handleBasePosition: handle.position.clone(),
       worldNormal,
       ephemeral: true,
+      view,
+      originalGeom: this.cloneGeom(view.geom),
+      originalPivot: view.pivot.clone(),
+      lastPreviewAt: 0,
     };
     this.controls.enabled = false;
     this.gizmo.enabled = false;
@@ -1103,7 +1157,14 @@ export class Scene {
    * a plain click ending in two different states was the actual complaint).
    */
   private showPushPullInput(drag: PushPullDrag, initialValue = "0") {
-    this.pushPullPending = { id: drag.id, localPoint: drag.localPoint, localNormal: drag.localNormal };
+    this.pushPullPending = {
+      id: drag.id,
+      localPoint: drag.localPoint,
+      localNormal: drag.localNormal,
+      view: drag.view,
+      originalGeom: drag.originalGeom,
+      originalPivot: drag.originalPivot,
+    };
     const rect = this.renderer.domElement.getBoundingClientRect();
     const p = drag.handleBasePosition.clone().project(this.camera);
     this.pushPullLabelEl.style.display = "block";
@@ -1114,25 +1175,97 @@ export class Scene {
     this.pushPullLabelEl.select();
   }
 
-  /** Applies (or abandons) whatever is in the push/pull pill, on blur/Enter/
-   *  Escape — pushPullPending is cleared by the Escape handler first when
-   *  that is why this fired, so this is also what a plain Escape resolves
-   *  to: close with nothing applied. */
-  private commitPushPullInput() {
+  /**
+   * Resolves whatever is in the push/pull pill, on blur/Enter/Escape.
+   * `apply` is false only for an explicit Escape — everything else (blur
+   * from clicking away, or Enter, which just blurs) tries to apply, but
+   * still reverts if the value doesn't clear the same 0.5mm floor a drag
+   * itself uses (a typed/dragged-to 0 is not an edit — never turn a
+   * parametric node into a baked one for that).
+   *
+   * Either way ends with the part's geometry in a CORRECT state: applying
+   * discards the pre-drag snapshot (the live preview already showing is
+   * close enough until the real committed rebuild replaces it shortly);
+   * reverting restores that snapshot exactly, since nothing else would
+   * otherwise put an abandoned live-preview shape back to what is actually
+   * still the document's real, committed state.
+   */
+  private commitOrAbandonPushPull(apply: boolean) {
     const pending = this.pushPullPending;
     this.pushPullPending = null;
     this.pushPullLabelEl.style.display = "none";
     this.onDragChange?.(false);
     if (!pending) return;
+
     const distance = Number(this.pushPullLabelEl.value);
-    // Same 0.5mm floor as a drag: a typed 0 (or nothing usable) is not an
-    // edit — never turn a parametric node into a baked one for that.
-    if (!Number.isFinite(distance) || Math.abs(distance) < 0.5) return;
-    this.onPushPullFace?.(pending.id, {
-      point: pending.localPoint,
-      normal: pending.localNormal,
+    const valid = apply && Number.isFinite(distance) && Math.abs(distance) >= 0.5;
+    if (valid) {
+      this.disposeGeom(pending.originalGeom);
+      this.onPushPullFace?.(pending.id, {
+        point: pending.localPoint,
+        normal: pending.localNormal,
+        distance,
+      });
+    } else {
+      this.restoreGeom(pending.view, pending.originalGeom, pending.originalPivot);
+    }
+  }
+
+  /** Puts a part's render geometry (and its matching pivot) back to a saved
+   *  snapshot, disposing whatever was showing before the restore. Used to
+   *  revert an abandoned push/pull's live preview — see
+   *  commitOrAbandonPushPull. */
+  private restoreGeom(view: PartView, geom: ThreeGeometry[], pivot: THREE.Vector3) {
+    const stale = view.geom;
+    view.geom = geom;
+    view.pivot = pivot;
+    view.mesh.geometry = geom[0].faces;
+    view.wire.geometry = geom[0].lines;
+    this.applyPlacements();
+    this.disposeGeom(stale);
+  }
+
+  private disposeGeom(geom: ThreeGeometry[]) {
+    for (const g of geom) {
+      g.faces.dispose();
+      g.lines.dispose();
+    }
+  }
+
+  /**
+   * One live preview sample during a push/pull drag: a real (throttled, see
+   * PUSH_PULL_PREVIEW_MS) kernel rebuild of just this node with `distance`
+   * tentatively applied, swapped into the part's actual Three.js geometry —
+   * not just the arrow sliding, the shape itself growing/shrinking, the way
+   * every other drag in this app already shows its result live. Nothing is
+   * written to the document; the real edit only happens once the drag ends
+   * and the pill is committed (see commitOrAbandonPushPull).
+   */
+  private async requestPushPullPreview(drag: PushPullDrag, distance: number) {
+    const mesh = await this.onPreviewPushPull?.(drag.id, {
+      point: drag.localPoint,
+      normal: drag.localNormal,
       distance,
     });
+    // The drag may have ended (or a newer one started on the same or a
+    // different part) while this was in flight — a stale preview landing
+    // late must not clobber whatever is current now.
+    if (!mesh || this.pushPullDrag !== drag) return;
+    // syncKernelGeometry reuses/mutates drag.view.geom's existing
+    // BufferGeometry objects in place whenever the array length already
+    // matches (always true here — one mesh in, one geometry pair out), so
+    // the returned array IS (by reference) the same one passed in. Nothing
+    // new is allocated on an ordinary preview frame, so there is nothing to
+    // dispose here — disposing what this returns would destroy buffers the
+    // mesh is still actively using. drag.originalGeom (a separate CLONE
+    // taken before the drag began) is what preserves the true pre-drag
+    // state; it is untouched by any of this and is what gets disposed or
+    // restored once the drag actually ends — see commitOrAbandonPushPull.
+    drag.view.geom = syncKernelGeometry(mesh, drag.view.geom);
+    drag.view.pivot = this.centreGeometry(drag.view.geom);
+    drag.view.mesh.geometry = drag.view.geom[0].faces;
+    drag.view.wire.geometry = drag.view.geom[0].lines;
+    this.applyPlacements();
   }
 
   private applyTypedDimension(input: HTMLInputElement) {
@@ -1448,6 +1581,14 @@ export class Scene {
       // this became a real <input>. blur() below only fires from an actual
       // focused edit, so this never races with commitPushPullInput().
       this.pushPullLabelEl.value = distance.toFixed(1);
+
+      // The actual shape, not just the arrow — throttled, since each sample
+      // is a real kernel rebuild (see previewLocal's doc comment).
+      const now = performance.now();
+      if (this.onPreviewPushPull && now - drag.lastPreviewAt >= PUSH_PULL_PREVIEW_MS) {
+        drag.lastPreviewAt = now;
+        void this.requestPushPullPreview(drag, distance);
+      }
       return;
     }
 

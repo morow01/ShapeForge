@@ -168,4 +168,12 @@ export const kernel = {
   // edit-triggered rebuild — every click should produce its own file.
   exportSTL: (specs: NodeSpec[]) =>
     withWatchdog("heavy", (raw, onProgress) => raw.exportSTL(specs, Comlink.proxy(onProgress))),
+  // A live push/pull drag's preview — see previewLocal's own doc comment in
+  // worker.ts. Shares the "scene" lane/worker with buildScene (it needs to
+  // be just as responsive, and must never queue behind a "heavy" merged-
+  // result/export call), coalesced the same way so a fast-moving drag's
+  // later samples overwrite earlier, now-stale ones instead of piling up.
+  previewLocal: coalesceLatest((spec: NodeSpec) =>
+    withWatchdog("scene", (raw) => raw.previewLocal(spec)),
+  ),
 };
