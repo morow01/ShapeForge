@@ -35,15 +35,15 @@ const AXIS_TICKS: { dir: THREE.Vector3; color: number; label: string }[] = [
 
 /** Square viewport the cube renders into, and its margin from the corner —
  *  both in CSS pixels, matching every other size in Scene. */
-export const CUBE_PX = 100;
-export const CUBE_MARGIN_PX = 16;
+export const CUBE_PX = 160;
+export const CUBE_MARGIN_PX = 18;
 
 /** Half the cube's side length — every other placement (axis ticks, camera
  *  distance/extent) is expressed relative to this one number. */
 const HALF = 0.5;
 
 function makeFaceTexture(text: string): THREE.CanvasTexture {
-  const size = 128;
+  const size = 192;
   const canvas = document.createElement("canvas");
   canvas.width = size;
   canvas.height = size;
@@ -51,10 +51,10 @@ function makeFaceTexture(text: string): THREE.CanvasTexture {
   ctx.fillStyle = "#fcfdfd";
   ctx.fillRect(0, 0, size, size);
   ctx.strokeStyle = "#dde2e5";
-  ctx.lineWidth = 3;
-  ctx.strokeRect(1.5, 1.5, size - 3, size - 3);
+  ctx.lineWidth = 4;
+  ctx.strokeRect(2, 2, size - 4, size - 4);
   ctx.fillStyle = "#8a949c";
-  ctx.font = "600 19px system-ui, -apple-system, Segoe UI, sans-serif";
+  ctx.font = "600 28px system-ui, -apple-system, Segoe UI, sans-serif";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillText(text, size / 2, size / 2 + 1);
@@ -64,17 +64,17 @@ function makeFaceTexture(text: string): THREE.CanvasTexture {
 }
 
 function makeAxisSprite(text: string, color: number): THREE.Sprite {
-  const size = 48;
+  const size = 64;
   const canvas = document.createElement("canvas");
   canvas.width = size;
   canvas.height = size;
   const ctx = canvas.getContext("2d")!;
   ctx.fillStyle = `#${color.toString(16).padStart(6, "0")}`;
   ctx.beginPath();
-  ctx.arc(size / 2, size / 2, size / 2 - 2, 0, Math.PI * 2);
+  ctx.arc(size / 2, size / 2, size / 2 - 3, 0, Math.PI * 2);
   ctx.fill();
   ctx.fillStyle = "#ffffff";
-  ctx.font = "700 24px system-ui, -apple-system, Segoe UI, sans-serif";
+  ctx.font = "700 32px system-ui, -apple-system, Segoe UI, sans-serif";
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillText(text, size / 2, size / 2 + 1);
@@ -84,7 +84,7 @@ function makeAxisSprite(text: string, color: number): THREE.Sprite {
     new THREE.SpriteMaterial({ map: tex, depthTest: false, sizeAttenuation: false }),
   );
   sprite.renderOrder = 10;
-  sprite.scale.set(0.11, 0.11, 1);
+  sprite.scale.set(0.16, 0.16, 1);
   return sprite;
 }
 
@@ -100,7 +100,7 @@ export class NavCube {
     // so the little viewport reads as a continuation of it, not a hole.
     this.scene.background = new THREE.Color(0xedf1f4);
 
-    const half = 2.1;
+    const half = 1.7;
     this.camera = new THREE.OrthographicCamera(-half, half, half, -half, 0.1, 20);
     this.camera.up.set(0, 0, 1);
 
