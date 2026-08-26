@@ -57,12 +57,23 @@ export interface EditSpec extends SpecBase {
 
 export type NodeSpec = ObjectSpec | GroupSpec | ImportSpec | EditSpec;
 
-/** One flat (planar) face of a top-level part, in the part's own local
- *  frame — everything push/pull needs to let the viewport show a handle on
- *  it and, from a click there, describe a PushPullOp back to the kernel.
- *  Curved faces (a cylinder's side, say) are omitted entirely: there is no
- *  single well-defined push/pull direction for those. */
+/** One face of a top-level part, in the part's own local frame — everything
+ *  the viewport needs to let a click directly on the 3D geometry highlight
+ *  and, for a planar one, push/pull it into a PushPullOp back to the kernel.
+ *  Curved faces (a cylinder's side, say) are included too, so hovering one
+ *  still highlights it the way Shapr3D does — there just isn't a single
+ *  well-defined push/pull direction for those, so `planar` gates that.
+ *
+ * This array's ORDER matches the mesh's own faceGroups order (both are built
+ * by walking the same solid's s.faces list — see faceInfoOf() in worker.ts),
+ * so the viewport resolves "the pointer hit this triangle" to "which
+ * FaceInfo is that" via getFaceIndex()'s group index used as a plain array
+ * position into this list — not by matching any id. The mesh's own
+ * faceGroups[].faceId is some OCCT-internal value (confirmed empirically:
+ * not a small sequential index), so it is deliberately not carried here or
+ * relied on for that correlation. */
 export interface FaceInfo {
+  planar: boolean;
   point: Vec3;
   normal: Vec3;
 }

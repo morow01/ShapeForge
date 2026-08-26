@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
-import { syncGeometries } from "replicad-threejs-helper";
+import { clearHighlights, getFaceIndex, highlightInGeometry, syncGeometries } from "replicad-threejs-helper";
 import type { ReplicadMesh, ThreeGeometry } from "replicad-threejs-helper";
 import type { FaceInfo, KernelMesh, ScenePart } from "../kernel/types";
 import type { SceneNode, Vec3 } from "../document/types";
@@ -69,6 +69,11 @@ interface PushPullDrag {
   handle: THREE.Object3D;
   handleBasePosition: THREE.Vector3;
   worldNormal: THREE.Vector3;
+  /** True when `handle` was spawned just for this one drag (a direct click
+   *  on a hovered face, not a pooled arrow from updatePushPullOverlay) —
+   *  onPointerUp must remove and dispose it rather than just repositioning
+   *  it back, or it would be left behind as an orphan floating arrow. */
+  ephemeral: boolean;
 }
 
 interface ResizeDrag {
@@ -145,6 +150,11 @@ const MATERIALS = {
     roughness: 0.5,
   }),
   result: new THREE.MeshStandardMaterial({ color: 0x5bbf87, metalness: 0.04, roughness: 0.55 }),
+  // Material index 1 on every part's geometry (see applyMaterials) — painted
+  // over whichever face group is currently hovered/clicked, Shapr3D-style.
+  // Flat, unlit red so it reads clearly against both the translucent hole
+  // material and the opaque solid one.
+  faceHighlight: new THREE.MeshBasicMaterial({ color: 0xff3b30 }),
 };
 
 /**
@@ -239,6 +249,12 @@ export class Scene {
   private pushPullPoolKey = "";
   private pushPullDrag: PushPullDrag | null = null;
   private pushPullLabelEl: HTMLDivElement;
+  /** Whichever face the pointer is directly over right now — Shapr3D-style
+   *  hover, independent of object selection: any face of any visible part,
+   *  planar or curved, not just the arrows on a pre-selected object's own
+   *  faces. Painted via faceHighlight (material index 1, see applyMaterials)
+   *  on the group getFaceIndex() resolves the hit triangle to. */
+  private hoverFace: { view: PartView; groupIndex: number } | null = null;
   private dimensionInputs: HTMLInputElement[] = [];
   private resizeDrag: ResizeDrag | null = null;
   private resizeConstrained = true;
@@ -490,7 +506,7 @@ export class Scene {
     const geom = syncKernelGeometry(mesh);
     const pivot = this.centreGeometry(geom);
     const group = new THREE.Group();
-    const m = new THREE.Mesh(geom[0].faces, isHole ? MATERIALS.hole : MATERIALS.solid);
+    const m = new THREE.Mesh(geom[0].faces, [isHole ? MATERIALS.hole : MATERIALS.solid, MATERIALS.faceHighlight]);
     const wire = new THREE.LineSegments(
       geom[0].lines,
       new THREE.LineBasicMaterial({ color: 0x38505f, transparent: true, opacity: 0.7 }),
@@ -600,12 +616,17 @@ export class Scene {
   private applyMaterials() {
     for (const [id, view] of this.parts) {
       const sel = this.selectedIds.includes(id);
+      // Index 1 (faceHighlight) is picked per-triangle-group by the geometry's
+      // own .groups, set via highlightFace()/clearFaceHover() below — this
+      // array is what makes that actually render as anything other than the
+      // base material (a BufferGeometry's .groups are ignored entirely unless
+      // .material is an array).
       if (view.isHole) {
-        view.mesh.material = sel ? MATERIALS.holeSelected : MATERIALS.hole;
+        view.mesh.material = [sel ? MATERIALS.holeSelected : MATERIALS.hole, MATERIALS.faceHighlight];
         // Draw after opaque solids while still respecting their depth.
         view.mesh.renderOrder = 1;
       } else {
-        view.mesh.material = sel ? MATERIALS.solidSelected : MATERIALS.solid;
+        view.mesh.material = [sel ? MATERIALS.solidSelected : MATERIALS.solid, MATERIALS.faceHighlight];
         view.mesh.renderOrder = 0;
       }
       view.group.visible = !this.showResult;
@@ -826,6 +847,82 @@ export class Scene {
     }
   }
 
+  /** Paints material index 1 onto exactly one triangle group of a geometry —
+   *  highlightInGeometry's own type declaration says it wants the {faces,
+   *  lines} wrapper, but the actual implementation (see node_modules;
+   *  geometry.groups.forEach(...)) operates on the raw BufferGeometry, same
+   *  as clearHighlights/getFaceIndex/getFaceId right next to it — a mismatch
+   *  in the package's own .d.ts, not a mistake here. */
+  private highlightFace(groupIndex: number, geometry: THREE.BufferGeometry) {
+    highlightInGeometry([groupIndex], geometry as unknown as Parameters<typeof highlightInGeometry>[1]);
+  }
+
+  private clearFaceHover() {
+    if (!this.hoverFace) return;
+    clearHighlights(this.hoverFace.view.mesh.geometry as THREE.BufferGeometry);
+    this.hoverFace = null;
+  }
+
+  /**
+   * Whatever face (planar or curved) sits directly under the pointer RIGHT
+   * NOW, on any visible part — a fresh raycast against the actual meshes,
+   * not a cached lookup. beginPushPullFromHover deliberately calls this
+   * itself rather than trusting this.hoverFace: that field is only updated
+   * by pointermove, so it can go stale between a face-hover and a LATER,
+   * unrelated pointerdown elsewhere (a synthetic/fast click sequence with no
+   * intervening move event over the new spot, a marquee started far from
+   * the last-hovered face, etc.) — confirmed live: without this re-check, a
+   * marquee-select started well away from a previously-hovered face still
+   * read the old hoverFace and began a push/pull nowhere near the click.
+   */
+  private raycastFace(e: PointerEvent): { view: PartView; groupIndex: number } | null {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    const candidates = [...this.parts.values()].filter((v) => v.group.visible);
+    const hit = this.raycaster.intersectObjects(candidates.map((v) => v.mesh), false)[0];
+    const faceIndex = hit?.faceIndex;
+    if (faceIndex == null) return null;
+
+    const view = candidates.find((v) => v.mesh === hit.object);
+    const geometry = view?.mesh.geometry as THREE.BufferGeometry | undefined;
+    if (!view || !geometry) return null;
+    const groupIndex = getFaceIndex(faceIndex, geometry);
+    return groupIndex < 0 ? null : { view, groupIndex };
+  }
+
+  /**
+   * Shapr3D-style face hover: whatever flat OR curved face the pointer is
+   * directly over — on any visible part, selected or not — is painted red
+   * (see MATERIALS.faceHighlight), so a face is something you can literally
+   * see and click, not just something that appears once its parent object is
+   * already selected. Skipped whenever some other gesture (an existing drag,
+   * the gizmo, a marquee) already owns the pointer, so it never fights them.
+   */
+  private updateFaceHover(e: PointerEvent) {
+    if (
+      this.toolMode !== "select" || this.showResult || this.gizmo.dragging ||
+      this.pushPullDrag || this.navDrag || this.resizeDrag ||
+      this.grab?.active || this.marquee?.active
+    ) {
+      this.clearFaceHover();
+      return;
+    }
+
+    const found = this.raycastFace(e);
+    if (!found) {
+      this.clearFaceHover();
+      return;
+    }
+    if (this.hoverFace && this.hoverFace.view === found.view && this.hoverFace.groupIndex === found.groupIndex) {
+      return; // same face as last frame — nothing to change
+    }
+    this.clearFaceHover();
+    this.highlightFace(found.groupIndex, found.view.mesh.geometry as THREE.BufferGeometry);
+    this.hoverFace = found;
+  }
+
   /**
    * Starts a push/pull if the pointer went down on one of the face arrows.
    * The whole gesture resolves to a signed distance along the face normal,
@@ -881,6 +978,80 @@ export class Scene {
       handle,
       handleBasePosition: handle.position.clone(),
       worldNormal,
+      ephemeral: false,
+    };
+    this.controls.enabled = false;
+    this.gizmo.enabled = false;
+    e.preventDefault();
+    return true;
+  }
+
+  /**
+   * Path 2 of beginPushPull: a direct click-drag on whatever planar face is
+   * currently hovered (see updateFaceHover), not just the small fixed arrow
+   * updatePushPullOverlay places at the face centre — this is what lets a
+   * drag started anywhere on the face itself work, Shapr3D-style.
+   *
+   * Deliberately still gated on the part already being selected, unlike
+   * Shapr3D's own "one click on any face, selected or not" gesture: this
+   * app's PRIMARY select-mode drag is click-and-drag-the-body-to-move-it (a
+   * deliberately TinkerCAD-matched interaction from earlier in the project),
+   * and a flat face is most of a typical primitive's clickable surface — if
+   * a face-drag meant push/pull even before the object was selected, that
+   * body-move gesture would be unreachable by dragging almost anywhere on
+   * most shapes. Once an object IS selected, though, push/pull is the more
+   * useful thing for a face-drag to mean (repositioning it again is the
+   * gizmo's job at that point), so it takes over from there. A curved face
+   * still highlights on hover regardless of selection — it just never starts
+   * a drag here, planar or not, since it always falls through to path 1.
+   */
+  private beginPushPullFromHover(e: PointerEvent): boolean {
+    if (this.toolMode !== "select" || this.showResult) return false;
+    // A fresh raycast at THIS event's coordinates, not this.hoverFace — see
+    // raycastFace()'s doc comment for why trusting the cached hover here
+    // caused a real bug (a stale hover resuming a push/pull nowhere near a
+    // later, unrelated click).
+    const found = this.raycastFace(e);
+    if (!found) return false;
+    const { view, groupIndex } = found;
+    const partId = [...this.parts.entries()].find(([, v]) => v === view)?.[0];
+    const face = view.faces?.[groupIndex];
+    if (!partId || !face || !face.planar || !this.selectedIds.includes(partId)) return false;
+
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    view.group.updateWorldMatrix(true, true);
+    const at = this.kernelLocalToWorld(view, face.point);
+    const worldNormal = this.kernelNormalToWorld(view, face.normal);
+    const project = (p: THREE.Vector3) => {
+      const v = p.clone().project(this.camera);
+      return { x: ((v.x + 1) / 2) * rect.width, y: ((1 - v.y) / 2) * rect.height };
+    };
+    const origin = project(at);
+    const along = project(at.clone().add(worldNormal));
+    const dx = along.x - origin.x;
+    const dy = along.y - origin.y;
+    const pixelsPerUnit = Math.hypot(dx, dy);
+    if (pixelsPerUnit < 1e-3) return false;
+
+    const scale = Math.max(0.5, this.worldSnapTolerance(at) * 0.85);
+    const handle = makeArrow();
+    handle.position.copy(at).addScaledVector(worldNormal, scale * 1.1);
+    handle.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), worldNormal);
+    handle.scale.setScalar(scale);
+    this.pushPullHandles.add(handle);
+
+    this.pushPullDrag = {
+      id: partId,
+      localPoint: face.point,
+      localNormal: face.normal,
+      screenDir: { x: dx / pixelsPerUnit, y: dy / pixelsPerUnit },
+      pixelsPerUnit,
+      downScreen: { x: e.clientX, y: e.clientY },
+      active: false,
+      handle,
+      handleBasePosition: handle.position.clone(),
+      worldNormal,
+      ephemeral: true,
     };
     this.controls.enabled = false;
     this.gizmo.enabled = false;
@@ -1097,6 +1268,12 @@ export class Scene {
     // for orbit/pan and must never be misread as a click on release.
     if (e.button !== 0) return;
     this.downAt = { x: e.clientX, y: e.clientY };
+    // Whatever gesture starts here owns the pointer until it ends — none of
+    // them re-run updateFaceHover while active (see its own guard), so any
+    // highlight left over from before would otherwise just sit there stale
+    // for the whole gesture. beginPushPullFromHover below re-raycasts fresh
+    // regardless, so clearing this first is purely cosmetic, not load-bearing.
+    this.clearFaceHover();
 
     const navNdc = this.navNdc(e);
     if (navNdc) {
@@ -1126,7 +1303,7 @@ export class Scene {
     // Before beginResize: the face arrows sit outside the bounds cage, but
     // an arrow near a corner could otherwise fall inside beginResize's own
     // screen-space grab radius and be swallowed by it.
-    if (this.beginPushPull(e)) {
+    if (this.beginPushPull(e) || this.beginPushPullFromHover(e)) {
       this.downAt = null;
       return;
     }
@@ -1283,7 +1460,10 @@ export class Scene {
     }
 
     const g = this.grab;
-    if (!g) return;
+    if (!g) {
+      this.updateFaceHover(e);
+      return;
+    }
 
     if (!g.active) {
       if (Math.hypot(e.clientX - g.downScreen.x, e.clientY - g.downScreen.y) <= CLICK_SLOP_PX) {
@@ -1353,7 +1533,12 @@ export class Scene {
       this.controls.enabled = true;
       this.gizmo.enabled = true;
       this.pushPullLabelEl.style.display = "none";
-      drag.handle.position.copy(drag.handleBasePosition);
+      if (drag.ephemeral) {
+        this.pushPullHandles.remove(drag.handle);
+        disposeArrow(drag.handle);
+      } else {
+        drag.handle.position.copy(drag.handleBasePosition);
+      }
       if (drag.active) {
         const distance = this.pushPullDistance(e, drag);
         // A drag that resolved to nothing is not an edit — never turn a

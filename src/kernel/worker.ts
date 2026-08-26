@@ -114,20 +114,38 @@ function toMesh(name: string, s: AnySolid, quality: MeshQuality): KernelMesh {
   return { name, faces: s.mesh(quality), edges: s.meshEdges(quality) };
 }
 
-/** The planar faces of a top-level part, in its own local frame — push/pull
- *  handles in the viewport are placed from this. Skipped for a MeshShape
- *  (an import, or anything a boolean touched an import in): those have no
- *  OCCT face topology to walk. */
+/** Every face of a top-level part, in its own local frame — lets the
+ *  viewport highlight whichever one the pointer is directly over (planar or
+ *  curved) and, for a planar one, push/pull it. Skipped for a MeshShape (an
+ *  import, or anything a boolean touched an import in): those have no OCCT
+ *  face topology to walk. faceId is just this loop's own index, matching
+ *  s.mesh()'s faceGroups[].faceId — both are built by walking the same
+ *  solid's s.faces list, so the two line up without needing to agree on it
+ *  through any other channel. */
 function faceInfoOf(s: AnySolid): FaceInfo[] | undefined {
   if (isMesh(s)) return undefined;
-  const out: FaceInfo[] = [];
-  for (const face of s.faces) {
-    if (face.geomType !== "PLANE") continue;
-    const c = face.center;
-    const n = face.normalAt(c);
-    out.push({ point: [c.x, c.y, c.z], normal: [n.x, n.y, n.z] });
-  }
-  return out;
+  return s.faces.map((face): FaceInfo => {
+    try {
+      const c = face.center;
+      const n = face.normalAt(c);
+      return {
+        planar: face.geomType === "PLANE",
+        point: [c.x, c.y, c.z],
+        normal: [n.x, n.y, n.z],
+      };
+    } catch {
+      // Some non-planar geometries — a cylinder's curved side, confirmed —
+      // throw a raw, uncatchable-looking WebAssembly exception straight out
+      // of .center/.normalAt() in this replicad-opencascadejs build. Same
+      // family of build-level quirk as importSTL()'s (see shape.ts) — not
+      // fixable here, only worked around. Hover-highlighting this face only
+      // needs its position in this array to line up with the mesh's own
+      // faceGroups order, not a real point/normal, so fall back to a
+      // placeholder and mark it non-planar — push/pull was never offered
+      // for a curved face anyway.
+      return { planar: false, point: [0, 0, 0], normal: [0, 0, 1] };
+    }
+  });
 }
 
 function volumeOf(s: AnySolid): number {
