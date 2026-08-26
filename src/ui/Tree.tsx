@@ -63,7 +63,13 @@ function Row({ node, depth, selectedIds, invalid, onSelect, onToggleCollapsed }:
         )}
         <span
           className={
-            node.isHole ? "dot hole" : group ? "dot group" : node.type === "import" ? "dot import" : "dot"
+            node.isHole
+              ? "dot hole"
+              : group
+                ? "dot group"
+                : node.type === "import" || node.type === "edit"
+                  ? "dot import"
+                  : "dot"
           }
         />
         <span className="label">{node.name}</span>

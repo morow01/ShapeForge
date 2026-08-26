@@ -21,6 +21,8 @@ interface Props {
   /** Alt-drag: creates a copy of `id` and returns its new id (or null),
    *  synchronously, so the Scene can keep dragging that id instead. */
   onDuplicate: (id: string) => string | null;
+  /** Push/pull: a face on `id` was dragged `distance` mm along its normal. */
+  onPushPull: (id: string, op: { point: Vec3; normal: Vec3; distance: number }) => void;
   onDragChange: (dragging: boolean) => void;
 }
 
@@ -45,6 +47,7 @@ export function Viewport(props: Props) {
     scene.onTransformObject = (id, patch) => latest.current.onTransform(id, patch);
     scene.onAlignObjects = (updates) => latest.current.onAlign(updates);
     scene.onDuplicateObject = (id) => latest.current.onDuplicate(id);
+    scene.onPushPullFace = (id, op) => latest.current.onPushPull(id, op);
     scene.onDragChange = (dragging) => latest.current.onDragChange(dragging);
 
     scene.setParts(latest.current.parts);

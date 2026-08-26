@@ -12,6 +12,7 @@ import { loadSTLPreview } from "./stlPreview";
 import type { AnySolid } from "./shape";
 import type {
   BuildError,
+  FaceInfo,
   KernelMesh,
   MeshedEdges,
   MeshedFaces,
@@ -113,6 +114,22 @@ function toMesh(name: string, s: AnySolid, quality: MeshQuality): KernelMesh {
   return { name, faces: s.mesh(quality), edges: s.meshEdges(quality) };
 }
 
+/** The planar faces of a top-level part, in its own local frame — push/pull
+ *  handles in the viewport are placed from this. Skipped for a MeshShape
+ *  (an import, or anything a boolean touched an import in): those have no
+ *  OCCT face topology to walk. */
+function faceInfoOf(s: AnySolid): FaceInfo[] | undefined {
+  if (isMesh(s)) return undefined;
+  const out: FaceInfo[] = [];
+  for (const face of s.faces) {
+    if (face.geomType !== "PLANE") continue;
+    const c = face.center;
+    const n = face.normalAt(c);
+    out.push({ point: [c.x, c.y, c.z], normal: [n.x, n.y, n.z] });
+  }
+  return out;
+}
+
 function volumeOf(s: AnySolid): number {
   return isMesh(s) ? s.volume() : measureVolume(s);
 }
@@ -144,6 +161,7 @@ function localKey(spec: NodeSpec): string {
     ]);
   }
   if (spec.type === "import") return JSON.stringify([spec.type, spec.blobId]);
+  if (spec.type === "edit") return JSON.stringify([spec.type, localKey(spec.base), spec.ops]);
   return JSON.stringify([spec.type, spec.kind, spec.params]);
 }
 
@@ -154,7 +172,7 @@ function localKey(spec: NodeSpec): string {
  * objects existed, even though only one of them was actually being touched.
  * A cache hit skips the OCCT call entirely, not just the retriangulation.
  */
-const meshCache = new Map<string, { key: string; mesh: KernelMesh }>();
+const meshCache = new Map<string, { key: string; mesh: KernelMesh; faces?: FaceInfo[] }>();
 
 /** Collects per-node failures so one bad node cannot blank the whole scene. */
 function collector() {
@@ -211,7 +229,7 @@ const api = {
       const cached = meshCache.get(spec.id);
 
       if (cached && cached.key === key) {
-        parts.push({ id: spec.id, isHole: spec.isHole, mesh: cached.mesh });
+        parts.push({ id: spec.id, isHole: spec.isHole, mesh: cached.mesh, faces: cached.faces });
         continue;
       }
 
@@ -229,8 +247,9 @@ const api = {
           const solid = await makeLocal(spec, onError, onProgress);
           if (solid) {
             const mesh = toMesh(spec.id, solid, EDIT_QUALITY);
-            meshCache.set(spec.id, { key, mesh });
-            parts.push({ id: spec.id, isHole: spec.isHole, mesh });
+            const faces = faceInfoOf(solid);
+            meshCache.set(spec.id, { key, mesh, faces });
+            parts.push({ id: spec.id, isHole: spec.isHole, mesh, faces });
           } else {
             meshCache.delete(spec.id);
           }

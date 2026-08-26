@@ -1,5 +1,5 @@
 import { PRIMITIVES } from "./types";
-import type { BooleanOp, PrimitiveKind, SceneNode, Vec3 } from "./types";
+import type { BooleanOp, PrimitiveKind, PushPullOp, SceneNode, Vec3 } from "./types";
 
 const KEY = "cad.document";
 /** Bump when the node shape changes incompatibly; older saves are then ignored
@@ -66,7 +66,24 @@ function parseNode(raw: unknown): SceneNode | null {
     return { ...base, type: "import", blobId: n.blobId, fileName: n.fileName, byteSize: n.byteSize };
   }
 
+  if (n.type === "edit") {
+    const parsedBase = parseNode(n.base);
+    if (!parsedBase || (parsedBase.type !== "object" && parsedBase.type !== "group")) return null;
+    if (!Array.isArray(n.ops)) return null;
+    const ops = n.ops.map(parseOp).filter((op): op is PushPullOp => op !== null);
+    if (!ops.length) return null;
+    return { ...base, type: "edit", base: parsedBase, ops };
+  }
+
   return null;
+}
+
+function parseOp(raw: unknown): PushPullOp | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  if (!isVec3(o.point) || !isVec3(o.normal)) return null;
+  if (typeof o.distance !== "number" || !Number.isFinite(o.distance)) return null;
+  return { point: o.point, normal: o.normal, distance: o.distance };
 }
 
 export function loadDocument(): SceneNode[] {
@@ -107,6 +124,7 @@ export function highestIdSuffix(nodes: SceneNode[]): number {
       const m = /^n-(\d+)$/.exec(n.id);
       if (m) max = Math.max(max, Number(m[1]));
       if (n.type === "group") walk(n.children);
+      if (n.type === "edit") walk([n.base]);
     }
   };
   walk(nodes);

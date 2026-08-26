@@ -1,4 +1,4 @@
-import type { BooleanOp, PrimitiveKind, Vec3 } from "../document/types";
+import type { BooleanOp, PrimitiveKind, PushPullOp, Vec3 } from "../document/types";
 
 /** Typed arrays keep large imported scans compact while structured-cloning
  *  efficiently across the worker boundary. Replicad's own meshes use arrays. */
@@ -49,12 +49,31 @@ export interface ImportSpec extends SpecBase {
   blobId: string;
 }
 
-export type NodeSpec = ObjectSpec | GroupSpec | ImportSpec;
+export interface EditSpec extends SpecBase {
+  type: "edit";
+  base: NodeSpec;
+  ops: PushPullOp[];
+}
+
+export type NodeSpec = ObjectSpec | GroupSpec | ImportSpec | EditSpec;
+
+/** One flat (planar) face of a top-level part, in the part's own local
+ *  frame — everything push/pull needs to let the viewport show a handle on
+ *  it and, from a click there, describe a PushPullOp back to the kernel.
+ *  Curved faces (a cylinder's side, say) are omitted entirely: there is no
+ *  single well-defined push/pull direction for those. */
+export interface FaceInfo {
+  point: Vec3;
+  normal: Vec3;
+}
 
 export interface ScenePart {
   id: string;
   isHole: boolean;
   mesh: KernelMesh;
+  /** Omitted for parts with no OCCT topology (an import, or anything a
+   *  MeshShape boolean touched) — push/pull just has nothing to offer there. */
+  faces?: FaceInfo[];
 }
 
 /** A node whose parameters cannot describe a real solid. */

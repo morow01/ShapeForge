@@ -77,6 +77,8 @@ export function Inspector({
         </>
       ) : node.type === "import" ? (
         <ImportInfo node={node} />
+      ) : node.type === "edit" ? (
+        <EditInfo node={node} />
       ) : (
         <ObjectParams node={node} onParam={onParam} onTransform={onTransform} />
       )}
@@ -174,6 +176,25 @@ function ImportInfo({ node }: { node: Extract<SceneNode, { type: "import" }> }) 
         <dd>{formatBytes(node.byteSize)}</dd>
       </dl>
       <p className="hint">Original geometry is preserved; use Scale to resize it proportionally.</p>
+    </>
+  );
+}
+
+function EditInfo({ node }: { node: Extract<SceneNode, { type: "edit" }> }) {
+  const baseLabel = isGroup(node.base) ? "Combined shape" : PRIMITIVES[node.base.kind].label;
+  return (
+    <>
+      <h2>Edited shape</h2>
+      <dl className="readout">
+        <dt>Built from</dt>
+        <dd>{baseLabel}</dd>
+        <dt>Push/pull edits</dt>
+        <dd>{node.ops.length}</dd>
+      </dl>
+      <p className="hint">
+        No longer defined by width/height/radius — like an imported file, use Scale to resize it as
+        a whole.
+      </p>
     </>
   );
 }

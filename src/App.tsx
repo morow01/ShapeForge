@@ -47,6 +47,18 @@ const toSpec = (n: SceneNode): NodeSpec => {
       isHole: n.isHole,
     };
   }
+  if (n.type === "edit") {
+    return {
+      type: "edit",
+      id: n.id,
+      base: toSpec(n.base),
+      ops: n.ops,
+      position: n.position,
+      rotation: n.rotation,
+      scale: n.scale,
+      isHole: n.isHole,
+    };
+  }
   return {
     type: "object",
     id: n.id,
@@ -103,7 +115,9 @@ const shapeOf = (n: SceneNode): unknown => {
   }
   // blobId never changes for an import node, so this is stable — importSTL()
   // never re-runs just because the node moved.
-  return n.type === "import" ? [n.id, "import", n.blobId] : [n.id, n.kind, n.params];
+  if (n.type === "import") return [n.id, "import", n.blobId];
+  if (n.type === "edit") return [n.id, "edit", shapeOf(n.base), n.ops];
+  return [n.id, n.kind, n.params];
 };
 
 export function App() {
@@ -122,6 +136,7 @@ export function App() {
     setTransform,
     setPositions,
     duplicateNodes,
+    pushPullFace,
     setHole,
     setGroupOp,
     toggleCollapsed,
@@ -605,12 +620,13 @@ export function App() {
           onTransform={onTransform}
           onAlign={setPositions}
           onDuplicate={onDuplicate}
+          onPushPull={pushPullFace}
           onDragChange={onDragChange}
         />
         <div className="canvas-help">
           {toolMode === "align"
             ? "Click a dot to align minimum, centre, or maximum · A Align · Esc Select"
-            : "V Select · M Move · R Rotate · A Align · Alt-drag duplicate · Shift-drag straight · Right-drag orbit · Scroll zoom"}
+            : "V Select · M Move · R Rotate · A Align · Drag a face arrow to push/pull · Alt-drag duplicate · Shift-drag straight · Right-drag orbit"}
         </div>
         {error && <div className="canvas-error">{error}</div>}
         {!error && busy && busySince && busyNow - busySince > 8000 && (

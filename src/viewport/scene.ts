@@ -3,7 +3,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
 import { syncGeometries } from "replicad-threejs-helper";
 import type { ReplicadMesh, ThreeGeometry } from "replicad-threejs-helper";
-import type { KernelMesh, ScenePart } from "../kernel/types";
+import type { FaceInfo, KernelMesh, ScenePart } from "../kernel/types";
 import type { SceneNode, Vec3 } from "../document/types";
 import { snapBounds } from "../snapping/snap";
 import type { Bounds3, SnapTarget } from "../snapping/snap";
@@ -53,6 +53,24 @@ interface Marquee {
   additive: boolean;
 }
 
+interface PushPullDrag {
+  id: string;
+  /** The target face, in the kernel's ORIGINAL local frame (see
+   *  kernelLocalPoint()) — what actually gets sent as the PushPullOp. */
+  localPoint: Vec3;
+  localNormal: Vec3;
+  /** How a 2D mouse delta becomes a signed 1D distance: the screen-space
+   *  (pixel) direction one world unit along the face normal projects to,
+   *  and how many of those pixels correspond to that one world unit. */
+  screenDir: { x: number; y: number };
+  pixelsPerUnit: number;
+  downScreen: { x: number; y: number };
+  active: boolean;
+  handle: THREE.Object3D;
+  handleBasePosition: THREE.Vector3;
+  worldNormal: THREE.Vector3;
+}
+
 interface ResizeDrag {
   id: string;
   startScale: Vec3;
@@ -82,6 +100,9 @@ interface PartView {
    * pivot. Document positions still refer to the kernel's original origin. */
   pivot: THREE.Vector3;
   isHole: boolean;
+  /** Planar faces, in the kernel's ORIGINAL (pre-pivot-shift) local frame —
+   *  see kernelLocalPoint(). Undefined for a part with no OCCT topology. */
+  faces?: FaceInfo[];
 }
 
 const MATERIALS = {
@@ -171,6 +192,32 @@ function syncKernelGeometry(mesh: KernelMesh, previous: ThreeGeometry[] = []): T
   return [{ faces, lines }];
 }
 
+/** One push/pull grip: a stubby arrow (shaft + cone) built pointing along
+ *  +Y, so a single setFromUnitVectors aims it down any face normal. Drawn
+ *  without depth testing so a face's own arrow is never buried in it. */
+function makeArrow(): THREE.Object3D {
+  const material = new THREE.MeshBasicMaterial({ color: 0x1c9e8e, depthTest: false });
+  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.09, 0.7, 10), material);
+  shaft.position.y = 0.35;
+  const head = new THREE.Mesh(new THREE.ConeGeometry(0.22, 0.42, 12), material);
+  head.position.y = 0.9;
+  const group = new THREE.Group();
+  group.add(shaft, head);
+  group.renderOrder = 26;
+  shaft.renderOrder = 26;
+  head.renderOrder = 26;
+  return group;
+}
+
+function disposeArrow(handle: THREE.Object3D) {
+  handle.traverse((child) => {
+    const mesh = child as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    mesh.geometry.dispose();
+    (mesh.material as THREE.Material).dispose();
+  });
+}
+
 export class Scene {
   private host: HTMLElement;
   private renderer: THREE.WebGLRenderer;
@@ -184,6 +231,14 @@ export class Scene {
   private alignBox = new THREE.Box3Helper(new THREE.Box3(), 0x00a9b7);
   private alignHandles = new THREE.Group();
   private alignHandleMeshes: THREE.Mesh[] = [];
+  /** One arrow per planar face of the single selected part — push/pull. */
+  private pushPullHandles = new THREE.Group();
+  private pushPullHandleMeshes: THREE.Object3D[] = [];
+  /** id+face-count the handle pool was last built for, so it is only rebuilt
+   *  when that actually changes (every other frame just repositions them). */
+  private pushPullPoolKey = "";
+  private pushPullDrag: PushPullDrag | null = null;
+  private pushPullLabelEl: HTMLDivElement;
   private dimensionInputs: HTMLInputElement[] = [];
   private resizeDrag: ResizeDrag | null = null;
   private resizeConstrained = true;
@@ -235,6 +290,11 @@ export class Scene {
    *  synchronously — the caller then drags that id instead of the original,
    *  with no kernel rebuild to wait for. */
   onDuplicateObject: ((id: string) => string | null) | null = null;
+  /** Push/pull: a face on `id` was pushed or pulled by `distance` (mm, along
+   *  the face's own outward normal — see PushPullOp in document/types.ts). */
+  onPushPullFace:
+    | ((id: string, op: { point: Vec3; normal: Vec3; distance: number }) => void)
+    | null = null;
 
   constructor(host: HTMLElement) {
     this.host = host;
@@ -264,6 +324,15 @@ export class Scene {
       "box-shadow:0 2px 10px rgba(15,30,40,0.18);";
     host.appendChild(this.navCubeFrame);
 
+    // The live push/pull readout ("12.5 mm") — plain DOM/CSS, same reasoning
+    // as the marquee rectangle: a 2D overlay is simpler and pixel-exact here.
+    this.pushPullLabelEl = document.createElement("div");
+    this.pushPullLabelEl.style.cssText =
+      "position:absolute;display:none;pointer-events:none;transform:translate(-50%,-130%);" +
+      "background:#1c9e8e;color:#fff;font:600 12px system-ui,sans-serif;" +
+      "padding:3px 8px;border-radius:10px;white-space:nowrap;";
+    host.appendChild(this.pushPullLabelEl);
+
     this.setupResizeOverlay();
     this.setupAlignOverlay();
 
@@ -286,6 +355,7 @@ export class Scene {
     this.scene.add(this.gizmo.getHelper());
     this.scene.add(this.guides.group);
     this.scene.add(this.resizeBox, this.resizeHandles, this.alignBox, this.alignHandles);
+    this.scene.add(this.pushPullHandles);
 
     this.addLights();
     this.addGrid();
@@ -416,7 +486,7 @@ export class Scene {
 
   // ---- parts ------------------------------------------------------------
 
-  private makeView(mesh: KernelMesh, isHole: boolean): PartView {
+  private makeView(mesh: KernelMesh, isHole: boolean, faces?: FaceInfo[]): PartView {
     const geom = syncKernelGeometry(mesh);
     const pivot = this.centreGeometry(geom);
     const group = new THREE.Group();
@@ -427,7 +497,7 @@ export class Scene {
     );
     group.add(m, wire);
     this.scene.add(group);
-    return { group, mesh: m, wire, geom, pivot, isHole };
+    return { group, mesh: m, wire, geom, pivot, isHole, faces };
   }
 
   /** Alt-drag needs a real Object3D to drag the instant the gesture starts —
@@ -479,8 +549,9 @@ export class Scene {
         existing.mesh.geometry = existing.geom[0].faces;
         existing.wire.geometry = existing.geom[0].lines;
         existing.isHole = part.isHole;
+        existing.faces = part.faces;
       } else {
-        this.parts.set(part.id, this.makeView(part.mesh, part.isHole));
+        this.parts.set(part.id, this.makeView(part.mesh, part.isHole, part.faces));
       }
     }
 
@@ -542,6 +613,7 @@ export class Scene {
     if (this.resultView) this.resultView.group.visible = this.showResult;
     this.updateResizeOverlay();
     this.updateAlignOverlay();
+    this.updatePushPullOverlay();
   }
 
   /** Draws a TinkerCAD-style bounds cage, eight corner handles, and editable
@@ -681,6 +753,149 @@ export class Scene {
     this.updateAlignOverlay();
   }
 
+  /**
+   * A point in the kernel's ORIGINAL local frame (what FaceInfo/PushPullOp
+   * use) converted to world space, and back. centreGeometry() shifts each
+   * part's render geometry by -pivot and compensates on the group, so a
+   * kernel-local point p sits at group.matrixWorld * (p - pivot).
+   */
+  private kernelLocalToWorld(view: PartView, p: Vec3): THREE.Vector3 {
+    return new THREE.Vector3(p[0], p[1], p[2]).sub(view.pivot).applyMatrix4(view.group.matrixWorld);
+  }
+
+  /** Rotation only — a normal must not pick up the group's translation. */
+  private kernelNormalToWorld(view: PartView, n: Vec3): THREE.Vector3 {
+    return new THREE.Vector3(n[0], n[1], n[2])
+      .applyQuaternion(view.group.getWorldQuaternion(new THREE.Quaternion()))
+      .normalize();
+  }
+
+  /**
+   * One small arrow per planar face of the single selected part, sitting on
+   * the face and pointing out along its normal — Shapr3D's push/pull grips.
+   * Only in Select mode, and only for a part the kernel gave face topology
+   * for (never an import — see faceInfoOf() in kernel/worker.ts).
+   */
+  private updatePushPullOverlay() {
+    const id = this.selectedIds.length === 1 ? this.selectedIds[0] : null;
+    const view = id ? this.parts.get(id) : undefined;
+    const faces = view?.faces;
+    const visible =
+      this.toolMode === "select" && !!view && !!faces && faces.length > 0 && !this.showResult &&
+      view.group.visible;
+    this.pushPullHandles.visible = visible;
+    if (!visible || !view || !faces) {
+      this.pushPullPoolKey = "";
+      return;
+    }
+
+    // Rebuilding the arrows every frame would churn geometry for nothing —
+    // only their placement actually changes as the camera or object moves.
+    const key = `${id}:${faces.length}`;
+    if (this.pushPullPoolKey !== key) {
+      this.rebuildPushPullPool(faces.length);
+      this.pushPullPoolKey = key;
+    }
+
+    view.group.updateWorldMatrix(true, true);
+    for (let i = 0; i < faces.length; i++) {
+      const handle = this.pushPullHandleMeshes[i];
+      const at = this.kernelLocalToWorld(view, faces[i].point);
+      const normal = this.kernelNormalToWorld(view, faces[i].normal);
+      // Keep a constant on-screen size, like the resize/align handles.
+      const scale = Math.max(0.5, this.worldSnapTolerance(at) * 0.85);
+      handle.position.copy(at).addScaledVector(normal, scale * 1.1);
+      handle.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), normal);
+      handle.scale.setScalar(scale);
+      handle.userData.faceIndex = i;
+      handle.userData.partId = id;
+    }
+  }
+
+  /** Grows/shrinks the arrow pool to exactly `count`, reusing what exists. */
+  private rebuildPushPullPool(count: number) {
+    while (this.pushPullHandleMeshes.length > count) {
+      const handle = this.pushPullHandleMeshes.pop()!;
+      this.pushPullHandles.remove(handle);
+      disposeArrow(handle);
+    }
+    while (this.pushPullHandleMeshes.length < count) {
+      const handle = makeArrow();
+      this.pushPullHandles.add(handle);
+      this.pushPullHandleMeshes.push(handle);
+    }
+  }
+
+  /**
+   * Starts a push/pull if the pointer went down on one of the face arrows.
+   * The whole gesture resolves to a signed distance along the face normal,
+   * so the projected screen direction of that normal is computed once here
+   * rather than re-derived every move.
+   */
+  private beginPushPull(e: PointerEvent): boolean {
+    if (!this.pushPullHandles.visible) return false;
+    const id = this.selectedIds.length === 1 ? this.selectedIds[0] : null;
+    const view = id ? this.parts.get(id) : undefined;
+    const faces = view?.faces;
+    if (!id || !view || !faces) return false;
+
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    const hit = this.raycaster.intersectObjects(this.pushPullHandleMeshes, true)[0];
+    if (!hit) return false;
+
+    // intersectObjects(recursive) can report a child cone/shaft, so walk up
+    // to whichever ancestor actually carries the face index.
+    let handle: THREE.Object3D | null = hit.object;
+    while (handle && handle.userData.faceIndex === undefined) handle = handle.parent;
+    if (!handle || handle.userData.partId !== id) return false;
+    const face = faces[handle.userData.faceIndex as number];
+    if (!face) return false;
+
+    const at = this.kernelLocalToWorld(view, face.point);
+    const worldNormal = this.kernelNormalToWorld(view, face.normal);
+    const project = (p: THREE.Vector3) => {
+      const v = p.clone().project(this.camera);
+      return { x: ((v.x + 1) / 2) * rect.width, y: ((1 - v.y) / 2) * rect.height };
+    };
+    const origin = project(at);
+    const along = project(at.clone().add(worldNormal));
+    const dx = along.x - origin.x;
+    const dy = along.y - origin.y;
+    const pixelsPerUnit = Math.hypot(dx, dy);
+    // Face pointing (almost) straight at or away from the camera: its normal
+    // barely projects to any screen direction, so a drag cannot express a
+    // distance along it. Orbit slightly and try again.
+    if (pixelsPerUnit < 1e-3) return false;
+
+    this.pushPullDrag = {
+      id,
+      localPoint: face.point,
+      localNormal: face.normal,
+      screenDir: { x: dx / pixelsPerUnit, y: dy / pixelsPerUnit },
+      pixelsPerUnit,
+      downScreen: { x: e.clientX, y: e.clientY },
+      active: false,
+      handle,
+      handleBasePosition: handle.position.clone(),
+      worldNormal,
+    };
+    this.controls.enabled = false;
+    this.gizmo.enabled = false;
+    e.preventDefault();
+    return true;
+  }
+
+  /** Distance (mm) the pointer currently represents, snapped to 0.5mm. */
+  private pushPullDistance(e: PointerEvent, drag: PushPullDrag): number {
+    const dx = e.clientX - drag.downScreen.x;
+    const dy = e.clientY - drag.downScreen.y;
+    const along = dx * drag.screenDir.x + dy * drag.screenDir.y;
+    return Math.round((along / drag.pixelsPerUnit) * 2) / 2;
+  }
+
   private applyTypedDimension(input: HTMLInputElement) {
     const id = input.dataset.nodeId;
     const current = Number(input.dataset.currentSize);
@@ -731,6 +946,7 @@ export class Scene {
     this.attachGizmo();
     this.updateResizeOverlay();
     this.updateAlignOverlay();
+    this.updatePushPullOverlay();
   }
 
   /** The gizmo drives one node at a time — the most recently selected. */
@@ -907,6 +1123,13 @@ export class Scene {
       this.downAt = null;
       return;
     }
+    // Before beginResize: the face arrows sit outside the bounds cage, but
+    // an arrow near a corner could otherwise fall inside beginResize's own
+    // screen-space grab radius and be swallowed by it.
+    if (this.beginPushPull(e)) {
+      this.downAt = null;
+      return;
+    }
     if (this.beginResize(e)) return;
 
     // A gizmo-handle drag claims the event first: its own pointerdown
@@ -956,6 +1179,29 @@ export class Scene {
    * as before — this never changes what a non-dragging click does.
    */
   private onPointerMove = (e: PointerEvent) => {
+    if (this.pushPullDrag) {
+      const drag = this.pushPullDrag;
+      if (!drag.active) {
+        if (Math.hypot(e.clientX - drag.downScreen.x, e.clientY - drag.downScreen.y) <= CLICK_SLOP_PX) {
+          return;
+        }
+        drag.active = true;
+        this.onDragChange?.(true);
+      }
+      const distance = this.pushPullDistance(e, drag);
+      // Preview by sliding the arrow only. The solid itself cannot follow
+      // live — every step is a real OCCT boolean — so it updates once, on
+      // release, and the readout carries the value in the meantime.
+      drag.handle.position.copy(drag.handleBasePosition).addScaledVector(drag.worldNormal, distance);
+      const rect = this.renderer.domElement.getBoundingClientRect();
+      const p = drag.handle.position.clone().project(this.camera);
+      this.pushPullLabelEl.style.display = "block";
+      this.pushPullLabelEl.style.left = `${((p.x + 1) / 2) * rect.width}px`;
+      this.pushPullLabelEl.style.top = `${((1 - p.y) / 2) * rect.height}px`;
+      this.pushPullLabelEl.textContent = `${distance > 0 ? "+" : ""}${distance.toFixed(1)} mm`;
+      return;
+    }
+
     if (this.navDrag) {
       const d = this.navDrag;
       const dx = e.clientX - d.downScreen.x;
@@ -1100,6 +1346,29 @@ export class Scene {
   private onPointerUp = (e: PointerEvent) => {
     const down = this.downAt;
     this.downAt = null;
+
+    if (this.pushPullDrag) {
+      const drag = this.pushPullDrag;
+      this.pushPullDrag = null;
+      this.controls.enabled = true;
+      this.gizmo.enabled = true;
+      this.pushPullLabelEl.style.display = "none";
+      drag.handle.position.copy(drag.handleBasePosition);
+      if (drag.active) {
+        const distance = this.pushPullDistance(e, drag);
+        // A drag that resolved to nothing is not an edit — never turn a
+        // parametric node into a baked one for a 0mm push.
+        if (Math.abs(distance) >= 0.5) {
+          this.onPushPullFace?.(drag.id, {
+            point: drag.localPoint,
+            normal: drag.localNormal,
+            distance,
+          });
+        }
+        this.onDragChange?.(false);
+      }
+      return;
+    }
 
     if (this.navDrag) {
       const wasClick = !this.navDrag.active;
@@ -1450,6 +1719,7 @@ export class Scene {
     this.controls.update();
     this.updateResizeOverlay();
     this.updateAlignOverlay();
+    this.updatePushPullOverlay();
     this.renderer.render(this.scene, this.camera);
     this.renderNavCube();
   }
@@ -1500,10 +1770,12 @@ export class Scene {
     this.guides.dispose();
     this.alignHandleMeshes[0]?.geometry.dispose();
     for (const handle of this.alignHandleMeshes) (handle.material as THREE.Material).dispose();
+    for (const handle of this.pushPullHandleMeshes) disposeArrow(handle);
     this.renderer.dispose();
     for (const input of this.dimensionInputs) input.remove();
     this.host.removeChild(this.renderer.domElement);
     this.host.removeChild(this.marqueeEl);
     this.host.removeChild(this.navCubeFrame);
+    this.host.removeChild(this.pushPullLabelEl);
   }
 }

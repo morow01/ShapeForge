@@ -166,6 +166,34 @@ export interface ImportNode extends NodeBase {
   byteSize: number;
 }
 
-export type SceneNode = ObjectNode | GroupNode | ImportNode;
+/** One push/pull: a face on the (frozen) base shape, identified by a point
+ *  and outward normal in the base's own local frame — not by index, since
+ *  a later op's face only exists after earlier ops have already run — and
+ *  a signed distance along that normal (positive adds material, negative
+ *  removes it). Re-locating "the same" face after a rebuild is a nearest-
+ *  match search (see findFace() in kernel/shape.ts), so it only works
+ *  reliably on flat (planar) faces — the only kind push/pull targets. */
+export interface PushPullOp {
+  point: Vec3;
+  normal: Vec3;
+  distance: number;
+}
+
+/**
+ * A shape produced by pushing/pulling a face of an ordinary object or group.
+ * That is no longer expressible as primitive parameters, so — like an
+ * imported STL — it stops being parametrically editable: `base` is a frozen
+ * snapshot of whatever it was built from (at the local origin, unrotated,
+ * unscaled — this node's own position/rotation/scale now own its placement,
+ * same split as every other node type), and `ops` replay on top of it, in
+ * order, on every rebuild.
+ */
+export interface EditNode extends NodeBase {
+  type: "edit";
+  base: ObjectNode | GroupNode;
+  ops: PushPullOp[];
+}
+
+export type SceneNode = ObjectNode | GroupNode | ImportNode | EditNode;
 
 export const isGroup = (n: SceneNode): n is GroupNode => n.type === "group";

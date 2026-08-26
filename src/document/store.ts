@@ -13,10 +13,12 @@ import {
 } from "../geometry/triangle";
 import type {
   BooleanOp,
+  EditNode,
   GroupNode,
   ImportNode,
   ObjectNode,
   PrimitiveKind,
+  PushPullOp,
   SceneNode,
   Vec3,
 } from "./types";
@@ -118,6 +120,10 @@ interface DocState {
    *  them, and selects the new copies. Returns the new top-level ids, in the
    *  same order as `source`. */
   duplicateNodes: (source: SceneNode[], offset: Vec3) => string[];
+  /** Push/pull: turns an ordinary object or group into an EditNode the first
+   *  time it is called for that id (freezing its current definition as
+   *  `base`), or appends another op if it already is one. */
+  pushPullFace: (id: string, op: PushPullOp) => void;
   setHole: (id: string, isHole: boolean) => void;
   setGroupOp: (id: string, op: BooleanOp) => void;
   toggleCollapsed: (id: string) => void;
@@ -240,6 +246,34 @@ export const useDoc = create<DocState>()(
         set((s) => ({ nodes: [...s.nodes, ...clones], selectedIds: clones.map((c) => c.id) }));
         afterBatchedMutation();
         return clones.map((c) => c.id);
+      },
+
+      pushPullFace: (id, op) => {
+        set((s) => ({
+          nodes: updateNode(s.nodes, id, (n) => {
+            if (n.type === "edit") return { ...n, ops: [...n.ops, op] };
+            if (n.type === "import") return n; // guard — the UI never offers this on an import
+            const base: ObjectNode | GroupNode = {
+              ...n,
+              position: [0, 0, 0],
+              rotation: [0, 0, 0],
+              scale: [1, 1, 1],
+            };
+            const edit: EditNode = {
+              type: "edit",
+              id: n.id,
+              name: n.name,
+              position: n.position,
+              rotation: n.rotation,
+              scale: n.scale,
+              isHole: n.isHole,
+              base,
+              ops: [op],
+            };
+            return edit;
+          }),
+        }));
+        afterBatchedMutation();
       },
 
       setHole: (id, isHole) =>

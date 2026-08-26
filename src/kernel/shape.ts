@@ -2,16 +2,18 @@ import {
   makeBaseBox,
   makeCylinder,
   makeSphere,
+  basicFaceExtrusion,
+  Vector,
   draw,
   importSTLAsMesh,
   measureVolume,
   MeshShape,
 } from "replicad";
-import type { Shape3D } from "replicad";
+import type { Face, Shape3D } from "replicad";
 import { InvalidShapeError, solveTriangle } from "../geometry/triangle";
 import { getBlob } from "../document/blobStore";
 import type { Vec3 } from "../document/types";
-import type { ImportSpec, NodeSpec, ObjectSpec } from "./types";
+import type { EditSpec, ImportSpec, NodeSpec, ObjectSpec } from "./types";
 
 export { InvalidShapeError };
 
@@ -134,7 +136,85 @@ async function loadImport(blobId: string): Promise<MeshShape> {
 function hasImport(spec: NodeSpec): boolean {
   if (spec.type === "import") return true;
   if (spec.type === "group") return spec.children.some(hasImport);
+  if (spec.type === "edit") return hasImport(spec.base);
   return false;
+}
+
+/**
+ * Re-locates, on the CURRENT shape, the same planar face a PushPullOp was
+ * created against — it cannot be addressed by index, since a later op's
+ * target face is only created once earlier ops have already reshaped the
+ * solid. "Same face" here means: still planar, facing the same way, and
+ * lying in the same plane as the point recorded when the op was made — a
+ * plain nearest-match search, not true topological naming, but sufficient
+ * as long as the base shape upstream of these ops never itself changes
+ * (which is exactly the deal a node makes once it has been pushed/pulled —
+ * see EditNode in document/types.ts).
+ */
+function findFace(solid: Shape3D, point: Vec3, normal: Vec3, tolerance = 0.05): Face | null {
+  let best: Face | null = null;
+  let bestDistance = Infinity;
+  for (const face of solid.faces) {
+    if (face.geomType !== "PLANE") continue;
+    const c = face.center;
+    const n = face.normalAt(c);
+    const facing = n.x * normal[0] + n.y * normal[1] + n.z * normal[2];
+    if (facing < 0.9) continue; // not (close enough to) the same outward direction
+    const planeDistance = Math.abs(
+      (point[0] - c.x) * n.x + (point[1] - c.y) * n.y + (point[2] - c.z) * n.z,
+    );
+    if (planeDistance < bestDistance) {
+      bestDistance = planeDistance;
+      best = face;
+    }
+  }
+  return bestDistance <= tolerance ? best : null;
+}
+
+/**
+ * Extrudes `face` into a prism `distance` deep along its own outward normal
+ * and fuses that volume into `solid` (pulling, distance > 0) or cuts it away
+ * (pushing, distance < 0) — a push/pull.
+ *
+ * The prism is always built along the OUTWARD normal, even when pushing:
+ * cutting wants the solid material sitting just inside the face, which is
+ * the same prism mirrored, so a push extrudes inward (-normal) instead. Both
+ * directions therefore start from the face itself and never leave a sliver
+ * behind it.
+ */
+function pushPullFace(solid: Shape3D, face: Face, distance: number): Shape3D {
+  if (Math.abs(distance) < 1e-6) return solid;
+  const n = face.normalAt(face.center);
+  const direction = new Vector([n.x, n.y, n.z]).normalized().multiply(distance);
+  const prism = basicFaceExtrusion(face, direction) as Shape3D;
+  return (distance > 0 ? solid.fuse(prism) : solid.cut(prism)) as Shape3D;
+}
+
+async function makeEdit(
+  spec: EditSpec,
+  onError?: (id: string, msg: string) => void,
+  onProgress?: (id: string) => void,
+): Promise<AnySolid | null> {
+  const base = await makeLocal(spec.base, onError, onProgress);
+  if (!base) return null;
+  if (isMesh(base)) {
+    onError?.(spec.id, "Push/pull isn't supported on an imported mesh.");
+    return base;
+  }
+
+  let solid = base;
+  for (const op of spec.ops) {
+    const face = findFace(solid, op.point, op.normal);
+    if (!face) {
+      onError?.(
+        spec.id,
+        "A pushed/pulled face could not be found after rebuilding — try redoing that edit.",
+      );
+      break;
+    }
+    solid = pushPullFace(solid, face, op.distance);
+  }
+  return solid;
 }
 
 /**
@@ -305,6 +385,10 @@ export async function makeLocal(
   if (spec.type === "import") {
     onProgress?.(spec.id);
     return makeImport(spec);
+  }
+  if (spec.type === "edit") {
+    onProgress?.(spec.id);
+    return makeEdit(spec, onError, onProgress);
   }
 
   const build = async (spin: boolean, report?: (id: string, msg: string) => void) => {
