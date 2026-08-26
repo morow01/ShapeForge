@@ -248,7 +248,15 @@ export class Scene {
    *  when that actually changes (every other frame just repositions them). */
   private pushPullPoolKey = "";
   private pushPullDrag: PushPullDrag | null = null;
-  private pushPullLabelEl: HTMLDivElement;
+  /** The live push/pull readout — a real input, not just a label, so a plain
+   *  click on a face (no drag) can show it ready to type an exact distance
+   *  into, the same way the resize handles' dimension inputs work. See
+   *  showPushPullInput()/commitPushPullInput(). */
+  private pushPullLabelEl: HTMLInputElement;
+  /** What the typed-input pill would apply to, while it's open — set by
+   *  showPushPullInput(), read by commitPushPullInput(), cleared once it
+   *  closes (blur/Enter/Escape or a new drag starting elsewhere). */
+  private pushPullPending: { id: string; localPoint: Vec3; localNormal: Vec3 } | null = null;
   /** Whichever face the pointer is directly over right now — Shapr3D-style
    *  hover, independent of object selection: any face of any visible part,
    *  planar or curved, not just the arrows on a pre-selected object's own
@@ -342,11 +350,29 @@ export class Scene {
 
     // The live push/pull readout ("12.5 mm") — plain DOM/CSS, same reasoning
     // as the marquee rectangle: a 2D overlay is simpler and pixel-exact here.
-    this.pushPullLabelEl = document.createElement("div");
+    // A real number input, styled like the resize handles' own dimension
+    // pills (same white/teal look), not just a label: a plain click on a
+    // face with no drag opens it ready to type an exact distance into,
+    // same as typing an exact width/height there already works.
+    this.pushPullLabelEl = document.createElement("input");
+    this.pushPullLabelEl.type = "number";
+    this.pushPullLabelEl.step = "0.5";
+    this.pushPullLabelEl.title = "Push/pull distance in millimetres";
+    this.pushPullLabelEl.setAttribute("aria-label", "Push/pull distance in millimetres");
     this.pushPullLabelEl.style.cssText =
-      "position:absolute;display:none;pointer-events:none;transform:translate(-50%,-130%);" +
-      "background:#1c9e8e;color:#fff;font:600 12px system-ui,sans-serif;" +
-      "padding:3px 8px;border-radius:10px;white-space:nowrap;";
+      "position:absolute;display:none;z-index:30;width:70px;transform:translate(-50%,-130%);" +
+      "padding:5px 6px;border:1px solid #00a9b7;border-radius:10px;background:white;" +
+      "color:#25313b;font:600 12px system-ui,sans-serif;text-align:center;" +
+      "box-shadow:0 2px 7px rgba(0,0,0,.14);";
+    this.pushPullLabelEl.addEventListener("focus", () => this.onDragChange?.(true));
+    this.pushPullLabelEl.addEventListener("blur", () => this.commitPushPullInput());
+    this.pushPullLabelEl.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") this.pushPullLabelEl.blur();
+      else if (event.key === "Escape") {
+        this.pushPullPending = null; // Escape abandons the edit — see commitPushPullInput()
+        this.pushPullLabelEl.blur();
+      }
+    });
     host.appendChild(this.pushPullLabelEl);
 
     this.setupResizeOverlay();
@@ -1067,6 +1093,43 @@ export class Scene {
     return Math.round((along / drag.pixelsPerUnit) * 2) / 2;
   }
 
+  /** Opens the push/pull pill for typing an exact distance, at the same
+   *  screen position the live-drag readout would use — triggered by a plain
+   *  click (no drag) on a face's arrow/hover-highlight, the way clicking a
+   *  resize handle's dimension pill lets you type instead of dragging. */
+  private showPushPullInput(drag: PushPullDrag) {
+    this.pushPullPending = { id: drag.id, localPoint: drag.localPoint, localNormal: drag.localNormal };
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const p = drag.handleBasePosition.clone().project(this.camera);
+    this.pushPullLabelEl.style.display = "block";
+    this.pushPullLabelEl.style.left = `${((p.x + 1) / 2) * rect.width}px`;
+    this.pushPullLabelEl.style.top = `${((1 - p.y) / 2) * rect.height}px`;
+    this.pushPullLabelEl.value = "0";
+    this.pushPullLabelEl.focus();
+    this.pushPullLabelEl.select();
+  }
+
+  /** Applies (or abandons) whatever is in the push/pull pill, on blur/Enter/
+   *  Escape — pushPullPending is cleared by the Escape handler first when
+   *  that is why this fired, so this is also what a plain Escape resolves
+   *  to: close with nothing applied. */
+  private commitPushPullInput() {
+    const pending = this.pushPullPending;
+    this.pushPullPending = null;
+    this.pushPullLabelEl.style.display = "none";
+    this.onDragChange?.(false);
+    if (!pending) return;
+    const distance = Number(this.pushPullLabelEl.value);
+    // Same 0.5mm floor as a drag: a typed 0 (or nothing usable) is not an
+    // edit — never turn a parametric node into a baked one for that.
+    if (!Number.isFinite(distance) || Math.abs(distance) < 0.5) return;
+    this.onPushPullFace?.(pending.id, {
+      point: pending.localPoint,
+      normal: pending.localNormal,
+      distance,
+    });
+  }
+
   private applyTypedDimension(input: HTMLInputElement) {
     const id = input.dataset.nodeId;
     const current = Number(input.dataset.currentSize);
@@ -1375,7 +1438,11 @@ export class Scene {
       this.pushPullLabelEl.style.display = "block";
       this.pushPullLabelEl.style.left = `${((p.x + 1) / 2) * rect.width}px`;
       this.pushPullLabelEl.style.top = `${((1 - p.y) / 2) * rect.height}px`;
-      this.pushPullLabelEl.textContent = `${distance > 0 ? "+" : ""}${distance.toFixed(1)} mm`;
+      // Not focused during a live drag (the mouse button is down over the
+      // canvas, not this input) — just reflecting the value, same as before
+      // this became a real <input>. blur() below only fires from an actual
+      // focused edit, so this never races with commitPushPullInput().
+      this.pushPullLabelEl.value = distance.toFixed(1);
       return;
     }
 
@@ -1532,7 +1599,6 @@ export class Scene {
       this.pushPullDrag = null;
       this.controls.enabled = true;
       this.gizmo.enabled = true;
-      this.pushPullLabelEl.style.display = "none";
       if (drag.ephemeral) {
         this.pushPullHandles.remove(drag.handle);
         disposeArrow(drag.handle);
@@ -1540,6 +1606,7 @@ export class Scene {
         drag.handle.position.copy(drag.handleBasePosition);
       }
       if (drag.active) {
+        this.pushPullLabelEl.style.display = "none";
         const distance = this.pushPullDistance(e, drag);
         // A drag that resolved to nothing is not an edit — never turn a
         // parametric node into a baked one for a 0mm push.
@@ -1551,6 +1618,10 @@ export class Scene {
           });
         }
         this.onDragChange?.(false);
+      } else {
+        // A plain click, no drag: open the same pill for typing an exact
+        // distance instead, rather than doing nothing.
+        this.showPushPullInput(drag);
       }
       return;
     }
