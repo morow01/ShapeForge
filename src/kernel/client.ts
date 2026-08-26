@@ -176,4 +176,7 @@ export const kernel = {
   previewLocal: coalesceLatest((spec: NodeSpec) =>
     withWatchdog("scene", (raw) => raw.previewLocal(spec)),
   ),
+  // Not coalesced: an explicit, one-off user action (the "Remove broken
+  // edit" button), not a rebuild fired on every change.
+  pruneDeadOps: (spec: NodeSpec) => withWatchdog("scene", (raw) => raw.pruneDeadOps(spec)),
 };

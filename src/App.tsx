@@ -137,6 +137,7 @@ export function App() {
     setPositions,
     duplicateNodes,
     pushPullFace,
+    setOps,
     setHole,
     setGroupOp,
     toggleCollapsed,
@@ -433,6 +434,24 @@ export function App() {
     },
     [],
   );
+  // "Remove broken edit": permanently drops whichever op(s) in the SELECTED
+  // node's own history can no longer find their target face, instead of
+  // leaving them to keep re-failing (and re-showing the same error) on
+  // every future rebuild — see kernel/shape.ts's survivingOps(). Reads the
+  // current selection fresh at call time rather than closing over `selected`
+  // from render, same reasoning as onPreviewPushPull above.
+  const onPruneDeadOps = useCallback(async () => {
+    const s = useDoc.getState();
+    const id = s.selectedIds[s.selectedIds.length - 1];
+    const node = id ? findNode(s.nodes, id) : null;
+    if (!node || node.type !== "edit") return;
+    try {
+      const kept = await kernel.pruneDeadOps(toSpec(node) as EditSpec);
+      if (kept) setOps(node.id, kept);
+    } catch (e) {
+      setError(msg(e));
+    }
+  }, [setOps]);
   // A gizmo drag emits a change every frame; collapse the whole drag into one
   // undo step so undo jumps back to where the drag started.
   const onDragChange = useCallback(
@@ -713,6 +732,7 @@ export function App() {
               onOp={(op) => setGroupOp(selected.id, op)}
               onRename={(n) => rename(selected.id, n)}
               onDelete={removeSelected}
+              onPruneDeadOps={onPruneDeadOps}
             />
           ) : <div className="empty-state small">Select an object to edit its dimensions and position.</div>}
         </section>

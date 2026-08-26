@@ -267,6 +267,12 @@ export class Scene {
    *  when that actually changes (every other frame just repositions them). */
   private pushPullPoolKey = "";
   private pushPullDrag: PushPullDrag | null = null;
+  /** Bumped whenever a push/pull drag starts, or whenever the pill actually
+   *  resolves (commit or abandon) — see applyFinalPushPullPreview(). A
+   *  preview response captures this at request time and checks it again on
+   *  arrival: if it moved on, something newer already decided what this
+   *  part's geometry should be, and a late response must not clobber that. */
+  private pushPullGeneration = 0;
   /** The live push/pull readout — a real input, not just a label, so a plain
    *  click on a face (no drag) can show it ready to type an exact distance
    *  into, the same way the resize handles' dimension inputs work. See
@@ -1049,6 +1055,7 @@ export class Scene {
       originalPivot: view.pivot.clone(),
       lastPreviewAt: 0,
     };
+    this.pushPullGeneration++;
     this.controls.enabled = false;
     this.gizmo.enabled = false;
     e.preventDefault();
@@ -1133,6 +1140,7 @@ export class Scene {
       originalPivot: view.pivot.clone(),
       lastPreviewAt: 0,
     };
+    this.pushPullGeneration++;
     this.controls.enabled = false;
     this.gizmo.enabled = false;
     e.preventDefault();
@@ -1193,6 +1201,7 @@ export class Scene {
   private commitOrAbandonPushPull(apply: boolean) {
     const pending = this.pushPullPending;
     this.pushPullPending = null;
+    this.pushPullGeneration++; // invalidates any still-in-flight preview — see applyFinalPushPullPreview
     this.pushPullLabelEl.style.display = "none";
     this.onDragChange?.(false);
     if (!pending) return;
@@ -1251,6 +1260,36 @@ export class Scene {
     // different part) while this was in flight — a stale preview landing
     // late must not clobber whatever is current now.
     if (!mesh || this.pushPullDrag !== drag) return;
+    this.applyPreviewMesh(drag, mesh);
+  }
+
+  /**
+   * One extra, un-throttled preview call fired the instant a drag ends, at
+   * the EXACT release distance — not the last throttled sample, which can
+   * legitimately lag a little behind wherever the pointer actually ended up
+   * (see PUSH_PULL_PREVIEW_MS). Without this, the shape kept showing that
+   * slightly-earlier frame — arrow and pill both already at the true final
+   * value — until the real committed rebuild eventually landed a bit later
+   * and visibly snapped/settled into the true position: reported live as
+   * "after a split second... jumps like a little bit extra."
+   *
+   * Guarded by generation, not by `this.pushPullDrag !== drag` (that field
+   * is already null by the time this is called, deliberately, so a NEW drag
+   * can start immediately without waiting on this) — a captured generation
+   * number is invalidated by either a new drag starting or this same drag's
+   * pill actually resolving (commitOrAbandonPushPull) before this settles.
+   */
+  private async applyFinalPushPullPreview(drag: PushPullDrag, distance: number, generation: number) {
+    const mesh = await this.onPreviewPushPull?.(drag.id, {
+      point: drag.localPoint,
+      normal: drag.localNormal,
+      distance,
+    });
+    if (!mesh || generation !== this.pushPullGeneration) return;
+    this.applyPreviewMesh(drag, mesh);
+  }
+
+  private applyPreviewMesh(drag: PushPullDrag, mesh: KernelMesh) {
     // syncKernelGeometry reuses/mutates drag.view.geom's existing
     // BufferGeometry objects in place whenever the array length already
     // matches (always true here — one mesh in, one geometry pair out), so
@@ -1759,6 +1798,10 @@ export class Scene {
       if (drag.active) this.onDragChange?.(false); // closes the (empty) drag batch; the edit itself commits separately, below
       const distance = drag.active ? this.pushPullDistance(e, drag) : 0;
       this.showPushPullInput(drag, distance.toFixed(1));
+      // See applyFinalPushPullPreview's own doc comment — this is what stops
+      // the shape settling into place a moment after release instead of
+      // already being there.
+      if (drag.active) void this.applyFinalPushPullPreview(drag, distance, this.pushPullGeneration);
       return;
     }
 

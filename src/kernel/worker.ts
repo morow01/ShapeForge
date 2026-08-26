@@ -7,7 +7,7 @@ import wasmUrl from "replicad-opencascadejs/wasm?url";
 import ManifoldModule from "manifold-3d";
 import manifoldWasmUrl from "manifold-3d/manifold.wasm?url";
 import { setOC, setManifold, measureVolume, MeshShape } from "replicad";
-import { hasImport, isMesh, makeLocal } from "./shape";
+import { hasImport, isMesh, makeLocal, survivingOps } from "./shape";
 import { loadSTLPreview } from "./stlPreview";
 import type { AnySolid } from "./shape";
 import type {
@@ -21,6 +21,7 @@ import type {
   SceneBuild,
   ResultBuild,
 } from "./types";
+import type { PushPullOp } from "../document/types";
 
 let booted: Promise<void> | null = null;
 
@@ -339,6 +340,21 @@ const api = {
       // has committed to yet.
       return null;
     }
+  },
+
+  /**
+   * Replays an edit node's ops and returns just the ones that could still
+   * be found — for the "Remove broken edit" action: an op that fails here
+   * can never succeed again (its target face is permanently gone), so
+   * unlike an ordinary rebuild (which skips a dead op but leaves it in the
+   * document to keep re-failing and re-reporting the same error forever),
+   * this is what lets the app drop it for good. null for anything that
+   * isn't an edit node — nothing to prune.
+   */
+  async pruneDeadOps(spec: NodeSpec): Promise<PushPullOp[] | null> {
+    await init();
+    if (spec.type !== "edit") return null;
+    return survivingOps(spec);
   },
 };
 

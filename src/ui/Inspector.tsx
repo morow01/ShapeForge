@@ -16,6 +16,10 @@ interface Props {
   onOp: (op: BooleanOp) => void;
   onRename: (name: string) => void;
   onDelete: () => void;
+  /** Edit nodes only: permanently drops whichever push/pull op(s) can no
+   *  longer find their target face, instead of leaving them to keep
+   *  re-failing (and re-showing `error`) on every future rebuild. */
+  onPruneDeadOps: () => void;
 }
 
 const AXES = ["X", "Y", "Z"] as const;
@@ -31,6 +35,7 @@ export function Inspector({
   onOp,
   onRename,
   onDelete,
+  onPruneDeadOps,
 }: Props) {
   const group = isGroup(node);
 
@@ -78,7 +83,7 @@ export function Inspector({
       ) : node.type === "import" ? (
         <ImportInfo node={node} />
       ) : node.type === "edit" ? (
-        <EditInfo node={node} />
+        <EditInfo node={node} error={error} onPruneDeadOps={onPruneDeadOps} />
       ) : (
         <ObjectParams node={node} onParam={onParam} onTransform={onTransform} />
       )}
@@ -180,7 +185,15 @@ function ImportInfo({ node }: { node: Extract<SceneNode, { type: "import" }> }) 
   );
 }
 
-function EditInfo({ node }: { node: Extract<SceneNode, { type: "edit" }> }) {
+function EditInfo({
+  node,
+  error,
+  onPruneDeadOps,
+}: {
+  node: Extract<SceneNode, { type: "edit" }>;
+  error: string | null;
+  onPruneDeadOps: () => void;
+}) {
   const baseLabel = isGroup(node.base) ? "Combined shape" : PRIMITIVES[node.base.kind].label;
   return (
     <>
@@ -195,6 +208,18 @@ function EditInfo({ node }: { node: Extract<SceneNode, { type: "edit" }> }) {
         No longer defined by width/height/radius — like an imported file, use Scale to resize it as
         a whole.
       </p>
+      {error && (
+        <>
+          <button className="danger" onClick={onPruneDeadOps}>
+            Remove broken edit
+          </button>
+          <p className="hint">
+            One of this shape's push/pull edits can no longer find the face it targeted — usually
+            from an earlier edit that reshaped it away. This drops just that one edit for good; the
+            rest stay exactly as they are.
+          </p>
+        </>
+      )}
     </>
   );
 }

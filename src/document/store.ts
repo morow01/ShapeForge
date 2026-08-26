@@ -124,6 +124,11 @@ interface DocState {
    *  time it is called for that id (freezing its current definition as
    *  `base`), or appends another op if it already is one. */
   pushPullFace: (id: string, op: PushPullOp) => void;
+  /** Replaces an edit node's ops wholesale — used to permanently drop an op
+   *  that can never succeed again (see the kernel's pruneDeadOps/
+   *  survivingOps), not to add one (pushPullFace does that). A no-op for
+   *  any node that isn't an edit. */
+  setOps: (id: string, ops: PushPullOp[]) => void;
   setHole: (id: string, isHole: boolean) => void;
   setGroupOp: (id: string, op: BooleanOp) => void;
   toggleCollapsed: (id: string) => void;
@@ -272,6 +277,13 @@ export const useDoc = create<DocState>()(
             };
             return edit;
           }),
+        }));
+        afterBatchedMutation();
+      },
+
+      setOps: (id, ops) => {
+        set((s) => ({
+          nodes: updateNode(s.nodes, id, (n) => (n.type === "edit" ? { ...n, ops } : n)),
         }));
         afterBatchedMutation();
       },

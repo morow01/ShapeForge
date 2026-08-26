@@ -12,7 +12,7 @@ import {
 import type { Face, Shape3D } from "replicad";
 import { InvalidShapeError, solveTriangle } from "../geometry/triangle";
 import { getBlob } from "../document/blobStore";
-import type { Vec3 } from "../document/types";
+import type { PushPullOp, Vec3 } from "../document/types";
 import type { EditSpec, ImportSpec, NodeSpec, ObjectSpec } from "./types";
 
 export { InvalidShapeError };
@@ -246,6 +246,36 @@ async function makeEdit(
     solid = pushPullFace(solid, face, op.distance);
   }
   return solid;
+}
+
+/**
+ * Replays spec.ops the same way makeEdit() does and returns just the ones
+ * that actually found their face — an op that fails here never can succeed
+ * again (the face it targeted is permanently gone; nothing about a LATER
+ * edit brings it back), so unlike makeEdit() itself, which skips a dead op
+ * but leaves it in place to keep re-failing and re-reporting the same error
+ * on every future rebuild forever, this is what lets the app permanently
+ * drop it from the node's own ops list instead — see the "Remove broken
+ * edit" action wired to this in the app layer. Mirrors makeEdit()'s replay
+ * loop exactly; kept as a separate function rather than a flag on makeEdit
+ * so that function's existing, already-verified behaviour is untouched.
+ */
+export async function survivingOps(
+  spec: EditSpec,
+  onError?: (id: string, msg: string) => void,
+  onProgress?: (id: string) => void,
+): Promise<PushPullOp[]> {
+  const base = await makeLocal(spec.base, onError, onProgress);
+  if (!base || isMesh(base)) return spec.ops; // nothing to replay against — leave as-is
+  let solid = base;
+  const kept: PushPullOp[] = [];
+  for (const op of spec.ops) {
+    const face = findFace(solid, op.point, op.normal);
+    if (!face) continue;
+    solid = pushPullFace(solid, face, op.distance);
+    kept.push(op);
+  }
+  return kept;
 }
 
 /**
