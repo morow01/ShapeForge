@@ -318,6 +318,28 @@ export class Scene {
   private selectedFace: { partId: string; groupIndex: number } | null = null;
   private pushPullHandleHovered = false;
   private dimensionInputs: HTMLInputElement[] = [];
+  /** Editable X/Y readouts of how far the object has moved from where the
+   *  current move began — TinkerCAD's offset display. */
+  private moveInputs: HTMLInputElement[] = [];
+  /** The L-shaped leader drawn on the build plate from the move's start
+   *  point to where the object is now, one leg per axis. */
+  private moveGuide = new THREE.Line(
+    new THREE.BufferGeometry().setAttribute(
+      "position",
+      new THREE.BufferAttribute(new Float32Array(9), 3),
+    ),
+    // depthTest stays ON, unlike the selection overlays: this leader lies on
+    // the build plate, so letting the object occlude the stretch that runs
+    // underneath it is what makes it read as measured along the floor rather
+    // than painted across the model.
+    new THREE.LineBasicMaterial({ color: 0x25313b, transparent: true, opacity: 0.7 }),
+  );
+  /** Where the object sat when the current move started, so the readout can
+   *  show a delta rather than an absolute position. Survives the drag itself
+   *  so the values stay on screen and editable afterwards, the way the
+   *  push/pull pill does. Cleared by anything that makes "from there" stop
+   *  meaning what it said — see clearMoveReadout. */
+  private moveReadout: { id: string; startPos: THREE.Vector3 } | null = null;
   private resizeDrag: ResizeDrag | null = null;
   private resizeConstrained = true;
   private toolMode: ToolMode = "select";
@@ -446,6 +468,9 @@ export class Scene {
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0xedf1f4);
+    // After the scene exists — this one adds itself to it, unlike the purely
+    // DOM-side overlays set up above.
+    this.setupMoveReadout();
 
     this.camera = this.makePerspective();
     this.camera.position.set(70, -70, 55);
@@ -556,6 +581,145 @@ export class Scene {
       this.host.appendChild(input);
       this.dimensionInputs.push(input);
     }
+  }
+
+  /** The offset readout: one editable field per ground axis, plus the leader
+   *  drawn between where the move started and where the object is now. */
+  private setupMoveReadout() {
+    this.moveGuide.visible = false;
+    this.moveGuide.renderOrder = 21;
+    this.moveGuide.frustumCulled = false;
+    this.scene.add(this.moveGuide);
+
+    for (const axis of ["X", "Y"] as const) {
+      const input = document.createElement("input");
+      input.type = "number";
+      input.step = "0.5";
+      input.title = `Moved along ${axis} in millimetres`;
+      input.setAttribute("aria-label", `Moved along ${axis} in millimetres`);
+      // Deliberately distinct from the dimension pills: those are sizes, these
+      // are signed offsets, and confusing the two would be easy at a glance.
+      input.style.cssText =
+        "position:absolute;display:none;z-index:30;width:66px;padding:5px 6px;" +
+        "border:1px solid #8a97a1;border-radius:5px;background:white;color:#25313b;" +
+        "font:12px system-ui;text-align:center;box-shadow:0 2px 7px rgba(0,0,0,.14);";
+      input.addEventListener("focus", () => this.onDragChange?.(true));
+      input.addEventListener("blur", () => {
+        this.applyTypedMove(input);
+        this.onDragChange?.(false);
+      });
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") input.blur();
+        else if (event.key === "Escape") {
+          // Put back what it was showing, then let it close without applying.
+          this.updateMoveReadout();
+          input.blur();
+        }
+      });
+      this.host.appendChild(input);
+      this.moveInputs.push(input);
+    }
+  }
+
+  /** Starts (or restarts) the offset readout for a move of `id`. */
+  private beginMoveReadout(id: string, startPos: THREE.Vector3) {
+    this.moveReadout = { id, startPos: startPos.clone() };
+  }
+
+  private clearMoveReadout() {
+    if (!this.moveReadout) return;
+    this.moveReadout = null;
+    this.moveGuide.visible = false;
+    for (const input of this.moveInputs) input.style.display = "none";
+  }
+
+  /**
+   * Positions the offset readout. Runs every frame alongside the other
+   * overlays, so it follows the object and the camera without needing anything
+   * to remember to refresh it.
+   */
+  private updateMoveReadout() {
+    const readout = this.moveReadout;
+    const view = readout ? this.parts.get(readout.id) : undefined;
+    const visible =
+      !!readout && !!view && this.toolMode === "select" && !this.showResult &&
+      view.group.visible && this.selectedIds.includes(readout.id);
+    this.moveGuide.visible = !!visible;
+    if (!visible || !readout || !view) {
+      for (const input of this.moveInputs) input.style.display = "none";
+      return;
+    }
+
+    view.group.updateWorldMatrix(true, true);
+    const now = view.group.position;
+    const dx = now.x - readout.startPos.x;
+    const dy = now.y - readout.startPos.y;
+
+    // Draw on the build plate under the object rather than through it, so the
+    // leader reads as a measurement on the ground the way TinkerCAD's does.
+    // Lifted a hair off the object's base so it cannot z-fight the grid when
+    // the object is sitting flat on the plate.
+    const z = new THREE.Box3().setFromObject(view.group).min.z + 0.02;
+    const from = new THREE.Vector3(readout.startPos.x, readout.startPos.y, z);
+    const elbow = new THREE.Vector3(now.x, readout.startPos.y, z);
+    const to = new THREE.Vector3(now.x, now.y, z);
+    const position = this.moveGuide.geometry.getAttribute("position") as THREE.BufferAttribute;
+    position.setXYZ(0, from.x, from.y, from.z);
+    position.setXYZ(1, elbow.x, elbow.y, elbow.z);
+    position.setXYZ(2, to.x, to.y, to.z);
+    position.needsUpdate = true;
+    this.moveGuide.geometry.computeBoundingSphere();
+
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const legs = [
+      { value: dx, at: from.clone().lerp(elbow, 0.5), shift: "translate(-50%, 10px)" },
+      { value: dy, at: elbow.clone().lerp(to, 0.5), shift: "translate(10px, -50%)" },
+    ];
+    for (let i = 0; i < this.moveInputs.length; i++) {
+      const input = this.moveInputs[i];
+      const leg = legs[i];
+      // A leg of zero length has no arrow to label and nowhere sensible to sit.
+      if (Math.abs(leg.value) < 0.005) {
+        input.style.display = "none";
+        continue;
+      }
+      const p = leg.at.project(this.camera);
+      input.style.display = "block";
+      if (document.activeElement !== input) input.value = leg.value.toFixed(2);
+      input.style.left = `${((p.x + 1) / 2) * rect.width}px`;
+      input.style.top = `${((1 - p.y) / 2) * rect.height}px`;
+      input.style.transform = leg.shift;
+    }
+  }
+
+  /** Moves the object so its offset along one axis equals the typed value,
+   *  leaving the other axis (and its height) exactly where they are. */
+  private applyTypedMove(input: HTMLInputElement) {
+    const readout = this.moveReadout;
+    const view = readout ? this.parts.get(readout.id) : undefined;
+    const typed = Number(input.value);
+    if (!readout || !view || !Number.isFinite(typed)) {
+      this.updateMoveReadout();
+      return;
+    }
+    const axis = this.moveInputs.indexOf(input);
+    const target = view.group.position.clone();
+    if (axis === 0) target.x = readout.startPos.x + typed;
+    else target.y = readout.startPos.y + typed;
+    if (target.equals(view.group.position)) return;
+
+    view.group.position.copy(target);
+    view.group.updateWorldMatrix(true, true);
+    // Same conversion the drag itself uses: the document stores a node's own
+    // origin, while group.position carries the mesh pivot baked in.
+    const rotatedPivot = view.pivot.clone().applyEuler(view.group.rotation);
+    this.onTransformObject?.(readout.id, {
+      position: [
+        target.x - rotatedPivot.x,
+        target.y - rotatedPivot.y,
+        target.z - rotatedPivot.z,
+      ],
+    });
   }
 
   private setupAlignOverlay() {
@@ -684,6 +848,11 @@ export class Scene {
     if (this.selectedFace && !selectedIds.includes(this.selectedFace.partId)) {
       this.selectedFace = null;
     }
+    // "Moved this far from there" stops meaning anything once the object it
+    // described is no longer the one selected.
+    if (this.moveReadout && !selectedIds.includes(this.moveReadout.id)) {
+      this.clearMoveReadout();
+    }
     this.applyPlacements();
     this.applyMaterials();
     this.attachGizmo();
@@ -731,6 +900,7 @@ export class Scene {
     this.updateResizeOverlay();
     this.updateAlignOverlay();
     this.updatePushPullOverlay();
+    this.updateMoveReadout();
   }
 
   /** Draws a TinkerCAD-style bounds cage, eight corner handles, and editable
@@ -1465,6 +1635,9 @@ export class Scene {
 
   setToolMode(mode: ToolMode) {
     const leavingFace = this.toolMode === "face" && mode !== "face";
+    // The offset readout belongs to select-tool dragging; leaving would strand
+    // a start point that the next return to select has no reason to honour.
+    if (mode !== "select") this.clearMoveReadout();
     this.toolMode = mode;
     if (leavingFace) {
       // A half-finished push/pull must not survive the tool switch — abandon
@@ -1485,6 +1658,7 @@ export class Scene {
     this.updateResizeOverlay();
     this.updateAlignOverlay();
     this.updatePushPullOverlay();
+    this.updateMoveReadout();
   }
 
   /** The gizmo drives one node at a time — the most recently selected. */
@@ -1866,6 +2040,9 @@ export class Scene {
         this.onSelectObject?.(g.id, false);
         this.onDragChange?.(true);
       }
+      // Measure from where THIS drag began — after the alt-drag branch above,
+      // so a duplicate measures from its own start rather than the original's.
+      this.beginMoveReadout(g.id, g.startPos);
     }
 
     const view = this.parts.get(g.id);
@@ -2285,6 +2462,7 @@ export class Scene {
     this.updateResizeOverlay();
     this.updateAlignOverlay();
     this.updatePushPullOverlay();
+    this.updateMoveReadout();
     this.renderer.render(this.scene, this.camera);
     this.renderNavCube();
   }
@@ -2338,6 +2516,9 @@ export class Scene {
     for (const handle of this.pushPullHandleMeshes) disposeArrow(handle);
     this.renderer.dispose();
     for (const input of this.dimensionInputs) input.remove();
+    for (const input of this.moveInputs) input.remove();
+    this.moveGuide.geometry.dispose();
+    (this.moveGuide.material as THREE.Material).dispose();
     this.host.removeChild(this.renderer.domElement);
     this.host.removeChild(this.marqueeEl);
     this.host.removeChild(this.navCubeFrame);
