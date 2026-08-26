@@ -8,6 +8,7 @@ import type { SceneNode, Vec3 } from "../document/types";
 import { snapBounds } from "../snapping/snap";
 import type { Bounds3, SnapTarget } from "../snapping/snap";
 import { SmartGuides } from "./guides";
+import { CUBE_MARGIN_PX, CUBE_PX, NavCube } from "./navcube";
 
 export type CameraMode = "perspective" | "orthographic";
 export type ToolMode = "select" | "move" | "rotate" | "align";
@@ -31,6 +32,19 @@ interface BodyGrab {
   plane: THREE.Plane;
   grabPoint: THREE.Vector3;
   startPos: THREE.Vector3;
+}
+
+interface NavDrag {
+  downScreen: { x: number; y: number };
+  /** False until the pointer clears the click threshold — before that it
+   *  might still turn out to be a plain click on a face (see onPointerUp). */
+  active: boolean;
+  target: THREE.Vector3;
+  /** Aligns the world's actual up axis to +Y and back, so orbiting here uses
+   *  the same up-agnostic spherical math OrbitControls itself relies on. */
+  quat: THREE.Quaternion;
+  quatInverse: THREE.Quaternion;
+  startSpherical: THREE.Spherical;
 }
 
 interface Marquee {
@@ -198,6 +212,12 @@ export class Scene {
    *  TinkerCAD's way of selecting several objects at once. */
   private marquee: Marquee | null = null;
   private marqueeEl: HTMLDivElement;
+  /** TinkerCAD-style view cube, rendered into a corner of this same canvas —
+   *  see renderNavCube(). Click a face to snap to it; drag to orbit freely. */
+  private navCube = new NavCube();
+  private navCubeFrame: HTMLDivElement;
+  private navDrag: NavDrag | null = null;
+  private navAnimFrame = 0;
 
   onSelectObject: ((id: string | null, additive: boolean) => void) | null = null;
   /** Marquee release: every id whose screen-space bounds landed fully inside
@@ -232,6 +252,17 @@ export class Scene {
       "border:1px solid #ffa53d;background:rgba(255,165,61,0.15);";
     if (getComputedStyle(host).position === "static") host.style.position = "relative";
     host.appendChild(this.marqueeEl);
+
+    // Purely decorative — a soft panel behind the view cube. CSS anchors it
+    // to the corner directly, so unlike the marquee it never needs updating
+    // on resize; the WebGL viewport it frames is still computed in pixels
+    // (see navRect()), independently, for the actual render and hit-testing.
+    this.navCubeFrame = document.createElement("div");
+    this.navCubeFrame.style.cssText =
+      `position:absolute;top:${CUBE_MARGIN_PX}px;right:${CUBE_MARGIN_PX}px;` +
+      `width:${CUBE_PX}px;height:${CUBE_PX}px;border-radius:12px;pointer-events:none;` +
+      "box-shadow:0 2px 10px rgba(15,30,40,0.18);";
+    host.appendChild(this.navCubeFrame);
 
     this.setupResizeOverlay();
     this.setupAlignOverlay();
@@ -801,6 +832,48 @@ export class Scene {
     if (this.altDown) this.guides.clear();
   };
 
+  /** The view cube's square viewport, top-right corner, in CSS pixels
+   *  (top-left origin, matching pointer events) — independent of the
+   *  decorative navCubeFrame div, which CSS positions the same way. */
+  private navRect() {
+    const w = this.renderer.domElement.clientWidth;
+    return { x: w - CUBE_PX - CUBE_MARGIN_PX, y: CUBE_MARGIN_PX, w: CUBE_PX, h: CUBE_PX };
+  }
+
+  /** `e`'s position as clip-space [-1, 1] coordinates within the view cube's
+   *  own viewport, or null when it falls outside that corner entirely. */
+  private navNdc(e: PointerEvent): { x: number; y: number } | null {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const nav = this.navRect();
+    const px = e.clientX - rect.left - nav.x;
+    const py = e.clientY - rect.top - nav.y;
+    if (px < 0 || py < 0 || px > nav.w || py > nav.h) return null;
+    return { x: (px / nav.w) * 2 - 1, y: -(py / nav.h) * 2 + 1 };
+  }
+
+  /** Eases the camera around to look straight at `dir` (one of
+   *  FACE_DIRECTIONS, world-space, from the target) along the shortest arc,
+   *  at whatever distance/zoom it is already at — a click on the view cube. */
+  private snapToDirection(dir: THREE.Vector3) {
+    cancelAnimationFrame(this.navAnimFrame);
+    const target = this.controls.target.clone();
+    const distance = this.camera.position.distanceTo(target);
+    const startDir = this.camera.position.clone().sub(target).normalize();
+    const endDir = dir.clone().normalize();
+    const rotation = new THREE.Quaternion().setFromUnitVectors(startDir, endDir);
+    const duration = 350;
+    const start = performance.now();
+    const step = () => {
+      const t = Math.min(1, (performance.now() - start) / duration);
+      const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+      const q = new THREE.Quaternion().slerp(rotation, eased);
+      this.camera.position.copy(target).add(startDir.clone().applyQuaternion(q).multiplyScalar(distance));
+      this.controls.update();
+      if (t < 1) this.navAnimFrame = requestAnimationFrame(step);
+    };
+    step();
+  }
+
   // ---- picking ------------------------------------------------------------
 
   private onPointerDown = (e: PointerEvent) => {
@@ -808,6 +881,27 @@ export class Scene {
     // for orbit/pan and must never be misread as a click on release.
     if (e.button !== 0) return;
     this.downAt = { x: e.clientX, y: e.clientY };
+
+    const navNdc = this.navNdc(e);
+    if (navNdc) {
+      // A click vs. a drag is only distinguishable in onPointerUp/Move (see
+      // the resize/align/body-drag patterns above) — start passive here,
+      // same as everything else that begins on the canvas.
+      const target = this.controls.target.clone();
+      const quat = new THREE.Quaternion().setFromUnitVectors(this.camera.up, new THREE.Vector3(0, 1, 0));
+      this.navDrag = {
+        downScreen: { x: e.clientX, y: e.clientY },
+        active: false,
+        target,
+        quat,
+        quatInverse: quat.clone().invert(),
+        startSpherical: new THREE.Spherical().setFromVector3(
+          this.camera.position.clone().sub(target).applyQuaternion(quat),
+        ),
+      };
+      this.downAt = null;
+      return;
+    }
 
     if (this.beginAlign(e)) {
       this.downAt = null;
@@ -862,6 +956,28 @@ export class Scene {
    * as before — this never changes what a non-dragging click does.
    */
   private onPointerMove = (e: PointerEvent) => {
+    if (this.navDrag) {
+      const d = this.navDrag;
+      const dx = e.clientX - d.downScreen.x;
+      const dy = e.clientY - d.downScreen.y;
+      if (!d.active) {
+        if (Math.hypot(dx, dy) <= CLICK_SLOP_PX) return;
+        d.active = true;
+        cancelAnimationFrame(this.navAnimFrame); // a drag interrupts any in-flight snap
+      }
+      // Same up-agnostic spherical math OrbitControls itself uses to turn a
+      // screen-space drag into an orbit — see NavDrag's quat/quatInverse.
+      const h = this.renderer.domElement.clientHeight;
+      const theta = d.startSpherical.theta - (2 * Math.PI * dx) / h;
+      const phi = THREE.MathUtils.clamp(d.startSpherical.phi - (2 * Math.PI * dy) / h, 1e-3, Math.PI - 1e-3);
+      const offset = new THREE.Vector3()
+        .setFromSpherical(new THREE.Spherical(d.startSpherical.radius, phi, theta))
+        .applyQuaternion(d.quatInverse);
+      this.camera.position.copy(d.target).add(offset);
+      this.controls.update();
+      return;
+    }
+
     if (this.resizeDrag) {
       const d = Math.hypot(e.clientX - this.resizeDrag.centreX, e.clientY - this.resizeDrag.centreY);
       const ratio = d / this.resizeDrag.startDistance;
@@ -984,6 +1100,17 @@ export class Scene {
   private onPointerUp = (e: PointerEvent) => {
     const down = this.downAt;
     this.downAt = null;
+
+    if (this.navDrag) {
+      const wasClick = !this.navDrag.active;
+      this.navDrag = null;
+      if (wasClick) {
+        const ndc = this.navNdc(e);
+        const hit = ndc && this.navCube.hitTest(ndc.x, ndc.y);
+        if (hit) this.snapToDirection(hit.dir);
+      }
+      return;
+    }
 
     if (this.resizeDrag) {
       this.resizeDrag = null;
@@ -1324,6 +1451,29 @@ export class Scene {
     this.updateResizeOverlay();
     this.updateAlignOverlay();
     this.renderer.render(this.scene, this.camera);
+    this.renderNavCube();
+  }
+
+  /** Draws the view cube into its own small corner viewport of this same
+   *  canvas, after the main render — a separate WebGL context/canvas would
+   *  cost a whole extra renderer for one small overlay. Always mirrors
+   *  whichever direction the main camera is currently looking from. */
+  private renderNavCube() {
+    const offsetDir = this.camera.position.clone().sub(this.controls.target).normalize();
+    this.navCube.syncOrientation(offsetDir, this.camera.up);
+
+    const w = this.renderer.domElement.clientWidth;
+    const h = this.renderer.domElement.clientHeight;
+    const nav = this.navRect();
+    // WebGL's viewport/scissor origin is bottom-left; navRect() is top-left
+    // (CSS/pointer-event space), so the y coordinate flips here.
+    const glY = h - nav.y - nav.h;
+    this.renderer.setScissorTest(true);
+    this.renderer.setScissor(nav.x, glY, nav.w, nav.h);
+    this.renderer.setViewport(nav.x, glY, nav.w, nav.h);
+    this.renderer.render(this.navCube.scene, this.navCube.camera);
+    this.renderer.setScissorTest(false);
+    this.renderer.setViewport(0, 0, w, h);
   }
 
   /** Canvas backing-store size, for tests and diagnostics. */
@@ -1333,6 +1483,8 @@ export class Scene {
 
   dispose() {
     cancelAnimationFrame(this.frame);
+    cancelAnimationFrame(this.navAnimFrame);
+    this.navCube.dispose();
     this.renderer.domElement.removeEventListener("pointerdown", this.onPointerDown);
     this.renderer.domElement.removeEventListener("pointermove", this.onPointerMove);
     this.renderer.domElement.removeEventListener("pointerup", this.onPointerUp);
@@ -1352,5 +1504,6 @@ export class Scene {
     for (const input of this.dimensionInputs) input.remove();
     this.host.removeChild(this.renderer.domElement);
     this.host.removeChild(this.marqueeEl);
+    this.host.removeChild(this.navCubeFrame);
   }
 }
