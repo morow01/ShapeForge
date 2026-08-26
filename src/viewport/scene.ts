@@ -11,7 +11,7 @@ import { SmartGuides } from "./guides";
 import { CUBE_MARGIN_PX, CUBE_PX, NavCube } from "./navcube";
 
 export type CameraMode = "perspective" | "orthographic";
-export type ToolMode = "select" | "move" | "rotate" | "align";
+export type ToolMode = "select" | "face" | "move" | "rotate" | "align";
 type AlignAxis = 0 | 1 | 2;
 type AlignAnchor = "min" | "center" | "max";
 
@@ -908,7 +908,7 @@ export class Scene {
     const faceIndex = this.selectedFace?.groupIndex ?? -1;
     const face = faces?.[faceIndex];
     const visible =
-      this.toolMode === "select" && !!view && !!face?.planar && face.pushPullable !== false && this.selectedIds.includes(id ?? "") &&
+      this.toolMode === "face" && !!view && !!face?.planar && face.pushPullable !== false && this.selectedIds.includes(id ?? "") &&
       !this.showResult && view.group.visible;
     this.pushPullHandles.visible = visible;
     if (!visible || !view || !face || !id) {
@@ -1051,7 +1051,7 @@ export class Scene {
    */
   private updateFaceHover(e: PointerEvent) {
     if (
-      this.toolMode !== "select" || this.showResult || this.gizmo.dragging ||
+      this.toolMode !== "face" || this.showResult || this.gizmo.dragging ||
       this.pushPullDrag || this.navDrag || this.resizeDrag ||
       this.grab?.active || this.marquee?.active
     ) {
@@ -1464,7 +1464,22 @@ export class Scene {
   // ---- gizmo ------------------------------------------------------------
 
   setToolMode(mode: ToolMode) {
+    const leavingFace = this.toolMode === "face" && mode !== "face";
     this.toolMode = mode;
+    if (leavingFace) {
+      // A half-finished push/pull must not survive the tool switch — abandon
+      // it rather than leaving its preview geometry and open distance pill
+      // behind with no tool left that could resolve them.
+      if (this.pushPullPending) this.commitOrAbandonPushPull(false);
+      this.clearFaceHover();
+      // Drop the red face highlight itself, not just the reference to it:
+      // clearFaceHover only removes a HOVER highlight and then repaints
+      // whichever face is selected, so clearing the selection alone would
+      // leave the last face painted with no tool active that explains it.
+      const held = this.selectedFace ? this.parts.get(this.selectedFace.partId) : undefined;
+      this.selectedFace = null;
+      if (held) clearHighlights(held.mesh.geometry as THREE.BufferGeometry);
+    }
     if (mode === "move" || mode === "rotate") this.gizmo.setMode(mode === "move" ? "translate" : "rotate");
     this.attachGizmo();
     this.updateResizeOverlay();
@@ -1957,7 +1972,10 @@ export class Scene {
 
     if (!down || this.gizmo.dragging) return;
     if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > CLICK_SLOP_PX) return;
-    if (!(e.ctrlKey || e.metaKey || e.shiftKey) && this.selectFaceAt(e)) return;
+    // Only the face tool turns a click into a face pick. Under the select
+    // tool a click on an object is just a click on the OBJECT — which is
+    // what makes plain dragging reliably move things.
+    if (this.toolMode === "face" && !(e.ctrlKey || e.metaKey || e.shiftKey) && this.selectFaceAt(e)) return;
     this.pick(e, e.ctrlKey || e.metaKey || e.shiftKey);
   };
 

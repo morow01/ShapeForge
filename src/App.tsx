@@ -668,6 +668,8 @@ export function App() {
         pasteClipboard();
       } else if (!mod && e.key.toLowerCase() === "v") {
         setToolMode("select");
+      } else if (!mod && e.key.toLowerCase() === "f") {
+        setToolMode("face");
       } else if (!mod && e.key.toLowerCase() === "m") {
         setToolMode("move");
       } else if (!mod && e.key.toLowerCase() === "r") {
@@ -751,6 +753,21 @@ export function App() {
             aria-label="Select tool"
           ><span className="tool-symbol cursor-symbol">➤</span></button>
           <button
+            className={toolMode === "face" ? "active" : ""}
+            onClick={() => setToolMode("face")}
+            title="Select a face to push/pull (F)"
+            aria-label="Face tool"
+          >
+            {/* A cube with its top face picked out — the one face lit against
+                two plain ones is what distinguishes "edit a face" from the
+                shape library's solid Box icon. */}
+            <svg className="tool-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <path d="M12 3 20 7.4 12 11.8 4 7.4Z" fill="currentColor" />
+              <path d="M4 8.9 11.4 13v7.9L4 16.8Z" fill="currentColor" opacity=".3" />
+              <path d="M20 8.9 12.6 13v7.9L20 16.8Z" fill="currentColor" opacity=".45" />
+            </svg>
+          </button>
+          <button
             className={toolMode === "move" ? "active" : ""}
             onClick={() => setToolMode("move")}
             title="Move with axis controls (M)"
@@ -791,7 +808,9 @@ export function App() {
         <div className="canvas-help">
           {toolMode === "align"
             ? "Click a dot to align minimum, centre, or maximum · A Align · Esc Select"
-            : "V Select · M Move · R Rotate · A Align · Drag a face arrow to push/pull · Alt-drag duplicate · Shift-drag straight · Right-drag orbit"}
+            : toolMode === "face"
+            ? "Click a flat face, then drag its arrow or type a distance to push/pull · Esc Select · Right-drag orbit"
+            : "V Select · F Face · M Move · R Rotate · A Align · Drag an object to move it · Alt-drag duplicate · Shift-drag straight · Right-drag orbit"}
         </div>
         {error && <div className="canvas-error">{error}</div>}
         {!error && busy && busySince && busyNow - busySince > 8000 && (

@@ -110,6 +110,7 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 }
 .tool-rail button.active { color: #087a79; background: #dff5f4; border-color: #55c5c3; }
 .tool-symbol { font-size: 20px; line-height: 1; }
+.tool-icon { display: block; width: 21px; height: 21px; }
 .cursor-symbol { transform: rotate(-40deg); font-size: 18px; }
 
 .panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 3px 14px; }
