@@ -7,7 +7,16 @@ import wasmUrl from "replicad-opencascadejs/wasm?url";
 import ManifoldModule from "manifold-3d";
 import manifoldWasmUrl from "manifold-3d/manifold.wasm?url";
 import { setOC, setManifold, measureVolume, MeshShape } from "replicad";
-import { hasImport, isMesh, makeLocal, survivingOps } from "./shape";
+import type { Shape3D } from "replicad";
+import {
+  applyPushPullPreview,
+  hasImport,
+  isMesh,
+  makeLocal,
+  makePushPullPreviewBase,
+  place,
+  survivingOps,
+} from "./shape";
 import { loadSTLPreview } from "./stlPreview";
 import type { AnySolid } from "./shape";
 import type {
@@ -44,6 +53,11 @@ function initOC(): Promise<void> {
 // (manifold-3d) instead — see shape.ts for how that composes with ordinary
 // OCCT primitives in the same boolean.
 let manifoldBooted: Promise<void> | null = null;
+
+/** The stable part of the most recent live push/pull preview. One entry is
+ * enough because the worker is single-threaded and the UI coalesces each drag
+ * to its newest distance. Replacing it also prevents an unbounded shape cache. */
+let pushPullPreviewCache: { key: string; solid: Shape3D } | null = null;
 
 function initManifold(): Promise<void> {
   if (!manifoldBooted) {
@@ -192,7 +206,16 @@ function localKey(spec: NodeSpec): string {
  * objects existed, even though only one of them was actually being touched.
  * A cache hit skips the OCCT call entirely, not just the retriangulation.
  */
-const meshCache = new Map<string, { key: string; mesh: KernelMesh; faces?: FaceInfo[] }>();
+const meshCache = new Map<string, { key: string; mesh: KernelMesh; faces?: FaceInfo[]; solid?: AnySolid }>();
+
+/** The fully placed/booleaned root solid from the latest matching scene or
+ * merged-result build. Export can tessellate this directly instead of
+ * replaying an expensive combined object's entire edit history again. */
+let resultSolidCache: { key: string; solid: AnySolid } | null = null;
+
+function resultKey(specs: NodeSpec[]): string {
+  return JSON.stringify(specs.map((s) => [localKey(s), s.position, s.rotation, s.scale, s.isHole]));
+}
 
 /** Collects per-node failures so one bad node cannot blank the whole scene. */
 function collector() {
@@ -268,7 +291,7 @@ const api = {
           if (solid) {
             const mesh = toMesh(spec.id, solid, EDIT_QUALITY);
             const faces = faceInfoOf(solid);
-            meshCache.set(spec.id, { key, mesh, faces });
+            meshCache.set(spec.id, { key, mesh, faces, solid });
             parts.push({ id: spec.id, isHole: spec.isHole, mesh, faces });
           } else {
             meshCache.delete(spec.id);
@@ -286,6 +309,19 @@ const api = {
       if (!seen.has(id)) meshCache.delete(id);
     }
 
+    // The common editing case is one top-level object (including one complex
+    // combined/edited group). Its local solid was just evaluated above, so
+    // retain the correctly placed result for a near-instant subsequent STL
+    // export instead of evaluating the same history a second time.
+    if (specs.length === 1 && !specs[0].isHole) {
+      const cached = meshCache.get(specs[0].id);
+      resultSolidCache = cached?.solid && cached.key === localKey(specs[0])
+        ? { key: resultKey(specs), solid: place(cached.solid, specs[0]) }
+        : null;
+    } else if (resultSolidCache?.key !== resultKey(specs)) {
+      resultSolidCache = null;
+    }
+
     return { parts, errors, buildMs: performance.now() - t0 };
   },
 
@@ -297,6 +333,7 @@ const api = {
 
     const solid = await evaluateRoots(specs, onError, onProgress);
     if (!solid) return { mesh: null, volume: 0, faceCount: 0, errors, buildMs: 0 };
+    resultSolidCache = { key: resultKey(specs), solid };
 
     return {
       mesh: toMesh("result", solid, EXPORT_QUALITY),
@@ -307,11 +344,26 @@ const api = {
     };
   },
 
+  /** Fast export path used on the interactive worker: it never rebuilds. If
+   * the current scene/result solid is cached, only STL tessellation remains;
+   * otherwise the client falls back to the isolated heavy worker. */
+  async exportCachedSTL(specs: NodeSpec[]): Promise<Blob | null> {
+    await init();
+    const key = resultKey(specs);
+    return resultSolidCache?.key === key
+      ? blobSTLOf(resultSolidCache.solid, EXPORT_QUALITY)
+      : null;
+  },
+
   /** Exports the fully booleaned result as a binary STL, ready for the slicer. */
   async exportSTL(specs: NodeSpec[], onProgress?: (id: string) => void): Promise<Blob | null> {
     await init();
     const { onError } = collector();
-    const solid = await evaluateRoots(specs, onError, onProgress);
+    const key = resultKey(specs);
+    const solid = resultSolidCache?.key === key
+      ? resultSolidCache.solid
+      : await evaluateRoots(specs, onError, onProgress);
+    if (solid && resultSolidCache?.key !== key) resultSolidCache = { key, solid };
     // binary: true — smaller and faster to write/read than the ASCII default,
     // and every slicer (including Bambu Studio) reads it fine.
     return solid ? blobSTLOf(solid, EXPORT_QUALITY) : null;
@@ -332,7 +384,18 @@ const api = {
   async previewLocal(spec: NodeSpec): Promise<PreviewBuild | null> {
     await init();
     try {
-      const solid = await makeLocal(spec);
+      let solid: AnySolid | null;
+      if (spec.type === "edit" && spec.ops.length > 0 && !hasImport(spec.base)) {
+        const finalOp = spec.ops[spec.ops.length - 1];
+        const key = JSON.stringify({ base: spec.base, ops: spec.ops.slice(0, -1) });
+        if (pushPullPreviewCache?.key !== key) {
+          const base = await makePushPullPreviewBase(spec);
+          pushPullPreviewCache = base ? { key, solid: base } : null;
+        }
+        solid = pushPullPreviewCache ? applyPushPullPreview(pushPullPreviewCache.solid, finalOp) : null;
+      } else {
+        solid = await makeLocal(spec);
+      }
       if (!solid) return null;
       // Faces ride along too — not just for completeness: without this, the
       // push/pull arrow (positioned from a part's `faces`) stayed at its

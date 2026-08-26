@@ -210,6 +210,32 @@ function pushPullFace(solid: Shape3D, face: Face, distance: number): Shape3D {
   return (distance > 0 ? solid.fuse(prism) : solid.cut(prism)) as Shape3D;
 }
 
+/**
+ * Builds the stable portion of a live push/pull preview: the edit's base and
+ * every already-committed operation, excluding the tentative final operation
+ * whose distance changes on every pointer move. The worker caches this solid
+ * for the duration of a drag, which is especially important when the base is
+ * a group whose children require several boolean operations to combine.
+ */
+export async function makePushPullPreviewBase(spec: EditSpec): Promise<Shape3D | null> {
+  const base = await makeLocal(spec.base);
+  if (!base || isMesh(base)) return null;
+
+  let solid = base;
+  for (const op of spec.ops.slice(0, -1)) {
+    const face = findFace(solid, op.point, op.normal);
+    if (!face) continue;
+    solid = pushPullFace(solid, face, op.distance);
+  }
+  return solid;
+}
+
+/** Applies only the changing final operation to a cached preview base. */
+export function applyPushPullPreview(base: Shape3D, op: PushPullOp): Shape3D | null {
+  const face = findFace(base, op.point, op.normal);
+  return face ? pushPullFace(base, face, op.distance) : null;
+}
+
 async function makeEdit(
   spec: EditSpec,
   onError?: (id: string, msg: string) => void,

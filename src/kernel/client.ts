@@ -166,8 +166,17 @@ export const kernel = {
   ),
   // Not coalesced: an explicit user action (the Export STL button), not an
   // edit-triggered rebuild — every click should produce its own file.
-  exportSTL: (specs: NodeSpec[]) =>
-    withWatchdog("heavy", (raw, onProgress) => raw.exportSTL(specs, Comlink.proxy(onProgress))),
+  exportSTL: async (specs: NodeSpec[]) => {
+    // The scene worker may already hold this exact evaluated solid. Ask it
+    // for a tessellation-only export first; a cache miss remains cheap and
+    // falls back to the isolated heavy worker so a genuine rebuild never
+    // freezes interactive editing.
+    const cached = await withWatchdog("scene", (raw) => raw.exportCachedSTL(specs));
+    return cached ?? withWatchdog(
+      "heavy",
+      (raw, onProgress) => raw.exportSTL(specs, Comlink.proxy(onProgress)),
+    );
+  },
   // A live push/pull drag's preview — see previewLocal's own doc comment in
   // worker.ts. Shares the "scene" lane/worker with buildScene (it needs to
   // be just as responsive, and must never queue behind a "heavy" merged-

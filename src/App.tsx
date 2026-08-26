@@ -71,6 +71,8 @@ const toSpec = (n: SceneNode): NodeSpec => {
   };
 };
 
+const DEAD_PUSH_PULL_ERROR = "A pushed/pulled face could not be found after rebuilding";
+
 /** Removes a skipped node from anywhere in the tree, not just the top level —
  *  a timed-out import nested inside a group must actually come out of that
  *  group's children, or the group (still top-level, so not itself excluded)
@@ -163,6 +165,8 @@ export function App() {
   const [parts, setParts] = useState<ScenePart[]>([]);
   const [result, setResult] = useState<KernelMesh | null>(null);
   const [stats, setStats] = useState<{ volume: number; faces: number; ms: number } | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [readyExportUrl, setReadyExportUrl] = useState<string | null>(null);
   /** Per-node failures, keyed by node id. */
   const [invalid, setInvalid] = useState<Record<string, string>>({});
   /** Top-level node ids excluded from kernel calls after a watchdog timeout —
@@ -313,6 +317,34 @@ export function App() {
             ...Object.fromEntries(res.errors.map((e) => [e.id, e.message])),
           }));
           setError(null);
+
+          // A failed push/pull op has already been skipped by the kernel, so
+          // leaving it in the document cannot affect the visible shape — it
+          // only makes the same warning reappear on every future rebuild.
+          // Verify the edit history has not changed while the repair runs,
+          // then permanently retain only the operations the kernel can still
+          // resolve. This is the automatic equivalent of the Inspector's
+          // existing "Remove broken edit" action.
+          for (const issue of res.errors) {
+            if (!issue.message.startsWith(DEAD_PUSH_PULL_ERROR)) continue;
+            const failed = findNode(useDoc.getState().nodes, issue.id);
+            if (!failed || failed.type !== "edit") continue;
+            const failedSpec = toSpec(failed) as EditSpec;
+            const expectedOps = JSON.stringify(failed.ops);
+            void kernel.pruneDeadOps(failedSpec).then((kept) => {
+              const current = findNode(useDoc.getState().nodes, issue.id);
+              if (
+                kept && current?.type === "edit" &&
+                JSON.stringify(current.ops) === expectedOps &&
+                kept.length < current.ops.length
+              ) {
+                setOps(current.id, kept);
+              }
+            }).catch(() => {
+              // Keep the warning and manual repair button if validation itself
+              // cannot complete; never remove an operation speculatively.
+            });
+          }
         })
         .catch((e: unknown) => {
           if (id !== buildId.current) return;
@@ -513,6 +545,70 @@ export function App() {
   };
 
   const exportSTL = async () => {
+    if (exporting) return;
+    // Browsers without showSaveFilePicker need the actual download click to
+    // happen synchronously inside a user gesture. The first click prepares
+    // the Blob; this second, clearly labelled click performs the download.
+    if (readyExportUrl) {
+      const a = document.createElement("a");
+      a.href = readyExportUrl;
+      a.download = "part.stl";
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      setReadyExportUrl(null);
+      window.setTimeout(() => {
+        a.remove();
+        URL.revokeObjectURL(readyExportUrl);
+      }, 60_000);
+      return;
+    }
+    setExporting(true);
+    setError(null);
+    // Ask where to save while this click still has browser user activation.
+    // Waiting for the CAD worker first can make Chromium silently reject a
+    // later synthetic <a download> click, which looked like Export did
+    // nothing even though the STL Blob had been generated successfully.
+    type SaveHandle = {
+      createWritable(): Promise<{ write(data: Blob): Promise<void>; close(): Promise<void> }>;
+    };
+    const picker = (window as typeof window & {
+      showSaveFilePicker?: (options: {
+        suggestedName: string;
+        types: { description: string; accept: Record<string, string[]> }[];
+      }) => Promise<SaveHandle>;
+    }).showSaveFilePicker;
+    let saveHandle: SaveHandle | null = null;
+    if (picker) {
+      const askedAt = performance.now();
+      try {
+        saveHandle = await picker({
+          suggestedName: "part.stl",
+          types: [{ description: "STL model", accept: { "model/stl": [".stl"] } }],
+        });
+      } catch (e) {
+        // AbortError fires both when the user genuinely clicks Cancel on the
+        // dialog, AND when the browser silently refuses to show it at all —
+        // lost window focus, an enterprise policy, a privacy extension, or an
+        // automated/kiosk environment all produce the exact same error name
+        // and message, with no dialog ever appearing. Those two cases are
+        // indistinguishable from the rejection alone, and treating every
+        // AbortError as "user cancelled" made Export STL a silent no-op
+        // whenever the picker couldn't be shown — clicking it did nothing,
+        // with no error, no download, nothing. A human cannot see a dialog
+        // render and click Cancel in under ~250ms, so a near-instant reject
+        // means the picker never actually appeared; fall through to the
+        // ordinary <a download> path below instead of giving up. A genuine,
+        // slower cancel is still respected and does nothing further.
+        const instant = performance.now() - askedAt < 250;
+        if (e instanceof DOMException && e.name === "AbortError" && !instant) {
+          setExporting(false);
+          return;
+        }
+        // Unsupported/restricted picker, or a picker that never actually
+        // showed: use the ordinary download fallback.
+      }
+    }
     try {
       const specs = pruneSkipped(useDoc.getState().nodes, skippedIds).map(toSpec);
       const blob = await kernel.exportSTL(specs);
@@ -520,18 +616,21 @@ export function App() {
         setError("Nothing to export — add at least one solid.");
         return;
       }
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "part.stl";
-      a.click();
-      URL.revokeObjectURL(url);
+      if (saveHandle) {
+        const writable = await saveHandle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        return;
+      }
+      setReadyExportUrl(URL.createObjectURL(blob));
     } catch (e) {
       if (e instanceof KernelTimeoutError && e.nodeId) {
         setInvalid((prev) => ({ ...prev, [e.nodeId!]: e.message }));
         setSkippedIds((prev) => addSkip(prev, e.nodeId!));
       }
       setError(msg(e));
+    } finally {
+      setExporting(false);
     }
   };
 
@@ -596,10 +695,12 @@ export function App() {
           <button className={cameraMode === "orthographic" ? "on" : ""} onClick={() => setCameraMode("orthographic")}>Ortho</button>
         </div>
         <div className="toolbar-spacer" />
-        <span className={["status-pill", error ? "error" : busy ? "busy" : ""].filter(Boolean).join(" ")}>
-          {error ? "Needs attention" : busy ? "Building…" : "Ready"}
+        <span className={["status-pill", error ? "error" : busy || exporting ? "busy" : ""].filter(Boolean).join(" ")}>
+          {error ? "Needs attention" : exporting ? "Exporting…" : readyExportUrl ? "STL ready" : busy ? "Building…" : "Ready"}
         </span>
-        <button className="export-btn" onClick={exportSTL}>Export STL</button>
+        <button className="export-btn" onClick={exportSTL} disabled={exporting}>
+          {exporting ? "Exporting…" : readyExportUrl ? "Download STL" : "Export STL"}
+        </button>
       </header>
 
       <aside className="panel object-panel">

@@ -93,6 +93,11 @@ interface PushPullDrag {
    *  samples at most every PUSH_PULL_PREVIEW_MS instead of on every single
    *  pointermove — each sample is a real OCCT/manifold rebuild. */
   lastPreviewAt: number;
+  /** Only one expensive kernel preview may run at a time. While it is busy,
+   *  pointer moves replace this value so the next rebuild jumps straight to
+   *  the newest distance instead of replaying a backlog of stale positions. */
+  previewInFlight: boolean;
+  queuedPreviewDistance: number | null;
 }
 
 interface ResizeDrag {
@@ -1054,6 +1059,8 @@ export class Scene {
       originalGeom: this.cloneGeom(view.geom),
       originalPivot: view.pivot.clone(),
       lastPreviewAt: 0,
+      previewInFlight: false,
+      queuedPreviewDistance: null,
     };
     this.pushPullGeneration++;
     this.controls.enabled = false;
@@ -1139,6 +1146,8 @@ export class Scene {
       originalGeom: this.cloneGeom(view.geom),
       originalPivot: view.pivot.clone(),
       lastPreviewAt: 0,
+      previewInFlight: false,
+      queuedPreviewDistance: null,
     };
     this.pushPullGeneration++;
     this.controls.enabled = false;
@@ -1250,17 +1259,27 @@ export class Scene {
    * written to the document; the real edit only happens once the drag ends
    * and the pill is committed (see commitOrAbandonPushPull).
    */
-  private async requestPushPullPreview(drag: PushPullDrag, distance: number) {
-    const preview = await this.onPreviewPushPull?.(drag.id, {
-      point: drag.localPoint,
-      normal: drag.localNormal,
-      distance,
-    });
-    // The drag may have ended (or a newer one started on the same or a
-    // different part) while this was in flight — a stale preview landing
-    // late must not clobber whatever is current now.
-    if (!preview || this.pushPullDrag !== drag) return;
-    this.applyPreviewMesh(drag, preview);
+  private requestPushPullPreview(drag: PushPullDrag, distance: number) {
+    drag.queuedPreviewDistance = distance;
+    if (drag.previewInFlight) return;
+    drag.previewInFlight = true;
+
+    void (async () => {
+      while (this.pushPullDrag === drag && drag.queuedPreviewDistance !== null) {
+        const nextDistance = drag.queuedPreviewDistance;
+        drag.queuedPreviewDistance = null;
+        const preview = await this.onPreviewPushPull?.(drag.id, {
+          point: drag.localPoint,
+          normal: drag.localNormal,
+          distance: nextDistance,
+        });
+        // The drag may have ended (or a newer one started) while this was in
+        // flight. Never let that stale result overwrite the current scene.
+        if (this.pushPullDrag !== drag) break;
+        if (preview) this.applyPreviewMesh(drag, preview);
+      }
+      drag.previewInFlight = false;
+    })();
   }
 
   /**
@@ -1635,7 +1654,7 @@ export class Scene {
       const now = performance.now();
       if (this.onPreviewPushPull && now - drag.lastPreviewAt >= PUSH_PULL_PREVIEW_MS) {
         drag.lastPreviewAt = now;
-        void this.requestPushPullPreview(drag, distance);
+        this.requestPushPullPreview(drag, distance);
       }
       return;
     }
