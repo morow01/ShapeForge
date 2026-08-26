@@ -373,7 +373,53 @@ export function applyPushPullPreview(base: Shape3D, op: PushPullOp): Shape3D | n
   return face ? pushPullFace(base, face, op.distance) : null;
 }
 
+/** True if a sphere sits anywhere below this node — the seam bug's only
+ *  possible source, so the only case worth rebuilding for. */
+function hasSphereDeep(spec: NodeSpec): boolean {
+  if (spec.type === "object") return spec.kind === "sphere";
+  if (spec.type === "group") return spec.children.some(hasSphereDeep);
+  if (spec.type === "edit") return hasSphereDeep(spec.base);
+  return false;
+}
+
+/** respin() applied to every sphere below this node, wherever it sits. */
+function respinDeep(spec: NodeSpec): NodeSpec {
+  if (spec.type === "object") return respin(spec);
+  if (spec.type === "group") return { ...spec, children: spec.children.map(respinDeep) };
+  if (spec.type === "edit") return { ...spec, base: respinDeep(spec.base) };
+  return spec;
+}
+
+/**
+ * Replays an edit's push/pull history, retrying once with the seam moved if
+ * the result comes out cracked.
+ *
+ * The sphere-seam weakness is not confined to the boolean that first
+ * introduces the sphere — makeLocal already guards that one. A base group can
+ * combine perfectly cleanly (measured: watertight) and only crack once a
+ * push/pull cuts a face that traces back to the sphere's surface, which is
+ * work that happens here, after that guard has already passed. Moving the
+ * seam is geometrically a no-op (a sphere is symmetric about its own axis,
+ * and place() rotates it about an axis its centre already sits on), so the
+ * rebuilt history describes the same shape — the recorded op points still
+ * resolve — it simply avoids the parameterisation OCCT mishandles.
+ */
 async function makeEdit(
+  spec: EditSpec,
+  onError?: (id: string, msg: string) => void,
+  onProgress?: (id: string) => void,
+): Promise<AnySolid | null> {
+  const first = await replayEdit(spec, onError, onProgress);
+  if (!first || isMesh(first) || !hasSphereDeep(spec.base) || isWatertight(first)) return first;
+
+  // Errors were already reported on the first pass; a second identical set
+  // from the retry would just duplicate them.
+  const retry = await replayEdit({ ...spec, base: respinDeep(spec.base) }, undefined, onProgress);
+  if (retry && !isMesh(retry) && isWatertight(retry)) return retry;
+  return first;
+}
+
+async function replayEdit(
   spec: EditSpec,
   onError?: (id: string, msg: string) => void,
   onProgress?: (id: string) => void,
@@ -641,6 +687,69 @@ function suspicious(
   }
 }
 
+/**
+ * Tessellation used only to probe a result for seam cracks — never to display
+ * or export anything. Deliberately matches EDIT_QUALITY in worker.ts rather
+ * than being cheaper: the cracks do NOT show up at any density (measured — a
+ * 0.1mm probe reported the very shape this was written for as watertight,
+ * while the 0.05mm display mesh of it had 29 open edges), because how finely
+ * OCCT splits a shared edge is what decides whether the two faces either side
+ * happen to agree. Probing at the density the mesh is actually built at is
+ * what makes the check mean anything. Still nowhere near OCCT's default,
+ * which is the setting that can exhaust the WASM heap on a sphere.
+ */
+const SEAM_CHECK_QUALITY = { tolerance: 0.05, angularTolerance: 0.4 };
+
+/**
+ * True when a solid tessellates into a closed surface — every edge shared by
+ * exactly two triangles.
+ *
+ * This exists because suspicious() cannot see the failure mode it is paired
+ * with. A sphere seam landing badly does not always produce a solid whose
+ * VOLUME looks wrong; it can produce one that measures perfectly sensibly and
+ * still meshes with cracks along the seam, because the two faces either side
+ * discretise the shared edge differently. That is invisible in the viewport
+ * (the gaps are hairline) but it is not invisible downstream: an STL with
+ * holes is not a closed solid, so slicers have to guess how to patch it, and
+ * converting such a shape to a MeshShape — which happens to EVERY operand as
+ * soon as one sibling needs the mesh path — makes manifold reject the whole
+ * boolean with "Not manifold", failing the export outright.
+ */
+function isWatertight(s: AnySolid): boolean {
+  if (isMesh(s)) return true; // manifold's own invariant — nothing to check
+  try {
+    const { vertices, triangles } = s.mesh(SEAM_CHECK_QUALITY);
+    const ids = new Map<string, number>();
+    const canon: number[] = [];
+    for (let i = 0; i < vertices.length; i += 3) {
+      const key = `${Math.round(vertices[i] * 1e4)},${Math.round(vertices[i + 1] * 1e4)},${Math.round(vertices[i + 2] * 1e4)}`;
+      let id = ids.get(key);
+      if (id === undefined) {
+        id = ids.size;
+        ids.set(key, id);
+      }
+      canon.push(id);
+    }
+    const edges = new Map<string, number>();
+    for (let t = 0; t < triangles.length; t += 3) {
+      const a = canon[triangles[t]];
+      const b = canon[triangles[t + 1]];
+      const c = canon[triangles[t + 2]];
+      if (a === b || b === c || a === c) continue; // zero-area, no edges to own
+      for (const [x, y] of [[a, b], [b, c], [c, a]]) {
+        const key = x < y ? `${x}:${y}` : `${y}:${x}`;
+        edges.set(key, (edges.get(key) ?? 0) + 1);
+      }
+    }
+    for (const count of edges.values()) if (count !== 2) return false;
+    return true;
+  } catch {
+    // A probe that cannot run says nothing about the shape — treat it as fine
+    // rather than forcing a pointless rebuild.
+    return true;
+  }
+}
+
 /** Spins a sphere about its own axis: geometrically identical, but it moves
  *  the seam meridian, which is what OCCT actually trips over. */
 function respin(spec: NodeSpec): NodeSpec {
@@ -694,7 +803,7 @@ export async function makeLocal(
 
   const kids = await build(false, onError);
   const result = combine(spec.op, kids);
-  if (!result || !suspicious(spec.op, result, kids)) return result;
+  if (!result) return result;
 
   // Known OCCT weakness: a sphere's seam meridian crossing the other shape's
   // boundary makes the boolean return an invalid solid. Spinning the seam away
@@ -702,13 +811,26 @@ export async function makeLocal(
   // there is actually a sphere involved. (suspicious() already short-circuits
   // to false for MeshShape results, so this never fires on the import path.)
   const hasSphere = spec.children.some((c) => c.type === "object" && c.kind === "sphere");
+  const invalid = suspicious(spec.op, result, kids);
+  // The same seam also has a quieter failure mode that suspicious() cannot
+  // catch, because the solid it produces measures perfectly plausibly and
+  // only misbehaves when tessellated — see isWatertight. Worth the extra
+  // probe only when a sphere could actually be responsible.
+  const cracked = !invalid && hasSphere && !isWatertight(result);
+  if (!invalid && !cracked) return result;
+
   if (hasSphere) {
     const retryKids = await build(true);
     const retry = combine(spec.op, retryKids);
-    if (retry && !suspicious(spec.op, retry, retryKids)) return retry;
+    // A retry has to actually be better, not merely different: when the first
+    // attempt was outright invalid any sound solid is an improvement, but when
+    // it was specifically cracked, only a watertight one is worth swapping in.
+    if (retry && !suspicious(spec.op, retry, retryKids) && (invalid || isWatertight(retry))) {
+      return retry;
+    }
   }
 
-  if (spec.op === "union") {
+  if (invalid && spec.op === "union") {
     onError?.(spec.id, "This union produced an invalid solid — try moving or rotating a part.");
   }
   return result;

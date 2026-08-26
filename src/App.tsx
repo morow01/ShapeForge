@@ -19,7 +19,6 @@ import type { EditSpec, KernelMesh, NodeSpec, PreviewBuild, ScenePart } from "./
 import type { CameraMode, ToolMode } from "./viewport/scene";
 import { APP_NAME, APP_VERSION } from "./version";
 import { positionWithReferenceGap } from "./snapping/spacing";
-import { displayedMeshSTL } from "./export/stl";
 import type { SnapAnchor, SnapAxis } from "./snapping/snap";
 
 /** Only the fields the kernel cares about — so renaming or collapsing a node
@@ -612,11 +611,15 @@ export function App() {
     }
     try {
       const currentNodes = pruneSkipped(useDoc.getState().nodes, skippedIds);
-      const onlyNode = currentNodes.length === 1 && !currentNodes[0].isHole ? currentNodes[0] : null;
-      const displayed = onlyNode ? parts.find((part) => part.id === onlyNode.id) : null;
-      const blob = displayed && onlyNode
-        ? displayedMeshSTL(displayed.mesh, onlyNode)
-        : await kernel.exportSTL(currentNodes.map(toSpec));
+      // Always export from the kernel, even for a single object. Re-using the
+      // mesh already on screen is faster, but the viewport mesh is built at
+      // EDIT_QUALITY and inherits whatever tessellation cracks that pass left
+      // — measured on a reported model, exporting the displayed mesh produced
+      // an STL with 29 open edges. The saved file is the one artifact of this
+      // app that has to be right, so it gets the export-quality, healed path
+      // (see blobSTLOf in worker.ts); the worker's own result cache is what
+      // keeps that fast.
+      const blob = await kernel.exportSTL(currentNodes.map(toSpec));
       if (!blob) {
         setError("Nothing to export — add at least one solid.");
         return;

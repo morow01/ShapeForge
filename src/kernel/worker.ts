@@ -271,6 +271,15 @@ function faceCountOf(s: AnySolid): number {
 }
 
 function blobSTLOf(s: AnySolid, quality: MeshQuality): Blob {
+  // Deliberately NOT routed through meshShape()/manifold to "heal" the mesh
+  // first. OCCT can leave T-junction cracks between a curved face and its
+  // neighbour on a solid built from a long boolean/push-pull chain, but
+  // manifold cannot repair those: meshShape() only merges COINCIDENT
+  // vertices, and a T-junction's vertices genuinely do not pair up
+  // (measured: 25 open edges survive even a 0.1mm weld). Worse, feeding it
+  // such a mesh raises a "Not manifold" error out of the WASM module that
+  // does not reliably surface as a catchable JS exception, so the attempt
+  // turned a slightly-imperfect export into a failed one.
   return isMesh(s) ? s.blobSTL({ binary: true }) : s.blobSTL({ ...quality, binary: true });
 }
 
