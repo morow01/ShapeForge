@@ -521,6 +521,68 @@ function combineMesh(
 
 type GroupOp = "union" | "subtract" | "intersect";
 
+/**
+ * Folds a NON-UNIFORM scale into a primitive's own parameters when doing so
+ * is exactly equivalent, so the node never has to leave the OCCT/Shape3D
+ * path at all.
+ *
+ * This matters far more than it looks. OCCT cannot scale non-uniformly, so
+ * place() falls back to converting the solid to a MeshShape — and because
+ * combine() resolves any group containing a MeshShape entirely in MeshShape
+ * terms, ONE non-uniformly scaled child silently drags its whole group (and
+ * every push/pull edit above it) onto the triangle-mesh path, which is far
+ * newer and less robust than the BRep one. A user who merely dragged a
+ * corner handle with "lock proportions" off has no way to know they just
+ * changed which geometry kernel their model is built with.
+ *
+ * A primitive is built axis-aligned and then normalised (centred in XY,
+ * base on z = 0) before place() scales it about its own bounding-box
+ * centre, so for a box "scale by [sx,sy,sz]" and "build it sx/sy/sz times
+ * bigger" describe the same solid — as long as the conditions below hold:
+ *
+ *  - fillet must be 0: scaling a filleted box non-uniformly turns its round
+ *    edges elliptical, which re-building at the new size would not reproduce.
+ *  - a cylinder may only be scaled uniformly in XY, or its circular section
+ *    becomes an ellipse, which makeCylinder cannot express.
+ *  - rx and ry must be 0. Scaling in Z moves the base off z = 0 (the shape
+ *    is scaled about its centre, not its base), so the baked version needs a
+ *    compensating Z shift. position is applied AFTER rotation, so that shift
+ *    only stays a pure Z translation while nothing tips the Z axis over —
+ *    rotation about Z alone is fine and stays allowed.
+ */
+function bakeNonUniformScale(spec: NodeSpec): NodeSpec {
+  if (spec.type !== "object") return spec;
+  const [sx, sy, sz] = spec.scale;
+  if (sx === sy && sy === sz) return spec; // uniform — OCCT scales this directly
+  if (!(sx > 0 && sy > 0 && sz > 0)) return spec;
+  const [rx, ry] = spec.rotation;
+  if (rx !== 0 || ry !== 0) return spec;
+
+  const p = spec.params;
+  let params: Record<string, number>;
+  let height: number;
+  if (spec.kind === "box") {
+    if ((p.fillet ?? 0) > 0) return spec;
+    height = p.height;
+    params = { ...p, width: p.width * sx, depth: p.depth * sy, height: p.height * sz };
+  } else if (spec.kind === "cylinder" && sx === sy) {
+    height = p.height;
+    params = { ...p, radius: p.radius * sx, height: p.height * sz };
+  } else {
+    return spec;
+  }
+
+  // Re-normalising puts the baked shape's base back on z = 0, while scaling
+  // about the centre would have left it at height * (1 - sz) / 2.
+  const [px, py, pz] = spec.position;
+  return {
+    ...spec,
+    params,
+    scale: [1, 1, 1],
+    position: [px, py, pz + (height * (1 - sz)) / 2],
+  };
+}
+
 /** Applies rotation (about the node origin) then translation. Works on either
  *  kernel's solid — both expose the same translate/rotate signatures. */
 export function place(s: AnySolid, spec: NodeSpec): AnySolid {
@@ -658,8 +720,12 @@ export async function makeWorld(
   onError?: (id: string, msg: string) => void,
   onProgress?: (id: string) => void,
 ): Promise<AnySolid | null> {
-  const local = await makeLocal(spec, onError, onProgress);
-  return local ? place(local, spec) : null;
+  // Both steps must see the SAME spec: baking rewrites the parameters and
+  // the scale together, so building from one and placing with the other
+  // would apply the scale twice.
+  const baked = bakeNonUniformScale(spec);
+  const local = await makeLocal(baked, onError, onProgress);
+  return local ? place(local, baked) : null;
 }
 
 export { hasImport, isMesh };
