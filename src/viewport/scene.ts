@@ -3,7 +3,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
 import { clearHighlights, getFaceIndex, highlightInGeometry, syncGeometries } from "replicad-threejs-helper";
 import type { ReplicadMesh, ThreeGeometry } from "replicad-threejs-helper";
-import type { FaceInfo, KernelMesh, ScenePart } from "../kernel/types";
+import type { FaceInfo, KernelMesh, PreviewBuild, ScenePart } from "../kernel/types";
 import type { SceneNode, Vec3 } from "../document/types";
 import { snapBounds } from "../snapping/snap";
 import type { Bounds3, SnapTarget } from "../snapping/snap";
@@ -358,7 +358,7 @@ export class Scene {
    *  Returns null on failure (a mid-drag distance can transiently describe
    *  something unbuildable) or if superseded by a newer request. */
   onPreviewPushPull:
-    | ((id: string, op: { point: Vec3; normal: Vec3; distance: number }) => Promise<KernelMesh | null>)
+    | ((id: string, op: { point: Vec3; normal: Vec3; distance: number }) => Promise<PreviewBuild | null>)
     | null = null;
 
   constructor(host: HTMLElement) {
@@ -1251,7 +1251,7 @@ export class Scene {
    * and the pill is committed (see commitOrAbandonPushPull).
    */
   private async requestPushPullPreview(drag: PushPullDrag, distance: number) {
-    const mesh = await this.onPreviewPushPull?.(drag.id, {
+    const preview = await this.onPreviewPushPull?.(drag.id, {
       point: drag.localPoint,
       normal: drag.localNormal,
       distance,
@@ -1259,8 +1259,8 @@ export class Scene {
     // The drag may have ended (or a newer one started on the same or a
     // different part) while this was in flight — a stale preview landing
     // late must not clobber whatever is current now.
-    if (!mesh || this.pushPullDrag !== drag) return;
-    this.applyPreviewMesh(drag, mesh);
+    if (!preview || this.pushPullDrag !== drag) return;
+    this.applyPreviewMesh(drag, preview);
   }
 
   /**
@@ -1280,16 +1280,16 @@ export class Scene {
    * pill actually resolving (commitOrAbandonPushPull) before this settles.
    */
   private async applyFinalPushPullPreview(drag: PushPullDrag, distance: number, generation: number) {
-    const mesh = await this.onPreviewPushPull?.(drag.id, {
+    const preview = await this.onPreviewPushPull?.(drag.id, {
       point: drag.localPoint,
       normal: drag.localNormal,
       distance,
     });
-    if (!mesh || generation !== this.pushPullGeneration) return;
-    this.applyPreviewMesh(drag, mesh);
+    if (!preview || generation !== this.pushPullGeneration) return;
+    this.applyPreviewMesh(drag, preview);
   }
 
-  private applyPreviewMesh(drag: PushPullDrag, mesh: KernelMesh) {
+  private applyPreviewMesh(drag: PushPullDrag, preview: PreviewBuild) {
     // syncKernelGeometry reuses/mutates drag.view.geom's existing
     // BufferGeometry objects in place whenever the array length already
     // matches (always true here — one mesh in, one geometry pair out), so
@@ -1300,10 +1300,19 @@ export class Scene {
     // taken before the drag began) is what preserves the true pre-drag
     // state; it is untouched by any of this and is what gets disposed or
     // restored once the drag actually ends — see commitOrAbandonPushPull.
-    drag.view.geom = syncKernelGeometry(mesh, drag.view.geom);
+    drag.view.geom = syncKernelGeometry(preview.mesh, drag.view.geom);
     drag.view.pivot = this.centreGeometry(drag.view.geom);
     drag.view.mesh.geometry = drag.view.geom[0].faces;
     drag.view.wire.geometry = drag.view.geom[0].lines;
+    // Faces too, not just geometry — this is what the push/pull arrow (and
+    // findFace/beginPushPullFromHover, for starting the NEXT drag) reads.
+    // Without updating this too, the arrow stayed at its pre-drag position
+    // until the next real, committed rebuild eventually corrected it —
+    // visibly snapping a second or so later even though the shape itself
+    // was already right. updatePushPullOverlay() runs every frame (see
+    // renderFrame), so this alone is enough to move the arrow immediately;
+    // no extra call needed here.
+    if (preview.faces) drag.view.faces = preview.faces;
     this.applyPlacements();
   }
 

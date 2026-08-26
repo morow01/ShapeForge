@@ -17,6 +17,7 @@ import type {
   MeshedEdges,
   MeshedFaces,
   NodeSpec,
+  PreviewBuild,
   ScenePart,
   SceneBuild,
   ResultBuild,
@@ -328,11 +329,19 @@ const api = {
    * worker every mouse-move; the coalesceLatest wrapper below caps how many
    * of those throttled calls can queue up if one runs long.
    */
-  async previewLocal(spec: NodeSpec): Promise<KernelMesh | null> {
+  async previewLocal(spec: NodeSpec): Promise<PreviewBuild | null> {
     await init();
     try {
       const solid = await makeLocal(spec);
-      return solid ? toMesh(spec.id, solid, EDIT_QUALITY) : null;
+      if (!solid) return null;
+      // Faces ride along too — not just for completeness: without this, the
+      // push/pull arrow (positioned from a part's `faces`) stayed at its
+      // pre-drag spot until the next REAL, committed rebuild eventually
+      // updated it, a second or so later — the shape itself was already
+      // right (see applyPreviewMesh in scene.ts), just the arrow marking it
+      // wasn't, and then visibly snapped once that real rebuild landed.
+      // Reported live as "the face I was moving jumps a little bit extra."
+      return { mesh: toMesh(spec.id, solid, EDIT_QUALITY), faces: faceInfoOf(solid) };
     } catch {
       // A mid-drag distance can transiently describe something OCCT can't
       // build (e.g. pushing clean through the far side) — just skip this

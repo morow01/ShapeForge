@@ -15,7 +15,7 @@ import { PRIMITIVES, isGroup } from "./document/types";
 import { findNode } from "./document/tree";
 import { putBlob } from "./document/blobStore";
 import type { PrimitiveKind, SceneNode, Vec3 } from "./document/types";
-import type { EditSpec, KernelMesh, NodeSpec, ScenePart } from "./kernel/types";
+import type { EditSpec, KernelMesh, NodeSpec, PreviewBuild, ScenePart } from "./kernel/types";
 import type { CameraMode, ToolMode } from "./viewport/scene";
 import { APP_NAME, APP_VERSION } from "./version";
 import { positionWithReferenceGap } from "./snapping/spacing";
@@ -406,7 +406,7 @@ export function App() {
   // reasoning as the debounced kernel-call effects above — a fresh read on
   // every call, not a stale one from whenever this callback was last built.
   const onPreviewPushPull = useCallback(
-    async (id: string, op: { point: Vec3; normal: Vec3; distance: number }): Promise<KernelMesh | null> => {
+    async (id: string, op: { point: Vec3; normal: Vec3; distance: number }): Promise<PreviewBuild | null> => {
       const node = findNode(useDoc.getState().nodes, id);
       if (!node) return null;
       const spec: EditSpec =

@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { Scene } from "./scene";
 import type { CameraMode, ToolMode } from "./scene";
-import type { KernelMesh, ScenePart } from "../kernel/types";
+import type { KernelMesh, PreviewBuild, ScenePart } from "../kernel/types";
 import type { SceneNode, Vec3 } from "../document/types";
 
 interface Props {
@@ -28,7 +28,7 @@ interface Props {
   onPreviewPushPull: (
     id: string,
     op: { point: Vec3; normal: Vec3; distance: number },
-  ) => Promise<KernelMesh | null>;
+  ) => Promise<PreviewBuild | null>;
   onDragChange: (dragging: boolean) => void;
 }
 

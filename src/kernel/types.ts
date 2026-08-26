@@ -106,3 +106,11 @@ export interface ResultBuild {
   errors: BuildError[];
   buildMs: number;
 }
+
+/** A live push/pull preview sample — see previewLocal() in worker.ts. Faces
+ *  ride along so the push/pull arrow can reposition immediately from this,
+ *  rather than sitting stale until the next real, committed rebuild. */
+export interface PreviewBuild {
+  mesh: KernelMesh;
+  faces?: FaceInfo[];
+}
