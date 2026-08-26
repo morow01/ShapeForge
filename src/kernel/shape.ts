@@ -144,14 +144,27 @@ function hasImport(spec: NodeSpec): boolean {
  * Re-locates, on the CURRENT shape, the same planar face a PushPullOp was
  * created against — it cannot be addressed by index, since a later op's
  * target face is only created once earlier ops have already reshaped the
- * solid. "Same face" here means: still planar, facing the same way, and
- * lying in the same plane as the point recorded when the op was made — a
- * plain nearest-match search, not true topological naming, but sufficient
- * as long as the base shape upstream of these ops never itself changes
- * (which is exactly the deal a node makes once it has been pushed/pulled —
- * see EditNode in document/types.ts).
+ * solid. "Same face" here means: still planar, facing the same way, lying
+ * in the same plane as the point recorded when the op was made, AND that
+ * point actually falling within (near) THIS face's own extent — not just
+ * its infinite plane. That last check matters once a shape has had enough
+ * edits done to it: two genuinely distinct faces (say, two separate walls
+ * either side of a notch) can end up coplanar without being anywhere near
+ * each other, and matching by plane distance alone picked whichever one
+ * happened to be closest to the recorded point ALONG THE PLANE'S OWN
+ * NORMAL — which says nothing about whether the point is anywhere near
+ * that face's actual footprint. A generous 1mm pad on the bounding-box
+ * check absorbs minor shifts from earlier ops in the sequence (this face
+ * may have been slightly resized by one of them) without being loose
+ * enough to also match a truly separate, merely-coplanar face — a real
+ * failure mode this project actually hit (see the commit fixing this).
+ * Still a plain nearest-match search, not true topological naming, and
+ * still only sound as long as the base shape upstream of these ops never
+ * itself changes (the deal a node makes once it has been pushed/pulled —
+ * see EditNode in document/types.ts) — but considerably harder to fool.
  */
 function findFace(solid: Shape3D, point: Vec3, normal: Vec3, tolerance = 0.05): Face | null {
+  const FOOTPRINT_PAD = 1; // mm
   let best: Face | null = null;
   let bestDistance = Infinity;
   for (const face of solid.faces) {
@@ -163,12 +176,19 @@ function findFace(solid: Shape3D, point: Vec3, normal: Vec3, tolerance = 0.05): 
     const planeDistance = Math.abs(
       (point[0] - c.x) * n.x + (point[1] - c.y) * n.y + (point[2] - c.z) * n.z,
     );
+    if (planeDistance > tolerance) continue;
+    const [min, max] = face.boundingBox.bounds;
+    const withinFootprint =
+      point[0] >= min[0] - FOOTPRINT_PAD && point[0] <= max[0] + FOOTPRINT_PAD &&
+      point[1] >= min[1] - FOOTPRINT_PAD && point[1] <= max[1] + FOOTPRINT_PAD &&
+      point[2] >= min[2] - FOOTPRINT_PAD && point[2] <= max[2] + FOOTPRINT_PAD;
+    if (!withinFootprint) continue;
     if (planeDistance < bestDistance) {
       bestDistance = planeDistance;
       best = face;
     }
   }
-  return bestDistance <= tolerance ? best : null;
+  return best;
 }
 
 /**
