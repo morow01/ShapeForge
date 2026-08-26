@@ -1093,18 +1093,23 @@ export class Scene {
     return Math.round((along / drag.pixelsPerUnit) * 2) / 2;
   }
 
-  /** Opens the push/pull pill for typing an exact distance, at the same
-   *  screen position the live-drag readout would use — triggered by a plain
-   *  click (no drag) on a face's arrow/hover-highlight, the way clicking a
-   *  resize handle's dimension pill lets you type instead of dragging. */
-  private showPushPullInput(drag: PushPullDrag) {
+  /**
+   * Opens the push/pull pill for typing an exact distance, at the same
+   * screen position the live-drag readout uses — either from a plain click
+   * (no drag) on a face's arrow/hover-highlight, pre-filled at 0, or right
+   * after a real drag ends, pre-filled with the distance it dragged to, so
+   * that value stays reviewable/adjustable for one more correction instead
+   * of vanishing the instant the mouse comes up (as it used to — a drag and
+   * a plain click ending in two different states was the actual complaint).
+   */
+  private showPushPullInput(drag: PushPullDrag, initialValue = "0") {
     this.pushPullPending = { id: drag.id, localPoint: drag.localPoint, localNormal: drag.localNormal };
     const rect = this.renderer.domElement.getBoundingClientRect();
     const p = drag.handleBasePosition.clone().project(this.camera);
     this.pushPullLabelEl.style.display = "block";
     this.pushPullLabelEl.style.left = `${((p.x + 1) / 2) * rect.width}px`;
     this.pushPullLabelEl.style.top = `${((1 - p.y) / 2) * rect.height}px`;
-    this.pushPullLabelEl.value = "0";
+    this.pushPullLabelEl.value = initialValue;
     this.pushPullLabelEl.focus();
     this.pushPullLabelEl.select();
   }
@@ -1605,24 +1610,14 @@ export class Scene {
       } else {
         drag.handle.position.copy(drag.handleBasePosition);
       }
-      if (drag.active) {
-        this.pushPullLabelEl.style.display = "none";
-        const distance = this.pushPullDistance(e, drag);
-        // A drag that resolved to nothing is not an edit — never turn a
-        // parametric node into a baked one for a 0mm push.
-        if (Math.abs(distance) >= 0.5) {
-          this.onPushPullFace?.(drag.id, {
-            point: drag.localPoint,
-            normal: drag.localNormal,
-            distance,
-          });
-        }
-        this.onDragChange?.(false);
-      } else {
-        // A plain click, no drag: open the same pill for typing an exact
-        // distance instead, rather than doing nothing.
-        this.showPushPullInput(drag);
-      }
+      // Either way — dragged to a distance, or just clicked — this ends in
+      // the SAME place: the pill open and focused with that value, needing
+      // an explicit commit (Enter/blur applies it, Escape abandons it; see
+      // commitPushPullInput) rather than a drag silently applying on
+      // release while only a plain click left anything open to review.
+      if (drag.active) this.onDragChange?.(false); // closes the (empty) drag batch; the edit itself commits separately, below
+      const distance = drag.active ? this.pushPullDistance(e, drag) : 0;
+      this.showPushPullInput(drag, distance.toFixed(1));
       return;
     }
 
