@@ -573,11 +573,15 @@ const api = {
         const solid = await makeWorld(spec, onError);
         if (!solid) continue;
         const [min, max] = solid.boundingBox.bounds;
-        centres[spec.id] = [
+        const centre: Vec3 = [
           (min[0] + max[0]) / 2,
           (min[1] + max[1]) / 2,
           (min[2] + max[2]) / 2,
         ];
+        // An empty or degenerate solid reports an infinite box, and half of
+        // infinity is not a centre. Offering it anyway put NaN into every
+        // position the caller then computed, which wiped the model.
+        if (centre.every(Number.isFinite)) centres[spec.id] = centre;
       } catch {
         // A spec that will not build has no centre to offer; the caller keeps
         // the frame instead of guessing one.

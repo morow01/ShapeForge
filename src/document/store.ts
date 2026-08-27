@@ -168,6 +168,11 @@ function liftOutOf(
           child.position[2] * group.scale[2],
         ] as Vec3);
   const offset = applyMatrix(rotation, scaled);
+  // Never let a bad number reach the document: one non-finite centre would
+  // otherwise turn a position into NaN, and a node with no position never
+  // builds again — the whole model disappears rather than one part moving.
+  if (!offset.every(Number.isFinite)) return child;
+
   return {
     ...child,
     position: [
