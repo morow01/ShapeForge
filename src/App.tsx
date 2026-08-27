@@ -179,6 +179,7 @@ export function App() {
     pushPullFace,
     setOps,
     setHole,
+    restoreNodes,
     setSvgThickness,
     shapeBuild,
     setColor,
@@ -857,13 +858,90 @@ export function App() {
     }
   }, []);
 
+  /**
+   * What the model IS, independent of how it is arranged: the volume and
+   * centroid of everything the kernel would build. Grouping and ungrouping
+   * change the tree, never the part, so this number has to survive them.
+   */
+  const modelSignature = useCallback(async (nodes: SceneNode[]) => {
+    const blob = await kernel.exportSTL(nodes.map(toSpec), "draft");
+    if (!blob) return null;
+    const view = new DataView(await blob.arrayBuffer());
+    const count = view.getUint32(80, true);
+    let volume = 0;
+    const centroid = [0, 0, 0];
+    for (let i = 0; i < count; i++) {
+      const at = 84 + i * 50 + 12;
+      const p: number[][] = [];
+      for (let v = 0; v < 3; v++) {
+        p.push([
+          view.getFloat32(at + v * 12, true),
+          view.getFloat32(at + v * 12 + 4, true),
+          view.getFloat32(at + v * 12 + 8, true),
+        ]);
+      }
+      const [x, y, z] = p;
+      const d =
+        (x[0] * (y[1] * z[2] - z[1] * y[2]) -
+          x[1] * (y[0] * z[2] - z[0] * y[2]) +
+          x[2] * (y[0] * z[1] - z[0] * y[1])) / 6;
+      volume += d;
+      for (let k = 0; k < 3; k++) centroid[k] += (d * (x[k] + y[k] + z[k])) / 4;
+    }
+    if (!Number.isFinite(volume) || Math.abs(volume) < 1e-9) return null;
+    return { volume: Math.abs(volume), centroid: centroid.map((c) => c / volume) };
+  }, []);
+
+  /**
+   * Runs a tree change and checks the model came through it unchanged, putting
+   * the document back if it did not.
+   *
+   * Grouping has repeatedly moved or erased parts here — through OCCT
+   * booleans that fail differently from one attempt to the next, and through
+   * my own arithmetic for frames that scale. Each cause gets fixed as it is
+   * found, but the guarantee should not depend on having found them all: a
+   * rearrangement that changes the part is always wrong, and is better
+   * refused than saved.
+   */
+  const guardTreeChange = useCallback(
+    async (apply: () => void, label: string) => {
+      const before = useDoc.getState();
+      const previous = before.nodes;
+      const previousSelection = before.selectedIds;
+      const signatureBefore = await modelSignature(previous);
+      apply();
+      if (!signatureBefore) return;
+      const after = await modelSignature(useDoc.getState().nodes);
+      // Loose enough to ignore the difference between the two kernels — the
+      // same model fused by OCCT and by manifold measures about 0.2% apart,
+      // and its centroid up to a millimetre — and tight enough to catch what
+      // actually goes wrong here, which is a part landing tens of millimetres
+      // away or the whole model disappearing.
+      const moved =
+        !after ||
+        Math.abs(after.volume - signatureBefore.volume) > signatureBefore.volume * 0.02 ||
+        after.centroid.some((c, i) => Math.abs(c - signatureBefore.centroid[i]) > 2);
+      if (!moved) return;
+      restoreNodes(previous, previousSelection);
+      setError(
+        !after
+          ? `${label} was undone: it left nothing to build.`
+          : `${label} was undone: it would have changed the model ` +
+            `(volume ${signatureBefore.volume.toFixed(0)} to ${after.volume.toFixed(0)} mm³).`,
+      );
+    },
+    [modelSignature, restoreNodes],
+  );
+
   const ungroupSelected = useCallback(async () => {
-    ungroup(await regroupCentres());
-  }, [ungroup, regroupCentres]);
+    const centres = await regroupCentres();
+    await guardTreeChange(() => ungroup(centres), "Ungroup");
+  }, [ungroup, regroupCentres, guardTreeChange]);
 
   const groupSelected = useCallback(async () => {
-    group(await regroupCentres());
-  }, [group, regroupCentres]);
+    const centres = await regroupCentres();
+    await guardTreeChange(() => group(centres), "Group");
+  }, [group, regroupCentres, guardTreeChange]);
 
   const dropSelected = useCallback(() => {
     const updates = sceneRef.current?.dropSelected() ?? [];

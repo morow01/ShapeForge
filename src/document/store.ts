@@ -392,6 +392,9 @@ interface DocState {
   /** Shape Builder: replaces `sourceIds` with one node holding them frozen
    *  and the chosen cell masks. Sources keep their relative placement. */
   shapeBuild: (sourceIds: string[], keep: number[], centres?: Record<string, Vec3>) => void;
+  /** Puts the document back as it was — used to undo a grouping that turned
+   *  out to change the model rather than just its arrangement. */
+  restoreNodes: (nodes: SceneNode[], selectedIds: string[]) => void;
   clearAll: () => void;
 }
 
@@ -903,6 +906,8 @@ export const useDoc = create<DocState>()(
           nodes.splice(Math.min(at, nodes.length), 0, node);
           return { nodes, selectedIds: [node.id] };
         }),
+
+      restoreNodes: (nodes, selectedIds) => set({ nodes, selectedIds }),
 
       clearAll: () => {
         set({ nodes: [], selectedIds: [] });
