@@ -896,3 +896,8 @@ select.num { height: 31px; }
 }
 .build-chip:hover { border-color: #24aaa8; }
 .build-actions { display: flex; justify-content: flex-end; gap: 6px; }
+
+/* Smart Guides toggle. Lives with Perspective/Ortho — it is a preference
+   about how dragging behaves, not a tool you switch into. */
+.snap-toggle { display: inline-flex; align-items: center; gap: 5px; }
+.snap-icon { width: 13px; height: 13px; }

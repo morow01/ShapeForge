@@ -930,6 +930,19 @@ export function App() {
         <div className="toolbar-group view-tools">
           <button className={cameraMode === "perspective" ? "on" : ""} onClick={() => setCameraMode("perspective")}>Perspective</button>
           <button className={cameraMode === "orthographic" ? "on" : ""} onClick={() => setCameraMode("orthographic")}>Ortho</button>
+          <button
+            className={`snap-toggle ${snapEnabled ? "on" : ""}`}
+            onClick={() => setSnapEnabled((v) => !v)}
+            title={
+              snapEnabled
+                ? "Smart Guides on — objects snap to each other while dragging (S). Hold Alt to bypass for one drag."
+                : "Smart Guides off — drags go exactly where the pointer goes (S)"
+            }
+            aria-pressed={snapEnabled}
+          >
+            <MagnetIcon className="snap-icon" />
+            Snap
+          </button>
         </div>
         <div className="toolbar-spacer" />
         <span className={["status-pill", error ? "error" : busy || exporting || buildBusy ? "busy" : ""].filter(Boolean).join(" ")}>
@@ -1073,19 +1086,6 @@ export function App() {
             aria-pressed={wireframe}
           >
             <WireframeIcon />
-          </button>
-          <button
-            className={snapEnabled ? "active" : ""}
-            onClick={() => setSnapEnabled((v) => !v)}
-            title={
-              snapEnabled
-                ? "Smart Guides on — objects snap to each other while dragging (S). Hold Alt to bypass for one drag."
-                : "Smart Guides off — drags go exactly where the pointer goes (S)"
-            }
-            aria-label="Toggle Smart Guides"
-            aria-pressed={snapEnabled}
-          >
-            <MagnetIcon />
           </button>
           {/* An action, not a mode and not a view toggle — its own group. */}
           <span className="tool-rail-sep" />
