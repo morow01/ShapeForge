@@ -26,6 +26,7 @@ import {
 } from "../geometry/triangle";
 import type {
   BooleanOp,
+  BuildNode,
   EditNode,
   GroupNode,
   ImportNode,
@@ -242,6 +243,9 @@ interface DocState {
   ungroup: () => void;
   setShowResult: (v: boolean) => void;
   /** Clears the canvas of the active project. */
+  /** Shape Builder: replaces `sourceIds` with one node holding them frozen
+   *  and the chosen cell masks. Sources keep their relative placement. */
+  shapeBuild: (sourceIds: string[], keep: number[]) => void;
   clearAll: () => void;
 }
 
@@ -554,7 +558,10 @@ export const useDoc = create<DocState>()(
                 ops: [...n.ops, op],
               };
             }
-            if (n.type === "import") return n; // guard — the UI never offers this on an import
+            // Neither is parametric any more, and the UI offers push/pull on
+            // neither: an import has no face topology, and a build's shape is
+            // owned by its cell selection.
+            if (n.type === "import" || n.type === "build") return n;
             const base: ObjectNode | GroupNode = {
               ...n,
               position: [0, 0, 0],
@@ -690,6 +697,36 @@ export const useDoc = create<DocState>()(
         }),
 
       setShowResult: (v) => set({ showResult: v }),
+
+      shapeBuild: (sourceIds, keep) =>
+        set((s) => {
+          if (sourceIds.length < 2 || !keep.length) return {};
+          const ids = new Set(sourceIds);
+          const at = firstRootIndex(s.nodes, ids);
+          const { remaining, removed } = extractNodes(s.nodes, ids);
+          if (removed.length < 2) return {};
+
+          // Cell masks are bit positions over the sources IN ORDER, so the
+          // order the caller decomposed in is the order that has to be stored.
+          const order = new Map(sourceIds.map((id, i) => [id, i]));
+          removed.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+
+          const buildCount = s.nodes.filter((n) => n.type === "build").length + 1;
+          const node: BuildNode = {
+            type: "build",
+            id: nextId(),
+            name: `Built ${buildCount}`,
+            sources: removed,
+            keep: [...keep].sort((a, b) => a - b),
+            position: [0, 0, 0],
+            rotation: [0, 0, 0],
+            scale: [1, 1, 1],
+            isHole: false,
+          };
+          const nodes = [...remaining];
+          nodes.splice(Math.min(at, nodes.length), 0, node);
+          return { nodes, selectedIds: [node.id] };
+        }),
 
       clearAll: () => {
         set({ nodes: [], selectedIds: [] });

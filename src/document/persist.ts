@@ -74,6 +74,18 @@ export function parseNode(raw: unknown): SceneNode | null {
     return { ...base, type: "object", kind, params };
   }
 
+  if (n.type === "build") {
+    if (!Array.isArray(n.sources) || !Array.isArray(n.keep)) return null;
+    const sources = n.sources.map(parseNode).filter((s): s is SceneNode => s !== null);
+    if (sources.length < 2) return null;
+    const limit = 1 << sources.length;
+    const keep = (n.keep as unknown[]).filter(
+      (m): m is number => typeof m === "number" && Number.isInteger(m) && m > 0 && m < limit,
+    );
+    if (!keep.length) return null;
+    return { ...base, type: "build", sources, keep };
+  }
+
   if (n.type === "import") {
     if (typeof n.blobId !== "string" || typeof n.fileName !== "string") return null;
     if (typeof n.byteSize !== "number") return null;
@@ -277,6 +289,7 @@ export function highestIdSuffix(nodes: SceneNode[]): number {
       if (m) max = Math.max(max, Number(m[1]));
       if (n.type === "group") walk(n.children);
       if (n.type === "edit") walk([n.base]);
+      if (n.type === "build") walk(n.sources);
     }
   };
   walk(nodes);

@@ -185,6 +185,12 @@ export const kernel = {
       (raw, onProgress) => raw.exportSTL(specs, quality, Comlink.proxy(onProgress)),
     );
   },
+  // Shape Builder decomposition: an explicit tool entry, not an edit-driven
+  // rebuild, so it is not coalesced. Runs on the heavy lane — a four-body
+  // decomposition is 15 cells' worth of booleans and must never queue in
+  // front of the interactive rebuilds.
+  buildCells: (specs: NodeSpec[]) => withWatchdog("heavy", (raw) => raw.buildCells(specs)),
+
   // A live push/pull drag's preview — see previewLocal's own doc comment in
   // worker.ts. Shares the "scene" lane/worker with buildScene (it needs to
   // be just as responsive, and must never queue behind a "heavy" merged-

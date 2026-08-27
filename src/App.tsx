@@ -50,6 +50,18 @@ const toSpec = (n: SceneNode): NodeSpec => {
       isHole: n.isHole,
     };
   }
+  if (n.type === "build") {
+    return {
+      type: "build",
+      id: n.id,
+      sources: n.sources.map(toSpec),
+      keep: n.keep,
+      position: n.position,
+      rotation: n.rotation,
+      scale: n.scale,
+      isHole: n.isHole,
+    };
+  }
   if (n.type === "edit") {
     return {
       type: "edit",
@@ -122,6 +134,7 @@ const shapeOf = (n: SceneNode): unknown => {
   // never re-runs just because the node moved.
   if (n.type === "import") return [n.id, "import", n.blobId];
   if (n.type === "edit") return [n.id, "edit", shapeOf(n.base), n.ops];
+  if (n.type === "build") return [n.id, "build", n.sources.map(shapeOf), n.keep];
   return [n.id, n.kind, n.params];
 };
 

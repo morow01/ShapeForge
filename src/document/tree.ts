@@ -21,6 +21,12 @@ export function resolveNodeColor(node: SceneNode | null | undefined): string {
   if (node.type === "edit") {
     return resolveNodeColor(node.base);
   }
+  if (node.type === "build") {
+    for (const source of node.sources) {
+      const c = resolveNodeColor(source);
+      if (c && c !== DEFAULT_OBJECT_COLOR) return c;
+    }
+  }
   if (isGroup(node)) {
     for (const child of node.children) {
       const c = resolveNodeColor(child);
@@ -37,6 +43,7 @@ export function resolveNodeTransparent(node: SceneNode | null | undefined): bool
   if (node.type === "edit") {
     return resolveNodeTransparent(node.base);
   }
+  if (node.type === "build") return node.sources.some(resolveNodeTransparent);
   if (isGroup(node)) {
     return node.children.some(resolveNodeTransparent);
   }

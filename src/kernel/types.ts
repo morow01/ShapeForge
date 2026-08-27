@@ -55,7 +55,20 @@ export interface EditSpec extends SpecBase {
   ops: PushPullOp[];
 }
 
-export type NodeSpec = ObjectSpec | GroupSpec | ImportSpec | EditSpec;
+/** See BuildNode: frozen sources plus the cell masks to keep. */
+export interface BuildSpec extends SpecBase {
+  type: "build";
+  sources: NodeSpec[];
+  keep: number[];
+}
+
+export type NodeSpec = ObjectSpec | GroupSpec | ImportSpec | EditSpec | BuildSpec;
+
+/** One piece of a Shape Builder decomposition, ready to show and click. */
+export interface CellPart {
+  mask: number;
+  mesh: KernelMesh;
+}
 
 /** How finely an STL export tessellates curved faces. The actual tolerances
  *  live in worker.ts (EXPORT_PRESETS) next to the reasoning about them; only

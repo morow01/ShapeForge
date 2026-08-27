@@ -71,7 +71,7 @@ function Row({ node, depth, selectedIds, invalid, onSelect, onToggleCollapsed }:
               ? "dot hole"
               : group
                 ? "dot group"
-                : node.type === "import" || node.type === "edit"
+                : node.type === "import" || node.type === "edit" || node.type === "build"
                   ? "dot import"
                   : "dot"
           }

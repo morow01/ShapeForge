@@ -14,7 +14,7 @@ import type { Face, Shape3D } from "replicad";
 import { InvalidShapeError, solveTriangle, solveScaledTriangle } from "../geometry/triangle";
 import { getBlob } from "../document/blobStore";
 import type { PushPullOp, Vec3 } from "../document/types";
-import type { EditSpec, ImportSpec, NodeSpec, ObjectSpec } from "./types";
+import type { BuildSpec, EditSpec, ImportSpec, NodeSpec, ObjectSpec } from "./types";
 
 export { InvalidShapeError };
 
@@ -138,6 +138,7 @@ function hasImport(spec: NodeSpec): boolean {
   if (spec.type === "import") return true;
   if (spec.type === "group") return spec.children.some(hasImport);
   if (spec.type === "edit") return hasImport(spec.base);
+  if (spec.type === "build") return spec.sources.some(hasImport);
   return false;
 }
 
@@ -379,6 +380,7 @@ function hasSphereDeep(spec: NodeSpec): boolean {
   if (spec.type === "object") return spec.kind === "sphere";
   if (spec.type === "group") return spec.children.some(hasSphereDeep);
   if (spec.type === "edit") return hasSphereDeep(spec.base);
+  if (spec.type === "build") return spec.sources.some(hasSphereDeep);
   return false;
 }
 
@@ -387,6 +389,7 @@ function respinDeep(spec: NodeSpec): NodeSpec {
   if (spec.type === "object") return respin(spec);
   if (spec.type === "group") return { ...spec, children: spec.children.map(respinDeep) };
   if (spec.type === "edit") return { ...spec, base: respinDeep(spec.base) };
+  if (spec.type === "build") return { ...spec, sources: spec.sources.map(respinDeep) };
   return spec;
 }
 
@@ -536,6 +539,71 @@ export async function survivingOps(
     kept.push(op);
   }
   return kept;
+}
+
+/** Does this solid enclose any volume at all? A cell for a mask whose
+ *  sources do not all overlap comes back empty, and empty solids must be
+ *  dropped rather than fused into the result. */
+function isEmptySolid(solid: AnySolid): boolean {
+  if (isMesh(solid)) return solid.isEmpty || solid.volume() <= 1e-9;
+  try {
+    return measureVolume(solid) <= 1e-9;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * One cell of the arrangement of `solids`: the region inside every source
+ * whose bit is set in `mask` and outside all the others. Returns null when
+ * that region is empty, which is the common case — most masks over three or
+ * four bodies describe overlaps that do not actually happen.
+ *
+ * Each step falls back to the mesh kernel the same way combine() does, so one
+ * OCCT boolean refusing a hard case degrades to manifold instead of losing
+ * the cell.
+ */
+export function cellSolid(solids: AnySolid[], mask: number): AnySolid | null {
+  const members = solids.filter((_, i) => (mask >> i) & 1);
+  const others = solids.filter((_, i) => !((mask >> i) & 1));
+  if (!members.length) return null;
+
+  const asMesh = (s: AnySolid): MeshShape => (isMesh(s) ? s : (s as Shape3D).meshShape());
+  let result: AnySolid = members[0];
+
+  for (const other of members.slice(1)) {
+    try {
+      result = isMesh(result) || isMesh(other)
+        ? asMesh(result).intersect(asMesh(other))
+        : (result as Shape3D).intersect(other as Shape3D);
+    } catch {
+      result = asMesh(result).intersect(asMesh(other));
+    }
+    if (isEmptySolid(result)) return null;
+  }
+
+  for (const other of others) {
+    try {
+      result = isMesh(result) || isMesh(other)
+        ? asMesh(result).cut(asMesh(other))
+        : (result as Shape3D).cut(other as Shape3D);
+    } catch {
+      result = asMesh(result).cut(asMesh(other));
+    }
+    if (isEmptySolid(result)) return null;
+  }
+
+  return result;
+}
+
+/** Every non-empty cell of the arrangement, in mask order. */
+export function decompose(solids: AnySolid[]): { mask: number; solid: AnySolid }[] {
+  const cells: { mask: number; solid: AnySolid }[] = [];
+  for (let mask = 1; mask < 1 << solids.length; mask++) {
+    const solid = cellSolid(solids, mask);
+    if (solid) cells.push({ mask, solid });
+  }
+  return cells;
 }
 
 /**
@@ -878,6 +946,36 @@ function respin(spec: NodeSpec): NodeSpec {
  * had to be abandoned — an import's mesh-repair step is the one piece of
  * this pipeline that can legitimately run long enough to matter.
  */
+/**
+ * Rebuilds a Shape Builder result: evaluate the frozen sources where they
+ * stand, cut them into cells, and fuse back the ones that were kept.
+ */
+async function makeBuild(
+  spec: BuildSpec,
+  onError?: (id: string, msg: string) => void,
+  onProgress?: (id: string) => void,
+): Promise<AnySolid | null> {
+  const solids: AnySolid[] = [];
+  for (const source of spec.sources) {
+    try {
+      const solid = await makeWorld(source, onError, onProgress);
+      if (solid) solids.push(solid);
+    } catch (e) {
+      onError?.(source.id, e instanceof Error ? e.message : String(e));
+    }
+  }
+  if (solids.length < 2) return solids[0] ?? null;
+
+  const kept = spec.keep
+    .map((mask) => cellSolid(solids, mask))
+    .filter((s): s is AnySolid => !!s);
+  if (!kept.length) {
+    onError?.(spec.id, "Nothing left in this shape — every region was removed.");
+    return null;
+  }
+  return combine("union", kept.map((solid) => ({ solid, isHole: false })));
+}
+
 export async function makeLocal(
   spec: NodeSpec,
   onError?: (id: string, msg: string) => void,
@@ -894,6 +992,10 @@ export async function makeLocal(
   if (spec.type === "edit") {
     onProgress?.(spec.id);
     return makeEdit(spec, onError, onProgress);
+  }
+  if (spec.type === "build") {
+    onProgress?.(spec.id);
+    return makeBuild(spec, onError, onProgress);
   }
 
   const build = async (spin: boolean, report?: (id: string, msg: string) => void) => {

@@ -11,6 +11,7 @@ import type { Shape3D } from "replicad";
 import {
   applyPushPullPreview,
   combine,
+  decompose,
   hasImport,
   isMesh,
   makeLocal,
@@ -23,6 +24,7 @@ import { loadSTLPreview } from "./stlPreview";
 import type { AnySolid } from "./shape";
 import type {
   BuildError,
+  CellPart,
   ExportQuality,
   FaceInfo,
   KernelMesh,
@@ -329,6 +331,13 @@ function localKey(spec: NodeSpec): string {
   }
   if (spec.type === "import") return JSON.stringify([spec.type, spec.blobId]);
   if (spec.type === "edit") return JSON.stringify([spec.type, localKey(spec.base), spec.ops]);
+  if (spec.type === "build") {
+    return JSON.stringify([
+      spec.type,
+      spec.sources.map((s) => [localKey(s), s.position, s.rotation, s.scale]),
+      spec.keep,
+    ]);
+  }
   return JSON.stringify([spec.type, spec.kind, spec.params]);
 }
 
@@ -500,6 +509,28 @@ const api = {
       console.error("[worker.buildResult] uncaught error:", e);
       return { mesh: null, volume: 0, faceCount: 0, errors: [...errors, { id: "__root", message: String(e) }], buildMs: 0 };
     }
+  },
+
+  /**
+   * Shape Builder: cuts the given top-level shapes into the regions their
+   * boundaries divide space into, and meshes each one so the viewport can
+   * show and hit-test them. Empty regions — masks describing an overlap that
+   * does not actually happen — never come back, so what the user sees is only
+   * what is really there.
+   */
+  async buildCells(specs: NodeSpec[]): Promise<CellPart[]> {
+    await init();
+    const { onError } = collector();
+    const solids: AnySolid[] = [];
+    for (const spec of specs) {
+      const solid = await makeWorld(spec, onError);
+      if (solid) solids.push(solid);
+    }
+    if (solids.length < 2) return [];
+    return decompose(solids).map(({ mask, solid }) => ({
+      mask,
+      mesh: toMesh(`cell-${mask}`, solid, EDIT_QUALITY),
+    }));
   },
 
   /** Fast export path used on the interactive worker: it never rebuilds. If

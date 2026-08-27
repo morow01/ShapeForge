@@ -264,6 +264,8 @@ export function Inspector({
             <ImportInfo node={node} />
           ) : node.type === "edit" ? (
             <EditInfo node={node} error={error} onPruneDeadOps={onPruneDeadOps} />
+          ) : node.type === "build" ? (
+            <BuildInfo node={node} />
           ) : (
             <ObjectParams
               node={node}
@@ -372,6 +374,27 @@ function ImportInfo({ node }: { node: Extract<SceneNode, { type: "import" }> }) 
         <dd>{formatBytes(node.byteSize)}</dd>
       </dl>
       <p className="hint">Original geometry is preserved; use Scale to resize it proportionally.</p>
+    </>
+  );
+}
+
+function BuildInfo({ node }: { node: Extract<SceneNode, { type: "build" }> }) {
+  const total = (1 << node.sources.length) - 1;
+  return (
+    <>
+      <h2>Built shape</h2>
+      <dl className="readout">
+        <dt>Built from</dt>
+        <dd>{node.sources.map((s) => s.name).join(", ")}</dd>
+        <dt>Regions kept</dt>
+        <dd>
+          {node.keep.length} of {total}
+        </dd>
+      </dl>
+      <p className="hint">
+        The shapes it was built from are frozen inside it, so its dimensions are
+        no longer editable — move, rotate and scale still apply.
+      </p>
     </>
   );
 }

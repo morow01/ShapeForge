@@ -251,7 +251,40 @@ export interface EditNode extends NodeBase {
   ops: PushPullOp[];
 }
 
-export type SceneNode = ObjectNode | GroupNode | ImportNode | EditNode;
+/**
+ * The result of the Shape Builder: overlapping solids cut into the pieces
+ * their boundaries divide space into, with a chosen subset kept.
+ *
+ * A "cell" is one such piece, named by a bitmask over `sources` in order:
+ * bit i set means source i contains it. So with two sources, 0b01 is
+ * A-minus-B, 0b10 is B-minus-A, and 0b11 is their overlap — every boolean of
+ * the two is some combination of the three, which is exactly what makes one
+ * click-and-alt-click gesture able to express union, subtract and intersect.
+ *
+ * Like an EditNode this freezes what it was built from, so it stays
+ * rebuildable (and the kept set stays revisitable) instead of collapsing to
+ * an opaque mesh. Sources keep the placements they had relative to each
+ * other — they have to, since the overlap is the whole point — and this
+ * node's own transform applies on top, exactly as a group's does.
+ */
+export interface BuildNode extends NodeBase {
+  type: "build";
+  sources: SceneNode[];
+  /** Cell masks to keep. Empty means nothing survived, which the UI prevents. */
+  keep: number[];
+}
+
+export type SceneNode = ObjectNode | GroupNode | ImportNode | EditNode | BuildNode;
+
+/** Every cell mask over `count` sources: 1 .. 2^count - 1. */
+export function cellMasks(count: number): number[] {
+  return Array.from({ length: (1 << count) - 1 }, (_, i) => i + 1);
+}
+
+/** Cap on sources in one Shape Builder operation: cells grow as 2^n - 1, and
+ *  every one of them costs booleans to find. Four gives 15, which is already
+ *  more regions than anyone can keep track of on screen. */
+export const MAX_BUILD_SOURCES = 4;
 
 export const isGroup = (n: SceneNode): n is GroupNode => n.type === "group";
 
