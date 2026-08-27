@@ -52,6 +52,11 @@ function toMm(value: string | null): number | null {
 /** The shapes SVG offers besides <path>, rewritten as path data. */
 function shapeToPath(el: Element): string | null {
   const num = (name: string) => Number(el.getAttribute(name) ?? 0);
+  // Cubic approximation used by vector editors for a quarter circle. Using
+  // explicit cubics here is more reliable than reflecting SVG arc commands:
+  // a pill has a zero-length straight side and some arc converters choose the
+  // opposite sweep after the Y-axis flip, turning its rounded end inward.
+  const K = 0.5522847498307936;
   switch (el.tagName.toLowerCase()) {
     case "path":
       return el.getAttribute("d");
@@ -61,22 +66,35 @@ function shapeToPath(el: Element): string | null {
       const rx = Math.min(Number(el.getAttribute("rx") ?? el.getAttribute("ry") ?? 0), w / 2);
       const ry = Math.min(Number(el.getAttribute("ry") ?? el.getAttribute("rx") ?? 0), h / 2);
       if (rx > 0 && ry > 0) {
-        return `M${x + rx} ${y}H${x + w - rx}A${rx} ${ry} 0 0 1 ${x + w} ${y + ry}` +
-          `V${y + h - ry}A${rx} ${ry} 0 0 1 ${x + w - rx} ${y + h}` +
-          `H${x + rx}A${rx} ${ry} 0 0 1 ${x} ${y + h - ry}` +
-          `V${y + ry}A${rx} ${ry} 0 0 1 ${x + rx} ${y}Z`;
+        const kx = rx * K, ky = ry * K;
+        return `M${x + rx} ${y}L${x + w - rx} ${y}` +
+          `C${x + w - rx + kx} ${y} ${x + w} ${y + ry - ky} ${x + w} ${y + ry}` +
+          `L${x + w} ${y + h - ry}` +
+          `C${x + w} ${y + h - ry + ky} ${x + w - rx + kx} ${y + h} ${x + w - rx} ${y + h}` +
+          `L${x + rx} ${y + h}` +
+          `C${x + rx - kx} ${y + h} ${x} ${y + h - ry + ky} ${x} ${y + h - ry}` +
+          `L${x} ${y + ry}` +
+          `C${x} ${y + ry - ky} ${x + rx - kx} ${y} ${x + rx} ${y}Z`;
       }
       return `M${x} ${y}h${w}v${h}h${-w}Z`;
     }
     case "circle": {
       const cx = num("cx"), cy = num("cy"), r = num("r");
       if (!(r > 0)) return null;
-      return `M${cx - r} ${cy}a${r} ${r} 0 1 0 ${r * 2} 0a${r} ${r} 0 1 0 ${-r * 2} 0Z`;
+      const k = r * K;
+      return `M${cx + r} ${cy}C${cx + r} ${cy + k} ${cx + k} ${cy + r} ${cx} ${cy + r}` +
+        `C${cx - k} ${cy + r} ${cx - r} ${cy + k} ${cx - r} ${cy}` +
+        `C${cx - r} ${cy - k} ${cx - k} ${cy - r} ${cx} ${cy - r}` +
+        `C${cx + k} ${cy - r} ${cx + r} ${cy - k} ${cx + r} ${cy}Z`;
     }
     case "ellipse": {
       const cx = num("cx"), cy = num("cy"), rx = num("rx"), ry = num("ry");
       if (!(rx > 0 && ry > 0)) return null;
-      return `M${cx - rx} ${cy}a${rx} ${ry} 0 1 0 ${rx * 2} 0a${rx} ${ry} 0 1 0 ${-rx * 2} 0Z`;
+      const kx = rx * K, ky = ry * K;
+      return `M${cx + rx} ${cy}C${cx + rx} ${cy + ky} ${cx + kx} ${cy + ry} ${cx} ${cy + ry}` +
+        `C${cx - kx} ${cy + ry} ${cx - rx} ${cy + ky} ${cx - rx} ${cy}` +
+        `C${cx - rx} ${cy - ky} ${cx - kx} ${cy - ry} ${cx} ${cy - ry}` +
+        `C${cx + kx} ${cy - ry} ${cx + rx} ${cy - ky} ${cx + rx} ${cy}Z`;
     }
     case "line":
       return `M${num("x1")} ${num("y1")}L${num("x2")} ${num("y2")}`;
@@ -160,8 +178,11 @@ export function parseSvg(text: string): SvgOutlines {
       .abs();
 
     const commands: SvgCommand[] = [];
-    // iterate(fn, true) hands over absolute segments with H/V already
-    // resolved into L, so only four command kinds can arrive here.
+    // Do not keep svgpath's transform stack lazy here. With `true` as the
+    // second argument iterate() returns the original Illustrator coordinates,
+    // silently skipping the artboard scale, nested transforms and Y-axis
+    // flip we just queued above. That distorted compound artwork even though
+    // simple letters could appear plausible.
     p.iterate((seg) => {
       const op = String(seg[0]).toUpperCase();
       const a = seg.slice(1) as number[];
@@ -184,7 +205,7 @@ export function parseSvg(text: string): SvgOutlines {
           a[3],
         ]);
       } else if (op === "Z") commands.push(["Z"]);
-    }, true);
+    });
 
     if (commands.length > 1) paths.push(commands);
   }

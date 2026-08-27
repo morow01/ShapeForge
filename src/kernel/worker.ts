@@ -20,6 +20,7 @@ import {
   place,
   survivingOps,
 } from "./shape";
+import { SVG_IMPORT_REVISION } from "./svgSolid";
 import { loadSTLPreview } from "./stlPreview";
 import type { AnySolid } from "./shape";
 import type {
@@ -311,6 +312,40 @@ function blobSTLOf(s: AnySolid, quality: MeshQuality): Blob {
   return isMesh(s) ? s.blobSTL({ binary: true }) : s.blobSTL({ ...quality, binary: true });
 }
 
+/** Binary STL containing several already-evaluated closed shells. STL does
+ * not require one topological body, and slicers routinely accept multiple
+ * overlapping shells in one file. This is the safe fallback when manifold
+ * cannot perform the optional final union of otherwise valid scene roots. */
+function blobSTLOfMany(solids: AnySolid[], quality: MeshQuality): Blob {
+  const meshes = solids.map((solid) => isMesh(solid) ? solid.mesh() : solid.mesh(quality));
+  const triangleCount = meshes.reduce((sum, mesh) => sum + Math.floor(mesh.triangles.length / 3), 0);
+  const buffer = new ArrayBuffer(84 + triangleCount * 50);
+  const output = new DataView(buffer);
+  output.setUint32(80, triangleCount, true);
+  let triangleNumber = 0;
+  for (const mesh of meshes) {
+    for (let offset = 0; offset + 2 < mesh.triangles.length; offset += 3) {
+      const ids = [mesh.triangles[offset], mesh.triangles[offset + 1], mesh.triangles[offset + 2]];
+      const points = ids.map((id) => [mesh.vertices[id * 3], mesh.vertices[id * 3 + 1], mesh.vertices[id * 3 + 2]]);
+      const [a, b, c] = points;
+      const ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+      const ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+      let nx = ab[1] * ac[2] - ab[2] * ac[1];
+      let ny = ab[2] * ac[0] - ab[0] * ac[2];
+      let nz = ab[0] * ac[1] - ab[1] * ac[0];
+      const length = Math.hypot(nx, ny, nz) || 1;
+      nx /= length; ny /= length; nz /= length;
+      let byteOffset = 84 + triangleNumber++ * 50;
+      for (const value of [nx, ny, nz, ...a, ...b, ...c]) {
+        output.setFloat32(byteOffset, value, true);
+        byteOffset += 4;
+      }
+      output.setUint16(byteOffset, 0, true);
+    }
+  }
+  return new Blob([buffer], { type: "model/stl" });
+}
+
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 /**
@@ -329,7 +364,13 @@ function localKey(spec: NodeSpec): string {
       spec.children.map((c) => [localKey(c), c.position, c.rotation, c.scale, c.isHole]),
     ]);
   }
-  if (spec.type === "import") return JSON.stringify([spec.type, spec.blobId]);
+  if (spec.type === "import") {
+    return JSON.stringify([
+      spec.type,
+      spec.blobId,
+      spec.svg ? [spec.svg.thickness, SVG_IMPORT_REVISION] : null,
+    ]);
+  }
   if (spec.type === "edit") return JSON.stringify([spec.type, localKey(spec.base), spec.ops]);
   if (spec.type === "build") {
     return JSON.stringify([
@@ -563,10 +604,16 @@ const api = {
     }
     // Otherwise evaluate using the same Manifold-first path as buildResult.
     const { onError } = collector();
-    const kids: { solid: MeshShape; isHole: boolean }[] = [];
+    const evaluated: { solid: AnySolid; isHole: boolean }[] = [];
     for (const spec of specs) {
       const world = await makeWorld(spec, onError, onProgress);
       if (!world) continue;
+      evaluated.push({ solid: world, isHole: spec.isHole });
+    }
+    if (!evaluated.length) return null;
+    const evaluatedSolids = evaluated.filter((item) => !item.isHole).map((item) => item.solid);
+    let solid: AnySolid | null;
+    try {
       // EXPORT_QUALITY is not optional here. meshShape() with no argument
       // tessellates at OCCT's default tolerance (~0.001mm), which this file
       // already documents as the setting that turns a single sphere into six
@@ -575,11 +622,17 @@ const api = {
       // ~400 for the three without, and manifold then spent 16s booleaning
       // that — 81% of the whole export, for detail finer than any printer can
       // resolve and finer than the viewport ever asked for.
-      const mesh = isMesh(world) ? world : (world as Shape3D).meshShape(EXPORT_PRESETS[quality]);
-      kids.push({ solid: mesh, isHole: spec.isHole });
+      const kids = evaluated.map(({ solid: world, isHole }) => ({
+        solid: isMesh(world) ? world : (world as Shape3D).meshShape(EXPORT_PRESETS[quality]),
+        isHole,
+      }));
+      solid = combine("union", kids);
+    } catch (error) {
+      if (/not manifold/i.test(message(error)) && evaluatedSolids.length) {
+        return blobSTLOfMany(evaluatedSolids, EXPORT_PRESETS[quality]);
+      }
+      throw error;
     }
-    if (!kids.length) return null;
-    const solid = combine("union", kids);
     if (!solid) return null;
     resultSolidCache = { key, solid, meshQuality: quality };
     // binary: true — smaller and faster to write/read than the ASCII default,
