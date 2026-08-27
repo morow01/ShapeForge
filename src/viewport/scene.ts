@@ -2142,6 +2142,11 @@ export class Scene {
    *  tens of thousands of vertices and does not deserve a ray each. */
   private static readonly DROP_SAMPLES = 400;
 
+  /** Columns per axis across the footprint two parts share. 12x12 resolves a
+   *  contact a millimetre or two across on a part the size of a bracket,
+   *  which is the scale at which a wrong landing is visible. */
+  private static readonly DROP_GRID = 12;
+
   /**
    * Gravity, one step at a time — the D shortcut. Each selected top-level part
    * falls straight down until it meets the nearest upward-facing surface below
@@ -2242,8 +2247,63 @@ export class Scene {
       }
     }
 
-    // The build plate always catches whatever nothing else did.
+    // Neither part's corners need lie over the other. Two bars crossing in
+    // plan — a panel spanning a deck narrower than itself — overlap only
+    // where their EDGES cross, so every vertex of each sits outside the
+    // other's footprint and both passes above come back empty. The part then
+    // has nothing to stand on and falls clean through to the plate, which is
+    // exactly what a bracket's upright did.
+    //
+    // So the overlap itself gets sampled. Down each column of the shared
+    // footprint: how low does this part reach, and what is the highest thing
+    // under it there.
+    for (const target of targets) {
+      const box = new THREE.Box3().setFromObject(target.group);
+      const minX = Math.max(box.min.x, movingBox.min.x);
+      const maxX = Math.min(box.max.x, movingBox.max.x);
+      const minY = Math.max(box.min.y, movingBox.min.y);
+      const maxY = Math.min(box.max.y, movingBox.max.y);
+      if (minX > maxX || minY > maxY) continue;
+      if (box.min.z > movingBox.max.z) continue;
+
+      const above = movingBox.max.z + 1;
+      const steps = Scene.DROP_GRID - 1;
+      for (let ix = 0; ix <= steps; ix++) {
+        for (let iy = 0; iy <= steps; iy++) {
+          const x = steps ? minX + ((maxX - minX) * ix) / steps : minX;
+          const y = steps ? minY + ((maxY - minY) * iy) / steps : minY;
+          // The underside is found from BELOW, not by taking the last hit of a
+          // downward ray. Materials here are FrontSide, and the raycaster
+          // honours that: a ray travelling down never reports the faces
+          // pointing down, so "the last hit" is really the part's TOP surface
+          // — which measured the drop from the wrong face and buried the part
+          // below the plate. A ray coming up meets that underside head on.
+          const fromBelow = new THREE.Vector3(x, y, movingBox.min.z - 1);
+          this.raycaster.set(fromBelow, UP);
+          const mine = this.raycaster.intersectObject(view.mesh, false)[0];
+          if (!mine) continue;
+          const underside = mine.point.z;
+
+          // Highest upward-facing surface of the target below that.
+          const from = new THREE.Vector3(x, y, above);
+          this.raycaster.set(from, DOWN);
+          let support = -Infinity;
+          for (const hit of this.raycaster.intersectObject(target.mesh, false)) {
+            if (hit.point.z > underside - Scene.DROP_EPS) continue;
+            if (!upwardHit(hit, true)) continue;
+            support = Math.max(support, hit.point.z);
+            break;
+          }
+          if (support === -Infinity) continue;
+          best = Math.min(best, underside - support);
+        }
+      }
+    }
+
+    // The build plate always catches whatever nothing else did — and nothing
+    // may sink through it, however the probes above vote.
     if (movingBox.min.z > Scene.DROP_EPS) best = Math.min(best, movingBox.min.z);
+    if (best > movingBox.min.z) best = Math.max(0, movingBox.min.z);
 
     return Number.isFinite(best) ? best : null;
   }
