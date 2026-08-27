@@ -185,7 +185,11 @@ function liftOutOf(group: GroupNode, child: SceneNode, worldCentre?: Vec3): Scen
  * selection that reaches inside an existing group does exactly that, which is
  * how a group could rearrange the model the moment it was made.
  */
-function liftToWorld(roots: SceneNode[], node: SceneNode): SceneNode {
+function liftToWorld(
+  roots: SceneNode[],
+  node: SceneNode,
+  centres?: Record<string, Vec3>,
+): SceneNode {
   const chain: GroupNode[] = [];
   const find = (list: SceneNode[], ancestors: GroupNode[]): boolean => {
     for (const n of list) {
@@ -198,8 +202,39 @@ function liftToWorld(roots: SceneNode[], node: SceneNode): SceneNode {
     return false;
   };
   find(roots, []);
-  // Innermost group first: each step lifts the node one frame outwards.
-  return chain.reduceRight((carried, group) => liftOutOf(group, carried), node);
+  if (!chain.length) return node;
+
+  // Flattening is exact for moving and turning, and only for those. A group
+  // that has been SCALED scales about the centre of its own bounds, and the
+  // child's share of that depends on where the child's own geometry sits
+  // inside itself — which the document does not know, so the child lands off
+  // by (scale - 1) x its own centre offset. That is 8mm for a 20mm box in a
+  // group scaled 1.8, and it is why grouping sometimes nudged parts.
+  //
+  // So a scaled frame is not flattened, it is kept: the child is wrapped in a
+  // group carrying that same transform, which reproduces where it stood by
+  // construction rather than by arithmetic.
+  const unitScale = (g: GroupNode) =>
+    g.scale[0] === 1 && g.scale[1] === 1 && g.scale[2] === 1;
+  if (chain.every(unitScale)) {
+    // Innermost group first: each step lifts the node one frame outwards.
+    return chain.reduceRight(
+      (carried, group) => liftOutOf(group, carried, centres?.[group.id]),
+      node,
+    );
+  }
+  return chain.reduceRight<SceneNode>(
+    (carried, group) =>
+      unitScale(group)
+        ? liftOutOf(group, carried, centres?.[group.id])
+        : {
+            ...group,
+            id: nextId(),
+            children: [carried],
+            collapsed: true,
+          },
+    node,
+  );
 }
 
 /** Runs after every mutation that can be part of a burst. */
@@ -336,7 +371,10 @@ interface DocState {
   setGroupOp: (id: string, op: BooleanOp) => void;
   toggleCollapsed: (id: string) => void;
   rename: (id: string, name: string) => void;
-  group: () => void;
+  /** `centres` maps a group id to its world bounding-box centre — see
+   *  ungroup(). Needed when a selection reaches inside a SCALED group, since
+   *  the kernel scales about that point and the document holds no bounds. */
+  group: (centres?: Record<string, Vec3>) => void;
   /** `centres` maps a group id to its world bounding-box centre, which only
    *  the viewport knows. Needed to undo a group's scaling, which the kernel
    *  applies about that point; without it a scaled group's children land
@@ -346,7 +384,7 @@ interface DocState {
   /** Clears the canvas of the active project. */
   /** Shape Builder: replaces `sourceIds` with one node holding them frozen
    *  and the chosen cell masks. Sources keep their relative placement. */
-  shapeBuild: (sourceIds: string[], keep: number[]) => void;
+  shapeBuild: (sourceIds: string[], keep: number[], centres?: Record<string, Vec3>) => void;
   clearAll: () => void;
 }
 
@@ -756,7 +794,7 @@ export const useDoc = create<DocState>()(
        * node was. Children keep their world transforms; the group starts at the
        * origin so grouping never moves anything.
        */
-      group: () =>
+      group: (centres) =>
         set((s) => {
           if (s.selectedIds.length < 2) return {};
           const ids = new Set(s.selectedIds);
@@ -771,7 +809,7 @@ export const useDoc = create<DocState>()(
           // A selection can reach inside an existing group. Those nodes are
           // stored relative to it, so they have to be rewritten into world
           // terms before joining a group that knows nothing about it.
-          const lifted = removed.map((n) => liftToWorld(s.nodes, n));
+          const lifted = removed.map((n) => liftToWorld(s.nodes, n, centres));
 
           const groupCount = s.nodes.filter(isGroup).length + 1;
           const node: GroupNode = {
@@ -822,7 +860,7 @@ export const useDoc = create<DocState>()(
 
       setShowResult: (v) => set({ showResult: v }),
 
-      shapeBuild: (sourceIds, keep) =>
+      shapeBuild: (sourceIds, keep, centres) =>
         set((s) => {
           if (sourceIds.length < 2 || !keep.length) return {};
           const ids = new Set(sourceIds);
@@ -836,7 +874,7 @@ export const useDoc = create<DocState>()(
           removed.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
           // Same as grouping: a source taken out of a group carries that
           // group's transform with it or it moves.
-          const sources = removed.map((n) => liftToWorld(s.nodes, n));
+          const sources = removed.map((n) => liftToWorld(s.nodes, n, centres));
 
           const buildCount = s.nodes.filter((n) => n.type === "build").length + 1;
           const node: BuildNode = {

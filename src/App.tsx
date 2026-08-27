@@ -811,14 +811,20 @@ export function App() {
    *  so the scene works out the distances and the document records them. */
   /** Ungroup needs each group's world centre, which only the viewport can
    *  measure — see the store's ungroup(). */
-  const ungroupSelected = useCallback(() => {
+  /** World centres of every built part, for the transform composition that
+   *  grouping and ungrouping both need — only the viewport knows them, and a
+   *  scaled group's children land wrong without them. */
+  const partCentres = useCallback(() => {
     const centres: Record<string, Vec3> = {};
-    for (const id of useDoc.getState().selectedIds) {
-      const centre = sceneRef.current?.worldCentre(id);
-      if (centre) centres[id] = centre;
+    for (const node of useDoc.getState().nodes) {
+      const centre = sceneRef.current?.worldCentre(node.id);
+      if (centre) centres[node.id] = centre;
     }
-    ungroup(centres);
-  }, [ungroup]);
+    return centres;
+  }, []);
+
+  const ungroupSelected = useCallback(() => ungroup(partCentres()), [ungroup, partCentres]);
+  const groupSelected = useCallback(() => group(partCentres()), [group, partCentres]);
 
   const dropSelected = useCallback(() => {
     const updates = sceneRef.current?.dropSelected() ?? [];
@@ -848,7 +854,7 @@ export function App() {
       } else if (mod && e.key.toLowerCase() === "g") {
         e.preventDefault();
         if (e.shiftKey) ungroupSelected();
-        else group();
+        else groupSelected();
       } else if (mod && e.key.toLowerCase() === "z") {
         e.preventDefault();
         if (e.shiftKey) redo();
@@ -893,7 +899,7 @@ export function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [removeSelected, undo, redo, group, ungroup, toggleTransparency, dropSelected, ungroupSelected, commitBuild, exportCurrentProject, newProject]);
+  }, [removeSelected, undo, redo, group, ungroup, toggleTransparency, dropSelected, ungroupSelected, groupSelected, commitBuild, exportCurrentProject, newProject]);
 
   return (
     <div className="app-shell">
@@ -963,7 +969,7 @@ export function App() {
           <button onClick={() => redo()} disabled={!canRedo} title="Redo (Ctrl+Shift+Z)">↷ Redo</button>
         </div>
         <div className="toolbar-group">
-          <button onClick={group} disabled={!canGroup} title="Ctrl+G">Group</button>
+          <button onClick={() => groupSelected()} disabled={!canGroup} title="Ctrl+G">Group</button>
           <button onClick={() => ungroupSelected()} disabled={!canUngroup} title="Ctrl+Shift+G">Ungroup</button>
         </div>
         <div className="toolbar-group view-tools">
