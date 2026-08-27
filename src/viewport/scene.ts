@@ -565,8 +565,11 @@ export class Scene {
     | ((id: string, patch: { position?: Vec3; rotation?: Vec3; scale?: Vec3 }) => void)
     | null = null;
   onAlignObjects: ((updates: { id: string; position: Vec3 }[]) => void) | null = null;
-  /** Shape Builder: how many regions are in the shape, out of how many exist. */
-  onCellsChanged: ((kept: number, total: number) => void) | null = null;
+  /** Shape Builder: every region and whether it is currently in the shape.
+   *  The panel needs the whole list, not a count: a region enclosed inside
+   *  another — a sphere's overlap with the box around it — has no visible
+   *  surface to click, so the list is the only way to reach it. */
+  onCellsChanged: ((cells: { mask: number; kept: boolean }[]) => void) | null = null;
   /** Fires as a gizmo drag begins and ends, so the whole drag can become a
    *  single undo step instead of one per frame. */
   onDragChange: ((dragging: boolean) => void) | null = null;
@@ -2310,7 +2313,31 @@ export class Scene {
     for (const view of this.parts.values()) view.group.visible = !cells;
     this.applyCellMaterials();
     this.applyMaterials();
-    this.onCellsChanged?.(this.keptCells().length, this.cellViews.size);
+    this.reportCells();
+  }
+
+  private reportCells() {
+    this.onCellsChanged?.(
+      [...this.cellViews].map(([mask, view]) => ({ mask, kept: view.kept })),
+    );
+  }
+
+  /** Put a region in or take it out from outside the viewport — the panel's
+   *  way in, and the only way to reach a region with no visible surface. */
+  setCellKept(mask: number, kept: boolean) {
+    const view = this.cellViews.get(mask);
+    if (!view || view.kept === kept) return;
+    view.kept = kept;
+    this.applyCellMaterials();
+    this.reportCells();
+  }
+
+  /** Highlights a region without clicking it, so hovering its entry in the
+   *  panel shows which part of the model it actually is. */
+  previewCell(mask: number | null) {
+    if (this.hoverCell === mask) return;
+    this.hoverCell = mask;
+    this.applyCellMaterials();
   }
 
   /** Which regions are currently kept — what a commit turns into a BuildNode. */
@@ -2396,7 +2423,7 @@ export class Scene {
     if (!view || view.kept === keep) return mask !== null;
     view.kept = keep;
     this.applyCellMaterials();
-    this.onCellsChanged?.(this.keptCells().length, this.cellViews.size);
+    this.reportCells();
     return true;
   }
 

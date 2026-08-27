@@ -34,8 +34,8 @@ interface Props {
    *  Drop has to call INTO the scene (it needs the built geometry), which the
    *  one-way props everything else uses cannot express. */
   onSceneReady?: (scene: Scene | null) => void;
-  /** Shape Builder tally: regions currently in the shape, out of how many. */
-  onCellsChanged?: (kept: number, total: number) => void;
+  /** Shape Builder: every region and whether it is in the shape. */
+  onCellsChanged?: (cells: { mask: number; kept: boolean }[]) => void;
 }
 
 export function Viewport(props: Props) {
@@ -62,7 +62,7 @@ export function Viewport(props: Props) {
     scene.onPushPullFace = (id, op) => latest.current.onPushPull(id, op);
     scene.onPreviewPushPull = (id, op) => latest.current.onPreviewPushPull(id, op);
     scene.onDragChange = (dragging) => latest.current.onDragChange(dragging);
-    scene.onCellsChanged = (kept, total) => latest.current.onCellsChanged?.(kept, total);
+    scene.onCellsChanged = (cells) => latest.current.onCellsChanged?.(cells);
 
     scene.setParts(latest.current.parts);
     scene.setPlacements(latest.current.nodes, latest.current.selectedIds);

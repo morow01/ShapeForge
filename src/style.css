@@ -870,3 +870,29 @@ select.num { height: 31px; }
   box-shadow: 0 1px 5px rgb(31 50 62 / 25%);
 }
 .cell-cursor.is-remove { border-color: #e0725c; color: #c2452c; }
+
+/* Region toggles inside the Shape Builder bar. */
+.build-bar { flex-direction: column; align-items: stretch; gap: 8px; max-width: 380px; }
+.build-regions { display: flex; flex-direction: column; gap: 6px; }
+.build-chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.build-chip {
+  min-height: 24px;
+  padding: 3px 8px;
+  border: 1px solid #cbd7df;
+  border-radius: 999px;
+  background: #f4f7f9;
+  color: #72818c;
+  font-size: 11px;
+  font-weight: 600;
+  /* A removed region reads as struck through, so "in" vs "out" survives a
+     glance without having to compare colours. */
+  text-decoration: line-through;
+}
+.build-chip.on {
+  border-color: #24aaa8;
+  background: #e6f7f6;
+  color: #087a79;
+  text-decoration: none;
+}
+.build-chip:hover { border-color: #24aaa8; }
+.build-actions { display: flex; justify-content: flex-end; gap: 6px; }

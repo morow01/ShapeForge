@@ -220,7 +220,7 @@ export function App() {
    *  cell masks index them. Null whenever the tool is not running. */
   const [buildSources, setBuildSources] = useState<string[] | null>(null);
   const [buildBusy, setBuildBusy] = useState(false);
-  const [buildTally, setBuildTally] = useState({ kept: 0, total: 0 });
+  const [buildCells, setBuildCells] = useState<{ mask: number; kept: boolean }[]>([]);
   // Remembered across sessions: which quality you want is a property of how
   // you print, not of one export.
   const [exportQuality, setExportQuality] = useState<ExportQuality>(
@@ -739,6 +739,20 @@ export function App() {
     };
   }, [toolMode]);
 
+  /** "Box 1", "Sphere 1", "Box 1 + Sphere 1" — a region named by which of the
+   *  source shapes contain it, which is exactly what its mask records. */
+  const cellLabel = useCallback(
+    (mask: number) => {
+      const names = (buildSources ?? [])
+        .map((id, i) => ((mask >> i) & 1 ? findNode(nodes, id)?.name ?? `Shape ${i + 1}` : null))
+        .filter((n): n is string => !!n);
+      return names.join(" + ");
+    },
+    [buildSources, nodes],
+  );
+
+  const keptCount = buildCells.filter((c) => c.kept).length;
+
   /** Commits the session: the kept regions become one built shape. */
   const commitBuild = useCallback(() => {
     const kept = sceneRef.current?.keptCells() ?? [];
@@ -1063,7 +1077,7 @@ export function App() {
           resizeConstrained={resizeConstrained}
           wireframe={wireframe}
           onSceneReady={(scene) => { sceneRef.current = scene; }}
-          onCellsChanged={(kept, total) => setBuildTally({ kept, total })}
+          onCellsChanged={setBuildCells}
           onSelect={onSelect}
           onSelectMany={onSelectMany}
           onTransform={onTransform}
@@ -1073,28 +1087,49 @@ export function App() {
           onPreviewPushPull={onPreviewPushPull}
           onDragChange={onDragChange}
         />
-        {toolMode === "build" && !buildBusy && buildTally.total > 0 && (
+        {toolMode === "build" && !buildBusy && buildCells.length > 0 && (
           // Finishing has to be visible. Enter alone was not: Esc is the key
           // people reach for to get out of a mode, and Esc throws the session
           // away — so the work looked like it had simply not applied.
           <div className="build-bar">
-            <span className="build-count">
-              <strong>{buildTally.kept}</strong> of {buildTally.total} regions kept
-            </span>
-            <span className="build-hint">Alt-click a region to remove it · click to put it back</span>
-            <button className="build-cancel" onClick={() => setToolMode("select")}>
-              Cancel (Esc)
-            </button>
-            <button className="build-apply" onClick={commitBuild} disabled={!buildTally.kept}>
-              Build shape (Enter)
-            </button>
+            <div className="build-regions">
+              <span className="build-count">
+                <strong>{keptCount}</strong> of {buildCells.length} regions kept
+              </span>
+              {/* One toggle per region. A region enclosed inside another — the
+                  half of a sphere buried in the box around it — has no visible
+                  surface to click in the viewport, so this list is the only way
+                  to reach it. Hovering highlights it in 3D. */}
+              <div className="build-chips">
+                {buildCells.map((cell) => (
+                  <button
+                    key={cell.mask}
+                    className={`build-chip ${cell.kept ? "on" : ""}`}
+                    onClick={() => sceneRef.current?.setCellKept(cell.mask, !cell.kept)}
+                    onMouseEnter={() => sceneRef.current?.previewCell(cell.mask)}
+                    onMouseLeave={() => sceneRef.current?.previewCell(null)}
+                    title={cell.kept ? "In the shape — click to remove" : "Removed — click to put back"}
+                  >
+                    {cellLabel(cell.mask)}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="build-actions">
+              <button className="build-cancel" onClick={() => setToolMode("select")}>
+                Cancel (Esc)
+              </button>
+              <button className="build-apply" onClick={commitBuild} disabled={!keptCount}>
+                Build shape (Enter)
+              </button>
+            </div>
           </div>
         )}
         <div className="canvas-help">
           {toolMode === "build"
             ? buildBusy
               ? "Working out the regions…"
-              : "Alt-click or alt-drag to remove a region · Click to put one back · Right-drag orbit"
+              : "Alt-click a region to remove it · Alt-click the same spot again for the region behind it · Right-drag orbit"
             : toolMode === "align"
             ? "Click a dot to align minimum, centre, or maximum · A Align · Esc Select"
             : toolMode === "face"
