@@ -3,7 +3,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
 import { clearHighlights, getFaceIndex, highlightInGeometry, syncGeometries } from "replicad-threejs-helper";
 import type { ReplicadMesh, ThreeGeometry } from "replicad-threejs-helper";
-import type { FaceInfo, KernelMesh, PreviewBuild, ScenePart } from "../kernel/types";
+import type { CellPart, FaceInfo, KernelMesh, PreviewBuild, ScenePart } from "../kernel/types";
 import type { CameraMode, SceneNode, Vec3 } from "../document/types";
 import { DEFAULT_OBJECT_COLOR, isGroup } from "../document/types";
 import { findNode, resolveNodeColor, resolveNodeTransparent } from "../document/tree";
@@ -15,7 +15,7 @@ import { CUBE_MARGIN_PX, CUBE_PX, NavCube } from "./navcube";
 import { findApex, solveScaledTriangle } from "../geometry/triangle";
 
 export type { CameraMode } from "../document/types";
-export type ToolMode = "select" | "face" | "move" | "rotate" | "align";
+export type ToolMode = "select" | "face" | "move" | "rotate" | "align" | "build";
 type AlignAxis = 0 | 1 | 2;
 type AlignAnchor = "min" | "center" | "max";
 
@@ -239,6 +239,26 @@ const MATERIALS = {
   // Using vibrant amber ensures high visibility across all solid colors
   // and prevents visual confusion with the default blue object color.
   faceHighlight: new THREE.MeshBasicMaterial({ color: 0xff9f1a, depthTest: true }),
+  /** Shape Builder regions. Kept is ordinary solid; removed stays visible as
+   *  a ghost so it can be clicked back rather than vanishing irretrievably;
+   *  hovered is the same amber the face tool uses, so "the thing under your
+   *  cursor" looks the same everywhere in the app. */
+  cellKept: new THREE.MeshStandardMaterial({ color: 0x43aede, metalness: 0.04, roughness: 0.55 }),
+  cellRemoved: new THREE.MeshStandardMaterial({
+    color: 0x9fb0bb,
+    transparent: true,
+    opacity: 0.16,
+    depthWrite: false,
+    roughness: 0.6,
+  }),
+  cellHover: new THREE.MeshStandardMaterial({ color: 0xff9f1a, metalness: 0.04, roughness: 0.5 }),
+  cellHoverRemoved: new THREE.MeshStandardMaterial({
+    color: 0xff9f1a,
+    transparent: true,
+    opacity: 0.42,
+    depthWrite: false,
+    roughness: 0.5,
+  }),
   // Wireframe view: the actual tessellation, every triangle edge drawn and
   // nothing filled, so the far side of a shape shows through the near side.
   // The mesh stays a normal drawn object — making it invisible would take it
@@ -483,6 +503,10 @@ export class Scene {
   private showResult = false;
   /** Edges-only view: solids stop being drawn, their wireframes carry on. */
   private wireframe = false;
+  /** Shape Builder: one view per region of the selection's arrangement, keyed
+   *  by cell mask. Empty whenever the tool is not active. */
+  private cellViews = new Map<number, { group: THREE.Group; mesh: THREE.Mesh; wire: THREE.LineSegments; kept: boolean }>();
+  private hoverCell: number | null = null;
   private selectedIds: string[] = [];
   /** Most recent nodes passed to setPlacements, so a part that is (re)created
    *  by setParts — which runs on its own async schedule from the kernel and
@@ -1138,7 +1162,11 @@ export class Scene {
         view.wire.visible = false;
         view.group.visible = true;
       } else {
-        view.group.visible = true;
+        // A Shape Builder session replaces the sources with their regions;
+        // leaving the sources drawn would z-fight the very geometry that came
+        // out of them, and the two coincident surfaces stripe against each
+        // other as the camera moves.
+        view.group.visible = !this.cellViews.size;
         view.wire.visible = true;
       }
     }
@@ -2207,6 +2235,99 @@ export class Scene {
     return points;
   }
 
+  /**
+   * Shows one clickable body per region of the selection's arrangement, and
+   * hides the shapes they came from — from here on the regions ARE the model
+   * as far as this tool is concerned. Every region starts kept, so a builder
+   * session that touches nothing commits a plain union.
+   *
+   * Passing null ends the session and puts the original parts back.
+   */
+  setCells(cells: CellPart[] | null) {
+    for (const view of this.cellViews.values()) {
+      this.scene.remove(view.group);
+      view.mesh.geometry.dispose();
+      view.wire.geometry.dispose();
+    }
+    this.cellViews.clear();
+    this.hoverCell = null;
+
+    if (cells) {
+      for (const cell of cells) {
+        const geom = syncKernelGeometry(cell.mesh);
+        const mesh = new THREE.Mesh(geom[0].faces, MATERIALS.cellKept);
+        const wire = new THREE.LineSegments(geom[0].lines, MATERIALS.wire);
+        const group = new THREE.Group();
+        group.add(mesh, wire);
+        this.scene.add(group);
+        this.cellViews.set(cell.mask, { group, mesh, wire, kept: true });
+      }
+    }
+    // The sources would otherwise sit exactly on top of their own regions,
+    // z-fighting them and swallowing every click.
+    for (const view of this.parts.values()) view.group.visible = !cells;
+    this.applyCellMaterials();
+    this.applyMaterials();
+  }
+
+  /** Which regions are currently kept — what a commit turns into a BuildNode. */
+  keptCells(): number[] {
+    return [...this.cellViews]
+      .filter(([, view]) => view.kept)
+      .map(([mask]) => mask)
+      .sort((a, b) => a - b);
+  }
+
+  get hasCells(): boolean {
+    return this.cellViews.size > 0;
+  }
+
+  private applyCellMaterials() {
+    for (const [mask, view] of this.cellViews) {
+      const hovered = this.hoverCell === mask;
+      view.mesh.material = view.kept
+        ? hovered
+          ? MATERIALS.cellHover
+          : MATERIALS.cellKept
+        : hovered
+          ? MATERIALS.cellHoverRemoved
+          : MATERIALS.cellRemoved;
+      // Removed regions draw after the kept ones so their ghost reads as
+      // "in front of, but not part of" the solid.
+      view.mesh.renderOrder = view.kept ? 0 : 2;
+      view.wire.visible = view.kept || hovered;
+    }
+  }
+
+  /** The region under the pointer, or null. */
+  private raycastCell(e: PointerEvent): number | null {
+    if (!this.cellViews.size) return null;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    const meshes = [...this.cellViews.values()].map((v) => v.mesh);
+    const hit = this.raycaster.intersectObjects(meshes, false)[0];
+    if (!hit) return null;
+    for (const [mask, view] of this.cellViews) if (view.mesh === hit.object) return mask;
+    return null;
+  }
+
+  /** Click keeps a region, alt-click removes it — the Illustrator gesture. */
+  private clickCell(e: PointerEvent): boolean {
+    const mask = this.raycastCell(e);
+    if (mask === null) return false;
+    const view = this.cellViews.get(mask);
+    if (!view) return false;
+    const keep = !e.altKey;
+    // Removing the last region would commit to nothing at all; the click is
+    // simply refused rather than leaving an empty build.
+    if (!keep && this.keptCells().length === 1 && view.kept) return true;
+    view.kept = keep;
+    this.applyCellMaterials();
+    return true;
+  }
+
   setWireframe(v: boolean) {
     if (this.wireframe === v) return;
     this.wireframe = v;
@@ -2220,6 +2341,7 @@ export class Scene {
     // The offset readout belongs to select-tool dragging; leaving would strand
     // a start point that the next return to select has no reason to honour.
     if (mode !== "select") this.clearMoveReadout();
+    if (this.toolMode === "build" && mode !== "build") this.setCells(null);
     this.toolMode = mode;
     if (leavingFace) {
       // A half-finished push/pull must not survive the tool switch — abandon
@@ -2391,6 +2513,12 @@ export class Scene {
     // for orbit/pan and must never be misread as a click on release.
     if (e.button !== 0) return;
     this.downAt = { x: e.clientX, y: e.clientY };
+    // Shape Builder owns every left click while it is running: the regions
+    // are what is on screen, and selecting the (hidden) sources underneath
+    // them would mean nothing.
+    if (this.toolMode === "build" && this.cellViews.size) {
+      if (this.clickCell(e)) return;
+    }
     // Whatever gesture starts here owns the pointer until it ends — none of
     // them re-run updateFaceHover while active (see its own guard), so any
     // highlight left over from before would otherwise just sit there stale
@@ -2488,6 +2616,14 @@ export class Scene {
    * as before — this never changes what a non-dragging click does.
    */
   private onPointerMove = (e: PointerEvent) => {
+    if (this.toolMode === "build" && this.cellViews.size) {
+      const mask = this.raycastCell(e);
+      if (mask !== this.hoverCell) {
+        this.hoverCell = mask;
+        this.applyCellMaterials();
+      }
+      return;
+    }
     if (this.pushPullDrag) {
       const drag = this.pushPullDrag;
       if (!drag.active) {
@@ -2724,6 +2860,11 @@ export class Scene {
   private onPointerUp = (e: PointerEvent) => {
     const down = this.downAt;
     this.downAt = null;
+
+    // The region click was already handled on pointerdown. Selection is
+    // resolved here, though, so without this the same click would also pick
+    // the (hidden) source underneath and change what the session is building.
+    if (this.toolMode === "build" && this.cellViews.size) return;
 
     if (this.pushPullDrag) {
       const drag = this.pushPullDrag;

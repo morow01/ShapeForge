@@ -60,3 +60,26 @@ export function DropIcon({ className = "tool-icon" }: { className?: string }) {
     </svg>
   );
 }
+
+/**
+ * Shape Builder: two overlapping outlines with only their shared region
+ * filled — the regions, and the fact that you pick between them, is the whole
+ * idea, so the icon shows an arrangement rather than a finished solid.
+ */
+export function ShapeBuilderIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      {/* The lens where the two circles meet, drawn as the intersection of
+          their paths via even-odd on a single filled shape. */}
+      <path
+        d="M12 5.6a6.4 6.4 0 0 1 0 12.8 6.4 6.4 0 0 1 0-12.8Z"
+        fill="currentColor"
+        opacity=".55"
+      />
+      <g fill="none" stroke="currentColor" strokeWidth="1.6">
+        <circle cx="9" cy="12" r="6.4" />
+        <circle cx="15" cy="12" r="6.4" />
+      </g>
+    </svg>
+  );
+}

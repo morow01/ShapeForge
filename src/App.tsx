@@ -3,7 +3,7 @@ import { kernel, KernelTimeoutError, WATCHDOG_MS } from "./kernel/client";
 import { Viewport } from "./viewport/Viewport";
 import { Inspector } from "./ui/Inspector";
 import { Tree } from "./ui/Tree";
-import { DropIcon, TransparencyIcon, WireframeIcon } from "./ui/icons";
+import { DropIcon, ShapeBuilderIcon, TransparencyIcon, WireframeIcon } from "./ui/icons";
 import { ProjectsModal } from "./ui/ProjectsModal";
 import {
   beginHistoryBatch,
@@ -13,7 +13,7 @@ import {
   useDoc,
   useTemporal,
 } from "./document/store";
-import { PRIMITIVES, isGroup } from "./document/types";
+import { MAX_BUILD_SOURCES, PRIMITIVES, isGroup } from "./document/types";
 import { findNode, parentOf, resolveNodeTransparent } from "./document/tree";
 import { putBlob } from "./document/blobStore";
 import { loadCameraState } from "./document/persist";
@@ -173,6 +173,7 @@ export function App() {
     pushPullFace,
     setOps,
     setHole,
+    shapeBuild,
     setColor,
     setTransparent,
     setGroupOp,
@@ -215,6 +216,10 @@ export function App() {
   const [toolMode, setToolMode] = useState<ToolMode>("select");
   const [resizeConstrained, setResizeConstrained] = useState(true);
   const [wireframe, setWireframe] = useState(false);
+  /** Shape Builder session: the ids that were decomposed, in the order the
+   *  cell masks index them. Null whenever the tool is not running. */
+  const [buildSources, setBuildSources] = useState<string[] | null>(null);
+  const [buildBusy, setBuildBusy] = useState(false);
   // Remembered across sessions: which quality you want is a property of how
   // you print, not of one export.
   const [exportQuality, setExportQuality] = useState<ExportQuality>(
@@ -317,6 +322,8 @@ export function App() {
   const shapeKey = useMemo(() => JSON.stringify(buildableNodes.map(shapeOf)), [buildableNodes]);
 
   const sceneRef = useRef<Scene | null>(null);
+  const toolModeRef = useRef<ToolMode>("select");
+  toolModeRef.current = toolMode;
   const buildId = useRef(0);
   const importInputRef = useRef<HTMLInputElement>(null);
 
@@ -679,6 +686,65 @@ export function App() {
     [nodes, selectedIds],
   );
 
+  // Entering Shape Builder decomposes the selection once; leaving it, by any
+  // route, tears the session down. The ids are captured here because the
+  // commit has to consume exactly what was decomposed, whatever the selection
+  // has become by then.
+  useEffect(() => {
+    if (toolMode !== "build") {
+      setBuildSources(null);
+      sceneRef.current?.setCells(null);
+      return;
+    }
+    const ids = useDoc.getState().selectedIds;
+    const sources = ids
+      .map((id) => findNode(useDoc.getState().nodes, id))
+      .filter((n): n is SceneNode => !!n && !n.isHole);
+    if (sources.length < 2) {
+      setError("Select at least two overlapping shapes to build from.");
+      setToolMode("select");
+      return;
+    }
+    if (sources.length > MAX_BUILD_SOURCES) {
+      setError(`Shape Builder handles up to ${MAX_BUILD_SOURCES} shapes at once.`);
+      setToolMode("select");
+      return;
+    }
+
+    let stale = false;
+    setBuildBusy(true);
+    setError(null);
+    kernel
+      .buildCells(sources.map(toSpec))
+      .then((cells) => {
+        if (stale) return;
+        if (!cells.length) {
+          setError("Those shapes do not overlap — nothing to build.");
+          setToolMode("select");
+          return;
+        }
+        setBuildSources(sources.map((n) => n.id));
+        sceneRef.current?.setCells(cells);
+      })
+      .catch((e: unknown) => {
+        if (stale) return;
+        setError(msg(e));
+        setToolMode("select");
+      })
+      .finally(() => !stale && setBuildBusy(false));
+
+    return () => {
+      stale = true;
+    };
+  }, [toolMode]);
+
+  /** Commits the session: the kept regions become one built shape. */
+  const commitBuild = useCallback(() => {
+    const kept = sceneRef.current?.keptCells() ?? [];
+    if (buildSources && kept.length) shapeBuild(buildSources, kept);
+    setToolMode("select");
+  }, [buildSources, shapeBuild]);
+
   /** Drop (D): let the selection fall onto whatever is underneath it. The
    *  geometry that answers "what is underneath" only exists in the viewport,
    *  so the scene works out the distances and the document records them. */
@@ -734,6 +800,12 @@ export function App() {
       } else if (!mod && e.key.toLowerCase() === "t") {
         e.preventDefault();
         toggleTransparency();
+      } else if (!mod && e.key.toLowerCase() === "b") {
+        e.preventDefault();
+        setToolMode("build");
+      } else if (e.key === "Enter" && useDoc.getState().selectedIds.length >= 0 && toolModeRef.current === "build") {
+        e.preventDefault();
+        commitBuild();
       } else if (!mod && e.key.toLowerCase() === "d") {
         e.preventDefault();
         dropSelected();
@@ -746,7 +818,7 @@ export function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [removeSelected, undo, redo, group, ungroup, toggleTransparency, dropSelected, exportCurrentProject, newProject]);
+  }, [removeSelected, undo, redo, group, ungroup, toggleTransparency, dropSelected, commitBuild, exportCurrentProject, newProject]);
 
   return (
     <div className="app-shell">
@@ -824,8 +896,18 @@ export function App() {
           <button className={cameraMode === "orthographic" ? "on" : ""} onClick={() => setCameraMode("orthographic")}>Ortho</button>
         </div>
         <div className="toolbar-spacer" />
-        <span className={["status-pill", error ? "error" : busy || exporting ? "busy" : ""].filter(Boolean).join(" ")}>
-          {error ? "Needs attention" : exporting ? "Exporting…" : readyExportUrl ? "STL ready" : busy ? "Building…" : "Ready"}
+        <span className={["status-pill", error ? "error" : busy || exporting || buildBusy ? "busy" : ""].filter(Boolean).join(" ")}>
+          {error
+            ? "Needs attention"
+            : exporting
+              ? "Exporting…"
+              : buildBusy
+                ? "Finding regions…"
+                : readyExportUrl
+                  ? "STL ready"
+                  : busy
+                    ? "Building…"
+                    : "Ready"}
         </span>
         <button
           className="export-project-btn"
@@ -925,6 +1007,15 @@ export function App() {
             aria-label="Align tool"
             disabled={selectedIds.length < 2}
           ><span className="tool-symbol">⋮</span></button>
+          <button
+            className={toolMode === "build" ? "active" : ""}
+            onClick={() => setToolMode("build")}
+            title="Shape Builder: combine overlapping shapes region by region (B)"
+            aria-label="Shape Builder tool"
+            disabled={selectedIds.length < 2}
+          >
+            <ShapeBuilderIcon />
+          </button>
           {/* Not a mode — a toggle on the selection, so it sits below a rule
               rather than in the run of tools that light each other out. */}
           <span className="tool-rail-sep" />
@@ -977,7 +1068,9 @@ export function App() {
           onDragChange={onDragChange}
         />
         <div className="canvas-help">
-          {toolMode === "align"
+          {toolMode === "build"
+            ? "Click a region to keep it · Alt-click to remove it · Enter builds the shape · Esc cancels"
+            : toolMode === "align"
             ? "Click a dot to align minimum, centre, or maximum · A Align · Esc Select"
             : toolMode === "face"
             ? "Click a flat face, then drag its arrow or type a distance to push/pull · Esc Select · Right-drag orbit"
