@@ -211,10 +211,70 @@ export function parseSvg(text: string): SvgOutlines {
   }
 
   return {
-    paths,
+    paths: centred(paths),
     width: hasViewBox ? vbW * scaleX : (widthMm ?? 0),
     height: hasViewBox ? vbH * scaleY : (heightMm ?? 0),
   };
+}
+
+/**
+ * Moves the artwork so its own centre sits on the origin.
+ *
+ * Outlines arrive in artboard coordinates, where (0,0) is a corner of the
+ * board rather than anywhere near the art. Imported as-is, a 100x50 board
+ * lands the shape 50mm right and 25mm up of wherever the node says it is,
+ * and an A4 board throws it off the grid entirely — which is what made
+ * imports appear outside the workspace instead of in the middle of it.
+ *
+ * Centring on the ART, not on the board: what you want in view is the
+ * drawing, and empty margin around it should not push it off centre. The
+ * cost is that two SVGs exported from the same board no longer line up with
+ * each other by construction — they each arrive centred, and are aligned by
+ * moving them, like any other pair of objects.
+ */
+function centred(paths: SvgCommand[][]): SvgCommand[][] {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  const see = (x: number, y: number) => {
+    minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+    minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+  };
+
+  // Curves are sampled, not just cornered: a bowl bulging past its endpoints
+  // is part of the drawing and belongs inside the bounds being centred.
+  let cursor: [number, number] = [0, 0];
+  for (const path of paths) {
+    for (const c of path) {
+      if (c[0] === "M" || c[0] === "L") {
+        cursor = [c[1], c[2]];
+        see(cursor[0], cursor[1]);
+      } else if (c[0] === "C") {
+        const [x0, y0] = cursor;
+        for (let i = 1; i <= 8; i++) {
+          const t = i / 8, u = 1 - t;
+          const a = u * u * u, b = 3 * u * u * t, d = 3 * u * t * t, e = t * t * t;
+          see(
+            a * x0 + b * c[1] + d * c[3] + e * c[5],
+            a * y0 + b * c[2] + d * c[4] + e * c[6],
+          );
+        }
+        cursor = [c[5], c[6]];
+      }
+    }
+  }
+  if (!Number.isFinite(minX) || !Number.isFinite(minY)) return paths;
+
+  const dx = -(minX + maxX) / 2;
+  const dy = -(minY + maxY) / 2;
+  return paths.map((path) =>
+    path.map((c) => {
+      if (c[0] === "M") return ["M", c[1] + dx, c[2] + dy] as SvgCommand;
+      if (c[0] === "L") return ["L", c[1] + dx, c[2] + dy] as SvgCommand;
+      if (c[0] === "C") {
+        return ["C", c[1] + dx, c[2] + dy, c[3] + dx, c[4] + dy, c[5] + dx, c[6] + dy] as SvgCommand;
+      }
+      return c;
+    }),
+  );
 }
 
 function lastX(commands: SvgCommand[]): number {
