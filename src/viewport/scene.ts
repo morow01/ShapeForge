@@ -2538,27 +2538,38 @@ export class Scene {
     });
   };
 
-  private applySmartSnap(id: string, obj: THREE.Object3D) {
+  /** Snaps `obj` to the guides around it and returns how far that moved it,
+   *  so a multi-object drag can carry the rest of the selection along by the
+   *  same amount instead of leaving them behind. */
+  private applySmartSnap(id: string, obj: THREE.Object3D): Vec3 {
     // Alt bypasses snapping so a free-placed copy never gets pulled onto a
     // guide. Shift does NOT bypass it — shift-constrain only locks the drag
     // to a straight line; Smart Guides still snap along that line exactly
     // as they would without shift, matching Illustrator.
     if (this.altDown) {
       this.guides.clear();
-      return;
+      return [0, 0, 0];
     }
 
+    // Everything travelling with the pointer is excluded, not just the one
+    // object under it. A companion in the same drag is a moving target: the
+    // dragged object snaps to it, it moves, the snap re-solves against its
+    // new position, and the two chase each other frame after frame — which
+    // is exactly the jitter this produced on a multi-object drag.
+    const travelling = new Set(
+      this.grab?.active ? this.grab.items.map((item) => item.id) : [id],
+    );
     const moving = this.boundsOf(obj);
     const targets: SnapTarget[] = [];
     for (const [targetId, view] of this.parts) {
-      if (targetId === id || !view.group.visible) continue;
+      if (travelling.has(targetId) || !view.group.visible) continue;
       targets.push({ id: targetId, bounds: this.boundsOf(view.group) });
     }
 
     const result = snapBounds(moving, targets, this.worldSnapTolerance(obj.position));
     if (!result.active.length) {
       this.guides.clear();
-      return;
+      return [0, 0, 0];
     }
 
     obj.position.x += result.delta[0];
@@ -2566,6 +2577,7 @@ export class Scene {
     obj.position.z += result.delta[2];
     obj.updateWorldMatrix(true, true);
     this.guides.show(result.active, this.boundsOf(obj));
+    return result.delta;
   }
 
   private boundsOf(object: THREE.Object3D): Bounds3 {
@@ -2978,14 +2990,33 @@ export class Scene {
       dy = Math.sin(angle) * dist;
     }
 
+    // Snap is resolved once, on the object under the cursor, and the answer
+    // becomes part of the delta every item moves by. Snapping inside the loop
+    // moved only that one object, so the selection quietly deformed as the
+    // guides engaged and released — the object under the cursor jiggling
+    // against companions that glided straight past.
+    let snap: Vec3 = [0, 0, 0];
+    const leadItem = g.items.find((item) => item.id === g.id);
+    const leadView = leadItem && this.parts.get(leadItem.id);
+    if (leadItem && leadView) {
+      leadView.group.position.set(
+        leadItem.startGroupPos.x + dx,
+        leadItem.startGroupPos.y + dy,
+        leadItem.startGroupPos.z,
+      );
+      leadView.group.updateWorldMatrix(true, true);
+      snap = this.applySmartSnap(g.id, leadView.group);
+    }
+
     for (const item of g.items) {
       const itemView = this.parts.get(item.id);
       if (!itemView) continue;
-      itemView.group.position.set(item.startGroupPos.x + dx, item.startGroupPos.y + dy, item.startGroupPos.z);
+      itemView.group.position.set(
+        item.startGroupPos.x + dx + snap[0],
+        item.startGroupPos.y + dy + snap[1],
+        item.startGroupPos.z + snap[2],
+      );
       itemView.group.updateWorldMatrix(true, true);
-      if (item.id === g.id) {
-        this.applySmartSnap(g.id, itemView.group);
-      }
       const rotatedPivot = item.pivot.clone().applyEuler(itemView.group.rotation);
       this.onTransformObject?.(item.id, {
         position: [
