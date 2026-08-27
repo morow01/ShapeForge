@@ -2265,16 +2265,34 @@ export class Scene {
     const matrix = view.mesh.matrixWorld;
     const normalMatrix = new THREE.Matrix3().getNormalMatrix(matrix);
     const facing = new THREE.Vector3();
-    const stride = Math.max(1, Math.ceil(position.count / max));
-    const points: THREE.Vector3[] = [];
-    for (let i = 0; i < position.count; i += stride) {
+
+    // Collect the whole half FIRST, then thin it out. Thinning first and
+    // filtering after loses the underside entirely on a dense mesh: an
+    // extruded import is mostly wall, so a stride that keeps one vertex in
+    // twenty can step over every one of the few that face down — and a part
+    // with no underside samples has nothing to stand on, so it falls straight
+    // through whatever it was above, all the way to the plate.
+    const facingHalf: number[] = [];
+    for (let i = 0; i < position.count; i++) {
       if (normal) {
         facing.fromBufferAttribute(normal, i).applyNormalMatrix(normalMatrix);
         // A vertical wall (z ~ 0) belongs to neither half and is skipped: its
         // top and bottom rims already come from the caps they join.
         if (wantDown ? facing.z >= 0 : facing.z <= 0) continue;
       }
-      points.push(new THREE.Vector3().fromBufferAttribute(position, i).applyMatrix4(matrix));
+      facingHalf.push(i);
+    }
+
+    // No normals at all — a mesh from the manifold side can arrive without
+    // them — so every vertex is a candidate rather than none.
+    const indices = facingHalf.length
+      ? facingHalf
+      : Array.from({ length: position.count }, (_, i) => i);
+
+    const stride = Math.max(1, Math.ceil(indices.length / max));
+    const points: THREE.Vector3[] = [];
+    for (let i = 0; i < indices.length; i += stride) {
+      points.push(new THREE.Vector3().fromBufferAttribute(position, indices[i]).applyMatrix4(matrix));
     }
     return points;
   }
