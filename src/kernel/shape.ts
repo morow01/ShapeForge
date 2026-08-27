@@ -685,7 +685,23 @@ export function combine(
       isHole: c.isHole,
     }));
 
-  if (children.some((c) => isMesh(c.solid))) return combineMesh(op, asMeshed());
+  const solidsOnly = children.filter((c) => !c.isHole).map((c) => c.solid);
+  const keptAll = (candidate: AnySolid | null) =>
+    !!candidate &&
+    !isEmptySolid(candidate) &&
+    !tessellatesEmpty(candidate) &&
+    (op !== "union" || unionKeptEverything(candidate, solidsOnly));
+
+  if (children.some((c) => isMesh(c.solid))) {
+    const meshed = combineMesh(op, asMeshed());
+    // Manifold drops an operand from a union about as readily as OCCT does on
+    // this kind of model — measured on a reported bracket, roughly one build
+    // in eight lost a whole sub-assembly with no error raised. Whatever comes
+    // back has to still reach as far as what went in.
+    if (keptAll(meshed) || !solidsOnly.length) return meshed;
+    const retried = combineMesh(op, asMeshed());
+    return keptAll(retried) ? retried : (meshed ?? retried);
+  }
 
   const result = combineShape(op, children as { solid: Shape3D; isHole: boolean }[]);
 
@@ -701,10 +717,10 @@ export function combine(
   // against it before being believed. Tessellating to check costs a mesh per
   // combine; a boolean already costs far more than that, and a silently empty
   // export costs a print.
-  if (result && !isEmptySolid(result) && !tessellatesEmpty(result)) return result;
+  if (keptAll(result)) return result;
 
   const viaMesh = combineMesh(op, asMeshed());
-  if (viaMesh && !isEmptySolid(viaMesh) && !tessellatesEmpty(viaMesh)) return viaMesh;
+  if (keptAll(viaMesh)) return viaMesh;
 
   // Both kernels agree there is nothing here, which a subtraction is entitled
   // to produce. Anything else keeps whatever OCCT managed.
@@ -748,6 +764,11 @@ function combineShape(
   const solids = children.filter((c) => !c.isHole);
   const holes = children.filter((c) => c.isHole);
   if (!solids.length) return null;
+  const meshedAll = () =>
+    children.map((c) => ({
+      solid: isMesh(c.solid) ? c.solid : (c.solid as Shape3D).meshShape(FALLBACK_MESH_QUALITY),
+      isHole: c.isHole,
+    }));
   let result = solids[0].solid;
   for (let i = 1; i < solids.length; i++) {
     try {
@@ -760,6 +781,12 @@ function combineShape(
       return combineMesh(op, meshed);
     }
   }
+  // Everything that went into the fuse has to still be in it.
+  if (!unionKeptEverything(result, solids.map((c) => c.solid))) {
+    const viaMesh = combineMesh("union", meshedAll());
+    if (viaMesh) return viaMesh;
+  }
+
   for (const h of holes) {
     try {
       result = result.cut(h.solid) as Shape3D;
@@ -968,6 +995,48 @@ const SEAM_CHECK_QUALITY = { tolerance: 0.05, angularTolerance: 0.4 };
  */
 const FALLBACK_MESH_QUALITY = { tolerance: 0.05, angularTolerance: 0.4 };
 
+/** World bounds of a solid, or null when it will not report any. */
+function boundsOf(solid: AnySolid): { min: Vec3; max: Vec3 } | null {
+  try {
+    const [min, max] = solid.boundingBox.bounds;
+    const box = { min: min as Vec3, max: max as Vec3 };
+    return box.min.every(Number.isFinite) && box.max.every(Number.isFinite) ? box : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Did the fuse actually keep everything it was given?
+ *
+ * A union can only ever reach as far as its operands do, and it must reach
+ * exactly that far — so its bounds are the union of theirs. When OCCT quietly
+ * drops an operand the result is still a perfectly good solid, just missing a
+ * part: it is not empty, it tessellates, and every check this file had passed
+ * it. What the user sees is a group with a piece of the model gone or left
+ * behind somewhere else.
+ *
+ * A millimetre of tolerance, since the comparison is between a fused solid
+ * and its inputs, not between two numbers that must agree exactly.
+ */
+export function unionKeptEverything(result: AnySolid, operands: AnySolid[]): boolean {
+  const got = boundsOf(result);
+  if (!got) return false;
+  const want = { min: [Infinity, Infinity, Infinity] as Vec3, max: [-Infinity, -Infinity, -Infinity] as Vec3 };
+  for (const operand of operands) {
+    const box = boundsOf(operand);
+    if (!box) return true; // nothing to compare against; leave the result alone
+    for (let i = 0; i < 3; i++) {
+      want.min[i] = Math.min(want.min[i], box.min[i]);
+      want.max[i] = Math.max(want.max[i], box.max[i]);
+    }
+  }
+  if (!want.min.every(Number.isFinite)) return true;
+  return [0, 1, 2].every(
+    (i) => Math.abs(got.min[i] - want.min[i]) < 1 && Math.abs(got.max[i] - want.max[i]) < 1,
+  );
+}
+
 /**
  * True when a solid tessellates into a closed surface — every edge shared by
  * exactly two triangles.
@@ -1093,12 +1162,23 @@ export async function makeLocal(
   const build = async (spin: boolean, report?: (id: string, msg: string) => void) => {
     const kids: { solid: AnySolid; isHole: boolean }[] = [];
     for (const child of spec.children) {
-      try {
-        const solid = await makeWorld(spin ? respin(child) : child, report, onProgress);
-        if (solid) kids.push({ solid, isHole: child.isHole });
-      } catch (e) {
-        report?.(child.id, e instanceof Error ? e.message : String(e));
+      // Building the same child twice can give different answers: OCCT fails
+      // on coincident faces intermittently, and a child that fails is a child
+      // that quietly leaves the group — a piece of the model gone with no
+      // error against the group itself. Measured on a reported bracket: five
+      // identical group/ungroup cycles built it correctly, the sixth lost a
+      // whole sub-assembly. So a failure is retried before it is believed.
+      let solid: AnySolid | null = null;
+      let failure = "";
+      for (let attempt = 0; attempt < 2 && !solid; attempt++) {
+        try {
+          solid = await makeWorld(spin ? respin(child) : child, undefined, onProgress);
+        } catch (e) {
+          failure = e instanceof Error ? e.message : String(e);
+        }
       }
+      if (solid) kids.push({ solid, isHole: child.isHole });
+      else report?.(child.id, failure || `${child.id} could not be built.`);
     }
     return kids;
   };

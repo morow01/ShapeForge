@@ -14,6 +14,7 @@ import {
   decompose,
   isEmptySolid,
   tessellatesEmpty,
+  unionKeptEverything,
   hasImport,
   isMesh,
   makeLocal,
@@ -641,12 +642,30 @@ const api = {
       return blobSTLOf(resultSolidCache!.solid, EXPORT_PRESETS[quality]);
     }
     // Otherwise evaluate using the same Manifold-first path as buildResult.
-    const { onError } = collector();
+    // Nothing may drop out of an export in silence. A shape that will not
+    // build is retried once — the failures here are intermittent — and if it
+    // still will not build the export FAILS rather than quietly writing a
+    // file with a piece of the part missing. A wrong file that looks right is
+    // the one outcome worth interrupting someone for.
+    const { errors, onError } = collector();
     const evaluated: { solid: AnySolid; isHole: boolean }[] = [];
+    const missing: string[] = [];
     for (const spec of specs) {
-      const world = await makeWorld(spec, onError, onProgress);
-      if (!world) continue;
+      let world = await makeWorld(spec, onError, onProgress);
+      if (!world) world = await makeWorld(spec, onError, onProgress);
+      if (!world) {
+        missing.push(spec.id);
+        continue;
+      }
       evaluated.push({ solid: world, isHole: spec.isHole });
+    }
+    if (missing.length) {
+      const why = errors.map((e) => e.message).find(Boolean);
+      throw new Error(
+        `${missing.length} shape${missing.length > 1 ? "s" : ""} could not be built, so the ` +
+          `export was stopped rather than saving a part with ${missing.length > 1 ? "them" : "it"} ` +
+          `missing.${why ? ` (${why})` : ""}`,
+      );
     }
     if (!evaluated.length) return null;
     const evaluatedSolids = evaluated.filter((item) => !item.isHole).map((item) => item.solid);
@@ -671,6 +690,13 @@ const api = {
       }
       throw error;
     }
+    // ...and an export missing a PIECE is the same failure wearing a
+    // disguise: it opens, it looks like the part, and what comes off the
+    // printer is wrong. If the union no longer reaches as far as the shapes
+    // that went into it, something was dropped, and the shells are written
+    // individually rather than saving the loss.
+    if (solid && !unionKeptEverything(solid, evaluatedSolids)) solid = null;
+
     // An export that comes out empty is the worst outcome this app has: a
     // file that looks like a part, opens in a slicer, and contains nothing.
     // The union can produce one — manifold hands back an empty result rather
