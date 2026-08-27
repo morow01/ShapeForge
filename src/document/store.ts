@@ -10,7 +10,6 @@ import {
   matrixToEuler,
   multiplyMatrix,
   tidy,
-  transposeMatrix,
 } from "./transform";
 import {
   deleteProjectStorage,
@@ -134,30 +133,40 @@ function sameTransform(node: SceneNode, patch: { position?: Vec3; rotation?: Vec
  * bounding-box centre, and the group's centre is not the child's, a
  * difference the document cannot resolve because it holds no bounds.
  */
-function liftOutOf(group: GroupNode, child: SceneNode, worldCentre?: Vec3): SceneNode {
+/**
+ * Rewrites a child of `group` into the group's own frame, so lifting it out
+ * leaves it exactly where it was drawn.
+ *
+ * Moving and turning compose as matrices. Scaling cannot: the kernel scales a
+ * shape about the centre of its own bounds, so where a child lands depends on
+ * both the group's centre and the child's — geometry the document does not
+ * hold. Given both (see the kernel's centresOf), the placement is exact:
+ *
+ *   P' = Gp + R(Cg + s(Cc - Cg)) - R(Cc - Cp)
+ *
+ * where Cg is the group's centre in its own frame, Cc the child's centre as
+ * its own transform alone would place it. Without them, a scaled group is not
+ * flattened at all — the caller keeps the frame instead of guessing.
+ */
+function liftOutOf(
+  group: GroupNode,
+  child: SceneNode,
+  centres?: { group?: Vec3; child?: Vec3 },
+): SceneNode {
   const rotation = eulerToMatrix(group.rotation);
-  // A group's scaling happens about the centre of its own bounds, not about
-  // the origin, so the child's offset has to be scaled about that same point.
-  // The viewport measures the centre AFTER the group's rotation and move;
-  // undoing those recovers the point the scaling actually used.
-  const scaled = worldCentre
-    ? (() => {
-        const local = applyMatrix(transposeMatrix(rotation), [
-          worldCentre[0] - group.position[0],
-          worldCentre[1] - group.position[1],
-          worldCentre[2] - group.position[2],
-        ]);
-        return [
-          local[0] + (child.position[0] - local[0]) * group.scale[0],
-          local[1] + (child.position[1] - local[1]) * group.scale[1],
-          local[2] + (child.position[2] - local[2]) * group.scale[2],
-        ] as Vec3;
-      })()
-    : ([
-        child.position[0] * group.scale[0],
-        child.position[1] * group.scale[1],
-        child.position[2] * group.scale[2],
-      ] as Vec3);
+  const scaled: Vec3 =
+    centres?.group && centres.child
+      ? (() => {
+          const [cg, cc] = [centres.group!, centres.child!];
+          return [0, 1, 2].map(
+            (i) => cg[i] + (cc[i] - cg[i]) * group.scale[i] - (cc[i] - child.position[i]),
+          ) as Vec3;
+        })()
+      : ([
+          child.position[0] * group.scale[0],
+          child.position[1] * group.scale[1],
+          child.position[2] * group.scale[2],
+        ] as Vec3);
   const offset = applyMatrix(rotation, scaled);
   return {
     ...child,
@@ -214,25 +223,18 @@ function liftToWorld(
   // So a scaled frame is not flattened, it is kept: the child is wrapped in a
   // group carrying that same transform, which reproduces where it stood by
   // construction rather than by arithmetic.
-  const unitScale = (g: GroupNode) =>
-    g.scale[0] === 1 && g.scale[1] === 1 && g.scale[2] === 1;
-  if (chain.every(unitScale)) {
-    // Innermost group first: each step lifts the node one frame outwards.
-    return chain.reduceRight(
-      (carried, group) => liftOutOf(group, carried, centres?.[group.id]),
-      node,
-    );
-  }
+  const flattenable = (g: GroupNode, child: SceneNode) =>
+    (g.scale[0] === 1 && g.scale[1] === 1 && g.scale[2] === 1) ||
+    (!!centres?.[g.id] && !!centres?.[child.id]);
+
+  // Innermost group first: each step lifts the node one frame outwards. A
+  // scaled group whose centres are unknown keeps its frame as a wrapper
+  // rather than being flattened with arithmetic that cannot be right.
   return chain.reduceRight<SceneNode>(
     (carried, group) =>
-      unitScale(group)
-        ? liftOutOf(group, carried, centres?.[group.id])
-        : {
-            ...group,
-            id: nextId(),
-            children: [carried],
-            collapsed: true,
-          },
+      flattenable(group, carried)
+        ? liftOutOf(group, carried, { group: centres?.[group.id], child: centres?.[carried.id] })
+        : { ...group, id: nextId(), children: [carried], collapsed: true },
     node,
   );
 }
@@ -848,7 +850,11 @@ export const useDoc = create<DocState>()(
                   // drops the group's half of that, so every child jumped by
                   // exactly however far the group had been moved, turned or
                   // scaled since it was made.
-                  return n.children.map((child) => liftOutOf(n, child, centres?.[n.id]));
+                  return n.children.map((child) =>
+                    n.scale.every((v) => v === 1) || (centres?.[n.id] && centres?.[child.id])
+                      ? liftOutOf(n, child, { group: centres?.[n.id], child: centres?.[child.id] })
+                      : child,
+                  );
                 }
                 return [{ ...n, children: expand(n.children) }];
               }

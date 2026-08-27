@@ -185,6 +185,10 @@ export const kernel = {
       (raw, onProgress) => raw.exportSTL(specs, quality, Comlink.proxy(onProgress)),
     );
   },
+  // Bounding-box centres for regrouping — see the worker's centresOf. Runs
+  // on the scene lane: it is small, and it blocks a user action.
+  centresOf: (specs: NodeSpec[]) => withWatchdog("scene", (raw) => raw.centresOf(specs)),
+
   // Shape Builder decomposition: an explicit tool entry, not an edit-driven
   // rebuild, so it is not coalesced. Runs on the heavy lane — a four-body
   // decomposition is 15 cells' worth of booleans and must never queue in

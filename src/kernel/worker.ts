@@ -37,7 +37,7 @@ import type {
   SceneBuild,
   ResultBuild,
 } from "./types";
-import type { PushPullOp } from "../document/types";
+import type { PushPullOp, Vec3 } from "../document/types";
 
 let booted: Promise<void> | null = null;
 
@@ -552,6 +552,38 @@ const api = {
       console.error("[worker.buildResult] uncaught error:", e);
       return { mesh: null, volume: 0, faceCount: 0, errors: [...errors, { id: "__root", message: String(e) }], buildMs: 0 };
     }
+  },
+
+  /**
+   * Bounding-box centre of each spec, keyed by its id.
+   *
+   * Regrouping needs these. The kernel scales a shape about the centre of its
+   * own bounds, so moving a node between frames without knowing that centre
+   * lands it in the wrong place — and only the kernel knows it. The viewport
+   * can measure a top-level part, but not a child inside a group, and a part
+   * that has not finished rebuilding cannot be measured at all: asking it
+   * mid-rebuild is how a regroup could throw a part clean across the model.
+   */
+  async centresOf(specs: NodeSpec[]): Promise<Record<string, Vec3>> {
+    await init();
+    const { onError } = collector();
+    const centres: Record<string, Vec3> = {};
+    for (const spec of specs) {
+      try {
+        const solid = await makeWorld(spec, onError);
+        if (!solid) continue;
+        const [min, max] = solid.boundingBox.bounds;
+        centres[spec.id] = [
+          (min[0] + max[0]) / 2,
+          (min[1] + max[1]) / 2,
+          (min[2] + max[2]) / 2,
+        ];
+      } catch {
+        // A spec that will not build has no centre to offer; the caller keeps
+        // the frame instead of guessing one.
+      }
+    }
+    return centres;
   },
 
   /**

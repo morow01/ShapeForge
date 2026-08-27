@@ -2539,18 +2539,6 @@ export class Scene {
     return true;
   }
 
-  /** Centre of a part's world bounds — what ungroup needs to undo a group's
-   *  scaling, which the kernel applies about exactly this point. */
-  worldCentre(id: string): Vec3 | null {
-    const view = this.parts.get(id);
-    if (!view) return null;
-    this.scene.updateMatrixWorld(true);
-    const box = new THREE.Box3().setFromObject(view.group);
-    if (box.isEmpty()) return null;
-    const centre = box.getCenter(new THREE.Vector3());
-    return [centre.x, centre.y, centre.z];
-  }
-
   setSnapEnabled(v: boolean) {
     if (this.snapEnabled === v) return;
     this.snapEnabled = v;

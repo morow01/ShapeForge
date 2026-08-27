@@ -17,7 +17,7 @@ import { MAX_BUILD_SOURCES, PRIMITIVES, isGroup } from "./document/types";
 import { findNode, parentOf, resolveNodeTransparent } from "./document/tree";
 import { putBlob } from "./document/blobStore";
 import { loadCameraState } from "./document/persist";
-import type { PrimitiveKind, SceneNode, Vec3 } from "./document/types";
+import type { GroupNode, PrimitiveKind, SceneNode, Vec3 } from "./document/types";
 import type { EditSpec, ExportQuality, NodeSpec, PreviewBuild, ScenePart } from "./kernel/types";
 import type { CameraMode, Scene, ToolMode } from "./viewport/scene";
 import { APP_NAME, APP_VERSION } from "./version";
@@ -811,20 +811,59 @@ export function App() {
    *  so the scene works out the distances and the document records them. */
   /** Ungroup needs each group's world centre, which only the viewport can
    *  measure — see the store's ungroup(). */
-  /** World centres of every built part, for the transform composition that
-   *  grouping and ungrouping both need — only the viewport knows them, and a
-   *  scaled group's children land wrong without them. */
-  const partCentres = useCallback(() => {
-    const centres: Record<string, Vec3> = {};
-    for (const node of useDoc.getState().nodes) {
-      const centre = sceneRef.current?.worldCentre(node.id);
-      if (centre) centres[node.id] = centre;
+  /**
+   * Bounding-box centres for the groups a regroup will dissolve and for the
+   * nodes moving between frames — from the KERNEL, not the viewport.
+   *
+   * The viewport can only measure a top-level part, and only once it has
+   * finished rebuilding. Group and ungroup in quick succession and the part
+   * being asked about may not exist yet, which used to leave the composition
+   * guessing and fling a shape across the model. The kernel can always answer,
+   * for a nested child as readily as a root.
+   *
+   * A group is asked about with its own transform stripped, because what the
+   * scaling turns around is the centre of its contents in its own frame.
+   */
+  const regroupCentres = useCallback(async (): Promise<Record<string, Vec3>> => {
+    const { nodes, selectedIds } = useDoc.getState();
+    const wanted = new Map<string, NodeSpec>();
+    const collect = (list: SceneNode[], ancestors: GroupNode[]) => {
+      for (const n of list) {
+        if (selectedIds.includes(n.id) && ancestors.length) {
+          wanted.set(n.id, toSpec(n));
+          for (const g of ancestors) {
+            wanted.set(g.id, { ...toSpec(g), position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] });
+          }
+        }
+        if (isGroup(n)) {
+          // A group that is itself selected is about to be dissolved, so its
+          // children are moving frames too.
+          if (selectedIds.includes(n.id)) {
+            wanted.set(n.id, { ...toSpec(n), position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] });
+            for (const child of n.children) wanted.set(child.id, toSpec(child));
+          }
+          collect(n.children, [...ancestors, n]);
+        }
+      }
+    };
+    collect(nodes, []);
+    if (!wanted.size) return {};
+    try {
+      return await kernel.centresOf([...wanted.values()]);
+    } catch {
+      // No centres means a scaled group keeps its frame rather than being
+      // flattened wrongly — see liftToWorld.
+      return {};
     }
-    return centres;
   }, []);
 
-  const ungroupSelected = useCallback(() => ungroup(partCentres()), [ungroup, partCentres]);
-  const groupSelected = useCallback(() => group(partCentres()), [group, partCentres]);
+  const ungroupSelected = useCallback(async () => {
+    ungroup(await regroupCentres());
+  }, [ungroup, regroupCentres]);
+
+  const groupSelected = useCallback(async () => {
+    group(await regroupCentres());
+  }, [group, regroupCentres]);
 
   const dropSelected = useCallback(() => {
     const updates = sceneRef.current?.dropSelected() ?? [];
