@@ -554,6 +554,24 @@ export async function survivingOps(
   return kept;
 }
 
+/**
+ * Can this solid actually be turned into triangles?
+ *
+ * Stronger than measuring it, and the two disagree: a fuse over parts that
+ * meet on exactly coincident faces can hand back something OCCT still
+ * measures a volume for but tessellates to nothing at all. On screen that is
+ * a group that renders as empty space, with no error anywhere — the shape
+ * simply vanishes the moment it is grouped.
+ */
+function tessellatesEmpty(solid: AnySolid): boolean {
+  try {
+    const mesh = isMesh(solid) ? solid.mesh() : solid.mesh(SEAM_CHECK_QUALITY);
+    return !mesh.triangles || mesh.triangles.length === 0;
+  } catch {
+    return true;
+  }
+}
+
 /** Does this solid enclose any volume at all? A cell for a mask whose
  *  sources do not all overlap comes back empty, and empty solids must be
  *  dropped rather than fused into the result. */
@@ -661,14 +679,28 @@ export function combine(
 ): AnySolid | null {
   if (!children.length) return null;
 
-  if (children.some((c) => isMesh(c.solid))) {
-    const meshed = children.map((c) => ({
+  const asMeshed = () =>
+    children.map((c) => ({
       solid: isMesh(c.solid) ? c.solid : (c.solid as Shape3D).meshShape(),
       isHole: c.isHole,
     }));
-    return combineMesh(op, meshed);
-  }
-  return combineShape(op, children as { solid: Shape3D; isHole: boolean }[]);
+
+  if (children.some((c) => isMesh(c.solid))) return combineMesh(op, asMeshed());
+
+  const result = combineShape(op, children as { solid: Shape3D; isHole: boolean }[]);
+
+  // OCCT does not only throw when a boolean defeats it — it can hand back an
+  // empty solid instead, and combineShape's own retries only catch the throw.
+  // A group of parts meeting on exactly coincident faces can do it, and the
+  // group then renders as nothing at all: no shape, no error, status Ready.
+  // Manifold does not share the weakness, so an empty answer is checked
+  // against it before being believed.
+  const wanted = op === "subtract" || children.some((c) => c.isHole);
+  if (result && !isEmptySolid(result)) return result;
+  if (wanted && !result) return result; // a subtraction may legitimately clear
+  const viaMesh = combineMesh(op, asMeshed());
+  if (viaMesh && !isEmptySolid(viaMesh)) return viaMesh;
+  return result ?? viaMesh;
 }
 
 function combineShape(
@@ -1053,6 +1085,18 @@ export async function makeLocal(
   const kids = await build(false, onError);
   const result = combine(spec.op, kids);
   if (!result) return result;
+
+  // A result that cannot be tessellated is no result. Manifold does not share
+  // OCCT's trouble with coincident faces, so the same children go through it
+  // rather than letting the group come out empty.
+  if (tessellatesEmpty(result)) {
+    const meshed = kids.map((k) => ({
+      solid: isMesh(k.solid) ? k.solid : (k.solid as Shape3D).meshShape(),
+      isHole: k.isHole,
+    }));
+    const viaMesh = combineMesh(spec.op, meshed);
+    if (viaMesh && !tessellatesEmpty(viaMesh)) return viaMesh;
+  }
 
   // Known OCCT weakness: a sphere's seam meridian crossing the other shape's
   // boundary makes the boolean return an invalid solid. Spinning the seam away

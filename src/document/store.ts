@@ -175,6 +175,33 @@ function liftOutOf(group: GroupNode, child: SceneNode, worldCentre?: Vec3): Scen
   };
 }
 
+/**
+ * Rewrites a node into the world frame by folding in every group it sits
+ * inside, innermost first.
+ *
+ * Taking a node OUT of a group has the same problem as ungrouping one: its
+ * stored transform is relative to the group, so re-parenting it anywhere else
+ * without composing the group's own transform makes it jump. Grouping a
+ * selection that reaches inside an existing group does exactly that, which is
+ * how a group could rearrange the model the moment it was made.
+ */
+function liftToWorld(roots: SceneNode[], node: SceneNode): SceneNode {
+  const chain: GroupNode[] = [];
+  const find = (list: SceneNode[], ancestors: GroupNode[]): boolean => {
+    for (const n of list) {
+      if (n.id === node.id) {
+        chain.push(...ancestors);
+        return true;
+      }
+      if (isGroup(n) && find(n.children, [...ancestors, n])) return true;
+    }
+    return false;
+  };
+  find(roots, []);
+  // Innermost group first: each step lifts the node one frame outwards.
+  return chain.reduceRight((carried, group) => liftOutOf(group, carried), node);
+}
+
 /** Runs after every mutation that can be part of a burst. */
 function afterBatchedMutation() {
   if (!armed) return;
@@ -741,13 +768,18 @@ export const useDoc = create<DocState>()(
           const order = new Map(s.selectedIds.map((id, i) => [id, i]));
           removed.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
 
+          // A selection can reach inside an existing group. Those nodes are
+          // stored relative to it, so they have to be rewritten into world
+          // terms before joining a group that knows nothing about it.
+          const lifted = removed.map((n) => liftToWorld(s.nodes, n));
+
           const groupCount = s.nodes.filter(isGroup).length + 1;
           const node: GroupNode = {
             type: "group",
             id: nextId(),
             name: `Group ${groupCount}`,
             op: "union",
-            children: removed,
+            children: lifted,
             position: [0, 0, 0],
             rotation: [0, 0, 0],
             scale: [1, 1, 1],
@@ -802,13 +834,16 @@ export const useDoc = create<DocState>()(
           // order the caller decomposed in is the order that has to be stored.
           const order = new Map(sourceIds.map((id, i) => [id, i]));
           removed.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+          // Same as grouping: a source taken out of a group carries that
+          // group's transform with it or it moves.
+          const sources = removed.map((n) => liftToWorld(s.nodes, n));
 
           const buildCount = s.nodes.filter((n) => n.type === "build").length + 1;
           const node: BuildNode = {
             type: "build",
             id: nextId(),
             name: `Built ${buildCount}`,
-            sources: removed,
+            sources,
             keep: [...keep].sort((a, b) => a - b),
             position: [0, 0, 0],
             rotation: [0, 0, 0],
