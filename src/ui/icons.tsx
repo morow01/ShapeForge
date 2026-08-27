@@ -83,3 +83,22 @@ export function ShapeBuilderIcon({ className = "tool-icon" }: { className?: stri
     </svg>
   );
 }
+
+/**
+ * Smart Guides: a horseshoe magnet, the usual shorthand for snapping. The
+ * poles are drawn as separate tips so it reads as a magnet rather than an
+ * arch at 21px.
+ */
+export function MagnetIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path
+        d="M6.4 17.5v-5.6a5.6 5.6 0 0 1 11.2 0v5.6"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="3"
+      />
+      <path d="M4.9 17.5h3v3h-3zM16.1 17.5h3v3h-3z" fill="currentColor" />
+    </svg>
+  );
+}

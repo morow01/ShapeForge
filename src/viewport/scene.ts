@@ -522,6 +522,8 @@ export class Scene {
   private showResult = false;
   /** Edges-only view: solids stop being drawn, their wireframes carry on. */
   private wireframe = false;
+  /** Smart Guides. Off means a drag goes exactly where the pointer goes. */
+  private snapEnabled = true;
   /** Shape Builder: one view per region of the selection's arrangement, keyed
    *  by cell mask. Empty whenever the tool is not active. */
   private cellViews = new Map<number, { group: THREE.Group; mesh: THREE.Mesh; wire: THREE.LineSegments; kept: boolean }>();
@@ -2459,6 +2461,12 @@ export class Scene {
     return true;
   }
 
+  setSnapEnabled(v: boolean) {
+    if (this.snapEnabled === v) return;
+    this.snapEnabled = v;
+    if (!v) this.guides.clear();
+  }
+
   setWireframe(v: boolean) {
     if (this.wireframe === v) return;
     this.wireframe = v;
@@ -2546,7 +2554,10 @@ export class Scene {
     // guide. Shift does NOT bypass it — shift-constrain only locks the drag
     // to a straight line; Smart Guides still snap along that line exactly
     // as they would without shift, matching Illustrator.
-    if (this.altDown) {
+    // Off entirely, or held off for this one drag by Alt. Alt stays a
+    // bypass rather than a toggle: reaching for it is how you place one
+    // object freely without giving up snapping for everything after it.
+    if (!this.snapEnabled || this.altDown) {
       this.guides.clear();
       return [0, 0, 0];
     }

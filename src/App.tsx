@@ -3,7 +3,7 @@ import { kernel, KernelTimeoutError, WATCHDOG_MS } from "./kernel/client";
 import { Viewport } from "./viewport/Viewport";
 import { Inspector } from "./ui/Inspector";
 import { Tree } from "./ui/Tree";
-import { DropIcon, ShapeBuilderIcon, TransparencyIcon, WireframeIcon } from "./ui/icons";
+import { DropIcon, MagnetIcon, ShapeBuilderIcon, TransparencyIcon, WireframeIcon } from "./ui/icons";
 import { ProjectsModal } from "./ui/ProjectsModal";
 import {
   beginHistoryBatch,
@@ -139,6 +139,7 @@ const shapeOf = (n: SceneNode): unknown => {
 };
 
 const EXPORT_QUALITY_KEY = "cad.exportQuality";
+const SNAP_KEY = "cad.smartGuides";
 
 /** What each preset costs, so the choice is not guesswork — measured on a
  *  40x30x15 box with a 10mm spherical bowl (see EXPORT_PRESETS in worker.ts). */
@@ -216,6 +217,11 @@ export function App() {
   const [toolMode, setToolMode] = useState<ToolMode>("select");
   const [resizeConstrained, setResizeConstrained] = useState(true);
   const [wireframe, setWireframe] = useState(false);
+  // Remembered like the export quality: whether you want things snapping is
+  // a working preference, not a per-session one.
+  const [snapEnabled, setSnapEnabled] = useState(
+    () => localStorage.getItem(SNAP_KEY) !== "off",
+  );
   /** Shape Builder session: the ids that were decomposed, in the order the
    *  cell masks index them. Null whenever the tool is not running. */
   const [buildSources, setBuildSources] = useState<string[] | null>(null);
@@ -405,6 +411,14 @@ export function App() {
     return () => clearTimeout(t);
   }, [shapeKey, skippedIds]);
 
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SNAP_KEY, snapEnabled ? "on" : "off");
+    } catch {
+      // Private mode / blocked storage: the choice just won't be remembered.
+    }
+  }, [snapEnabled]);
 
   useEffect(() => {
     try {
@@ -828,6 +842,9 @@ export function App() {
       } else if (!mod && e.key.toLowerCase() === "d") {
         e.preventDefault();
         dropSelected();
+      } else if (!mod && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        setSnapEnabled((v) => !v);
       } else if (!mod && e.key.toLowerCase() === "w") {
         e.preventDefault();
         setWireframe((v) => !v);
@@ -1057,6 +1074,19 @@ export function App() {
           >
             <WireframeIcon />
           </button>
+          <button
+            className={snapEnabled ? "active" : ""}
+            onClick={() => setSnapEnabled((v) => !v)}
+            title={
+              snapEnabled
+                ? "Smart Guides on — objects snap to each other while dragging (S). Hold Alt to bypass for one drag."
+                : "Smart Guides off — drags go exactly where the pointer goes (S)"
+            }
+            aria-label="Toggle Smart Guides"
+            aria-pressed={snapEnabled}
+          >
+            <MagnetIcon />
+          </button>
           {/* An action, not a mode and not a view toggle — its own group. */}
           <span className="tool-rail-sep" />
           <button
@@ -1076,6 +1106,7 @@ export function App() {
           toolMode={toolMode}
           resizeConstrained={resizeConstrained}
           wireframe={wireframe}
+          snapEnabled={snapEnabled}
           onSceneReady={(scene) => { sceneRef.current = scene; }}
           onCellsChanged={setBuildCells}
           onSelect={onSelect}
@@ -1134,7 +1165,7 @@ export function App() {
             ? "Click a dot to align minimum, centre, or maximum · A Align · Esc Select"
             : toolMode === "face"
             ? "Click a flat face, then drag its arrow or type a distance to push/pull · Esc Select · Right-drag orbit"
-            : "V Select · F Face · M Move · R Rotate · A Align · T Transparent · W Wireframe · D Drop · Drag an object to move it · Alt-drag duplicate · Shift-drag straight · Right-drag orbit"}
+            : "V Select · F Face · M Move · R Rotate · A Align · T Transparent · W Wireframe · D Drop · S Snapping · Drag an object to move it · Alt-drag duplicate · Shift-drag straight · Right-drag orbit"}
         </div>
         {error && <div className="canvas-error">{error}</div>}
         {!error && busy && busySince && busyNow - busySince > 8000 && (

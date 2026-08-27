@@ -13,6 +13,8 @@ interface Props {
   resizeConstrained: boolean;
   /** Edges-only view: solids stop being drawn, their wireframes carry on. */
   wireframe: boolean;
+  /** Smart Guides on/off — snapping while dragging. */
+  snapEnabled: boolean;
   onSelect: (id: string | null, additive: boolean) => void;
   /** Marquee-select release: every id caught inside the drawn rectangle. */
   onSelectMany: (ids: string[], additive: boolean) => void;
@@ -39,7 +41,7 @@ interface Props {
 }
 
 export function Viewport(props: Props) {
-  const { parts, nodes, selectedIds, cameraMode, toolMode, resizeConstrained, wireframe } = props;
+  const { parts, nodes, selectedIds, cameraMode, toolMode, resizeConstrained, wireframe, snapEnabled } = props;
 
   const hostRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<Scene | null>(null);
@@ -70,6 +72,7 @@ export function Viewport(props: Props) {
     scene.setToolMode(latest.current.toolMode);
     scene.setResizeConstrained(latest.current.resizeConstrained);
     scene.setWireframe(latest.current.wireframe);
+    scene.setSnapEnabled(latest.current.snapEnabled);
 
     sceneRef.current = scene;
     latest.current.onSceneReady?.(scene);
@@ -107,6 +110,10 @@ export function Viewport(props: Props) {
   useEffect(() => {
     sceneRef.current?.setWireframe(wireframe);
   }, [wireframe]);
+
+  useEffect(() => {
+    sceneRef.current?.setSnapEnabled(snapEnabled);
+  }, [snapEnabled]);
 
   return <div className="viewport" ref={hostRef} />;
 }
