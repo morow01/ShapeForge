@@ -563,7 +563,7 @@ export async function survivingOps(
  * a group that renders as empty space, with no error anywhere — the shape
  * simply vanishes the moment it is grouped.
  */
-function tessellatesEmpty(solid: AnySolid): boolean {
+export function tessellatesEmpty(solid: AnySolid): boolean {
   try {
     const mesh = isMesh(solid) ? solid.mesh() : solid.mesh(SEAM_CHECK_QUALITY);
     return !mesh.triangles || mesh.triangles.length === 0;
@@ -575,7 +575,7 @@ function tessellatesEmpty(solid: AnySolid): boolean {
 /** Does this solid enclose any volume at all? A cell for a mask whose
  *  sources do not all overlap comes back empty, and empty solids must be
  *  dropped rather than fused into the result. */
-function isEmptySolid(solid: AnySolid): boolean {
+export function isEmptySolid(solid: AnySolid): boolean {
   if (isMesh(solid)) return solid.isEmpty || solid.volume() <= 1e-9;
   try {
     return measureVolume(solid) <= 1e-9;
@@ -613,7 +613,7 @@ function isEmptySolid(solid: AnySolid): boolean {
  * and only an empty answer from BOTH kernels counts as genuinely empty.
  */
 function cellStep(a: AnySolid, b: AnySolid, op: "intersect" | "cut"): AnySolid | null {
-  const asMesh = (s: AnySolid): MeshShape => (isMesh(s) ? s : (s as Shape3D).meshShape());
+  const asMesh = (s: AnySolid): MeshShape => (isMesh(s) ? s : (s as Shape3D).meshShape(FALLBACK_MESH_QUALITY));
 
   if (!isMesh(a) && !isMesh(b)) {
     try {
@@ -681,7 +681,7 @@ export function combine(
 
   const asMeshed = () =>
     children.map((c) => ({
-      solid: isMesh(c.solid) ? c.solid : (c.solid as Shape3D).meshShape(),
+      solid: isMesh(c.solid) ? c.solid : (c.solid as Shape3D).meshShape(FALLBACK_MESH_QUALITY),
       isHole: c.isHole,
     }));
 
@@ -722,7 +722,7 @@ function combineShape(
         result = result.cut(children[i].solid) as Shape3D;
       } catch {
         const meshed = children.map((c) => ({
-          solid: isMesh(c.solid) ? c.solid : (c.solid as Shape3D).meshShape(),
+          solid: isMesh(c.solid) ? c.solid : (c.solid as Shape3D).meshShape(FALLBACK_MESH_QUALITY),
           isHole: c.isHole,
         }));
         return combineMesh(op, meshed);
@@ -737,7 +737,7 @@ function combineShape(
         result = result.intersect(children[i].solid) as Shape3D;
       } catch {
         const meshed = children.map((c) => ({
-          solid: isMesh(c.solid) ? c.solid : (c.solid as Shape3D).meshShape(),
+          solid: isMesh(c.solid) ? c.solid : (c.solid as Shape3D).meshShape(FALLBACK_MESH_QUALITY),
           isHole: c.isHole,
         }));
         return combineMesh(op, meshed);
@@ -754,7 +754,7 @@ function combineShape(
       result = result.fuse(solids[i].solid) as Shape3D;
     } catch {
       const meshed = children.map((c) => ({
-        solid: isMesh(c.solid) ? c.solid : (c.solid as Shape3D).meshShape(),
+        solid: isMesh(c.solid) ? c.solid : (c.solid as Shape3D).meshShape(FALLBACK_MESH_QUALITY),
         isHole: c.isHole,
       }));
       return combineMesh(op, meshed);
@@ -765,7 +765,7 @@ function combineShape(
       result = result.cut(h.solid) as Shape3D;
     } catch {
       const meshed = children.map((c) => ({
-        solid: isMesh(c.solid) ? c.solid : (c.solid as Shape3D).meshShape(),
+        solid: isMesh(c.solid) ? c.solid : (c.solid as Shape3D).meshShape(FALLBACK_MESH_QUALITY),
         isHole: c.isHole,
       }));
       return combineMesh(op, meshed);
@@ -954,6 +954,19 @@ function suspicious(
  * which is the setting that can exhaust the WASM heap on a sphere.
  */
 const SEAM_CHECK_QUALITY = { tolerance: 0.05, angularTolerance: 0.4 };
+
+/**
+ * Tessellation used when a solid has to become a mesh so manifold can finish
+ * a boolean OCCT could not.
+ *
+ * meshShape() with no argument takes OCCT's own default of about 0.001mm,
+ * which this file already documents as the setting that turns one sphere into
+ * six figures of triangles. Handing that to manifold for every operand of a
+ * failed group boolean is how the rescue path came to fail as well, leaving
+ * the group empty and the model gone. The display quality is plenty for a
+ * boolean whose result is about to be tessellated at that quality anyway.
+ */
+const FALLBACK_MESH_QUALITY = { tolerance: 0.05, angularTolerance: 0.4 };
 
 /**
  * True when a solid tessellates into a closed surface — every edge shared by

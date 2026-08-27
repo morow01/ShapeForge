@@ -12,6 +12,8 @@ import {
   applyPushPullPreview,
   combine,
   decompose,
+  isEmptySolid,
+  tessellatesEmpty,
   hasImport,
   isMesh,
   makeLocal,
@@ -669,7 +671,30 @@ const api = {
       }
       throw error;
     }
-    if (!solid) return null;
+    // An export that comes out empty is the worst outcome this app has: a
+    // file that looks like a part, opens in a slicer, and contains nothing.
+    // The union can produce one — manifold hands back an empty result rather
+    // than throwing when an operand it dislikes reaches it — so the shells
+    // are written individually rather than the emptiness being believed.
+    // Holes are cut from each shell first, so the fallback still describes
+    // the part that was modelled, not the part before its holes.
+    if (!solid || isEmptySolid(solid) || tessellatesEmpty(solid)) {
+      if (!evaluatedSolids.length) return null;
+      const holes = evaluated.filter((item) => item.isHole).map((item) => item.solid);
+      const drilled = evaluatedSolids.map((shell) => {
+        let out = shell;
+        for (const hole of holes) {
+          const cut = combine("subtract", [
+            { solid: out, isHole: false },
+            { solid: hole, isHole: false },
+          ]);
+          if (cut) out = cut;
+        }
+        return out;
+      });
+      return blobSTLOfMany(drilled, EXPORT_PRESETS[quality]);
+    }
+
     resultSolidCache = { key, solid, meshQuality: quality };
     // binary: true — smaller and faster to write/read than the ASCII default,
     // and every slicer (including Bambu Studio) reads it fine.
