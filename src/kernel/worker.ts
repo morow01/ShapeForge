@@ -420,7 +420,9 @@ const api = {
         // view. Parse its triangles directly, like a slicer does. Imported
         // children inside a group still go through makeLocal because the
         // group's displayed shape is the evaluated boolean result.
-        if (spec.type === "import") {
+        // Vector artwork has no triangles to parse — it is built, not loaded —
+        // so only a mesh import takes the shortcut.
+        if (spec.type === "import" && !spec.svg) {
           onProgress?.(spec.id);
           const mesh = await loadSTLPreview(spec.id, spec.blobId);
           meshCache.set(spec.id, { key, mesh });

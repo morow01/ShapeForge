@@ -212,7 +212,14 @@ interface DocState {
   /** Adds a node for a file already written to blobStore — the caller reads
    *  and stores the bytes first (both are async), so this stays a plain
    *  synchronous mutation like every other store action. */
-  addImport: (blobId: string, fileName: string, byteSize: number) => void;
+  addImport: (
+    blobId: string,
+    fileName: string,
+    byteSize: number,
+    svg?: { thickness: number; width: number; height: number },
+  ) => void;
+  /** Extrusion depth of an imported vector artwork, in mm. */
+  setSvgThickness: (id: string, thickness: number) => void;
   removeSelected: () => void;
   select: (id: string | null, additive?: boolean) => void;
   selectMany: (ids: string[], additive?: boolean) => void;
@@ -438,7 +445,7 @@ export const useDoc = create<DocState>()(
           return { nodes: [...s.nodes, node], selectedIds: [node.id] };
         }),
 
-      addImport: (blobId, fileName, byteSize) =>
+      addImport: (blobId, fileName, byteSize, svg) =>
         set((s) => {
           const node: ImportNode = {
             type: "import",
@@ -446,6 +453,7 @@ export const useDoc = create<DocState>()(
             blobId,
             fileName,
             byteSize,
+            svg,
             // Strip a .stl extension for the display name; keep everything
             // else so two imports of similarly-named files stay distinct.
             name: fileName.replace(/\.stl$/i, ""),
@@ -590,6 +598,17 @@ export const useDoc = create<DocState>()(
       setOps: (id, ops) => {
         set((s) => ({
           nodes: updateNode(s.nodes, id, (n) => (n.type === "edit" ? { ...n, ops } : n)),
+        }));
+        afterBatchedMutation();
+      },
+
+      setSvgThickness: (id, thickness) => {
+        set((s) => ({
+          nodes: updateNode(s.nodes, id, (n) =>
+            n.type === "import" && n.svg
+              ? { ...n, svg: { ...n.svg, thickness: Math.max(0.1, thickness) } }
+              : n,
+          ),
         }));
         afterBatchedMutation();
       },

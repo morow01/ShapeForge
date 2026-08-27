@@ -89,7 +89,23 @@ export function parseNode(raw: unknown): SceneNode | null {
   if (n.type === "import") {
     if (typeof n.blobId !== "string" || typeof n.fileName !== "string") return null;
     if (typeof n.byteSize !== "number") return null;
-    return { ...base, type: "import", blobId: n.blobId, fileName: n.fileName, byteSize: n.byteSize };
+    const raw = n.svg as { thickness?: unknown; width?: unknown; height?: unknown } | undefined;
+    const svg =
+      raw && typeof raw.thickness === "number" && Number.isFinite(raw.thickness)
+        ? {
+            thickness: Math.max(0.1, raw.thickness),
+            width: typeof raw.width === "number" ? raw.width : 0,
+            height: typeof raw.height === "number" ? raw.height : 0,
+          }
+        : undefined;
+    return {
+      ...base,
+      type: "import",
+      blobId: n.blobId,
+      fileName: n.fileName,
+      byteSize: n.byteSize,
+      svg,
+    };
   }
 
   if (n.type === "edit") {

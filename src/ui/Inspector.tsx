@@ -29,6 +29,8 @@ interface Props {
   onHole: (isHole: boolean) => void;
   onColor: (color: string) => void;
   onTransparent: (transparent: boolean) => void;
+  /** Imported artwork only: how far the outlines are extruded, in mm. */
+  onSvgThickness: (mm: number) => void;
   onOp: (op: BooleanOp) => void;
   onRename: (name: string) => void;
   onDelete: () => void;
@@ -61,6 +63,7 @@ export function Inspector({
   onHole,
   onColor,
   onTransparent,
+  onSvgThickness,
   onOp,
   onRename,
   onDelete,
@@ -261,7 +264,7 @@ export function Inspector({
               </p>
             </>
           ) : node.type === "import" ? (
-            <ImportInfo node={node} />
+            <ImportInfo node={node} onSvgThickness={onSvgThickness} />
           ) : node.type === "edit" ? (
             <EditInfo node={node} error={error} onPruneDeadOps={onPruneDeadOps} />
           ) : node.type === "build" ? (
@@ -363,7 +366,51 @@ export function Inspector({
   );
 }
 
-function ImportInfo({ node }: { node: Extract<SceneNode, { type: "import" }> }) {
+function ImportInfo({
+  node,
+  onSvgThickness,
+}: {
+  node: Extract<SceneNode, { type: "import" }>;
+  onSvgThickness: (mm: number) => void;
+}) {
+  if (node.svg) {
+    const mm = (v: number) => `${v.toFixed(2)} mm`;
+    return (
+      <>
+        <h2>Imported artwork</h2>
+        <dl className="readout">
+          <dt>File</dt>
+          <dd>{node.fileName}</dd>
+          <dt>Artboard size</dt>
+          <dd>
+            {mm(node.svg.width)} × {mm(node.svg.height)}
+          </dd>
+        </dl>
+        <div className="field-row">
+          <span className="field-label">Thickness</span>
+          <input
+            className="num"
+            type="number"
+            min={0.1}
+            step={0.5}
+            value={node.svg.thickness}
+            onFocus={beginHistoryBatch}
+            onBlur={endHistoryBatch}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (Number.isFinite(v)) onSvgThickness(v);
+            }}
+            aria-label="Extrusion thickness in millimetres"
+          />
+        </div>
+        <p className="hint">
+          Imported at the size its artboard reports, so it matches Illustrator
+          1:1. Resize with the handles or Scale; thickness is how far it is
+          extruded.
+        </p>
+      </>
+    );
+  }
   return (
     <>
       <h2>Imported file</h2>

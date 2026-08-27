@@ -13,6 +13,8 @@ import {
 import type { Face, Shape3D } from "replicad";
 import { InvalidShapeError, solveTriangle, solveScaledTriangle } from "../geometry/triangle";
 import { getBlob } from "../document/blobStore";
+import { svgSolid } from "./svgSolid";
+import type { SvgCommand } from "../svg/parse";
 import type { PushPullOp, Vec3 } from "../document/types";
 import type { BuildSpec, EditSpec, ImportSpec, NodeSpec, ObjectSpec } from "./types";
 
@@ -107,7 +109,18 @@ function normalise<T extends AnySolid>(s: T): T {
  */
 const importCache = new Map<string, Promise<MeshShape>>();
 
-async function makeImport(spec: ImportSpec): Promise<MeshShape> {
+async function makeImport(spec: ImportSpec): Promise<AnySolid> {
+  // Vector artwork: the blob is millimetre outlines, and the solid is those
+  // outlines extruded. Nothing here needs the mesh kernel.
+  if (spec.svg) {
+    const blob = await getBlob(spec.blobId);
+    if (!blob) throw new Error("The artwork for this import is missing.");
+    const paths = JSON.parse(new TextDecoder().decode(blob)) as SvgCommand[][];
+    const solid = svgSolid(paths, Math.max(0.01, spec.svg.thickness));
+    if (!solid) throw new Error("No closed outlines in that artwork to build from.");
+    return solid;
+  }
+
   let cached = importCache.get(spec.blobId);
   if (!cached) {
     cached = loadImport(spec.blobId);

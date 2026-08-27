@@ -44,6 +44,7 @@ const toSpec = (n: SceneNode): NodeSpec => {
       type: "import",
       id: n.id,
       blobId: n.blobId,
+      svg: n.svg ? { thickness: n.svg.thickness } : undefined,
       position: n.position,
       rotation: n.rotation,
       scale: n.scale,
@@ -132,7 +133,8 @@ const shapeOf = (n: SceneNode): unknown => {
   }
   // blobId never changes for an import node, so this is stable — importSTL()
   // never re-runs just because the node moved.
-  if (n.type === "import") return [n.id, "import", n.blobId];
+  // Thickness is part of the shape for artwork, so a change to it rebuilds.
+  if (n.type === "import") return [n.id, "import", n.blobId, n.svg?.thickness];
   if (n.type === "edit") return [n.id, "edit", shapeOf(n.base), n.ops];
   if (n.type === "build") return [n.id, "build", n.sources.map(shapeOf), n.keep];
   return [n.id, n.kind, n.params];
@@ -140,6 +142,9 @@ const shapeOf = (n: SceneNode): unknown => {
 
 const EXPORT_QUALITY_KEY = "cad.exportQuality";
 const SNAP_KEY = "cad.smartGuides";
+/** Extrusion depth a freshly imported artwork gets, in mm. Thin enough to
+ *  read as "flat artwork", thick enough to print without curling. */
+const DEFAULT_SVG_THICKNESS = 2;
 
 /** What each preset costs, so the choice is not guesswork — measured on a
  *  40x30x15 box with a 10mm spherical bowl (see EXPORT_PRESETS in worker.ts). */
@@ -174,6 +179,7 @@ export function App() {
     pushPullFace,
     setOps,
     setHole,
+    setSvgThickness,
     shapeBuild,
     setColor,
     setTransparent,
@@ -547,6 +553,28 @@ export function App() {
       return;
     }
     try {
+      if (/.svg$/i.test(file.name)) {
+        // Vector artwork is parsed here, on the main thread: reading it needs
+        // DOMParser, which the kernel worker does not have. What gets stored
+        // is the millimetre outlines, so a rebuild never re-reads the SVG.
+        const { parseSvg } = await import("./svg/parse");
+        const art = parseSvg(await file.text());
+        if (!art.paths.length) {
+          setError(`${file.name} has no shapes to build from — outline any text before exporting.`);
+          return;
+        }
+        const blobId = crypto.randomUUID();
+        const json = new TextEncoder().encode(JSON.stringify(art.paths));
+        await putBlob(blobId, json.buffer as ArrayBuffer);
+        addImport(blobId, file.name, file.size, {
+          thickness: DEFAULT_SVG_THICKNESS,
+          width: art.width,
+          height: art.height,
+        });
+        setError(null);
+        return;
+      }
+
       const bytes = await file.arrayBuffer();
       const triangles = peekBinaryTriangleCount(bytes);
       if (triangles !== null && triangles > MAX_IMPORT_TRIANGLES) {
@@ -1188,12 +1216,12 @@ export function App() {
               </button>
             ))}
           </div>
-          <button className="import-btn" onClick={() => importInputRef.current?.click()}>↑ Import STL</button>
+          <button className="import-btn" onClick={() => importInputRef.current?.click()}>↑ Import STL or SVG</button>
         </section>
         <input
           ref={importInputRef}
           type="file"
-          accept=".stl,model/stl,model/x.stl-binary,model/x.stl-ascii"
+          accept=".stl,.svg,image/svg+xml,model/stl,model/x.stl-binary,model/x.stl-ascii"
           hidden
           onChange={(e) => {
             const file = e.target.files?.[0];
@@ -1236,6 +1264,7 @@ export function App() {
                 endHistoryBatch();
               }}
               onTransparent={applyTransparent}
+              onSvgThickness={(mm) => setSvgThickness(selected.id, mm)}
               onOp={(op) => setGroupOp(selected.id, op)}
               onRename={(n) => rename(selected.id, n)}
               onDelete={removeSelected}

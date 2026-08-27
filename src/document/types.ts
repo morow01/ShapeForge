@@ -221,6 +221,13 @@ export interface ImportNode extends NodeBase {
   blobId: string;
   fileName: string;
   byteSize: number;
+  /**
+   * Present when the import came from vector artwork rather than a mesh. The
+   * blob then holds millimetre outlines (see svg/parse.ts), not STL bytes,
+   * and the solid is those outlines extruded — so thickness stays editable
+   * and the artwork keeps the size its artboard gave it.
+   */
+  svg?: { thickness: number; width: number; height: number };
 }
 
 /** One push/pull: a face on the (frozen) base shape, identified by a point

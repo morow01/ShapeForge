@@ -47,6 +47,8 @@ export interface GroupSpec extends SpecBase {
 export interface ImportSpec extends SpecBase {
   type: "import";
   blobId: string;
+  /** See ImportNode.svg — vector artwork, extruded rather than meshed. */
+  svg?: { thickness: number };
 }
 
 export interface EditSpec extends SpecBase {
