@@ -1,5 +1,4 @@
-import { draw, getManifold, MeshShape } from "replicad";
-import type { Drawing, Shape3D } from "replicad";
+import { getManifold, MeshShape } from "replicad";
 import type { SvgCommand } from "../svg/parse";
 
 /**
@@ -96,33 +95,6 @@ function interiorPoint(points: [number, number][]): [number, number] {
   return pointInPolygon(mid, points) ? mid : points[0];
 }
 
-function toDrawing(commands: SvgCommand[]): Drawing | null {
-  const start = commands[0];
-  if (!start || start[0] !== "M") return null;
-  let pen = draw([start[1], start[2]]);
-  let cursor: [number, number] = [start[1], start[2]];
-  let drew = false;
-  for (const c of commands.slice(1)) {
-    if (c[0] === "M") break; // one outline per drawing; subpaths arrive separately
-    if (c[0] === "L") {
-      // A rounded rectangle whose radius is exactly half its height (a pill)
-      // legitimately produces a zero-length V segment after SVG shorthand is
-      // expanded. OCCT cannot construct that degenerate line and exposes it as
-      // "This object has been deleted", so simply omit the no-op segment.
-      if (Math.hypot(c[1] - cursor[0], c[2] - cursor[1]) < 1e-9) continue;
-      pen = pen.lineTo([c[1], c[2]]);
-      cursor = [c[1], c[2]];
-      drew = true;
-    } else if (c[0] === "C") {
-      pen = pen.cubicBezierCurveTo([c[5], c[6]], [c[1], c[2]], [c[3], c[4]]);
-      cursor = [c[5], c[6]];
-      drew = true;
-    }
-  }
-  if (!drew) return null;
-  return pen.close();
-}
-
 /** Splits a path's subpaths (each M starts one) into separate outlines. */
 function splitSubpaths(commands: SvgCommand[]): SvgCommand[][] {
   const out: SvgCommand[][] = [];
@@ -138,99 +110,10 @@ function splitSubpaths(commands: SvgCommand[]): SvgCommand[][] {
   return out;
 }
 
-interface Outline {
-  drawing: Drawing;
-  points: [number, number][];
-  inside: [number, number];
-  area: number;
-}
-
-/**
- * One extruded solid per shape in the artwork — a letter, a logo mark, an
- * island — each already carrying its own holes.
- *
- * Deliberately NOT one accumulated 2D region for the whole file. Fusing or
- * cutting every outline into a single running drawing made the shapes depend
- * on one another, so one misjudged counter could cut a hole out of a
- * neighbouring letter or remove it outright. Separate solids keep a mistake
- * local, and the caller unions them through the same boolean path the rest
- * of the app uses.
- *
- * Holes are decided by containment, not by winding rule: the counter in an O
- * is a hole whichever way it happens to wind, and exported artwork is not
- * consistent about that. Depth — how many outlines enclose a shape —
- * alternates solid, hole, solid, the way even-odd does.
- */
-export function svgSolids(paths: SvgCommand[][], thickness: number): Shape3D[] {
-  const outlines: Outline[] = [];
-  for (const [pathIndex, path] of paths.entries()) {
-    for (const [subIndex, sub] of splitSubpaths(path).entries()) {
-      const points = flatten(sub);
-      if (points.length < 3) continue;
-      let drawing: Drawing | null;
-      try {
-        drawing = toDrawing(sub);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        throw new Error(`SVG path ${pathIndex + 1}, outline ${subIndex + 1}: ${message}`);
-      }
-      if (!drawing) continue;
-      outlines.push({ drawing, points, inside: interiorPoint(points), area: areaOf(points) });
-    }
-  }
-  if (!outlines.length) return [];
-
-  // Which outlines enclose each one. Only bigger outlines can, which keeps
-  // this from depending on the arbitrary order shapes appear in the file.
-  const containers = outlines.map((outline, i) =>
-    outlines
-      .map((other, j) => ({ other, j }))
-      .filter(
-        ({ other, j }) =>
-          j !== i && other.area > outline.area && pointInPolygon(outline.inside, other.points),
-      ),
-  );
-
-  const solids: Shape3D[] = [];
-  outlines.forEach((outline, i) => {
-    if (containers[i].length % 2 === 1) return; // a hole, not a shape
-
-    try {
-      // Extrude the outer contour first, then cut counters as complete 3D
-      // tools. Illustrator compound paths can make OCCT's 2D Drawing.cut()
-      // produce an uncapped face (the supplied capital A exposed it). A
-      // slightly overlong 3D cutter crosses both caps unambiguously and keeps
-      // the letter a closed solid.
-      let solid = outline.drawing.sketchOnPlane("XY").extrude(thickness) as Shape3D;
-      outlines.forEach((hole, j) => {
-        if (j === i || containers[j].length !== containers[i].length + 1) return;
-        // The hole's immediate container is the smallest thing enclosing it,
-        // so a letter never claims a counter belonging to another letter.
-        let immediate: { other: Outline; j: number } | null = null;
-        for (const candidate of containers[j]) {
-          if (!immediate || candidate.other.area < immediate.other.area) immediate = candidate;
-        }
-        if (!immediate || immediate.j !== i) return;
-        // Cross both caps by a comfortable modelling tolerance. A 0.001 mm
-        // overlap was technically non-coplanar but still close enough for
-        // OCCT to lose the whole top cap on block-style counters such as D.
-        const overlap = Math.max(0.05, thickness * 0.05);
-        const cutter = (hole.drawing.sketchOnPlane("XY").extrude(thickness + overlap * 2) as Shape3D)
-          .translateZ(-overlap);
-        solid = solid.cut(cutter) as Shape3D;
-      });
-      solids.push(solid);
-    } catch {
-      // One unbuildable outline must not cost the rest of the artwork.
-    }
-  });
-
-  return solids;
-}
-
 /**
  * Builds SVG artwork the same way a vector importer does: each source element
- * becomes one even-odd 2D region (so compound letter counters remain holes),
+ * becomes one 2D region whose contours are wound so that counters read as
+ * holes (outer anticlockwise, nested clockwise, resolved NonZero),
  * the elements are unioned, and only then is the result extruded. This avoids
  * fragile per-counter OCCT face cuts that can lose a cap on glyphs such as D.
  */

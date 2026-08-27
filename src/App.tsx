@@ -809,6 +809,17 @@ export function App() {
   /** Drop (D): let the selection fall onto whatever is underneath it. The
    *  geometry that answers "what is underneath" only exists in the viewport,
    *  so the scene works out the distances and the document records them. */
+  /** Ungroup needs each group's world centre, which only the viewport can
+   *  measure — see the store's ungroup(). */
+  const ungroupSelected = useCallback(() => {
+    const centres: Record<string, Vec3> = {};
+    for (const id of useDoc.getState().selectedIds) {
+      const centre = sceneRef.current?.worldCentre(id);
+      if (centre) centres[id] = centre;
+    }
+    ungroup(centres);
+  }, [ungroup]);
+
   const dropSelected = useCallback(() => {
     const updates = sceneRef.current?.dropSelected() ?? [];
     if (updates.length) setPositions(updates);
@@ -836,7 +847,7 @@ export function App() {
         if (name !== null) newProject(name);
       } else if (mod && e.key.toLowerCase() === "g") {
         e.preventDefault();
-        if (e.shiftKey) ungroup();
+        if (e.shiftKey) ungroupSelected();
         else group();
       } else if (mod && e.key.toLowerCase() === "z") {
         e.preventDefault();
@@ -882,7 +893,7 @@ export function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [removeSelected, undo, redo, group, ungroup, toggleTransparency, dropSelected, commitBuild, exportCurrentProject, newProject]);
+  }, [removeSelected, undo, redo, group, ungroup, toggleTransparency, dropSelected, ungroupSelected, commitBuild, exportCurrentProject, newProject]);
 
   return (
     <div className="app-shell">
@@ -953,7 +964,7 @@ export function App() {
         </div>
         <div className="toolbar-group">
           <button onClick={group} disabled={!canGroup} title="Ctrl+G">Group</button>
-          <button onClick={ungroup} disabled={!canUngroup} title="Ctrl+Shift+G">Ungroup</button>
+          <button onClick={() => ungroupSelected()} disabled={!canUngroup} title="Ctrl+Shift+G">Ungroup</button>
         </div>
         <div className="toolbar-group view-tools">
           <button className={cameraMode === "perspective" ? "on" : ""} onClick={() => setCameraMode("perspective")}>Perspective</button>

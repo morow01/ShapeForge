@@ -5,6 +5,14 @@ import type { TemporalState } from "zundo";
 import { PRIMITIVES, isGroup } from "./types";
 import { extractNodes, findNode, firstRootIndex, updateNode, walk } from "./tree";
 import {
+  applyMatrix,
+  eulerToMatrix,
+  matrixToEuler,
+  multiplyMatrix,
+  tidy,
+  transposeMatrix,
+} from "./transform";
+import {
   deleteProjectStorage,
   exportProjectFile,
   getActiveProjectId,
@@ -110,6 +118,61 @@ function sameTransform(node: SceneNode, patch: { position?: Vec3; rotation?: Vec
     same(node.rotation, patch.rotation) &&
     same(node.scale, patch.scale)
   );
+}
+
+/**
+ * Rewrites a child of `group` into the world frame, so lifting it out of the
+ * group leaves it exactly where it was drawn.
+ *
+ * Rotation composes as matrices and comes back as angles; the child's offset
+ * is scaled and rotated by the group before being added to the group's own
+ * position; scales multiply per axis.
+ *
+ * Exact for any combination of move and rotate, which is what a group picks
+ * up in ordinary use. A group that has also been SCALED is right to within
+ * where its scaling centre sat: the kernel scales a shape about its own
+ * bounding-box centre, and the group's centre is not the child's, a
+ * difference the document cannot resolve because it holds no bounds.
+ */
+function liftOutOf(group: GroupNode, child: SceneNode, worldCentre?: Vec3): SceneNode {
+  const rotation = eulerToMatrix(group.rotation);
+  // A group's scaling happens about the centre of its own bounds, not about
+  // the origin, so the child's offset has to be scaled about that same point.
+  // The viewport measures the centre AFTER the group's rotation and move;
+  // undoing those recovers the point the scaling actually used.
+  const scaled = worldCentre
+    ? (() => {
+        const local = applyMatrix(transposeMatrix(rotation), [
+          worldCentre[0] - group.position[0],
+          worldCentre[1] - group.position[1],
+          worldCentre[2] - group.position[2],
+        ]);
+        return [
+          local[0] + (child.position[0] - local[0]) * group.scale[0],
+          local[1] + (child.position[1] - local[1]) * group.scale[1],
+          local[2] + (child.position[2] - local[2]) * group.scale[2],
+        ] as Vec3;
+      })()
+    : ([
+        child.position[0] * group.scale[0],
+        child.position[1] * group.scale[1],
+        child.position[2] * group.scale[2],
+      ] as Vec3);
+  const offset = applyMatrix(rotation, scaled);
+  return {
+    ...child,
+    position: [
+      group.position[0] + offset[0],
+      group.position[1] + offset[1],
+      group.position[2] + offset[2],
+    ],
+    rotation: tidy(matrixToEuler(multiplyMatrix(rotation, eulerToMatrix(child.rotation)))),
+    scale: [
+      child.scale[0] * group.scale[0],
+      child.scale[1] * group.scale[1],
+      child.scale[2] * group.scale[2],
+    ],
+  };
 }
 
 /** Runs after every mutation that can be part of a burst. */
@@ -247,7 +310,11 @@ interface DocState {
   toggleCollapsed: (id: string) => void;
   rename: (id: string, name: string) => void;
   group: () => void;
-  ungroup: () => void;
+  /** `centres` maps a group id to its world bounding-box centre, which only
+   *  the viewport knows. Needed to undo a group's scaling, which the kernel
+   *  applies about that point; without it a scaled group's children land
+   *  wrong. Groups that were never scaled do not need it. */
+  ungroup: (centres?: Record<string, Vec3>) => void;
   setShowResult: (v: boolean) => void;
   /** Clears the canvas of the active project. */
   /** Shape Builder: replaces `sourceIds` with one node holding them frozen
@@ -692,7 +759,7 @@ export const useDoc = create<DocState>()(
         }),
 
       /** Dissolves selected groups, lifting their children into their place. */
-      ungroup: () =>
+      ungroup: (centres) =>
         set((s) => {
           const targets = s.selectedIds
             .map((id) => findNode(s.nodes, id))
@@ -705,7 +772,13 @@ export const useDoc = create<DocState>()(
               if (isGroup(n)) {
                 if (targets.some((t) => t.id === n.id)) {
                   lifted.push(...n.children.map((c) => c.id));
-                  return n.children;
+                  // Children live in the group's frame: what you see is the
+                  // group's transform applied on top of each child's own (see
+                  // place() in kernel/shape.ts). Handing them back untouched
+                  // drops the group's half of that, so every child jumped by
+                  // exactly however far the group had been moved, turned or
+                  // scaled since it was made.
+                  return n.children.map((child) => liftOutOf(n, child, centres?.[n.id]));
                 }
                 return [{ ...n, children: expand(n.children) }];
               }
