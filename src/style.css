@@ -825,3 +825,48 @@ select.num { height: 31px; }
   color: #94a3b8;
   font-size: 13px;
 }
+
+/* Shape Builder session bar. Sits over the canvas, above the hint line: the
+   session has no other visible way to end, and Esc — the key people reach for
+   to leave a mode — deliberately throws it away. */
+.build-bar {
+  position: absolute;
+  z-index: 6;
+  right: 14px;
+  bottom: 52px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 9px;
+  border: 1px solid #d3dce1;
+  border-radius: 9px;
+  background: rgb(255 255 255 / 96%);
+  box-shadow: 0 4px 15px rgb(31 50 62 / 15%);
+  backdrop-filter: blur(7px);
+}
+.build-count { color: #25313b; font-size: 12px; }
+.build-count strong { color: #087a79; }
+.build-hint { color: #72818c; font-size: 11px; }
+.build-bar button { min-height: 28px; padding: 4px 10px; font-size: 12px; }
+.build-apply { border-color: #24aaa8; background: #24aaa8; color: #fff; font-weight: 650; }
+.build-apply:hover:not(:disabled) { background: #1c8f8d; }
+
+/* The +/- badge that follows the pointer in Shape Builder. Placed below-right
+   of the cursor so it never sits under the arrow itself. */
+.cell-cursor {
+  position: absolute;
+  display: none;
+  z-index: 31;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid #24aaa8;
+  border-radius: 50%;
+  background: #fff;
+  color: #087a79;
+  font: 700 13px/1 system-ui, sans-serif;
+  pointer-events: none;
+  box-shadow: 0 1px 5px rgb(31 50 62 / 25%);
+}
+.cell-cursor.is-remove { border-color: #e0725c; color: #c2452c; }

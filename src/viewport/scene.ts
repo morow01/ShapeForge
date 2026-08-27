@@ -243,18 +243,34 @@ const MATERIALS = {
    *  a ghost so it can be clicked back rather than vanishing irretrievably;
    *  hovered is the same amber the face tool uses, so "the thing under your
    *  cursor" looks the same everywhere in the app. */
-  cellKept: new THREE.MeshStandardMaterial({ color: 0x43aede, metalness: 0.04, roughness: 0.55 }),
+  // See-through for the whole session: every region has to be visible while
+  // you decide about it, including the ones buried inside the overlap.
+  cellKept: new THREE.MeshStandardMaterial({
+    color: 0x43aede,
+    metalness: 0.04,
+    roughness: 0.55,
+    transparent: true,
+    opacity: 0.55,
+    depthWrite: false,
+  }),
   cellRemoved: new THREE.MeshStandardMaterial({
     color: 0x9fb0bb,
     transparent: true,
-    opacity: 0.16,
+    opacity: 0.1,
     depthWrite: false,
     roughness: 0.6,
   }),
   // Hover tints rather than repaints: a region already in the shape keeps
   // reading as part of it, and one that is still out reads as a preview of
   // what clicking would add.
-  cellHover: new THREE.MeshStandardMaterial({ color: 0x6fd0e8, metalness: 0.04, roughness: 0.5 }),
+  cellHover: new THREE.MeshStandardMaterial({
+    color: 0x2bb3ba,
+    metalness: 0.04,
+    roughness: 0.5,
+    transparent: true,
+    opacity: 0.85,
+    depthWrite: false,
+  }),
   cellHoverRemoved: new THREE.MeshStandardMaterial({
     color: 0xffc46b,
     transparent: true,
@@ -513,6 +529,13 @@ export class Scene {
   /** Set while the pointer is down in the builder: every region swept over
    *  takes this state, so a drag paints regions the way Illustrator's does. */
   private cellPaint: boolean | null = null;
+  /** "+" or "−" next to the pointer while the builder is running: which of
+   *  the two gestures a click would perform is otherwise invisible until
+   *  after you have already done it. */
+  private cellCursorEl: HTMLDivElement;
+  /** Last pointer position over the canvas, so the badge can follow a change
+   *  of modifier key without waiting for the mouse to move. */
+  private cellCursorAt: { x: number; y: number } | null = null;
   private selectedIds: string[] = [];
   /** Most recent nodes passed to setPlacements, so a part that is (re)created
    *  by setParts — which runs on its own async schedule from the kernel and
@@ -600,6 +623,11 @@ export class Scene {
     // pills (same white/teal look), not just a label: a plain click on a
     // face with no drag opens it ready to type an exact distance into,
     // same as typing an exact width/height there already works.
+    this.cellCursorEl = document.createElement("div");
+    this.cellCursorEl.className = "cell-cursor";
+    this.cellCursorEl.setAttribute("aria-hidden", "true");
+    host.appendChild(this.cellCursorEl);
+
     this.pushPullLabelEl = document.createElement("input");
     this.pushPullLabelEl.type = "number";
     this.pushPullLabelEl.step = "0.5";
@@ -2259,6 +2287,7 @@ export class Scene {
     }
     this.cellViews.clear();
     this.hoverCell = null;
+    this.cellCursorEl.style.display = "none";
 
     if (cells) {
       for (const cell of cells) {
@@ -2268,10 +2297,12 @@ export class Scene {
         const group = new THREE.Group();
         group.add(mesh, wire);
         this.scene.add(group);
-        // Regions start OUT, not in. If they all start in, the preview looks
-        // identical to what was already on screen and a click — "add this
-        // region" — has nothing to do, which reads as the tool being broken.
-        this.cellViews.set(cell.mask, { group, mesh, wire, kept: false });
+        // Regions start IN, so alt-click — "take this one out", the gesture
+        // subtract is made of — does something the moment the tool opens.
+        // They are drawn see-through rather than solid, which is what stops
+        // that from looking identical to the shapes you started with: you can
+        // see the interior regions, and taking one out is visible immediately.
+        this.cellViews.set(cell.mask, { group, mesh, wire, kept: true });
       }
     }
     // The sources would otherwise sit exactly on top of their own regions,
@@ -2279,7 +2310,7 @@ export class Scene {
     for (const view of this.parts.values()) view.group.visible = !cells;
     this.applyCellMaterials();
     this.applyMaterials();
-    this.onCellsChanged?.(0, this.cellViews.size);
+    this.onCellsChanged?.(this.keptCells().length, this.cellViews.size);
   }
 
   /** Which regions are currently kept — what a commit turns into a BuildNode. */
@@ -2311,6 +2342,23 @@ export class Scene {
     }
   }
 
+  /** Moves the +/− badge to the pointer, or hides it when there is nothing
+   *  under it to act on. */
+  private updateCellCursor(alt: boolean) {
+    const at = this.cellCursorAt;
+    const over = this.toolMode === "build" && this.cellViews.size > 0 && this.hoverCell !== null;
+    if (!over || !at) {
+      this.cellCursorEl.style.display = "none";
+      return;
+    }
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.cellCursorEl.textContent = alt ? "−" : "+";
+    this.cellCursorEl.classList.toggle("is-remove", alt);
+    this.cellCursorEl.style.left = `${at.x - rect.left + 16}px`;
+    this.cellCursorEl.style.top = `${at.y - rect.top + 16}px`;
+    this.cellCursorEl.style.display = "flex";
+  }
+
   /** The region under the pointer, or null. */
   private raycastCell(e: PointerEvent): number | null {
     if (!this.cellViews.size) return null;
@@ -2319,10 +2367,25 @@ export class Scene {
     this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
     this.raycaster.setFromCamera(this.pointer, this.camera);
     const meshes = [...this.cellViews.values()].map((v) => v.mesh);
-    const hit = this.raycaster.intersectObjects(meshes, false)[0];
-    if (!hit) return null;
-    for (const [mask, view] of this.cellViews) if (view.mesh === hit.object) return mask;
-    return null;
+    const hits = this.raycaster.intersectObjects(meshes, false);
+    if (!hits.length) return null;
+
+    const maskOf = (object: THREE.Object3D): number | null => {
+      for (const [mask, view] of this.cellViews) if (view.mesh === object) return mask;
+      return null;
+    };
+
+    // A region still in the shape wins over any ghost in front of it. Without
+    // this, removing one region walls off everything behind it: the ghost is
+    // still solid geometry to a raycast, so it keeps swallowing the clicks
+    // meant for the regions it is now merely a shell around.
+    for (const hit of hits) {
+      const mask = maskOf(hit.object);
+      if (mask !== null && this.cellViews.get(mask)?.kept) return mask;
+    }
+    // Nothing kept along the ray — then the frontmost ghost is what you meant,
+    // which is how a removed region gets clicked back in.
+    return maskOf(hits[0].object);
   }
 
   /** Click adds a region to the shape, alt-click takes it back out. */
@@ -2471,6 +2534,7 @@ export class Scene {
   private onModifierChange = (e: KeyboardEvent) => {
     this.altDown = e.altKey;
     if (this.altDown) this.guides.clear();
+    if (this.toolMode === "build") this.updateCellCursor(e.altKey);
   };
 
   /** The view cube's square viewport, top-right corner, in CSS pixels
@@ -2637,6 +2701,8 @@ export class Scene {
         this.hoverCell = mask;
         this.applyCellMaterials();
       }
+      this.cellCursorAt = { x: e.clientX, y: e.clientY };
+      this.updateCellCursor(e.altKey);
       return;
     }
     if (this.pushPullDrag) {
@@ -3355,6 +3421,9 @@ export class Scene {
 
   dispose() {
     cancelAnimationFrame(this.frame);
+    // Appended to the host, so it outlives the renderer unless removed here —
+    // in dev that leaves one orphan badge behind on every remount.
+    this.cellCursorEl.remove();
     cancelAnimationFrame(this.navAnimFrame);
     this.navCube.dispose();
     this.renderer.domElement.removeEventListener("pointerdown", this.onPointerDown);

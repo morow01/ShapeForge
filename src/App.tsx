@@ -1073,11 +1073,28 @@ export function App() {
           onPreviewPushPull={onPreviewPushPull}
           onDragChange={onDragChange}
         />
+        {toolMode === "build" && !buildBusy && buildTally.total > 0 && (
+          // Finishing has to be visible. Enter alone was not: Esc is the key
+          // people reach for to get out of a mode, and Esc throws the session
+          // away — so the work looked like it had simply not applied.
+          <div className="build-bar">
+            <span className="build-count">
+              <strong>{buildTally.kept}</strong> of {buildTally.total} regions kept
+            </span>
+            <span className="build-hint">Alt-click a region to remove it · click to put it back</span>
+            <button className="build-cancel" onClick={() => setToolMode("select")}>
+              Cancel (Esc)
+            </button>
+            <button className="build-apply" onClick={commitBuild} disabled={!buildTally.kept}>
+              Build shape (Enter)
+            </button>
+          </div>
+        )}
         <div className="canvas-help">
           {toolMode === "build"
             ? buildBusy
               ? "Working out the regions…"
-              : `${buildTally.kept} of ${buildTally.total} regions in the shape · Click or drag to add · Alt-click to remove · Enter builds · Esc cancels`
+              : "Alt-click or alt-drag to remove a region · Click to put one back · Right-drag orbit"
             : toolMode === "align"
             ? "Click a dot to align minimum, centre, or maximum · A Align · Esc Select"
             : toolMode === "face"
