@@ -549,7 +549,10 @@ function isEmptySolid(solid: AnySolid): boolean {
   try {
     return measureVolume(solid) <= 1e-9;
   } catch {
-    return true;
+    // A region that cannot be measured is kept, not dropped. A spurious
+    // region is visible in the list and can be clicked away; a missing one
+    // is invisible, and its absence silently changes the result.
+    return false;
   }
 }
 
@@ -563,36 +566,59 @@ function isEmptySolid(solid: AnySolid): boolean {
  * OCCT boolean refusing a hard case degrades to manifold instead of losing
  * the cell.
  */
+/**
+ * One boolean step of a cell, with the empty result treated as suspect.
+ *
+ * OCCT does not only throw when it cannot do a boolean — it can also hand
+ * back an empty solid for a region that plainly exists. A sphere sunk into a
+ * box does it: the part of the sphere sticking out is real, visibly so, and
+ * cutting the box out of the sphere returns nothing, because the sphere's
+ * seam meridian crosses the box's boundary (the same OCCT weakness makeLocal
+ * already retries around). Silently dropping that region is what made
+ * "subtract the sphere" produce an untouched box: the region the user needed
+ * to remove had never been offered.
+ *
+ * So an empty OCCT result is re-tried on manifold, which has no such seam,
+ * and only an empty answer from BOTH kernels counts as genuinely empty.
+ */
+function cellStep(a: AnySolid, b: AnySolid, op: "intersect" | "cut"): AnySolid | null {
+  const asMesh = (s: AnySolid): MeshShape => (isMesh(s) ? s : (s as Shape3D).meshShape());
+
+  if (!isMesh(a) && !isMesh(b)) {
+    try {
+      const out = (op === "intersect"
+        ? (a as Shape3D).intersect(b as Shape3D)
+        : (a as Shape3D).cut(b as Shape3D)) as AnySolid;
+      if (!isEmptySolid(out)) return out;
+    } catch {
+      // Fall through to the mesh kernel.
+    }
+  }
+
+  try {
+    const out = op === "intersect"
+      ? asMesh(a).intersect(asMesh(b))
+      : asMesh(a).cut(asMesh(b));
+    return isEmptySolid(out) ? null : out;
+  } catch {
+    return null;
+  }
+}
+
 export function cellSolid(solids: AnySolid[], mask: number): AnySolid | null {
   const members = solids.filter((_, i) => (mask >> i) & 1);
   const others = solids.filter((_, i) => !((mask >> i) & 1));
   if (!members.length) return null;
 
-  const asMesh = (s: AnySolid): MeshShape => (isMesh(s) ? s : (s as Shape3D).meshShape());
-  let result: AnySolid = members[0];
-
+  let result: AnySolid | null = members[0];
   for (const other of members.slice(1)) {
-    try {
-      result = isMesh(result) || isMesh(other)
-        ? asMesh(result).intersect(asMesh(other))
-        : (result as Shape3D).intersect(other as Shape3D);
-    } catch {
-      result = asMesh(result).intersect(asMesh(other));
-    }
-    if (isEmptySolid(result)) return null;
+    result = cellStep(result, other, "intersect");
+    if (!result) return null;
   }
-
   for (const other of others) {
-    try {
-      result = isMesh(result) || isMesh(other)
-        ? asMesh(result).cut(asMesh(other))
-        : (result as Shape3D).cut(other as Shape3D);
-    } catch {
-      result = asMesh(result).cut(asMesh(other));
-    }
-    if (isEmptySolid(result)) return null;
+    result = cellStep(result, other, "cut");
+    if (!result) return null;
   }
-
   return result;
 }
 

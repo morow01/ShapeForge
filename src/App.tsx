@@ -1129,7 +1129,7 @@ export function App() {
           {toolMode === "build"
             ? buildBusy
               ? "Working out the regions…"
-              : "Alt-click a region to remove it · Alt-click the same spot again for the region behind it · Right-drag orbit"
+              : "Alt-click a shape to subtract it · Click to add it back · Use the region chips below for one region at a time"
             : toolMode === "align"
             ? "Click a dot to align minimum, centre, or maximum · A Align · Esc Select"
             : toolMode === "face"

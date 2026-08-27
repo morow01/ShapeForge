@@ -526,6 +526,9 @@ export class Scene {
    *  by cell mask. Empty whenever the tool is not active. */
   private cellViews = new Map<number, { group: THREE.Group; mesh: THREE.Mesh; wire: THREE.LineSegments; kept: boolean }>();
   private hoverCell: number | null = null;
+  /** Every region the current gesture would act on. Clicking a region that
+   *  belongs to ONE shape acts on that whole shape — see cellGroup(). */
+  private hoverGroup = new Set<number>();
   /** Set while the pointer is down in the builder: every region swept over
    *  takes this state, so a drag paints regions the way Illustrator's does. */
   private cellPaint: boolean | null = null;
@@ -2290,6 +2293,7 @@ export class Scene {
     }
     this.cellViews.clear();
     this.hoverCell = null;
+    this.hoverGroup.clear();
     this.cellCursorEl.style.display = "none";
 
     if (cells) {
@@ -2337,6 +2341,8 @@ export class Scene {
   previewCell(mask: number | null) {
     if (this.hoverCell === mask) return;
     this.hoverCell = mask;
+    // The panel names one region, so it highlights exactly that one.
+    this.hoverGroup = new Set(mask === null ? [] : [mask]);
     this.applyCellMaterials();
   }
 
@@ -2354,7 +2360,7 @@ export class Scene {
 
   private applyCellMaterials() {
     for (const [mask, view] of this.cellViews) {
-      const hovered = this.hoverCell === mask;
+      const hovered = this.hoverGroup.has(mask);
       view.mesh.material = view.kept
         ? hovered
           ? MATERIALS.cellHover
@@ -2386,6 +2392,25 @@ export class Scene {
     this.cellCursorEl.style.display = "flex";
   }
 
+  /**
+   * What a click on `mask` acts on.
+   *
+   * A region belonging to exactly one shape stands for that whole shape: the
+   * visible bulge of a sphere sunk into a box is "the sphere" to anyone
+   * looking at it, and alt-clicking it has to subtract the sphere — all of
+   * it, including the half buried inside the box that no click can reach.
+   * Removing only the part sticking out leaves box-plus-overlap, which is
+   * the box, which is exactly the "nothing happened" this kept producing.
+   *
+   * A region shared by several shapes is already a deliberate choice — the
+   * overlap itself — so that one acts alone.
+   */
+  private cellGroup(mask: number): number[] {
+    const single = (mask & (mask - 1)) === 0;
+    if (!single) return [mask];
+    return [...this.cellViews.keys()].filter((m) => m & mask);
+  }
+
   /** The region under the pointer, or null. */
   private raycastCell(e: PointerEvent): number | null {
     if (!this.cellViews.size) return null;
@@ -2415,15 +2440,22 @@ export class Scene {
     return maskOf(hits[0].object);
   }
 
-  /** Click adds a region to the shape, alt-click takes it back out. */
+  /** Click adds what is under the pointer, alt-click takes it back out —
+   *  a whole shape at a time when that is what was clicked (see cellGroup). */
   private paintCell(e: PointerEvent, keep: boolean): boolean {
     const mask = this.raycastCell(e);
     if (mask === null) return false;
-    const view = this.cellViews.get(mask);
-    if (!view || view.kept === keep) return mask !== null;
-    view.kept = keep;
-    this.applyCellMaterials();
-    this.reportCells();
+    let changed = false;
+    for (const m of this.cellGroup(mask)) {
+      const view = this.cellViews.get(m);
+      if (!view || view.kept === keep) continue;
+      view.kept = keep;
+      changed = true;
+    }
+    if (changed) {
+      this.applyCellMaterials();
+      this.reportCells();
+    }
     return true;
   }
 
@@ -2726,6 +2758,7 @@ export class Scene {
       const mask = this.raycastCell(e);
       if (mask !== this.hoverCell) {
         this.hoverCell = mask;
+        this.hoverGroup = new Set(mask === null ? [] : this.cellGroup(mask));
         this.applyCellMaterials();
       }
       this.cellCursorAt = { x: e.clientX, y: e.clientY };
