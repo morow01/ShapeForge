@@ -1,12 +1,24 @@
 import { PRIMITIVES } from "./types";
-import type { BooleanOp, PrimitiveKind, PushPullOp, SceneNode, Vec3 } from "./types";
+import type {
+  BooleanOp,
+  CameraMode,
+  PrimitiveKind,
+  ProjectData,
+  ProjectFile,
+  ProjectMeta,
+  PushPullOp,
+  SceneNode,
+  Vec3,
+} from "./types";
 
-const KEY = "cad.document";
-/** Bump when the node shape changes incompatibly; older saves are then ignored
- *  rather than being fed to the kernel as garbage. */
+const INDEX_KEY = "cad.projects_index";
+const ACTIVE_PROJECT_KEY = "cad.active_project_id";
+const PROJECT_PREFIX = "cad.project.";
+const LEGACY_KEY = "cad.document";
+const CAMERA_KEY = "cad.camera";
 const VERSION = 1;
 
-interface Stored {
+interface StoredLegacy {
   version: number;
   nodes: unknown;
 }
@@ -21,7 +33,7 @@ const isVec3 = (v: unknown): v is Vec3 =>
  * truncated. Anything that does not match is dropped rather than crashing the
  * kernel later with a half-formed node.
  */
-function parseNode(raw: unknown): SceneNode | null {
+export function parseNode(raw: unknown): SceneNode | null {
   if (!raw || typeof raw !== "object") return null;
   const n = raw as Record<string, unknown>;
 
@@ -33,11 +45,13 @@ function parseNode(raw: unknown): SceneNode | null {
     position: n.position,
     rotation: n.rotation,
     scale: isVec3(n.scale)
-      ? n.scale.map((v) => Math.max(0.01, v)) as Vec3
+      ? (n.scale.map((v) => Math.max(0.01, v)) as Vec3)
       : typeof n.scale === "number" && Number.isFinite(n.scale) && n.scale > 0
-        ? [n.scale, n.scale, n.scale] as Vec3
-        : [1, 1, 1] as Vec3,
+        ? ([n.scale, n.scale, n.scale] as Vec3)
+        : ([1, 1, 1] as Vec3),
     isHole: n.isHole === true,
+    color: typeof n.color === "string" && /^#[0-9a-fA-F]{6}$/.test(n.color) ? n.color : undefined,
+    transparent: typeof n.transparent === "boolean" ? n.transparent : undefined,
   };
 
   if (n.type === "group") {
@@ -86,33 +100,171 @@ function parseOp(raw: unknown): PushPullOp | null {
   return { point: o.point, normal: o.normal, distance: o.distance };
 }
 
-export function loadDocument(): SceneNode[] {
+export function parseProjectData(raw: unknown): ProjectData | null {
+  if (!raw || typeof raw !== "object") return null;
+  const p = raw as Record<string, unknown>;
+  if (typeof p.id !== "string" || typeof p.name !== "string") return null;
+  if (!Array.isArray(p.nodes)) return null;
+
+  const nodes = p.nodes.map(parseNode).filter((n): n is SceneNode => n !== null);
+  const createdAt = typeof p.createdAt === "number" ? p.createdAt : Date.now();
+  const updatedAt = typeof p.updatedAt === "number" ? p.updatedAt : Date.now();
+  let camera: StoredCamera | null = null;
+  if (p.camera && typeof p.camera === "object") {
+    const c = p.camera as Record<string, unknown>;
+    if (
+      (c.mode === "perspective" || c.mode === "orthographic") &&
+      isVec3(c.position) &&
+      isVec3(c.target)
+    ) {
+      camera = {
+        mode: c.mode,
+        position: c.position,
+        target: c.target,
+        zoom: typeof c.zoom === "number" ? c.zoom : undefined,
+      };
+    }
+  }
+
+  return {
+    version: VERSION,
+    id: p.id,
+    name: p.name,
+    createdAt,
+    updatedAt,
+    nodes,
+    camera,
+  };
+}
+
+/** Lists all saved project summaries. Automatically migrates legacy cad.document if present. */
+export function listProjects(): ProjectMeta[] {
   try {
-    const raw = localStorage.getItem(KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as Stored;
-    if (parsed?.version !== VERSION || !Array.isArray(parsed.nodes)) return [];
-    return parsed.nodes.map(parseNode).filter((n): n is SceneNode => n !== null);
+    const raw = localStorage.getItem(INDEX_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as ProjectMeta[];
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+      }
+    }
   } catch {
-    return [];
+    /* fallback to migration below */
+  }
+
+  // Check legacy document or create initial project
+  const initialNodes = loadLegacyDocument();
+  const initialProject: ProjectData = {
+    version: VERSION,
+    id: `p-${Date.now()}`,
+    name: initialNodes.length ? "My First Design" : "Untitled Project",
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    nodes: initialNodes,
+    camera: loadCameraState(),
+  };
+
+  saveProject(initialProject);
+  setActiveProjectId(initialProject.id);
+
+  return [
+    {
+      id: initialProject.id,
+      name: initialProject.name,
+      createdAt: initialProject.createdAt,
+      updatedAt: initialProject.updatedAt,
+      objectCount: initialProject.nodes.length,
+    },
+  ];
+}
+
+export function getActiveProjectId(): string {
+  try {
+    const active = localStorage.getItem(ACTIVE_PROJECT_KEY);
+    if (active) return active;
+  } catch {
+    /* ignore */
+  }
+  const list = listProjects();
+  return list[0]?.id ?? `p-${Date.now()}`;
+}
+
+export function setActiveProjectId(id: string): void {
+  try {
+    localStorage.setItem(ACTIVE_PROJECT_KEY, id);
+  } catch {
+    /* ignore */
   }
 }
 
-export function saveDocument(nodes: SceneNode[]): boolean {
+export function loadProject(id: string): ProjectData | null {
   try {
-    localStorage.setItem(KEY, JSON.stringify({ version: VERSION, nodes }));
+    const raw = localStorage.getItem(PROJECT_PREFIX + id);
+    if (!raw) return null;
+    return parseProjectData(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+export function saveProject(project: ProjectData): boolean {
+  try {
+    localStorage.setItem(PROJECT_PREFIX + project.id, JSON.stringify(project));
+
+    // Update index
+    let list: ProjectMeta[] = [];
+    try {
+      const raw = localStorage.getItem(INDEX_KEY);
+      if (raw) list = (JSON.parse(raw) as ProjectMeta[]) || [];
+    } catch {
+      list = [];
+    }
+
+    const meta: ProjectMeta = {
+      id: project.id,
+      name: project.name,
+      createdAt: project.createdAt,
+      updatedAt: project.updatedAt,
+      objectCount: project.nodes.length,
+    };
+
+    const existingIdx = list.findIndex((p) => p.id === project.id);
+    if (existingIdx >= 0) {
+      list[existingIdx] = meta;
+    } else {
+      list.push(meta);
+    }
+    list.sort((a, b) => b.updatedAt - a.updatedAt);
+    localStorage.setItem(INDEX_KEY, JSON.stringify(list));
+
     return true;
   } catch {
-    // Quota exceeded, or storage blocked (private mode / disabled cookies).
     return false;
   }
 }
 
-export function clearDocument() {
+export function deleteProjectStorage(id: string): boolean {
   try {
-    localStorage.removeItem(KEY);
+    localStorage.removeItem(PROJECT_PREFIX + id);
+    const raw = localStorage.getItem(INDEX_KEY);
+    if (raw) {
+      const list = (JSON.parse(raw) as ProjectMeta[]).filter((p) => p.id !== id);
+      localStorage.setItem(INDEX_KEY, JSON.stringify(list));
+    }
+    return true;
   } catch {
-    /* nothing useful to do */
+    return false;
+  }
+}
+
+function loadLegacyDocument(): SceneNode[] {
+  try {
+    const raw = localStorage.getItem(LEGACY_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as StoredLegacy;
+    if (parsed?.version !== VERSION || !Array.isArray(parsed.nodes)) return [];
+    return parsed.nodes.map(parseNode).filter((n): n is SceneNode => n !== null);
+  } catch {
+    return [];
   }
 }
 
@@ -130,3 +282,116 @@ export function highestIdSuffix(nodes: SceneNode[]): number {
   walk(nodes);
   return max;
 }
+
+export interface StoredCamera {
+  mode: CameraMode;
+  position: Vec3;
+  target: Vec3;
+  zoom?: number;
+}
+
+export function loadCameraState(): StoredCamera | null {
+  try {
+    const raw = localStorage.getItem(CAMERA_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<StoredCamera>;
+    if (!parsed || typeof parsed !== "object") return null;
+    if (parsed.mode !== "perspective" && parsed.mode !== "orthographic") return null;
+    if (!isVec3(parsed.position) || !isVec3(parsed.target)) return null;
+    const zoom =
+      typeof parsed.zoom === "number" && Number.isFinite(parsed.zoom) && parsed.zoom > 0
+        ? parsed.zoom
+        : undefined;
+    return {
+      mode: parsed.mode,
+      position: parsed.position,
+      target: parsed.target,
+      zoom,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function saveCameraState(state: StoredCamera): boolean {
+  try {
+    localStorage.setItem(CAMERA_KEY, JSON.stringify(state));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Exports project to a downloadable .shapeforge file. */
+export function exportProjectFile(project: ProjectData) {
+  const fileData: ProjectFile = {
+    format: "shapeforge",
+    version: VERSION,
+    id: project.id,
+    name: project.name,
+    exportedAt: Date.now(),
+    nodes: project.nodes,
+    camera: project.camera ?? loadCameraState(),
+  };
+
+  const jsonStr = JSON.stringify(fileData, null, 2);
+  const blob = new Blob([jsonStr], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  const safeName = project.name.trim().replace(/[/\\?%*:|"<>]/g, "_") || "Untitled Project";
+  a.download = `${safeName}.shapeforge`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
+/** Parses project file from string content (supports .shapeforge and general CAD json). */
+export function parseProjectFile(content: string, fallbackName = "Imported Project"): ProjectData | null {
+  try {
+    const raw = JSON.parse(content) as Record<string, unknown>;
+    if (!raw || typeof raw !== "object") return null;
+
+    let nodesRaw: unknown = raw.nodes;
+    if (!Array.isArray(nodesRaw) && Array.isArray(raw)) {
+      nodesRaw = raw; // raw array of nodes
+    }
+
+    if (!Array.isArray(nodesRaw)) return null;
+
+    const nodes = nodesRaw.map(parseNode).filter((n): n is SceneNode => n !== null);
+    const name = typeof raw.name === "string" && raw.name.trim() ? raw.name.trim() : fallbackName;
+    const id = `p-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+
+    let camera: StoredCamera | null = null;
+    if (raw.camera && typeof raw.camera === "object") {
+      const c = raw.camera as Record<string, unknown>;
+      if (
+        (c.mode === "perspective" || c.mode === "orthographic") &&
+        isVec3(c.position) &&
+        isVec3(c.target)
+      ) {
+        camera = {
+          mode: c.mode,
+          position: c.position,
+          target: c.target,
+          zoom: typeof c.zoom === "number" ? c.zoom : undefined,
+        };
+      }
+    }
+
+    return {
+      version: VERSION,
+      id,
+      name,
+      createdAt: typeof raw.createdAt === "number" ? raw.createdAt : Date.now(),
+      updatedAt: Date.now(),
+      nodes,
+      camera,
+    };
+  } catch {
+    return null;
+  }
+}
+

@@ -4,13 +4,17 @@ import { TransformControls } from "three/examples/jsm/controls/TransformControls
 import { clearHighlights, getFaceIndex, highlightInGeometry, syncGeometries } from "replicad-threejs-helper";
 import type { ReplicadMesh, ThreeGeometry } from "replicad-threejs-helper";
 import type { FaceInfo, KernelMesh, PreviewBuild, ScenePart } from "../kernel/types";
-import type { SceneNode, Vec3 } from "../document/types";
+import type { CameraMode, SceneNode, Vec3 } from "../document/types";
+import { DEFAULT_OBJECT_COLOR, isGroup } from "../document/types";
+import { findNode, resolveNodeColor, resolveNodeTransparent } from "../document/tree";
+import { loadCameraState, saveCameraState } from "../document/persist";
 import { snapBounds } from "../snapping/snap";
 import type { Bounds3, SnapTarget } from "../snapping/snap";
 import { SmartGuides } from "./guides";
 import { CUBE_MARGIN_PX, CUBE_PX, NavCube } from "./navcube";
+import { findApex, solveScaledTriangle } from "../geometry/triangle";
 
-export type CameraMode = "perspective" | "orthographic";
+export type { CameraMode } from "../document/types";
 export type ToolMode = "select" | "face" | "move" | "rotate" | "align";
 type AlignAxis = 0 | 1 | 2;
 type AlignAnchor = "min" | "center" | "max";
@@ -39,6 +43,13 @@ const PUSH_PULL_PREVIEW_MS = 120;
 const AXIS_COLOR = ["#d2544c", "#3f9a55", "#4079d0"] as const;
 const AXIS_COLOR_HEX = [0xd2544c, 0x3f9a55, 0x4079d0] as const;
 
+interface GrabItem {
+  id: string;
+  startGroupPos: THREE.Vector3;
+  pivot: THREE.Vector3;
+  rotation: THREE.Euler;
+}
+
 interface BodyGrab {
   id: string;
   downScreen: { x: number; y: number };
@@ -50,6 +61,7 @@ interface BodyGrab {
   plane: THREE.Plane;
   grabPoint: THREE.Vector3;
   startPos: THREE.Vector3;
+  items: GrabItem[];
 }
 
 interface NavDrag {
@@ -115,16 +127,28 @@ interface PushPullDrag {
   currentDistance: number;
 }
 
-interface ResizeDrag {
+interface ResizeTarget {
   id: string;
   startScale: Vec3;
+  startPosition: Vec3;
+  startGroupPosition: THREE.Vector3;
+  rawSize: Vec3;
+  rotation: THREE.Quaternion;
+}
+
+interface ResizeDrag {
+  id: string;
+  targets: ResizeTarget[];
+  startScale: Vec3;
   axis: 0 | 1 | 2 | null;
+  lockAspectXY?: boolean;
   centreX: number;
   centreY: number;
   startDistance: number;
   startX: number;
   startY: number;
   startSize: Vec3;
+  startBoxCentre: THREE.Vector3;
   cornerSigns: [number, number] | null;
   basisX: [number, number];
   basisY: [number, number];
@@ -139,6 +163,9 @@ interface PartView {
   group: THREE.Group;
   mesh: THREE.Mesh;
   wire: THREE.LineSegments;
+  /** Wireframe view only: an invisible copy of the solid that fills the depth
+   *  buffer, so lines on the far side are hidden by the near side. */
+  occluder: THREE.Mesh;
   geom: ThreeGeometry[];
   /** Centre of the kernel geometry before it is shifted around the visual
    * pivot. Document positions still refer to the kernel's original origin. */
@@ -149,7 +176,13 @@ interface PartView {
   faces?: FaceInfo[];
 }
 
+/** Straight down and straight up — the only directions gravity cares about. */
+const DOWN = new THREE.Vector3(0, 0, -1);
+const UP = new THREE.Vector3(0, 0, 1);
+
 const MATERIALS = {
+  wire: new THREE.LineBasicMaterial({ color: 0x38505f, transparent: true, opacity: 0.7 }),
+  wireSelected: new THREE.LineBasicMaterial({ color: 0x00c4cc, transparent: true, opacity: 0.95 }),
   solid: new THREE.MeshStandardMaterial({ color: 0x43aede, metalness: 0.04, roughness: 0.6 }),
   solidSelected: new THREE.MeshStandardMaterial({
     color: 0xf2a33a,
@@ -189,11 +222,55 @@ const MATERIALS = {
     roughness: 0.5,
   }),
   result: new THREE.MeshStandardMaterial({ color: 0x5bbf87, metalness: 0.04, roughness: 0.55 }),
+  /** Used for individual parts while "Show merged result" is active — they
+   *  show as faint translucent ghosts so the user can see the difference
+   *  between the editable pieces and the final merged solid. */
+  resultGhost: new THREE.MeshStandardMaterial({
+    color: 0x8ab8cc,
+    transparent: true,
+    opacity: 0.18,
+    depthWrite: false,
+    depthTest: true,
+    roughness: 0.6,
+    side: THREE.FrontSide,
+  }),
   // Material index 1 on every part's geometry (see applyMaterials) — painted
-  // over whichever face group is currently hovered/clicked, Shapr3D-style.
-  // Teal matches Shapr3D's persistent selected-face treatment and remains
-  // legible against both ordinary and selected object materials.
-  faceHighlight: new THREE.MeshBasicMaterial({ color: 0x168aa8 }),
+  // over whichever face group is currently hovered/clicked.
+  // Using vibrant amber ensures high visibility across all solid colors
+  // and prevents visual confusion with the default blue object color.
+  faceHighlight: new THREE.MeshBasicMaterial({ color: 0xff9f1a, depthTest: true }),
+  // Wireframe view: the actual tessellation, every triangle edge drawn and
+  // nothing filled, so the far side of a shape shows through the near side.
+  // The mesh stays a normal drawn object — making it invisible would take it
+  // out of raycasting and leave nothing clickable.
+  wireMesh: new THREE.MeshBasicMaterial({
+    color: 0x8d9ba6,
+    wireframe: true,
+    transparent: true,
+    // The tessellation is texture, not information — it says "this is a
+    // wireframe" without competing with the edges that say what the shape is.
+    opacity: 0.35,
+  }),
+  wireMeshSelected: new THREE.MeshBasicMaterial({
+    color: 0x2bb3ba,
+    wireframe: true,
+    transparent: true,
+    opacity: 0.5,
+  }),
+  /** Draws no colour, only depth — see PartView.occluder. The polygon offset
+   *  pushes it a hair away from the camera so a shape's own lines, which sit
+   *  exactly on its surface, still win the depth test against it. */
+  wireOccluder: new THREE.MeshBasicMaterial({
+    colorWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: 1,
+    polygonOffsetUnits: 1,
+  }),
+  // The shape's own edges ride on top of the triangles, darker and at full
+  // strength (no half-transparency, unlike over a shaded solid), so the real
+  // silhouette still reads through the mesh behind it.
+  wireOnly: new THREE.LineBasicMaterial({ color: 0x25313b }),
+  wireOnlySelected: new THREE.LineBasicMaterial({ color: 0x00a9b7 }),
 };
 
 /**
@@ -275,6 +352,32 @@ function disposeArrow(handle: THREE.Object3D) {
 }
 
 export class Scene {
+  private solidMaterialCache = new Map<string, THREE.MeshStandardMaterial>();
+
+  private getSolidMaterial(
+    colorHex: string = DEFAULT_OBJECT_COLOR,
+    isSelected: boolean,
+    transparent?: boolean,
+  ): THREE.MeshStandardMaterial {
+    const hex = (colorHex.startsWith("#") ? colorHex : `#${colorHex}`).toLowerCase();
+    const key = `${hex}:${isSelected ? "1" : "0"}:${transparent ? "1" : "0"}`;
+    let mat = this.solidMaterialCache.get(key);
+    if (!mat) {
+      const baseColor = new THREE.Color(hex);
+      mat = new THREE.MeshStandardMaterial({
+        color: baseColor,
+        metalness: 0.04,
+        roughness: 0.55,
+        transparent: !!transparent,
+        opacity: transparent ? 0.55 : 1,
+        depthWrite: !transparent,
+        depthTest: true,
+      });
+      this.solidMaterialCache.set(key, mat);
+    }
+    return mat;
+  }
+
   private host: HTMLElement;
   private renderer: THREE.WebGLRenderer;
   private scene: THREE.Scene;
@@ -328,6 +431,8 @@ export class Scene {
   private selectedFace: { partId: string; groupIndex: number } | null = null;
   private pushPullHandleHovered = false;
   private dimensionInputs: HTMLInputElement[] = [];
+  /** Floating corner labels for selected triangles (Left, Right, Apex). */
+  private cornerBadges: HTMLDivElement[] = [];
   /** The positioned wrapper around each dimension input — the input itself no
    *  longer carries the layout, since it now sits beside an axis badge. */
   private dimensionPills: HTMLDivElement[] = [];
@@ -376,6 +481,8 @@ export class Scene {
   private parts = new Map<string, PartView>();
   private resultView: PartView | null = null;
   private showResult = false;
+  /** Edges-only view: solids stop being drawn, their wireframes carry on. */
+  private wireframe = false;
   private selectedIds: string[] = [];
   /** Most recent nodes passed to setPlacements, so a part that is (re)created
    *  by setParts — which runs on its own async schedule from the kernel and
@@ -495,13 +602,40 @@ export class Scene {
     // DOM-side overlays set up above.
     this.setupMoveReadout();
 
-    this.camera = this.makePerspective();
-    this.camera.position.set(70, -70, 55);
-    this.camera.up.set(0, 0, 1);
+    const savedCam = loadCameraState();
+    const mode = savedCam?.mode ?? "perspective";
+    const pos = savedCam?.position ?? [70, -70, 55];
+    const tgt = savedCam?.target ?? [0, 0, 0];
+    const posVec = new THREE.Vector3(...pos);
+    const tgtVec = new THREE.Vector3(...tgt);
+    const distance = posVec.distanceTo(tgtVec);
+
+    if (mode === "orthographic") {
+      const halfH = Math.tan(THREE.MathUtils.degToRad(45 / 2)) * distance;
+      const halfW = halfH * this.aspect();
+      const cam = new THREE.OrthographicCamera(-halfW, halfW, halfH, -halfH, 0.1, 5000);
+      cam.up.set(0, 0, 1);
+      cam.position.copy(posVec);
+      cam.lookAt(tgtVec);
+      if (savedCam?.zoom) cam.zoom = savedCam.zoom;
+      cam.updateProjectionMatrix();
+      this.camera = cam;
+    } else {
+      const cam = this.makePerspective();
+      cam.position.copy(posVec);
+      cam.lookAt(tgtVec);
+      if (savedCam?.zoom) cam.zoom = savedCam.zoom;
+      cam.updateProjectionMatrix();
+      this.camera = cam;
+    }
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
     this.applyControlBindings();
+    this.controls.target.copy(tgtVec);
+    this.controls.update();
+    this.controls.addEventListener("change", this.onCameraChange);
+    window.addEventListener("beforeunload", this.onBeforeUnload);
 
     this.gizmo = new TransformControls(this.camera, this.renderer.domElement);
     this.gizmo.setTranslationSnap(1); // 1 mm
@@ -599,6 +733,14 @@ export class Scene {
       });
       this.host.appendChild(pill);
       this.dimensionInputs.push(input);
+    }
+
+    for (let i = 0; i < 3; i++) {
+      const badge = document.createElement("div");
+      badge.className = "triangle-corner-badge";
+      badge.style.display = "none";
+      this.host.appendChild(badge);
+      this.cornerBadges.push(badge);
     }
   }
 
@@ -805,20 +947,38 @@ export class Scene {
     this.resizeConstrained = value;
   }
 
-  // ---- parts ------------------------------------------------------------
+  /** Shares the part's own face geometry — never its own copy, so it stays in
+   *  step when setParts() swaps the geometry out from under a rebuilt part.
+   *  Drawn first (renderOrder -1) so the depth it lays down is already there
+   *  when the lines are tested against it. */
+  private makeOccluder(faces: ThreeGeometry["faces"]): THREE.Mesh {
+    const occluder = new THREE.Mesh(faces, MATERIALS.wireOccluder);
+    occluder.renderOrder = -1;
+    occluder.visible = this.wireframe;
+    return occluder;
+  }
 
-  private makeView(mesh: KernelMesh, isHole: boolean, faces?: FaceInfo[]): PartView {
+  private makeView(mesh: KernelMesh, isHole: boolean, faces?: FaceInfo[], id?: string): PartView {
     const geom = syncKernelGeometry(mesh);
     const pivot = this.centreGeometry(geom);
     const group = new THREE.Group();
-    const m = new THREE.Mesh(geom[0].faces, [isHole ? MATERIALS.hole : MATERIALS.solid, MATERIALS.faceHighlight]);
+    const node = id ? findNode(this.lastNodes, id) : undefined;
+    const color = resolveNodeColor(node);
+    const transparent = resolveNodeTransparent(node);
+    const isSelected = id ? this.selectedIds.includes(id) : false;
+
+    const m = new THREE.Mesh(geom[0].faces, [
+      isHole ? (isSelected ? MATERIALS.holeSelected : MATERIALS.hole) : this.getSolidMaterial(color, isSelected, transparent),
+      MATERIALS.faceHighlight,
+    ]);
     const wire = new THREE.LineSegments(
       geom[0].lines,
-      new THREE.LineBasicMaterial({ color: 0x38505f, transparent: true, opacity: 0.7 }),
+      isSelected ? MATERIALS.wireSelected : MATERIALS.wire,
     );
-    group.add(m, wire);
+    const occluder = this.makeOccluder(geom[0].faces);
+    group.add(m, wire, occluder);
     this.scene.add(group);
-    return { group, mesh: m, wire, geom, pivot, isHole, faces };
+    return { group, mesh: m, wire, occluder, geom, pivot, isHole, faces };
   }
 
   /** Alt-drag needs a real Object3D to drag the instant the gesture starts —
@@ -835,15 +995,16 @@ export class Scene {
     const faces = source.geom[0].faces.clone();
     const lines = source.geom[0].lines.clone();
     const geom: ThreeGeometry[] = [{ faces, lines }];
-    const mesh = new THREE.Mesh(faces, source.mesh.material);
+    const mesh = new THREE.Mesh(faces, Array.isArray(source.mesh.material) ? [...source.mesh.material] : source.mesh.material);
     const wire = new THREE.LineSegments(lines, source.wire.material);
+    const occluder = this.makeOccluder(faces);
     const group = new THREE.Group();
     group.position.copy(source.group.position);
     group.rotation.copy(source.group.rotation);
     group.scale.copy(source.group.scale);
-    group.add(mesh, wire);
+    group.add(mesh, wire, occluder);
     this.scene.add(group);
-    return { group, mesh, wire, geom, pivot: source.pivot.clone(), isHole: source.isHole };
+    return { group, mesh, wire, occluder, geom, pivot: source.pivot.clone(), isHole: source.isHole };
   }
 
   /** Centres both render geometries around their visible bounds. The outer
@@ -869,10 +1030,11 @@ export class Scene {
         existing.pivot = this.centreGeometry(existing.geom);
         existing.mesh.geometry = existing.geom[0].faces;
         existing.wire.geometry = existing.geom[0].lines;
+        existing.occluder.geometry = existing.geom[0].faces;
         existing.isHole = part.isHole;
         existing.faces = part.faces;
       } else {
-        this.parts.set(part.id, this.makeView(part.mesh, part.isHole, part.faces));
+        this.parts.set(part.id, this.makeView(part.mesh, part.isHole, part.faces, part.id));
       }
     }
 
@@ -913,7 +1075,7 @@ export class Scene {
       if (!view) continue;
       // Skip the part being dragged, so the drag is not fighting React state.
       if (this.gizmo.dragging && this.gizmo.object === view.group) continue;
-      if (this.grab?.active && this.grab.id === o.id) continue;
+      if (this.grab?.active && this.grab.items.some((item) => item.id === o.id)) continue;
       view.group.rotation.set(o.rotation[0] * DEG, o.rotation[1] * DEG, o.rotation[2] * DEG);
       view.group.scale.fromArray(o.scale);
       const rotatedPivot = view.pivot.clone().applyEuler(view.group.rotation);
@@ -928,21 +1090,57 @@ export class Scene {
 
   private applyMaterials() {
     for (const [id, view] of this.parts) {
-      const sel = this.selectedIds.includes(id);
+      const isDirectlySelected = this.selectedIds.includes(id);
+      const node = findNode(this.lastNodes, id);
+      const isChildSelected = !!(node && isGroup(node) && node.children.some((c) => this.selectedIds.includes(c.id)));
+      const sel = isDirectlySelected || isChildSelected;
+
+      const color = resolveNodeColor(node);
+      const transparent = resolveNodeTransparent(node);
+
       // Index 1 (faceHighlight) is picked per-triangle-group by the geometry's
       // own .groups, set via highlightFace()/clearFaceHover() below — this
       // array is what makes that actually render as anything other than the
       // base material (a BufferGeometry's .groups are ignored entirely unless
       // .material is an array).
-      if (view.isHole) {
+      if (this.wireframe) {
+        // No filled surface left to sort against, so renderOrder goes back to
+        // the default for holes and solids alike.
+        view.mesh.material = [
+          sel ? MATERIALS.wireMeshSelected : MATERIALS.wireMesh,
+          MATERIALS.faceHighlight,
+        ];
+        view.mesh.renderOrder = 0;
+      } else if (view.isHole) {
         view.mesh.material = [sel ? MATERIALS.holeSelected : MATERIALS.hole, MATERIALS.faceHighlight];
         // Draw after opaque solids while still respecting their depth.
-        view.mesh.renderOrder = 1;
+        view.mesh.renderOrder = 2;
       } else {
-        view.mesh.material = [sel ? MATERIALS.solidSelected : MATERIALS.solid, MATERIALS.faceHighlight];
-        view.mesh.renderOrder = 0;
+        const mat = this.getSolidMaterial(color, sel, transparent);
+        view.mesh.material = [mat, MATERIALS.faceHighlight];
+        view.mesh.renderOrder = transparent ? 1 : 0;
       }
-      view.group.visible = !this.showResult;
+      view.wire.material = this.wireframe
+        ? sel
+          ? MATERIALS.wireOnlySelected
+          : MATERIALS.wireOnly
+        : sel
+          ? MATERIALS.wireSelected
+          : MATERIALS.wire;
+
+      const hasActiveResult = this.showResult && !!this.resultView;
+      view.occluder.visible = this.wireframe && !hasActiveResult;
+      if (hasActiveResult) {
+        // Ghost the original part — still visible as a faint translucent
+        // silhouette so the user can see what the merged result was built from.
+        view.mesh.material = [MATERIALS.resultGhost, MATERIALS.faceHighlight];
+        view.mesh.renderOrder = 3; // draw after the solid result
+        view.wire.visible = false;
+        view.group.visible = true;
+      } else {
+        view.group.visible = true;
+        view.wire.visible = true;
+      }
     }
     if (this.resultView) this.resultView.group.visible = this.showResult;
     this.restoreSelectedFaceHighlight();
@@ -953,22 +1151,28 @@ export class Scene {
   }
 
   /** Draws a TinkerCAD-style bounds cage, eight corner handles, and editable
-   * world-size readouts around the one actively selected object. */
+   * world-size readouts around the actively selected object(s). */
   private updateResizeOverlay() {
-    const id = this.selectedIds.length === 1 ? this.selectedIds[0] : null;
-    const view = id ? this.parts.get(id) : undefined;
-    const node = id ? this.lastNodes.find((n) => n.id === id) : undefined;
+    const selectedViews = this.selectedIds
+      .map((id) => this.parts.get(id))
+      .filter((view): view is PartView => !!view && view.group.visible);
     const visible =
-      this.toolMode === "select" && !this.selectedFace && !!view && !!node &&
-      !this.showResult && view.group.visible;
+      this.toolMode === "select" && !this.selectedFace && selectedViews.length > 0 &&
+      !this.showResult;
     this.resizeBox.visible = visible;
     this.resizeHandles.visible = visible;
     this.dimensionEdges.visible = visible;
     for (const pill of this.dimensionPills) pill.style.display = visible ? "flex" : "none";
-    if (!visible || !view || !node) return;
+    if (!visible) {
+      for (const badge of this.cornerBadges) badge.style.display = "none";
+      return;
+    }
 
-    view.group.updateWorldMatrix(true, true);
-    const box = new THREE.Box3().setFromObject(view.group);
+    const box = new THREE.Box3();
+    for (const view of selectedViews) {
+      view.group.updateWorldMatrix(true, true);
+      box.expandByObject(view.group);
+    }
     this.resizeBox.box.copy(box);
     this.resizeBox.updateMatrixWorld(true);
 
@@ -1029,18 +1233,95 @@ export class Scene {
 
     const rect = this.renderer.domElement.getBoundingClientRect();
     const values = [size.x, size.y, size.z];
+    const isSingle = this.selectedIds.length === 1;
+    const singleNode = isSingle ? findNode(this.lastNodes, this.selectedIds[0]) : null;
+
     for (let i = 0; i < this.dimensionInputs.length; i++) {
       // Sit each pill on the midpoint of the very edge it measures.
       const p = edges[i][0].clone().lerp(edges[i][1], 0.5).project(this.camera);
       const input = this.dimensionInputs[i];
       if (document.activeElement !== input) input.value = values[i].toFixed(2);
-      input.dataset.nodeId = node.id;
+      input.dataset.nodeId = singleNode ? singleNode.id : "multi";
       input.dataset.currentSize = String(values[i]);
       const pill = this.dimensionPills[i];
       pill.style.left = `${((p.x + 1) / 2) * rect.width}px`;
       pill.style.top = `${((1 - p.y) / 2) * rect.height}px`;
       pill.style.transform =
         i === 0 ? "translate(-50%, 12px)" : i === 1 ? "translate(12px, 4px)" : "translate(12px, -50%)";
+    }
+
+    // Position corner badges for selected triangle
+    const isSingleTriangle =
+      isSingle &&
+      singleNode?.type === "object" &&
+      singleNode?.kind === "triangle";
+
+    if (!isSingleTriangle || !singleNode || singleNode.type !== "object") {
+      for (const badge of this.cornerBadges) badge.style.display = "none";
+    } else {
+      const view = this.parts.get(singleNode.id);
+      if (view) {
+        try {
+          const solved = solveScaledTriangle(singleNode.params, singleNode.scale);
+          const rawApex = findApex(singleNode.params, singleNode.params.base ?? 0);
+          const b = singleNode.params.base ?? 0;
+          const ax = rawApex.x;
+          const ay = rawApex.y;
+          const thickness = singleNode.params.thickness ?? 5;
+
+          const minX = Math.min(0, b, ax);
+          const maxX = Math.max(0, b, ax);
+          const centerX = (minX + maxX) / 2;
+          const centerY = ay / 2;
+
+          const localCorners = [
+            new THREE.Vector3(0 - centerX, -centerY, thickness / 2),
+            new THREE.Vector3(b - centerX, -centerY, thickness / 2),
+            new THREE.Vector3(ax - centerX, ay - centerY, thickness / 2),
+          ];
+
+          const lockFlags = [
+            !!singleNode.params.lockAngleLeft,
+            !!singleNode.params.lockAngleRight,
+            !!singleNode.params.lockAngleApex,
+          ];
+          const angleValues = [
+            solved.angles.left,
+            solved.angles.right,
+            solved.angles.apex,
+          ];
+          const names = ["Left", "Right", "Apex"];
+
+          view.group.updateWorldMatrix(true, true);
+
+          for (let i = 0; i < 3; i++) {
+            const worldPoint = localCorners[i].clone().applyMatrix4(view.group.matrixWorld);
+            const screenP = worldPoint.project(this.camera);
+
+            if (screenP.z > 1) {
+              this.cornerBadges[i].style.display = "none";
+              continue;
+            }
+
+            const badge = this.cornerBadges[i];
+            const isLocked = lockFlags[i];
+            badge.innerHTML = `
+              <span class="corner-dot dot-${i}"></span>
+              <span class="corner-name">${names[i]}</span>
+              <span class="corner-angle">${angleValues[i].toFixed(1)}°</span>
+              ${isLocked ? '<span class="corner-lock">🔒</span>' : ""}
+            `;
+            badge.className = `triangle-corner-badge ${isLocked ? "locked" : ""}`;
+            badge.style.display = "flex";
+            badge.style.left = `${((screenP.x + 1) / 2) * rect.width}px`;
+            badge.style.top = `${((1 - screenP.y) / 2) * rect.height}px`;
+          }
+        } catch {
+          for (const badge of this.cornerBadges) badge.style.display = "none";
+        }
+      } else {
+        for (const badge of this.cornerBadges) badge.style.display = "none";
+      }
     }
   }
 
@@ -1092,7 +1373,7 @@ export class Scene {
 
   private alignSelection(axis: AlignAxis, anchor: AlignAnchor) {
     const selected = this.selectedIds
-      .map((id) => ({ id, view: this.parts.get(id), node: this.lastNodes.find((n) => n.id === id) }))
+      .map((id) => ({ id, view: this.parts.get(id), node: findNode(this.lastNodes, id) }))
       .filter((item): item is { id: string; view: PartView; node: SceneNode } => !!item.view && !!item.node);
     if (selected.length < 2) return;
 
@@ -1525,12 +1806,19 @@ export class Scene {
     const valid = apply && Number.isFinite(distance) && Math.abs(distance) >= 0.5;
     if (valid) {
       this.disposeGeom(pending.originalGeom);
+      if (this.selectedFace?.partId === pending.id) {
+        this.selectedFace = null;
+        clearHighlights(pending.view.mesh.geometry as THREE.BufferGeometry);
+      }
       this.onPushPullFace?.(pending.id, {
         point: pending.localPoint,
         normal: pending.localNormal,
         distance,
       });
     } else {
+      if (this.selectedFace?.partId === pending.id) {
+        this.selectedFace = null;
+      }
       this.restoreGeom(pending.view, pending.originalGeom, pending.originalPivot);
     }
   }
@@ -1545,7 +1833,9 @@ export class Scene {
     view.pivot = pivot;
     view.mesh.geometry = geom[0].faces;
     view.wire.geometry = geom[0].lines;
+    clearHighlights(view.mesh.geometry as THREE.BufferGeometry);
     this.applyPlacements();
+    this.applyMaterials();
     this.disposeGeom(stale);
   }
 
@@ -1668,6 +1958,7 @@ export class Scene {
       }
     }
     this.applyPlacements();
+    this.applyMaterials();
     this.restoreSelectedFaceHighlight();
   }
 
@@ -1675,16 +1966,74 @@ export class Scene {
     const id = input.dataset.nodeId;
     const current = Number(input.dataset.currentSize);
     const desired = Number(input.value);
-    const node = id ? this.lastNodes.find((n) => n.id === id) : undefined;
-    if (!node || !Number.isFinite(current) || current <= 0 || !Number.isFinite(desired) || desired <= 0) {
+    if (!Number.isFinite(current) || current <= 0 || !Number.isFinite(desired) || desired <= 0) {
       this.updateResizeOverlay();
       return;
     }
     const ratio = desired / current;
-    const axis = this.dimensionInputs.indexOf(input);
+    const axis = this.dimensionInputs.indexOf(input) as 0 | 1 | 2;
+
+    if (id === "multi") {
+      const selectedViews = this.selectedIds
+        .map((sId) => ({ id: sId, view: this.parts.get(sId), node: findNode(this.lastNodes, sId) }))
+        .filter((item): item is { id: string; view: PartView; node: SceneNode } => !!item.view && !!item.node);
+      if (!selectedViews.length) return;
+
+      const box = new THREE.Box3();
+      for (const { view } of selectedViews) {
+        box.expandByObject(view.group);
+      }
+      const centre = box.getCenter(new THREE.Vector3());
+
+      const hasLocks = selectedViews.some(
+        ({ node }) =>
+          node.type === "object" &&
+          node.kind === "triangle" &&
+          !!(node.params.lockAngleLeft || node.params.lockAngleRight || node.params.lockAngleApex),
+      );
+
+      for (const { id: sId, node } of selectedViews) {
+        const scale = [...node.scale] as Vec3;
+        const position = [...node.position] as Vec3;
+        if (this.resizeConstrained || (hasLocks && (axis === 0 || axis === 1))) {
+          if (hasLocks && !this.resizeConstrained) {
+            for (let i = 0; i < 2; i++) {
+              scale[i] = Math.max(0.01, scale[i] * ratio);
+              position[i] = centre.getComponent(i) + (position[i] - centre.getComponent(i)) * ratio;
+            }
+          } else {
+            for (let i = 0; i < 3; i++) {
+              scale[i] = Math.max(0.01, scale[i] * ratio);
+              position[i] = centre.getComponent(i) + (position[i] - centre.getComponent(i)) * ratio;
+            }
+          }
+        } else {
+          scale[axis] = Math.max(0.01, scale[axis] * ratio);
+          position[axis] = centre.getComponent(axis) + (position[axis] - centre.getComponent(axis)) * ratio;
+        }
+        this.onTransformObject?.(sId, { scale, position });
+      }
+      return;
+    }
+
+    const node = id ? findNode(this.lastNodes, id) : undefined;
+    if (!node) {
+      this.updateResizeOverlay();
+      return;
+    }
     const scale = [...node.scale] as Vec3;
-    if (this.resizeConstrained) {
-      for (let i = 0; i < 3; i++) scale[i] = Math.max(0.01, scale[i] * ratio);
+    const hasLocks =
+      node.type === "object" &&
+      node.kind === "triangle" &&
+      !!(node.params.lockAngleLeft || node.params.lockAngleRight || node.params.lockAngleApex);
+
+    if (this.resizeConstrained || (hasLocks && (axis === 0 || axis === 1))) {
+      if (hasLocks && !this.resizeConstrained) {
+        scale[0] = Math.max(0.01, scale[0] * ratio);
+        scale[1] = Math.max(0.01, scale[1] * ratio);
+      } else {
+        for (let i = 0; i < 3; i++) scale[i] = Math.max(0.01, scale[i] * ratio);
+      }
     } else {
       scale[axis] = Math.max(0.01, scale[axis] * ratio);
     }
@@ -1701,7 +2050,7 @@ export class Scene {
       // Result geometry has no document node/placement pass, so restore the
       // offset removed while centring its render geometry.
       view.group.position.copy(view.pivot);
-      view.mesh.material = MATERIALS.result;
+      view.mesh.material = [MATERIALS.result, MATERIALS.faceHighlight];
       this.resultView = view;
     }
     this.applyMaterials();
@@ -1711,6 +2060,157 @@ export class Scene {
     this.showResult = v;
     this.applyMaterials();
     this.attachGizmo();
+  }
+
+  /** How close counts as "already touching", in mm. Well under the display
+   *  mesh's own 0.05mm tessellation, so it only ever absorbs float noise. */
+  private static readonly DROP_EPS = 1e-4;
+
+  /** Rays cast per direction, per part. A box needs 8; an imported scan has
+   *  tens of thousands of vertices and does not deserve a ray each. */
+  private static readonly DROP_SAMPLES = 400;
+
+  /**
+   * Gravity, one step at a time — the D shortcut. Each selected top-level part
+   * falls straight down until it meets the nearest upward-facing surface below
+   * it, or the ground plane.
+   *
+   * There is no stored notion of "which level am I on". Pressing D again just
+   * runs this from the new position: the surface now underfoot is at distance
+   * ~0 and is skipped, undersides never count (see below), so the next press
+   * naturally finds the next real level down and the plane is where it ends.
+   *
+   * Selected parts are dropped bottom-up and each one's view is moved as it
+   * lands, so a stack dropped together closes up instead of every part
+   * measuring against where the others used to be.
+   */
+  dropSelected(): { id: string; position: Vec3 }[] {
+    this.scene.updateMatrixWorld(true);
+    const falling = this.selectedIds
+      .map((id) => ({ id, view: this.parts.get(id) }))
+      .filter((entry): entry is { id: string; view: PartView } => !!entry.view)
+      .map((entry) => ({
+        ...entry,
+        node: findNode(this.lastNodes, entry.id),
+        minZ: new THREE.Box3().setFromObject(entry.view.group).min.z,
+      }))
+      .filter((entry) => !!entry.node)
+      .sort((a, b) => a.minZ - b.minZ);
+
+    const updates: { id: string; position: Vec3 }[] = [];
+    for (const { id, view, node } of falling) {
+      const drop = this.dropDistance(id, view);
+      if (drop === null || drop <= Scene.DROP_EPS) continue;
+      // Move the view now so anything still to fall measures against where
+      // this part actually ended up. setPlacements() re-applies the document's
+      // own numbers moments later either way.
+      view.group.position.z -= drop;
+      view.group.updateMatrixWorld(true);
+      // Rounded so a landing reads as the round number it visually is (10, not
+      // 9.999999999999998) — the raw distance comes off float matrix maths.
+      const landed = Math.round((node!.position[2] - drop) * 1e6) / 1e6;
+      updates.push({ id, position: [node!.position[0], node!.position[1], landed] });
+    }
+    return updates;
+  }
+
+  /** How far this part can fall before something stops it, or null if nothing
+   *  does (it is already resting). */
+  private dropDistance(movingId: string, view: PartView): number | null {
+    const targets = [...this.parts]
+      // A hole is subtractive: landing on one would be landing on nothing.
+      .filter(([id, v]) => id !== movingId && v.group.visible && !v.isHole)
+      .map(([, v]) => v);
+    const meshes = targets.map((t) => t.mesh);
+    const movingBox = new THREE.Box3().setFromObject(view.group);
+    const normalMatrix = new THREE.Matrix3();
+    const worldNormal = new THREE.Vector3();
+    let best = Infinity;
+
+    const upwardHit = (hit: THREE.Intersection, wantUp: boolean): boolean => {
+      if (!hit.face) return false;
+      normalMatrix.getNormalMatrix(hit.object.matrixWorld);
+      worldNormal.copy(hit.face.normal).applyNormalMatrix(normalMatrix);
+      return wantUp ? worldNormal.z > 0 : worldNormal.z < 0;
+    };
+
+    // Rays down from this part: where does its own geometry first meet a face
+    // that points up? An underside cannot hold anything up, so those are
+    // skipped — which is also what makes a second press sink through a step
+    // rather than catching on its bottom face.
+    for (const origin of this.sampleFacePoints(view, true, Scene.DROP_SAMPLES)) {
+      this.raycaster.set(origin, DOWN);
+      for (const hit of this.raycaster.intersectObjects(meshes, false)) {
+        if (hit.distance <= Scene.DROP_EPS) continue;
+        if (!upwardHit(hit, true)) continue;
+        best = Math.min(best, hit.distance);
+        break;
+      }
+    }
+
+    // Rays up from what is underneath. Sampling only the falling part would
+    // let a cone tip or sphere pole slip between its own sample points and be
+    // sunk straight through; every point below gets to push back too.
+    for (const target of targets) {
+      const box = new THREE.Box3().setFromObject(target.group);
+      if (box.min.x > movingBox.max.x || box.max.x < movingBox.min.x) continue;
+      if (box.min.y > movingBox.max.y || box.max.y < movingBox.min.y) continue;
+      if (box.min.z > movingBox.max.z) continue;
+      for (const origin of this.sampleFacePoints(target, false, Scene.DROP_SAMPLES)) {
+        if (origin.x < movingBox.min.x || origin.x > movingBox.max.x) continue;
+        if (origin.y < movingBox.min.y || origin.y > movingBox.max.y) continue;
+        if (origin.z > movingBox.max.z) continue;
+        this.raycaster.set(origin, UP);
+        for (const hit of this.raycaster.intersectObject(view.mesh, false)) {
+          if (hit.distance <= Scene.DROP_EPS) continue;
+          if (!upwardHit(hit, false)) continue;
+          best = Math.min(best, hit.distance);
+          break;
+        }
+      }
+    }
+
+    // The build plate always catches whatever nothing else did.
+    if (movingBox.min.z > Scene.DROP_EPS) best = Math.min(best, movingBox.min.z);
+
+    return Number.isFinite(best) ? best : null;
+  }
+
+  /**
+   * Up to `max` world-space vertices from the faces of a part that point down
+   * (`wantDown`) or up.
+   *
+   * Which half matters: only a part's UNDERSIDE can land on something. Casting
+   * from every vertex measures the top face's distance to the surface below it
+   * too, and the moment a part is level with something — exactly the state a
+   * second D press starts from — that spurious distance is the shortest one,
+   * and the part sinks by its own height instead of to the next level.
+   */
+  private sampleFacePoints(view: PartView, wantDown: boolean, max: number): THREE.Vector3[] {
+    const geometry = view.mesh.geometry;
+    const position = geometry.getAttribute("position");
+    const normal = geometry.getAttribute("normal");
+    const matrix = view.mesh.matrixWorld;
+    const normalMatrix = new THREE.Matrix3().getNormalMatrix(matrix);
+    const facing = new THREE.Vector3();
+    const stride = Math.max(1, Math.ceil(position.count / max));
+    const points: THREE.Vector3[] = [];
+    for (let i = 0; i < position.count; i += stride) {
+      if (normal) {
+        facing.fromBufferAttribute(normal, i).applyNormalMatrix(normalMatrix);
+        // A vertical wall (z ~ 0) belongs to neither half and is skipped: its
+        // top and bottom rims already come from the caps they join.
+        if (wantDown ? facing.z >= 0 : facing.z <= 0) continue;
+      }
+      points.push(new THREE.Vector3().fromBufferAttribute(position, i).applyMatrix4(matrix));
+    }
+    return points;
+  }
+
+  setWireframe(v: boolean) {
+    if (this.wireframe === v) return;
+    this.wireframe = v;
+    this.applyMaterials();
   }
 
   // ---- gizmo ------------------------------------------------------------
@@ -1967,6 +2467,15 @@ export class Scene {
       plane,
       grabPoint,
       startPos: view.group.position.clone(),
+      items: (this.selectedIds.includes(id) ? this.selectedIds : [id]).map((gId) => {
+        const v = this.parts.get(gId);
+        return {
+          id: gId,
+          startGroupPos: v?.group.position.clone() ?? new THREE.Vector3(),
+          pivot: v?.pivot.clone() ?? new THREE.Vector3(),
+          rotation: v?.group.rotation.clone() ?? new THREE.Euler(),
+        };
+      }),
     };
   };
 
@@ -1990,7 +2499,8 @@ export class Scene {
       }
       const distance = this.pushPullDistance(e, drag);
       drag.currentDistance = distance;
-      // Preview by sliding the arrow only. The solid itself cannot follow
+      // Immediate feedback: the arrow slides along the face's normal on every
+      // frame with no debounce or lag. The mesh rebuild itself is throttled
       // live — every step is a real OCCT boolean — so it updates once, on
       // release, and the readout carries the value in the meantime.
       drag.handle.position.copy(drag.handleBasePosition).addScaledVector(drag.worldNormal, distance);
@@ -2037,9 +2547,21 @@ export class Scene {
     if (this.resizeDrag) {
       const d = Math.hypot(e.clientX - this.resizeDrag.centreX, e.clientY - this.resizeDrag.centreY);
       const ratio = d / this.resizeDrag.startDistance;
-      const scale = [...this.resizeDrag.startScale] as Vec3;
+      const factors: Vec3 = [1, 1, 1];
+
       if (this.resizeConstrained) {
-        for (let i = 0; i < 3; i++) scale[i] = Math.max(0.01, scale[i] * ratio);
+        factors[0] = Math.max(0.01, ratio);
+        factors[1] = Math.max(0.01, ratio);
+        factors[2] = Math.max(0.01, ratio);
+      } else if (this.resizeDrag.lockAspectXY) {
+        // When triangle angles are locked, preserve them by scaling uniformly in XY.
+        if (this.resizeDrag.axis === 2) {
+          factors[2] = Math.max(0.01, ratio);
+        } else {
+          const uniformRatio = Math.max(0.01, ratio);
+          factors[0] = uniformRatio;
+          factors[1] = uniformRatio;
+        }
       } else if (this.resizeDrag.cornerSigns) {
         // Resolve the pointer movement into the selected object's projected
         // local X/Y axes. This lets an unlocked corner follow an asymmetric
@@ -2054,35 +2576,67 @@ export class Scene {
           const worldY = (dy * xx - dx * xy) / determinant;
           const nextX = Math.max(0.01, this.resizeDrag.startSize[0] + 2 * worldX * this.resizeDrag.cornerSigns[0]);
           const nextY = Math.max(0.01, this.resizeDrag.startSize[1] + 2 * worldY * this.resizeDrag.cornerSigns[1]);
-          scale[0] = Math.max(0.01, this.resizeDrag.startScale[0] * nextX / this.resizeDrag.startSize[0]);
-          scale[1] = Math.max(0.01, this.resizeDrag.startScale[1] * nextY / this.resizeDrag.startSize[1]);
+          factors[0] = Math.max(0.01, nextX / this.resizeDrag.startSize[0]);
+          factors[1] = Math.max(0.01, nextY / this.resizeDrag.startSize[1]);
+          factors[2] = 1;
         }
       } else if (this.resizeDrag.axis !== null) {
         const axis = this.resizeDrag.axis;
-        scale[axis] = Math.max(0.01, scale[axis] * ratio);
+        factors[axis] = Math.max(0.01, ratio);
       } else {
-        for (let i = 0; i < 3; i++) scale[i] = Math.max(0.01, scale[i] * ratio);
+        factors[0] = Math.max(0.01, ratio);
+        factors[1] = Math.max(0.01, ratio);
+        factors[2] = Math.max(0.01, ratio);
       }
-      const view = this.parts.get(this.resizeDrag.id);
-      const localShift = new THREE.Vector3();
-      for (let i = 0; i < 3; i++) {
-        localShift.setComponent(
-          i,
-          this.resizeDrag.handleSigns[i] * this.resizeDrag.rawSize[i] *
-            (scale[i] - this.resizeDrag.startScale[i]) / 2,
-        );
+
+      if (this.resizeDrag.targets.length > 1) {
+        for (const target of this.resizeDrag.targets) {
+          const targetView = this.parts.get(target.id);
+          const targetScale: Vec3 = [
+            Math.max(0.01, target.startScale[0] * factors[0]),
+            Math.max(0.01, target.startScale[1] * factors[1]),
+            Math.max(0.01, target.startScale[2] * factors[2]),
+          ];
+          const targetPosition: Vec3 = [
+            this.resizeDrag.startBoxCentre.x + (target.startPosition[0] - this.resizeDrag.startBoxCentre.x) * factors[0],
+            this.resizeDrag.startBoxCentre.y + (target.startPosition[1] - this.resizeDrag.startBoxCentre.y) * factors[1],
+            this.resizeDrag.startBoxCentre.z + (target.startPosition[2] - this.resizeDrag.startBoxCentre.z) * factors[2],
+          ];
+          if (targetView) {
+            targetView.group.scale.fromArray(targetScale);
+            const offset = new THREE.Vector3(
+              targetPosition[0] - target.startPosition[0],
+              targetPosition[1] - target.startPosition[1],
+              targetPosition[2] - target.startPosition[2],
+            );
+            targetView.group.position.copy(target.startGroupPosition).add(offset);
+          }
+          this.onTransformObject?.(target.id, { scale: targetScale, position: targetPosition });
+        }
+      } else {
+        const scale = [...this.resizeDrag.startScale] as Vec3;
+        for (let i = 0; i < 3; i++) scale[i] = Math.max(0.01, this.resizeDrag.startScale[i] * factors[i]);
+        const view = this.parts.get(this.resizeDrag.id);
+        const localShift = new THREE.Vector3();
+        for (let i = 0; i < 3; i++) {
+          localShift.setComponent(
+            i,
+            this.resizeDrag.handleSigns[i] * this.resizeDrag.rawSize[i] *
+              (scale[i] - this.resizeDrag.startScale[i]) / 2,
+          );
+        }
+        const worldShift = localShift.applyQuaternion(this.resizeDrag.rotation);
+        const position: Vec3 = [
+          this.resizeDrag.startPosition[0] + worldShift.x,
+          this.resizeDrag.startPosition[1] + worldShift.y,
+          this.resizeDrag.startPosition[2] + worldShift.z,
+        ];
+        if (view) {
+          view.group.scale.fromArray(scale);
+          view.group.position.copy(this.resizeDrag.startGroupPosition).add(worldShift);
+        }
+        this.onTransformObject?.(this.resizeDrag.id, { scale, position });
       }
-      const worldShift = localShift.applyQuaternion(this.resizeDrag.rotation);
-      const position: Vec3 = [
-        this.resizeDrag.startPosition[0] + worldShift.x,
-        this.resizeDrag.startPosition[1] + worldShift.y,
-        this.resizeDrag.startPosition[2] + worldShift.z,
-      ];
-      if (view) {
-        view.group.scale.fromArray(scale);
-        view.group.position.copy(this.resizeDrag.startGroupPosition).add(worldShift);
-      }
-      this.onTransformObject?.(this.resizeDrag.id, { scale, position });
       this.updateResizeOverlay();
       return;
     }
@@ -2119,7 +2673,9 @@ export class Scene {
         this.selectedIds = [copyId];
         this.applyMaterials();
       } else {
-        this.onSelectObject?.(g.id, false);
+        if (g.items.length <= 1) {
+          this.onSelectObject?.(g.id, false);
+        }
         this.onDragChange?.(true);
       }
       // Measure from where THIS drag began — after the alt-drag branch above,
@@ -2127,9 +2683,8 @@ export class Scene {
       this.beginMoveReadout(g.id, g.startPos);
     }
 
-    const view = this.parts.get(g.id);
     const hit = this.rayPlaneHit(e, g.plane);
-    if (!view || !hit) return;
+    if (!hit) return;
 
     // Adobe-style shift-constrain: lock the body-drag (plain move, or an
     // alt-drag copy — this runs after that branch has already retargeted
@@ -2145,18 +2700,25 @@ export class Scene {
       dx = Math.cos(angle) * dist;
       dy = Math.sin(angle) * dist;
     }
-    view.group.position.set(g.startPos.x + dx, g.startPos.y + dy, g.startPos.z);
-    view.group.updateWorldMatrix(true, true);
 
-    this.applySmartSnap(g.id, view.group);
-    const rotatedPivot = view.pivot.clone().applyEuler(view.group.rotation);
-    this.onTransformObject?.(g.id, {
-      position: [
-        view.group.position.x - rotatedPivot.x,
-        view.group.position.y - rotatedPivot.y,
-        view.group.position.z - rotatedPivot.z,
-      ],
-    });
+    for (const item of g.items) {
+      const itemView = this.parts.get(item.id);
+      if (!itemView) continue;
+      itemView.group.position.set(item.startGroupPos.x + dx, item.startGroupPos.y + dy, item.startGroupPos.z);
+      itemView.group.updateWorldMatrix(true, true);
+      if (item.id === g.id) {
+        this.applySmartSnap(g.id, itemView.group);
+      }
+      const rotatedPivot = item.pivot.clone().applyEuler(itemView.group.rotation);
+      this.onTransformObject?.(item.id, {
+        position: [
+          itemView.group.position.x - rotatedPivot.x,
+          itemView.group.position.y - rotatedPivot.y,
+          itemView.group.position.z - rotatedPivot.z,
+        ],
+      });
+    }
+    this.updateResizeOverlay();
   };
 
   private onPointerUp = (e: PointerEvent) => {
@@ -2239,7 +2801,7 @@ export class Scene {
   };
 
   private beginResize(e: PointerEvent): boolean {
-    if (!this.resizeHandles.visible || this.selectedIds.length !== 1) return false;
+    if (!this.resizeHandles.visible || this.selectedIds.length === 0) return false;
     const rect = this.renderer.domElement.getBoundingClientRect();
     // Screen-space hit testing keeps the grab target comfortably clickable at
     // every zoom level; raycasting a tiny 3D cube made near-edge clicks fall
@@ -2259,11 +2821,16 @@ export class Scene {
     }
     if (nearest > 16) return false;
 
-    const id = this.selectedIds[0];
-    const view = this.parts.get(id);
-    const node = this.lastNodes.find((n) => n.id === id);
-    if (!view || !node) return false;
-    const box = new THREE.Box3().setFromObject(view.group);
+    const selectedViews = this.selectedIds
+      .map((id) => ({ id, view: this.parts.get(id), node: findNode(this.lastNodes, id) }))
+      .filter((item): item is { id: string; view: PartView; node: SceneNode } => !!item.view && !!item.node && item.view.group.visible);
+    if (!selectedViews.length) return false;
+
+    const box = new THREE.Box3();
+    for (const { view } of selectedViews) {
+      view.group.updateWorldMatrix(true, true);
+      box.expandByObject(view.group);
+    }
     const worldCentre = box.getCenter(new THREE.Vector3());
     const project = (point: THREE.Vector3): [number, number] => {
       const p = point.project(this.camera);
@@ -2273,7 +2840,8 @@ export class Scene {
       ];
     };
     const [centreX, centreY] = project(worldCentre.clone());
-    const quaternion = view.group.getWorldQuaternion(new THREE.Quaternion());
+    const first = selectedViews[0];
+    const quaternion = first.view.group.getWorldQuaternion(new THREE.Quaternion());
     const [xPixelX, xPixelY] = project(worldCentre.clone().add(new THREE.Vector3(1, 0, 0).applyQuaternion(quaternion)));
     const [yPixelX, yPixelY] = project(worldCentre.clone().add(new THREE.Vector3(0, 1, 0).applyQuaternion(quaternion)));
     const cornerSigns: [number, number] | null = nearestIndex < 8
@@ -2286,25 +2854,46 @@ export class Scene {
           nearestIndex === 10 ? -1 : nearestIndex === 11 ? 1 : 0,
           nearestIndex === 12 ? -1 : nearestIndex === 13 ? 1 : 0,
         ];
-    view.mesh.geometry.computeBoundingBox();
-    const rawSize = view.mesh.geometry.boundingBox!
-      .getSize(new THREE.Vector3())
-      .toArray() as Vec3;
+    const targets: ResizeTarget[] = selectedViews.map(({ id, view, node }) => {
+      view.mesh.geometry.computeBoundingBox();
+      const rawSize = (view.mesh.geometry.boundingBox?.getSize(new THREE.Vector3()) ?? new THREE.Vector3(1, 1, 1)).toArray() as Vec3;
+      return {
+        id,
+        startScale: [...node.scale] as Vec3,
+        startPosition: [...node.position] as Vec3,
+        startGroupPosition: view.group.position.clone(),
+        rawSize,
+        rotation: view.group.getWorldQuaternion(new THREE.Quaternion()),
+      };
+    });
+    first.view.mesh.geometry.computeBoundingBox();
+    const rawSize = (first.view.mesh.geometry.boundingBox?.getSize(new THREE.Vector3()) ?? new THREE.Vector3(1, 1, 1)).toArray() as Vec3;
+
+    const lockAspectXY = selectedViews.some(
+      ({ node }) =>
+        node.type === "object" &&
+        node.kind === "triangle" &&
+        !!(node.params.lockAngleLeft || node.params.lockAngleRight || node.params.lockAngleApex),
+    );
+
     this.resizeDrag = {
-      id,
-      startScale: [...node.scale] as Vec3,
+      id: first.id,
+      targets,
+      startScale: [...first.node.scale] as Vec3,
       axis: nearestIndex < 8 ? null : (Math.floor((nearestIndex - 8) / 2) as 0 | 1 | 2),
+      lockAspectXY,
       centreX,
       centreY,
       startDistance: Math.max(1, Math.hypot(e.clientX - centreX, e.clientY - centreY)),
       startX: e.clientX,
       startY: e.clientY,
       startSize: box.getSize(new THREE.Vector3()).toArray() as Vec3,
+      startBoxCentre: worldCentre,
       cornerSigns,
       basisX: [xPixelX - centreX, xPixelY - centreY],
       basisY: [yPixelX - centreX, yPixelY - centreY],
-      startPosition: [...node.position] as Vec3,
-      startGroupPosition: view.group.position.clone(),
+      startPosition: [...first.node.position] as Vec3,
+      startGroupPosition: first.view.group.position.clone(),
       rawSize,
       handleSigns,
       rotation: quaternion,
@@ -2474,6 +3063,32 @@ export class Scene {
     this.gizmo.enabled = true;
   };
 
+  private cameraSaveTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  private onCameraChange = () => {
+    if (this.cameraSaveTimeout) clearTimeout(this.cameraSaveTimeout);
+    this.cameraSaveTimeout = setTimeout(() => {
+      this.saveCameraNow();
+    }, 200);
+  };
+
+  private onBeforeUnload = () => {
+    this.saveCameraNow();
+  };
+
+  private saveCameraNow() {
+    const mode: CameraMode = this.camera instanceof THREE.OrthographicCamera ? "orthographic" : "perspective";
+    const pos = this.camera.position;
+    const tgt = this.controls.target;
+    const roundCoord = (n: number) => Math.round(n * 100) / 100;
+    saveCameraState({
+      mode,
+      position: [roundCoord(pos.x), roundCoord(pos.y), roundCoord(pos.z)],
+      target: [roundCoord(tgt.x), roundCoord(tgt.y), roundCoord(tgt.z)],
+      zoom: this.camera.zoom !== 1 ? this.camera.zoom : undefined,
+    });
+  }
+
   setCameraMode(mode: CameraMode) {
     const isOrtho = this.camera instanceof THREE.OrthographicCamera;
     if ((mode === "orthographic") === isOrtho) return;
@@ -2494,6 +3109,7 @@ export class Scene {
     next.position.copy(position);
     next.lookAt(target);
 
+    this.controls.removeEventListener("change", this.onCameraChange);
     this.controls.dispose();
     this.camera = next;
     this.controls = new OrbitControls(next, this.renderer.domElement);
@@ -2501,7 +3117,9 @@ export class Scene {
     this.applyControlBindings();
     this.controls.target.copy(target);
     this.controls.update();
+    this.controls.addEventListener("change", this.onCameraChange);
     this.gizmo.camera = next;
+    this.saveCameraNow();
   }
 
   // ---- loop -------------------------------------------------------------
@@ -2591,6 +3209,10 @@ export class Scene {
     this.gizmo.removeEventListener("dragging-changed", this.onDraggingChanged);
     this.gizmo.removeEventListener("objectChange", this.onGizmoChange);
     this.gizmo.dispose();
+    this.controls.removeEventListener("change", this.onCameraChange);
+    window.removeEventListener("beforeunload", this.onBeforeUnload);
+    if (this.cameraSaveTimeout) clearTimeout(this.cameraSaveTimeout);
+    this.saveCameraNow();
     this.controls.dispose();
     this.guides.dispose();
     this.alignHandleMeshes[0]?.geometry.dispose();
@@ -2600,10 +3222,13 @@ export class Scene {
     for (const input of this.dimensionInputs) input.remove();
     for (const pill of this.movePills) pill.remove();
     for (const pill of this.dimensionPills) pill.remove();
+    for (const badge of this.cornerBadges) badge.remove();
     this.moveGuide.geometry.dispose();
     (this.moveGuide.material as THREE.Material).dispose();
     this.dimensionEdges.geometry.dispose();
     (this.dimensionEdges.material as THREE.Material).dispose();
+    for (const mat of this.solidMaterialCache.values()) mat.dispose();
+    this.solidMaterialCache.clear();
     this.host.removeChild(this.renderer.domElement);
     this.host.removeChild(this.marqueeEl);
     this.host.removeChild(this.navCubeFrame);

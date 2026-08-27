@@ -11,7 +11,7 @@ import {
   getManifold,
 } from "replicad";
 import type { Face, Shape3D } from "replicad";
-import { InvalidShapeError, solveTriangle } from "../geometry/triangle";
+import { InvalidShapeError, solveTriangle, solveScaledTriangle } from "../geometry/triangle";
 import { getBlob } from "../document/blobStore";
 import type { PushPullOp, Vec3 } from "../document/types";
 import type { EditSpec, ImportSpec, NodeSpec, ObjectSpec } from "./types";
@@ -404,18 +404,67 @@ function respinDeep(spec: NodeSpec): NodeSpec {
  * rebuilt history describes the same shape — the recorded op points still
  * resolve — it simply avoids the parameterisation OCCT mishandles.
  */
+/**
+ * Which edits have already been found to need their seam moved, keyed by the
+ * geometry that decides it (the base and the ops, not the node's placement).
+ *
+ * Worth caching because the discovery is expensive in a way the fix is not:
+ * finding out costs a full replay of the history, a tessellation to inspect
+ * it, a SECOND full replay against the respun base, and a second
+ * tessellation. Acting on a known answer costs one replay and no
+ * tessellation at all. Nothing about that answer changes between builds
+ * while the base and ops are identical, so on a model heavy enough for this
+ * to matter — measured at ~4.5s of the 11.2s merged build of a reported
+ * document — every rebuild after the first pays a fraction of it.
+ */
+const seamRespinCache = new Map<string, boolean>();
+const SEAM_CACHE_LIMIT = 64;
+
+function rememberSeam(key: string, needsRespin: boolean) {
+  // Plain FIFO eviction: this only ever holds one boolean per distinct edit,
+  // so the cap exists to bound a long session, not to be clever about it.
+  if (seamRespinCache.size >= SEAM_CACHE_LIMIT) {
+    const oldest = seamRespinCache.keys().next().value;
+    if (oldest !== undefined) seamRespinCache.delete(oldest);
+  }
+  seamRespinCache.set(key, needsRespin);
+}
+
 async function makeEdit(
   spec: EditSpec,
   onError?: (id: string, msg: string) => void,
   onProgress?: (id: string) => void,
 ): Promise<AnySolid | null> {
+  // No sphere below it means no seam to move — the overwhelmingly common
+  // case, and it must not pay for any of the machinery below.
+  if (!hasSphereDeep(spec.base)) return replayEdit(spec, onError, onProgress);
+
+  const key = JSON.stringify([spec.base, spec.ops]);
+  const remembered = seamRespinCache.get(key);
+  if (remembered !== undefined) {
+    return replayEdit(
+      remembered ? { ...spec, base: respinDeep(spec.base) } : spec,
+      onError,
+      onProgress,
+    );
+  }
+
   const first = await replayEdit(spec, onError, onProgress);
-  if (!first || isMesh(first) || !hasSphereDeep(spec.base) || isWatertight(first)) return first;
+  if (!first) return first;
+  if (isMesh(first) || isWatertight(first)) {
+    rememberSeam(key, false);
+    return first;
+  }
 
   // Errors were already reported on the first pass; a second identical set
   // from the retry would just duplicate them.
   const retry = await replayEdit({ ...spec, base: respinDeep(spec.base) }, undefined, onProgress);
-  if (retry && !isMesh(retry) && isWatertight(retry)) return retry;
+  if (retry && !isMesh(retry) && isWatertight(retry)) {
+    rememberSeam(key, true);
+    return retry;
+  }
+  // Neither form is clean, so there is nothing useful to remember: leaving it
+  // uncached lets a later build try again rather than locking in a guess.
   return first;
 }
 
@@ -518,16 +567,34 @@ export function combine(
 function combineShape(
   op: GroupOp,
   children: { solid: Shape3D; isHole: boolean }[],
-): Shape3D | null {
+): AnySolid | null {
   if (op === "subtract") {
     let result = children[0].solid;
-    for (let i = 1; i < children.length; i++) result = result.cut(children[i].solid) as Shape3D;
+    for (let i = 1; i < children.length; i++) {
+      try {
+        result = result.cut(children[i].solid) as Shape3D;
+      } catch {
+        const meshed = children.map((c) => ({
+          solid: isMesh(c.solid) ? c.solid : (c.solid as Shape3D).meshShape(),
+          isHole: c.isHole,
+        }));
+        return combineMesh(op, meshed);
+      }
+    }
     return result;
   }
   if (op === "intersect") {
     let result = children[0].solid;
     for (let i = 1; i < children.length; i++) {
-      result = result.intersect(children[i].solid) as Shape3D;
+      try {
+        result = result.intersect(children[i].solid) as Shape3D;
+      } catch {
+        const meshed = children.map((c) => ({
+          solid: isMesh(c.solid) ? c.solid : (c.solid as Shape3D).meshShape(),
+          isHole: c.isHole,
+        }));
+        return combineMesh(op, meshed);
+      }
     }
     return result;
   }
@@ -535,8 +602,28 @@ function combineShape(
   const holes = children.filter((c) => c.isHole);
   if (!solids.length) return null;
   let result = solids[0].solid;
-  for (let i = 1; i < solids.length; i++) result = result.fuse(solids[i].solid) as Shape3D;
-  for (const h of holes) result = result.cut(h.solid) as Shape3D;
+  for (let i = 1; i < solids.length; i++) {
+    try {
+      result = result.fuse(solids[i].solid) as Shape3D;
+    } catch {
+      const meshed = children.map((c) => ({
+        solid: isMesh(c.solid) ? c.solid : (c.solid as Shape3D).meshShape(),
+        isHole: c.isHole,
+      }));
+      return combineMesh(op, meshed);
+    }
+  }
+  for (const h of holes) {
+    try {
+      result = result.cut(h.solid) as Shape3D;
+    } catch {
+      const meshed = children.map((c) => ({
+        solid: isMesh(c.solid) ? c.solid : (c.solid as Shape3D).meshShape(),
+        isHole: c.isHole,
+      }));
+      return combineMesh(op, meshed);
+    }
+  }
   return result;
 }
 
@@ -614,6 +701,23 @@ function bakeNonUniformScale(spec: NodeSpec): NodeSpec {
   } else if (spec.kind === "cylinder" && sx === sy) {
     height = p.height;
     params = { ...p, radius: p.radius * sx, height: p.height * sz };
+  } else if (spec.kind === "triangle") {
+    height = p.thickness;
+    try {
+      const solved = solveScaledTriangle(p, [sx, sy, 1]);
+      params = {
+        ...p,
+        base: Math.round(solved.sides.base * 100) / 100,
+        sideLeft: Math.round(solved.sides.left * 100) / 100,
+        sideRight: Math.round(solved.sides.right * 100) / 100,
+        angleLeft: Math.round(solved.angles.left * 100) / 100,
+        angleRight: Math.round(solved.angles.right * 100) / 100,
+        angleApex: Math.round(solved.angles.apex * 100) / 100,
+        thickness: p.thickness * sz,
+      };
+    } catch {
+      return spec;
+    }
   } else {
     return spec;
   }
@@ -673,6 +777,10 @@ function suspicious(
   kids: { solid: AnySolid; isHole: boolean }[],
 ): boolean {
   if (isMesh(result)) return false;
+  // MeshShape children cannot be measured with OCCT's measureVolume; their
+  // presence also means the boolean ran through manifold-3d which doesn't
+  // have the sphere-seam bug this check guards against — skip entirely.
+  if (kids.some((k) => isMesh(k.solid))) return false;
   try {
     const volume = measureVolume(result);
     if (op === "union") {
@@ -837,6 +945,20 @@ export async function makeLocal(
 }
 
 /** A node placed into its parent's frame. */
+/**
+ * NOTE on caching the merge: a per-node cache of placed solids was tried here
+ * and removed again. The merged result and the export run on their own worker
+ * (see the two lanes in kernel/client.ts), so the per-node meshCache that
+ * buildScene fills while editing is not visible to them, and re-evaluating
+ * every object on every merge looks like the obvious waste to eliminate.
+ * Measured on a reported five-object model with 70+ push/pull edits, it is
+ * not: rebuilding after moving ONE object took 15.1s, 10.1s across runs,
+ * against 11.5s to build all five from cold — the same range, no gain. The
+ * time is going into the final union of the objects and the tessellation of
+ * the single result, and both of those have to be redone whenever anything
+ * moves, however many of the parts going into them were already built.
+ * Anything faster has to attack that, not the per-object work.
+ */
 export async function makeWorld(
   spec: NodeSpec,
   onError?: (id: string, msg: string) => void,

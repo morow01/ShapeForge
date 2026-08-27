@@ -23,7 +23,7 @@ export interface PrimitiveDef {
   fields: ParamField[];
 }
 
-const dim = (key: string, label: string, max = 200): ParamField => ({
+const dim = (key: string, label: string, max = 1000): ParamField => ({
   key,
   label,
   min: 1,
@@ -51,25 +51,25 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
       dim("width", "Width"),
       dim("depth", "Depth"),
       dim("height", "Height"),
-      { key: "fillet", label: "Corner radius", min: 0, max: 20, step: 0.5 },
+      { key: "fillet", label: "Corner radius", min: 0, max: 500, step: 0.5 },
     ],
   },
   cylinder: {
     label: "Cylinder",
     defaults: { radius: 10, height: 20 },
-    fields: [dim("radius", "Radius", 100), dim("height", "Height")],
+    fields: [dim("radius", "Radius"), dim("height", "Height")],
   },
   sphere: {
     label: "Sphere",
     defaults: { radius: 10 },
-    fields: [dim("radius", "Radius", 100)],
+    fields: [dim("radius", "Radius")],
   },
   cone: {
     label: "Cone",
     defaults: { bottomRadius: 10, topRadius: 0, height: 20 },
     fields: [
-      { key: "bottomRadius", label: "Bottom radius", min: 0, max: 100, step: 0.5 },
-      { key: "topRadius", label: "Top radius", min: 0, max: 100, step: 0.5 },
+      { key: "bottomRadius", label: "Bottom radius", min: 0, max: 1000, step: 0.5 },
+      { key: "topRadius", label: "Top radius", min: 0, max: 1000, step: 0.5 },
       dim("height", "Height"),
     ],
   },
@@ -109,7 +109,7 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
       angle("angleLeft", "Left corner", onlyIn(TRI_BY_ANGLES)),
       angle("angleRight", "Right corner", onlyIn(TRI_BY_ANGLES)),
       angle("angleApex", "Apex corner", onlyIn(TRI_BY_ANGLES)),
-      dim("thickness", "Thickness", 100),
+      dim("thickness", "Thickness"),
     ],
   },
 };
@@ -121,6 +121,8 @@ export function visibleFields(def: PrimitiveDef, params: Record<string, number>)
 
 export type Vec3 = [number, number, number];
 
+export type CameraMode = "perspective" | "orthographic";
+
 /** How a group combines its children. */
 export type BooleanOp = "union" | "subtract" | "intersect";
 
@@ -128,6 +130,57 @@ export const BOOLEAN_OPS: { value: BooleanOp; label: string; hint: string }[] = 
   { value: "union", label: "Union", hint: "Merge children; holes cut the solids" },
   { value: "subtract", label: "Subtract", hint: "First child minus all the rest" },
   { value: "intersect", label: "Intersect", hint: "Keep only the overlapping volume" },
+];
+
+export const DEFAULT_OBJECT_COLOR = "#43aede";
+
+export interface ColorPreset {
+  hex: string;
+  name: string;
+}
+
+export const TINKERCAD_COLORS: ColorPreset[] = [
+  // Warm Reds & Oranges
+  { hex: "#e74c3c", name: "Red" },
+  { hex: "#c0392b", name: "Dark Red" },
+  { hex: "#e67e22", name: "Orange" },
+  { hex: "#f39c12", name: "Amber" },
+  { hex: "#f1c40f", name: "Yellow" },
+  { hex: "#d4ac0d", name: "Gold" },
+
+  // Greens
+  { hex: "#a3e048", name: "Lime" },
+  { hex: "#2ecc71", name: "Light Green" },
+  { hex: "#27ae60", name: "Green" },
+  { hex: "#16a085", name: "Teal" },
+  { hex: "#1abc9c", name: "Mint" },
+  { hex: "#00b894", name: "Emerald" },
+
+  // Blues & Cyans
+  { hex: "#43aede", name: "ShapeForge Cyan" },
+  { hex: "#3498db", name: "Sky Blue" },
+  { hex: "#2980b9", name: "Blue" },
+  { hex: "#1f4ba6", name: "Dark Blue" },
+  { hex: "#34495e", name: "Navy" },
+  { hex: "#6c5ce7", name: "Indigo" },
+
+  // Purples & Pinks
+  { hex: "#9b59b6", name: "Purple" },
+  { hex: "#8e44ad", name: "Dark Purple" },
+  { hex: "#e056fd", name: "Magenta" },
+  { hex: "#fd79a8", name: "Pink" },
+  { hex: "#ff7675", name: "Coral" },
+  { hex: "#fab1a0", name: "Peach" },
+
+  // Earth & Neutrals
+  { hex: "#e0cda9", name: "Sand" },
+  { hex: "#a0522d", name: "Brown" },
+  { hex: "#5c3a21", name: "Dark Brown" },
+  { hex: "#ffffff", name: "White" },
+  { hex: "#bdc3c7", name: "Light Grey" },
+  { hex: "#7f8c8d", name: "Grey" },
+  { hex: "#2c3e50", name: "Charcoal" },
+  { hex: "#1e272e", name: "Black" },
 ];
 
 interface NodeBase {
@@ -141,6 +194,10 @@ interface NodeBase {
   scale: Vec3;
   /** TinkerCAD-style hole: subtracts from its siblings instead of adding. */
   isHole: boolean;
+  /** Hex color for solid rendering, defaults to DEFAULT_OBJECT_COLOR (#43aede). */
+  color?: string;
+  /** Whether the solid object is rendered with translucency. */
+  transparent?: boolean;
 }
 
 export interface ObjectNode extends NodeBase {
@@ -197,3 +254,41 @@ export interface EditNode extends NodeBase {
 export type SceneNode = ObjectNode | GroupNode | ImportNode | EditNode;
 
 export const isGroup = (n: SceneNode): n is GroupNode => n.type === "group";
+
+export interface ProjectMeta {
+  id: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+  objectCount: number;
+}
+
+export interface ProjectData {
+  version: number;
+  id: string;
+  name: string;
+  createdAt: number;
+  updatedAt: number;
+  nodes: SceneNode[];
+  camera?: {
+    mode: CameraMode;
+    position: Vec3;
+    target: Vec3;
+    zoom?: number;
+  } | null;
+}
+
+export interface ProjectFile {
+  format: "shapeforge";
+  version: number;
+  id?: string;
+  name: string;
+  exportedAt: number;
+  nodes: SceneNode[];
+  camera?: {
+    mode: CameraMode;
+    position: Vec3;
+    target: Vec3;
+    zoom?: number;
+  } | null;
+}

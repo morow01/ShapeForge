@@ -1,4 +1,5 @@
 import { isGroup } from "../document/types";
+import { resolveNodeColor, resolveNodeTransparent } from "../document/tree";
 import type { SceneNode } from "../document/types";
 
 interface Props {
@@ -27,25 +28,28 @@ export function Tree({ nodes, selectedIds, invalid, onSelect, onToggleCollapsed 
   );
 }
 
-interface RowProps extends Omit<Props, "nodes"> {
+function Row({ node, depth, selectedIds, invalid, onSelect, onToggleCollapsed }: {
   node: SceneNode;
   depth: number;
-}
-
-function Row({ node, depth, selectedIds, invalid, onSelect, onToggleCollapsed }: RowProps) {
+  selectedIds: string[];
+  invalid: Record<string, string>;
+  onSelect: (id: string, additive: boolean) => void;
+  onToggleCollapsed: (id: string) => void;
+}) {
+  const selected = selectedIds.includes(node.id);
+  const bad = !!invalid[node.id];
   const group = isGroup(node);
   const open = group && !node.collapsed;
-  const bad = invalid[node.id];
+  const color = resolveNodeColor(node);
+  const transparent = resolveNodeTransparent(node);
 
   return (
     <>
       <li
-        className={[selectedIds.includes(node.id) ? "sel" : "", bad ? "bad" : ""]
-          .filter(Boolean)
-          .join(" ")}
+        className={[selected ? "sel" : "", bad ? "bad" : ""].filter(Boolean).join(" ")}
         style={{ paddingLeft: 7 + depth * 13 }}
-        title={bad ?? undefined}
-        onClick={(e) => onSelect(node.id, e.ctrlKey || e.metaKey || e.shiftKey)}
+        onClick={(e) => onSelect(node.id, e.shiftKey || e.ctrlKey || e.metaKey)}
+        title={bad ? invalid[node.id] : undefined}
       >
         {group ? (
           <button
@@ -70,6 +74,16 @@ function Row({ node, depth, selectedIds, invalid, onSelect, onToggleCollapsed }:
                 : node.type === "import" || node.type === "edit"
                   ? "dot import"
                   : "dot"
+          }
+          style={
+            !node.isHole
+              ? {
+                  backgroundColor: color,
+                  opacity: transparent ? 0.6 : 1,
+                }
+              : transparent
+                ? { opacity: 0.6 }
+                : undefined
           }
         />
         <span className="label">{node.name}</span>

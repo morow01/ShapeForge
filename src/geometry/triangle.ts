@@ -44,10 +44,23 @@ export interface TriangleSolution {
  * derived from the base and this one point, so the three modes cannot drift
  * out of agreement with each other.
  */
-function findApex(p: Record<string, number>, base: number): { x: number; y: number } {
-  if (p.mode === TRI_BY_ANGLES) {
-    const left = p.angleLeft;
-    const right = p.angleRight;
+export function findApex(p: Record<string, number>, base: number): { x: number; y: number } {
+  let mode = p.mode;
+  if (mode === undefined) {
+    if (p.angleLeft !== undefined && p.angleRight !== undefined && (p.sideLeft === undefined || p.sideRight === undefined)) {
+      mode = TRI_BY_ANGLES;
+    } else if (p.sideLeft !== undefined && p.sideRight !== undefined) {
+      mode = TRI_BY_SIDES;
+    } else if (p.sideLeft !== undefined && p.angleLeft !== undefined) {
+      mode = TRI_BY_SIDE_ANGLE;
+    } else {
+      mode = TRI_BY_ANGLES;
+    }
+  }
+
+  if (mode === TRI_BY_ANGLES) {
+    const left = p.angleLeft ?? 60;
+    const right = p.angleRight ?? 60;
     if (!(left > 0) || !(right > 0)) {
       throw new InvalidShapeError("Angles must be greater than zero.");
     }
@@ -59,14 +72,14 @@ function findApex(p: Record<string, number>, base: number): { x: number; y: numb
       );
     }
     // Law of sines: each side is proportional to the sine of its opposite angle.
-    const apexAngle = 180 - left - right;
+    const apexAngle = Math.max(0.01, 180 - left - right);
     const leftSide = (base * Math.sin(right * RAD)) / Math.sin(apexAngle * RAD);
     return { x: leftSide * Math.cos(left * RAD), y: leftSide * Math.sin(left * RAD) };
   }
 
-  if (p.mode === TRI_BY_SIDE_ANGLE) {
-    const leftSide = p.sideLeft;
-    const angle = p.angleLeft;
+  if (mode === TRI_BY_SIDE_ANGLE) {
+    const leftSide = p.sideLeft ?? base;
+    const angle = p.angleLeft ?? 60;
     if (!(leftSide > 0)) throw new InvalidShapeError("Left side must be greater than zero.");
     if (!(angle > 0) || angle >= 180) {
       throw new InvalidShapeError("The angle between the sides must be between 0° and 180°.");
@@ -78,6 +91,13 @@ function findApex(p: Record<string, number>, base: number): { x: number; y: numb
   const left = p.sideLeft;
   const right = p.sideRight;
   if (!(left > 0) || !(right > 0)) {
+    if (p.angleLeft && p.angleRight) {
+      const l = p.angleLeft;
+      const r = p.angleRight;
+      const apexAngle = Math.max(0.01, 180 - l - r);
+      const leftSide = (base * Math.sin(r * RAD)) / Math.sin(apexAngle * RAD);
+      return { x: leftSide * Math.cos(l * RAD), y: leftSide * Math.sin(l * RAD) };
+    }
     throw new InvalidShapeError("Sides must be greater than zero.");
   }
   // Triangle inequality — every side must be shorter than the other two combined.
@@ -93,15 +113,22 @@ function findApex(p: Record<string, number>, base: number): { x: number; y: numb
 }
 
 /**
- * Resolves a triangle from side lengths, corner angles, or a mix of the two.
+ * Resolves a triangle from side lengths, corner angles, or a mix of the two,
+ * taking into account any world-space 2D scaling applied to the shape.
  * Throws InvalidShapeError with a plain-English reason when the numbers cannot
  * close into a triangle.
  */
-export function solveTriangle(p: Record<string, number>): TriangleSolution {
-  const base = p.base;
+export function solveScaledTriangle(
+  p: Record<string, number>,
+  scale: [number, number, number] | number[] = [1, 1, 1],
+): TriangleSolution {
+  const sx = Math.max(0.0001, Math.abs(scale[0] ?? 1));
+  const sy = Math.max(0.0001, Math.abs(scale[1] ?? 1));
+  const base = (p.base ?? 0) * sx;
   if (!(base > 0)) throw new InvalidShapeError("Base must be greater than zero.");
 
-  const apexPoint = findApex(p, base);
+  const rawApex = findApex(p, p.base ?? 0);
+  const apexPoint = { x: rawApex.x * sx, y: rawApex.y * sy };
   if (!(apexPoint.y > 0)) {
     throw new InvalidShapeError("Those values give a degenerate (flat) triangle.");
   }
@@ -109,17 +136,26 @@ export function solveTriangle(p: Record<string, number>): TriangleSolution {
   // Derive every other property from the base and the apex, so all modes agree.
   const angleLeft = Math.atan2(apexPoint.y, apexPoint.x) * DEG;
   const angleRight = Math.atan2(apexPoint.y, base - apexPoint.x) * DEG;
+  const angleApex = 180 - angleLeft - angleRight;
 
   return {
-    angles: { left: angleLeft, right: angleRight, apex: 180 - angleLeft - angleRight },
+    angles: {
+      left: round2(angleLeft),
+      right: round2(angleRight),
+      apex: round2(angleApex),
+    },
     sides: {
-      base,
-      left: Math.hypot(apexPoint.x, apexPoint.y),
-      right: Math.hypot(base - apexPoint.x, apexPoint.y),
+      base: round2(base),
+      left: round2(Math.hypot(apexPoint.x, apexPoint.y)),
+      right: round2(Math.hypot(base - apexPoint.x, apexPoint.y)),
     },
     apexPoint,
-    area: 0.5 * base * apexPoint.y,
+    area: round2(0.5 * base * apexPoint.y),
   };
+}
+
+export function solveTriangle(p: Record<string, number>): TriangleSolution {
+  return solveScaledTriangle(p, [1, 1, 1]);
 }
 
 /**
@@ -135,10 +171,41 @@ export function applyTriangleAngle(
   key: TriAngleKey,
   value: number,
 ): Record<string, number> {
+  const isLocked = (k: TriAngleKey) => {
+    if (k === "angleLeft") return !!params.lockAngleLeft;
+    if (k === "angleRight") return !!params.lockAngleRight;
+    if (k === "angleApex") return !!params.lockAngleApex;
+    return false;
+  };
+
+  const otherKeys = TRI_ANGLE_KEYS.filter((k) => k !== key);
+  const lockedOthers = otherKeys.filter(isLocked);
+
+  if (lockedOthers.length === 2) {
+    // Both other corners are locked: keep the first locked one, adjust the second locked one
+    const [k1, k2] = otherKeys;
+    const k1Val = params[k1] ?? 60;
+    const maxAngle = 180 - k1Val - MIN_ANGLE;
+    const edited = round2(Math.min(maxAngle, Math.max(MIN_ANGLE, value)));
+    const new_k2 = round2(180 - edited - k1Val);
+    return { ...params, [key]: edited, [k2]: new_k2 };
+  }
+
+  if (lockedOthers.length === 1) {
+    // Exactly one other corner is locked: strictly preserve it and allocate all remainder to the free corner
+    const fixedKey = lockedOthers[0];
+    const freeKey = otherKeys.find((k) => k !== fixedKey)!;
+    const fixedVal = params[fixedKey] ?? 60;
+    const maxAngle = 180 - fixedVal - MIN_ANGLE;
+    const edited = round2(Math.min(maxAngle, Math.max(MIN_ANGLE, value)));
+    const freeVal = round2(180 - edited - fixedVal);
+    return { ...params, [key]: edited, [freeKey]: freeVal, [fixedKey]: fixedVal };
+  }
+
+  // No other corners are locked: distribute remainder proportionally between k1 and k2
+  const [k1, k2] = otherKeys;
   const maxAngle = 180 - 2 * MIN_ANGLE;
   const edited = round2(Math.min(maxAngle, Math.max(MIN_ANGLE, value)));
-  const [k1, k2] = TRI_ANGLE_KEYS.filter((k) => k !== key);
-
   const remaining = 180 - edited;
   const current = (params[k1] ?? 0) + (params[k2] ?? 0);
 

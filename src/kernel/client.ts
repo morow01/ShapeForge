@@ -1,6 +1,6 @@
 import * as Comlink from "comlink";
 import type { KernelAPI } from "./worker";
-import type { NodeSpec } from "./types";
+import type { ExportQuality, NodeSpec } from "./types";
 
 function spawnWorker() {
   const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
@@ -13,6 +13,14 @@ function spawnWorker() {
 // minutes, so the two workloads use independent workers.
 let sceneCurrent = spawnWorker();
 let heavyCurrent = spawnWorker();
+
+// Pre-warm the heavy worker's WASM modules (OCCT ~22MB + manifold ~530KB) as
+// soon as this module loads, so the first "Preview merged result" click doesn't
+// have to wait for a cold download+compile. Called directly on the raw worker
+// (not via withWatchdog/coalesceLatest) so it doesn't block or interfere with
+// any subsequent buildResult call the user triggers.
+heavyCurrent.raw.warmup().catch(() => {/* ignore: buildResult re-runs init() itself */});
+
 
 /**
  * A call took long enough that the worker was terminated and replaced rather
@@ -166,15 +174,15 @@ export const kernel = {
   ),
   // Not coalesced: an explicit user action (the Export STL button), not an
   // edit-triggered rebuild — every click should produce its own file.
-  exportSTL: async (specs: NodeSpec[]) => {
+  exportSTL: async (specs: NodeSpec[], quality: ExportQuality) => {
     // The scene worker may already hold this exact evaluated solid. Ask it
     // for a tessellation-only export first; a cache miss remains cheap and
     // falls back to the isolated heavy worker so a genuine rebuild never
     // freezes interactive editing.
-    const cached = await withWatchdog("scene", (raw) => raw.exportCachedSTL(specs));
+    const cached = await withWatchdog("scene", (raw) => raw.exportCachedSTL(specs, quality));
     return cached ?? withWatchdog(
       "heavy",
-      (raw, onProgress) => raw.exportSTL(specs, Comlink.proxy(onProgress)),
+      (raw, onProgress) => raw.exportSTL(specs, quality, Comlink.proxy(onProgress)),
     );
   },
   // A live push/pull drag's preview — see previewLocal's own doc comment in

@@ -1,4 +1,4 @@
-import { isGroup } from "./types";
+import { DEFAULT_OBJECT_COLOR, isGroup } from "./types";
 import type { SceneNode } from "./types";
 
 /** Depth-first walk over the whole forest. */
@@ -12,6 +12,35 @@ export function* walk(nodes: SceneNode[]): Generator<SceneNode> {
 export function findNode(nodes: SceneNode[], id: string): SceneNode | null {
   for (const n of walk(nodes)) if (n.id === id) return n;
   return null;
+}
+
+/** Recursively resolves the display color for any node type (object, edit, group). */
+export function resolveNodeColor(node: SceneNode | null | undefined): string {
+  if (!node) return DEFAULT_OBJECT_COLOR;
+  if (node.color) return node.color;
+  if (node.type === "edit") {
+    return resolveNodeColor(node.base);
+  }
+  if (isGroup(node)) {
+    for (const child of node.children) {
+      const c = resolveNodeColor(child);
+      if (c && c !== DEFAULT_OBJECT_COLOR) return c;
+    }
+  }
+  return DEFAULT_OBJECT_COLOR;
+}
+
+/** Recursively resolves whether a node is translucent. */
+export function resolveNodeTransparent(node: SceneNode | null | undefined): boolean {
+  if (!node) return false;
+  if (node.transparent !== undefined) return node.transparent;
+  if (node.type === "edit") {
+    return resolveNodeTransparent(node.base);
+  }
+  if (isGroup(node)) {
+    return node.children.some(resolveNodeTransparent);
+  }
+  return false;
 }
 
 /** Replaces one node in place, rebuilding only the branches that contain it. */

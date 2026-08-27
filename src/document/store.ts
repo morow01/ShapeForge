@@ -4,12 +4,25 @@ import { temporal } from "zundo";
 import type { TemporalState } from "zundo";
 import { PRIMITIVES, isGroup } from "./types";
 import { extractNodes, findNode, firstRootIndex, updateNode, walk } from "./tree";
-import { clearDocument, highestIdSuffix, loadDocument, saveDocument } from "./persist";
+import {
+  deleteProjectStorage,
+  exportProjectFile,
+  getActiveProjectId,
+  highestIdSuffix,
+  listProjects,
+  loadCameraState,
+  loadProject,
+  parseProjectFile,
+  saveProject,
+  setActiveProjectId,
+} from "./persist";
 import {
   TRI_BY_ANGLES,
   applyTriangleAngle,
   isTriangleAngleKey,
   normaliseTriangleAngles,
+  solveScaledTriangle,
+  solveTriangle,
 } from "../geometry/triangle";
 import type {
   BooleanOp,
@@ -18,6 +31,8 @@ import type {
   ImportNode,
   ObjectNode,
   PrimitiveKind,
+  ProjectData,
+  ProjectMeta,
   PushPullOp,
   SceneNode,
   Vec3,
@@ -25,7 +40,26 @@ import type {
 
 // Restored synchronously at module load, so the first render already has the
 // saved document — no hydration flash, and no bogus entry in the undo history.
-const restored = loadDocument();
+const initialProjectList = listProjects();
+const activeId = getActiveProjectId();
+let activeProject = loadProject(activeId);
+if (!activeProject && initialProjectList.length > 0) {
+  activeProject = loadProject(initialProjectList[0].id);
+}
+if (!activeProject) {
+  activeProject = {
+    version: 1,
+    id: `p-${Date.now()}`,
+    name: "Untitled Project",
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    nodes: [],
+  };
+  saveProject(activeProject);
+}
+
+const initialProjects = listProjects();
+const restored = activeProject.nodes;
 
 let counter = highestIdSuffix(restored);
 const nextId = () => `n-${++counter}`;
@@ -52,6 +86,31 @@ export function endHistoryBatch() {
   useDoc.temporal.getState().resume();
 }
 
+/**
+ * Whether a transform patch would change anything at all.
+ *
+ * Worth checking because a placement makes a round trip: the document moves a
+ * node, the kernel rebuilds, the viewport re-applies the transform, and the
+ * gizmo reports that same position back as if the user had dragged it. Written
+ * blindly, that echo produces a second, identical `nodes` array a moment after
+ * the real edit — which undo faithfully records, so one align or drop then took
+ * two presses of Ctrl+Z to reverse, the first appearing to do nothing.
+ */
+function sameTransform(node: SceneNode, patch: { position?: Vec3; rotation?: Vec3; scale?: Vec3 }): boolean {
+  // Not exact equality: the echo arrives having been through a Three.js
+  // matrix and comes back a float ULP away (20 leaves, 20.000000000000004
+  // returns), which an === test reads as a real edit. A nanometre is many
+  // orders of magnitude below anything this app can model or display.
+  const EPS = 1e-6;
+  const same = (a: Vec3, b?: Vec3) =>
+    !b || (Math.abs(a[0] - b[0]) < EPS && Math.abs(a[1] - b[1]) < EPS && Math.abs(a[2] - b[2]) < EPS);
+  return (
+    same(node.position, patch.position) &&
+    same(node.rotation, patch.rotation) &&
+    same(node.scale, patch.scale)
+  );
+}
+
 /** Runs after every mutation that can be part of a burst. */
 function afterBatchedMutation() {
   if (!armed) return;
@@ -66,17 +125,48 @@ function afterBatchedMutation() {
 function nextParams(o: ObjectNode, key: string, value: number): Record<string, number> {
   if (o.kind !== "triangle") return { ...o.params, [key]: value };
 
-  // Entering Angles mode from a mode where the angles were independent — they
-  // may no longer sum to 180, so make them consistent before use.
+  // Entering a new mode: sync all derived sides and angles first so switching
+  // modes preserves the current triangle shape.
   if (key === "mode") {
-    const params = { ...o.params, mode: value };
-    return value === TRI_BY_ANGLES ? normaliseTriangleAngles(params) : params;
+    try {
+      const solved = solveTriangle(o.params);
+      const synced = {
+        ...o.params,
+        base: Math.round(solved.sides.base * 100) / 100,
+        sideLeft: Math.round(solved.sides.left * 100) / 100,
+        sideRight: Math.round(solved.sides.right * 100) / 100,
+        angleLeft: Math.round(solved.angles.left * 100) / 100,
+        angleRight: Math.round(solved.angles.right * 100) / 100,
+        angleApex: Math.round(solved.angles.apex * 100) / 100,
+        mode: value,
+      };
+      return value === TRI_BY_ANGLES ? normaliseTriangleAngles(synced) : synced;
+    } catch {
+      const params = { ...o.params, mode: value };
+      return value === TRI_BY_ANGLES ? normaliseTriangleAngles(params) : params;
+    }
   }
 
+  let updated: Record<string, number>;
   if (o.params.mode === TRI_BY_ANGLES && isTriangleAngleKey(key)) {
-    return applyTriangleAngle(o.params, key, value);
+    updated = applyTriangleAngle(o.params, key, value);
+  } else {
+    updated = { ...o.params, [key]: value };
   }
-  return { ...o.params, [key]: value };
+
+  try {
+    const solved = solveTriangle(updated);
+    return {
+      ...updated,
+      sideLeft: Math.round(solved.sides.left * 100) / 100,
+      sideRight: Math.round(solved.sides.right * 100) / 100,
+      angleLeft: Math.round(solved.angles.left * 100) / 100,
+      angleRight: Math.round(solved.angles.right * 100) / 100,
+      angleApex: Math.round(solved.angles.apex * 100) / 100,
+    };
+  } catch {
+    return updated;
+  }
 }
 
 /** Clones a node subtree with a fresh id at every level — a duplicated
@@ -94,6 +184,9 @@ function cloneSubtree(n: SceneNode, offset: Vec3): SceneNode {
 }
 
 interface DocState {
+  currentProjectId: string;
+  projectName: string;
+  projects: ProjectMeta[];
   nodes: SceneNode[];
   /** Multi-select, in click order. */
   selectedIds: string[];
@@ -103,6 +196,16 @@ interface DocState {
   savedAt: number | null;
   /** Set when localStorage refuses writes (quota, or private browsing). */
   storageBlocked: boolean;
+
+  newProject: (name?: string) => string;
+  openProject: (id: string) => boolean;
+  renameProject: (name: string) => void;
+  duplicateProject: (id: string) => string | null;
+  deleteProject: (id: string) => boolean;
+  exportCurrentProject: () => void;
+  importProjectFile: (file: File) => Promise<boolean>;
+  importProjectData: (data: ProjectData) => string;
+  refreshProjectsList: () => void;
 
   addPrimitive: (kind: PrimitiveKind) => void;
   /** Adds a node for a file already written to blobStore — the caller reads
@@ -130,25 +233,182 @@ interface DocState {
    *  any node that isn't an edit. */
   setOps: (id: string, ops: PushPullOp[]) => void;
   setHole: (id: string, isHole: boolean) => void;
+  setColor: (id: string, color: string) => void;
+  setTransparent: (id: string, transparent: boolean) => void;
   setGroupOp: (id: string, op: BooleanOp) => void;
   toggleCollapsed: (id: string) => void;
   rename: (id: string, name: string) => void;
   group: () => void;
   ungroup: () => void;
   setShowResult: (v: boolean) => void;
-  /** Discards the document and the saved copy. */
+  /** Clears the canvas of the active project. */
   clearAll: () => void;
 }
 
 export const useDoc = create<DocState>()(
   temporal(
-    (set) => ({
+    (set, get) => ({
+      currentProjectId: activeProject.id,
+      projectName: activeProject.name,
+      projects: initialProjects,
       nodes: restored,
       selectedIds: [],
       showResult: false,
       // A restored document is already on disk, so it counts as saved.
       savedAt: restored.length ? Date.now() : null,
       storageBlocked: false,
+
+      newProject: (name) => {
+        flushSave();
+        const newId = `p-${Date.now()}`;
+        const newProjName = name?.trim() || "Untitled Project";
+        const newProj: ProjectData = {
+          version: 1,
+          id: newId,
+          name: newProjName,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          nodes: [],
+        };
+        saveProject(newProj);
+        setActiveProjectId(newId);
+        const updatedProjects = listProjects();
+
+        useDoc.temporal.getState().clear();
+        set({
+          currentProjectId: newId,
+          projectName: newProjName,
+          projects: updatedProjects,
+          nodes: [],
+          selectedIds: [],
+          savedAt: Date.now(),
+        });
+        return newId;
+      },
+
+      openProject: (id) => {
+        flushSave();
+        const proj = loadProject(id);
+        if (!proj) return false;
+        setActiveProjectId(proj.id);
+        counter = Math.max(counter, highestIdSuffix(proj.nodes));
+        const updatedProjects = listProjects();
+
+        useDoc.temporal.getState().clear();
+        set({
+          currentProjectId: proj.id,
+          projectName: proj.name,
+          projects: updatedProjects,
+          nodes: proj.nodes,
+          selectedIds: [],
+          savedAt: Date.now(),
+        });
+        return true;
+      },
+
+      renameProject: (name) => {
+        const trimmed = name.trim() || "Untitled Project";
+        const s = get();
+        const proj = loadProject(s.currentProjectId) ?? {
+          version: 1,
+          id: s.currentProjectId,
+          name: trimmed,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          nodes: s.nodes,
+        };
+        proj.name = trimmed;
+        proj.updatedAt = Date.now();
+        proj.nodes = s.nodes;
+        saveProject(proj);
+        set({ projectName: trimmed, projects: listProjects() });
+      },
+
+      duplicateProject: (id) => {
+        flushSave();
+        const source = loadProject(id);
+        if (!source) return null;
+        const newId = `p-${Date.now()}`;
+        const newName = `${source.name} (Copy)`;
+        const newProj: ProjectData = {
+          ...source,
+          id: newId,
+          name: newName,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        };
+        saveProject(newProj);
+        set({ projects: listProjects() });
+        return newId;
+      },
+
+      deleteProject: (id) => {
+        flushSave();
+        const s = get();
+        deleteProjectStorage(id);
+        const remaining = listProjects();
+        if (s.currentProjectId === id) {
+          if (remaining.length > 0) {
+            s.openProject(remaining[0].id);
+          } else {
+            s.newProject("Untitled Project");
+          }
+        } else {
+          set({ projects: remaining });
+        }
+        return true;
+      },
+
+      exportCurrentProject: () => {
+        flushSave();
+        const s = get();
+        const proj: ProjectData = {
+          version: 1,
+          id: s.currentProjectId,
+          name: s.projectName,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          nodes: s.nodes,
+          camera: loadCameraState(),
+        };
+        exportProjectFile(proj);
+      },
+
+      importProjectFile: async (file) => {
+        try {
+          const text = await file.text();
+          const fallback = file.name.replace(/\.(shapeforge|json)$/i, "");
+          const proj = parseProjectFile(text, fallback);
+          if (!proj) return false;
+          get().importProjectData(proj);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+
+      importProjectData: (proj) => {
+        flushSave();
+        saveProject(proj);
+        setActiveProjectId(proj.id);
+        counter = Math.max(counter, highestIdSuffix(proj.nodes));
+        const updatedProjects = listProjects();
+
+        useDoc.temporal.getState().clear();
+        set({
+          currentProjectId: proj.id,
+          projectName: proj.name,
+          projects: updatedProjects,
+          nodes: proj.nodes,
+          selectedIds: [],
+          savedAt: Date.now(),
+        });
+        return proj.id;
+      },
+
+      refreshProjectsList: () => {
+        set({ projects: listProjects() });
+      },
 
       addPrimitive: (kind) =>
         set((s) => {
@@ -222,15 +482,42 @@ export const useDoc = create<DocState>()(
 
       setParam: (id, key, value) => {
         set((s) => ({
-          nodes: updateNode(s.nodes, id, (n) =>
-            n.type === "object" ? { ...n, params: nextParams(n, key, value) } : n,
-          ),
+          nodes: updateNode(s.nodes, id, (n) => {
+            if (n.type !== "object") return n;
+            if (
+              n.kind === "triangle" &&
+              (Math.abs(n.scale[0] - 1) > 1e-4 ||
+                Math.abs(n.scale[1] - 1) > 1e-4 ||
+                Math.abs(n.scale[2] - 1) > 1e-4)
+            ) {
+              try {
+                const solved = solveScaledTriangle(n.params, n.scale);
+                const bakedParams = {
+                  ...n.params,
+                  base: solved.sides.base,
+                  sideLeft: solved.sides.left,
+                  sideRight: solved.sides.right,
+                  angleLeft: solved.angles.left,
+                  angleRight: solved.angles.right,
+                  angleApex: solved.angles.apex,
+                  thickness: Math.round(n.params.thickness * n.scale[2] * 100) / 100,
+                };
+                const updated = nextParams({ ...n, params: bakedParams }, key, value);
+                return { ...n, params: updated, scale: [1, 1, 1] as Vec3 };
+              } catch {
+                return { ...n, params: nextParams(n, key, value) };
+              }
+            }
+            return { ...n, params: nextParams(n, key, value) };
+          }),
         }));
         afterBatchedMutation();
       },
 
       setTransform: (id, patch) => {
-        set((s) => ({ nodes: updateNode(s.nodes, id, (n) => ({ ...n, ...patch })) }));
+        set((s) => ({
+          nodes: updateNode(s.nodes, id, (n) => (sameTransform(n, patch) ? n : { ...n, ...patch })),
+        }));
         afterBatchedMutation();
       },
 
@@ -256,7 +543,17 @@ export const useDoc = create<DocState>()(
       pushPullFace: (id, op) => {
         set((s) => ({
           nodes: updateNode(s.nodes, id, (n) => {
-            if (n.type === "edit") return { ...n, ops: [...n.ops, op] };
+            if (n.type === "edit") {
+              const color = n.color || n.base.color;
+              const transparent = n.transparent ?? n.base.transparent;
+              return {
+                ...n,
+                color,
+                transparent,
+                base: { ...n.base, color, transparent },
+                ops: [...n.ops, op],
+              };
+            }
             if (n.type === "import") return n; // guard — the UI never offers this on an import
             const base: ObjectNode | GroupNode = {
               ...n,
@@ -272,6 +569,8 @@ export const useDoc = create<DocState>()(
               rotation: n.rotation,
               scale: n.scale,
               isHole: n.isHole,
+              color: n.color,
+              transparent: n.transparent,
               base,
               ops: [op],
             };
@@ -290,6 +589,30 @@ export const useDoc = create<DocState>()(
 
       setHole: (id, isHole) =>
         set((s) => ({ nodes: updateNode(s.nodes, id, (n) => ({ ...n, isHole })) })),
+
+      setColor: (id, color) => {
+        set((s) => ({
+          nodes: updateNode(s.nodes, id, (n) => {
+            if (n.type === "edit") {
+              return { ...n, color, base: { ...n.base, color } };
+            }
+            return { ...n, color };
+          }),
+        }));
+        afterBatchedMutation();
+      },
+
+      setTransparent: (id, transparent) => {
+        set((s) => ({
+          nodes: updateNode(s.nodes, id, (n) => {
+            if (n.type === "edit") {
+              return { ...n, transparent, base: { ...n.base, transparent } };
+            }
+            return { ...n, transparent };
+          }),
+        }));
+        afterBatchedMutation();
+      },
 
       setGroupOp: (id, op) =>
         set((s) => ({
@@ -369,7 +692,6 @@ export const useDoc = create<DocState>()(
       setShowResult: (v) => set({ showResult: v }),
 
       clearAll: () => {
-        clearDocument();
         set({ nodes: [], selectedIds: [] });
       },
     }),
@@ -377,6 +699,16 @@ export const useDoc = create<DocState>()(
       // Only geometry belongs in the undo history — selection and view toggles
       // would otherwise make undo feel like it "does nothing".
       partialize: (s) => ({ nodes: s.nodes }),
+      // partialize alone does not achieve that: it runs on every write and
+      // hands zundo a brand-new { nodes } wrapper each time, which the default
+      // Object.is comparison always reads as "changed". So a write that never
+      // touched a node — the autosave stamping savedAt a second after an edit
+      // is the common one — still recorded an undo step holding the identical
+      // geometry, and the first Ctrl+Z after any edit visibly did nothing
+      // because it was reversing that. Comparing the node list by reference is
+      // what the intent above actually requires: every action here rebuilds
+      // that array when, and only when, something in it really changed.
+      equality: (a, b) => a.nodes === b.nodes,
       limit: 200,
     },
   ),
@@ -430,9 +762,23 @@ function flushSave() {
     saveTimer = null;
   }
   if (!pending) return;
-  const ok = saveDocument(pending);
+  const s = useDoc.getState();
+  const proj: ProjectData = {
+    version: 1,
+    id: s.currentProjectId,
+    name: s.projectName,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    nodes: pending,
+    camera: loadCameraState(),
+  };
+  const ok = saveProject(proj);
   pending = null;
-  useDoc.setState(ok ? { savedAt: Date.now(), storageBlocked: false } : { storageBlocked: true });
+  useDoc.setState(
+    ok
+      ? { savedAt: Date.now(), storageBlocked: false, projects: listProjects() }
+      : { storageBlocked: true },
+  );
 }
 
 useDoc.subscribe((state, prev) => {

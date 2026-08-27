@@ -3,6 +3,8 @@ import { kernel, KernelTimeoutError, WATCHDOG_MS } from "./kernel/client";
 import { Viewport } from "./viewport/Viewport";
 import { Inspector } from "./ui/Inspector";
 import { Tree } from "./ui/Tree";
+import { DropIcon, TransparencyIcon, WireframeIcon } from "./ui/icons";
+import { ProjectsModal } from "./ui/ProjectsModal";
 import {
   beginHistoryBatch,
   copySelected,
@@ -12,11 +14,12 @@ import {
   useTemporal,
 } from "./document/store";
 import { PRIMITIVES, isGroup } from "./document/types";
-import { findNode } from "./document/tree";
+import { findNode, parentOf, resolveNodeTransparent } from "./document/tree";
 import { putBlob } from "./document/blobStore";
+import { loadCameraState } from "./document/persist";
 import type { PrimitiveKind, SceneNode, Vec3 } from "./document/types";
-import type { EditSpec, KernelMesh, NodeSpec, PreviewBuild, ScenePart } from "./kernel/types";
-import type { CameraMode, ToolMode } from "./viewport/scene";
+import type { EditSpec, ExportQuality, NodeSpec, PreviewBuild, ScenePart } from "./kernel/types";
+import type { CameraMode, Scene, ToolMode } from "./viewport/scene";
 import { APP_NAME, APP_VERSION } from "./version";
 import { positionWithReferenceGap } from "./snapping/spacing";
 import type { SnapAnchor, SnapAxis } from "./snapping/snap";
@@ -122,12 +125,28 @@ const shapeOf = (n: SceneNode): unknown => {
   return [n.id, n.kind, n.params];
 };
 
+const EXPORT_QUALITY_KEY = "cad.exportQuality";
+
+/** What each preset costs, so the choice is not guesswork — measured on a
+ *  40x30x15 box with a 10mm spherical bowl (see EXPORT_PRESETS in worker.ts). */
+const EXPORT_QUALITY_HINT: Record<ExportQuality, string> = {
+  draft: "Draft — fastest, visibly faceted curves. Good for test prints.",
+  standard: "Standard — faint facets on curved surfaces, exports in a moment.",
+  fine: "Fine — smooth curves, but a curved part can take several seconds.",
+};
+
 export function App() {
   const nodes = useDoc((s) => s.nodes);
   const selectedIds = useDoc((s) => s.selectedIds);
-  const showResult = useDoc((s) => s.showResult);
   const savedAt = useDoc((s) => s.savedAt);
   const storageBlocked = useDoc((s) => s.storageBlocked);
+  const projectName = useDoc((s) => s.projectName);
+
+  const [projectsModalOpen, setProjectsModalOpen] = useState(false);
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState(projectName);
+  useEffect(() => setTitleDraft(projectName), [projectName]);
+
   const {
     addPrimitive,
     addImport,
@@ -141,13 +160,17 @@ export function App() {
     pushPullFace,
     setOps,
     setHole,
+    setColor,
+    setTransparent,
     setGroupOp,
     toggleCollapsed,
     rename,
     group,
     ungroup,
-    setShowResult,
     clearAll,
+    renameProject,
+    newProject,
+    exportCurrentProject,
   } = useDoc.getState();
 
   // Ticks the "Saved 2m ago" label without re-rendering on every frame.
@@ -163,8 +186,6 @@ export function App() {
   const canRedo = useTemporal((s) => s.futureStates.length > 0);
 
   const [parts, setParts] = useState<ScenePart[]>([]);
-  const [result, setResult] = useState<KernelMesh | null>(null);
-  const [stats, setStats] = useState<{ volume: number; faces: number; ms: number } | null>(null);
   const [exporting, setExporting] = useState(false);
   const [readyExportUrl, setReadyExportUrl] = useState<string | null>(null);
   /** Per-node failures, keyed by node id. */
@@ -177,9 +198,15 @@ export function App() {
    *  render again; the node itself stays visible in the tree with a warning
    *  so the user can delete or replace it. */
   const [skippedIds, setSkippedIds] = useState<Set<string>>(new Set());
-  const [cameraMode, setCameraMode] = useState<CameraMode>("perspective");
+  const [cameraMode, setCameraMode] = useState<CameraMode>(() => loadCameraState()?.mode ?? "perspective");
   const [toolMode, setToolMode] = useState<ToolMode>("select");
   const [resizeConstrained, setResizeConstrained] = useState(true);
+  const [wireframe, setWireframe] = useState(false);
+  // Remembered across sessions: which quality you want is a property of how
+  // you print, not of one export.
+  const [exportQuality, setExportQuality] = useState<ExportQuality>(
+    () => (localStorage.getItem(EXPORT_QUALITY_KEY) as ExportQuality | null) ?? "fine",
+  );
   const [gapAxis, setGapAxis] = useState<SnapAxis>("x");
   const [gapMm, setGapMm] = useState(10);
   const [fixedAnchor, setFixedAnchor] = useState<SnapAnchor>("max");
@@ -187,17 +214,8 @@ export function App() {
   const [gapDirection, setGapDirection] = useState<-1 | 1>(1);
   const [spacingSwapped, setSpacingSwapped] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Tracked separately, not as one shared flag: buildScene and buildResult
-  // are independent kernel calls, and — because they share one single-
-  // threaded worker — an abandoned buildResult (say, from toggling "Show
-  // merged result" off before a slow one finished) can go on occupying the
-  // worker for a while after the user stopped caring about it, which would
-  // otherwise make a totally ordinary, fast buildScene edit right after LOOK
-  // stuck too, since a shared flag would already read "busy" from a stretch
-  // that has nothing to do with what the user just did.
   const [sceneBusy, setSceneBusy] = useState(false);
-  const [resultBusy, setResultBusy] = useState(false);
-  const busy = sceneBusy || resultBusy;
+  const busy = sceneBusy;
   // Timestamp sceneBusy last turned true, so the "still working" hint (below)
   // only shows up once it's genuinely been a while — an ordinary rebuild
   // finishes in well under a second, and flashing a "this can take minutes"
@@ -284,8 +302,8 @@ export function App() {
   // Rebuild only when geometry-defining data changes. Dragging a top-level node
   // changes its position, which the viewport applies itself without the kernel.
   const shapeKey = useMemo(() => JSON.stringify(buildableNodes.map(shapeOf)), [buildableNodes]);
-  const worldKey = useMemo(() => JSON.stringify(buildableNodes.map(toSpec)), [buildableNodes]);
 
+  const sceneRef = useRef<Scene | null>(null);
   const buildId = useRef(0);
   const importInputRef = useRef<HTMLInputElement>(null);
 
@@ -366,46 +384,14 @@ export function App() {
     return () => clearTimeout(t);
   }, [shapeKey, skippedIds]);
 
-  // The fully booleaned result is expensive, so only compute it when shown —
-  // and, same reasoning as above, debounced so it does not rebuild on every
-  // slider tick while it is visible.
+
   useEffect(() => {
-    if (!showResult) {
-      setResult(null);
-      return;
+    try {
+      localStorage.setItem(EXPORT_QUALITY_KEY, exportQuality);
+    } catch {
+      // Private mode / blocked storage: the choice just won't be remembered.
     }
-    const specs = pruneSkipped(useDoc.getState().nodes, skippedIds).map(toSpec);
-    let stale = false;
-    const t = setTimeout(() => {
-      setResultBusy(true);
-      kernel
-        .buildResult(specs)
-        .then((res) => {
-          if (stale) return;
-          setResult(res.mesh);
-          setStats({ volume: res.volume, faces: res.faceCount, ms: res.buildMs });
-          setError(null);
-        })
-        .catch((e: unknown) => {
-          if (stale) return;
-          if (e instanceof KernelTimeoutError) {
-            if (e.nodeId) {
-              setInvalid((prev) => ({ ...prev, [e.nodeId!]: e.message }));
-              setSkippedIds((prev) => addSkip(prev, e.nodeId!));
-            } else {
-              setError(e.message);
-            }
-          } else {
-            setError(msg(e));
-          }
-        })
-        .finally(() => !stale && setResultBusy(false));
-    }, 32);
-    return () => {
-      stale = true;
-      clearTimeout(t);
-    };
-  }, [showResult, worldKey, skippedIds]);
+  }, [exportQuality]);
 
   const onSelect = useCallback(
     (id: string | null, additive: boolean) => select(id, additive),
@@ -619,7 +605,7 @@ export function App() {
       // app that has to be right, so it gets the export-quality, healed path
       // (see blobSTLOf in worker.ts); the worker's own result cache is what
       // keeps that fast.
-      const blob = await kernel.exportSTL(currentNodes.map(toSpec));
+      const blob = await kernel.exportSTL(currentNodes.map(toSpec), exportQuality);
       if (!blob) {
         setError("Nothing to export — add at least one solid.");
         return;
@@ -642,6 +628,52 @@ export function App() {
     }
   };
 
+  /** Transparency, TinkerCAD-style: every selected solid becomes see-through
+   *  (or opaque again) together. Holes are skipped — they already render in
+   *  their own material — and a child's group mirrors the change, so a shape
+   *  inside a group looks the same as the identical one outside it. */
+  const applyTransparent = useCallback(
+    (value: boolean) => {
+      const s = useDoc.getState();
+      if (!s.selectedIds.length) return;
+      beginHistoryBatch();
+      for (const id of s.selectedIds) {
+        const node = findNode(s.nodes, id);
+        if (!node || node.isHole) continue;
+        setTransparent(id, value);
+        const parent = parentOf(s.nodes, id);
+        if (parent && isGroup(parent)) setTransparent(parent.id, value);
+      }
+      endHistoryBatch();
+    },
+    [setTransparent],
+  );
+
+  /** T flips whatever the last-selected object is actually showing right now,
+   *  so the whole selection lands on one state rather than each inverting. */
+  const toggleTransparency = useCallback(() => {
+    const s = useDoc.getState();
+    if (!s.selectedIds.length) return;
+    const primary = findNode(s.nodes, s.selectedIds[s.selectedIds.length - 1]);
+    applyTransparent(!resolveNodeTransparent(primary));
+  }, [applyTransparent]);
+
+  const selectionTransparent = useMemo(
+    () =>
+      selectedIds.length
+        ? resolveNodeTransparent(findNode(nodes, selectedIds[selectedIds.length - 1]))
+        : false,
+    [nodes, selectedIds],
+  );
+
+  /** Drop (D): let the selection fall onto whatever is underneath it. The
+   *  geometry that answers "what is underneath" only exists in the viewport,
+   *  so the scene works out the distances and the document records them. */
+  const dropSelected = useCallback(() => {
+    const updates = sceneRef.current?.dropSelected() ?? [];
+    if (updates.length) setPositions(updates);
+  }, [setPositions]);
+
   // Shortcuts, ignored while typing in an input.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -652,6 +684,16 @@ export function App() {
       if ((e.key === "Delete" || e.key === "Backspace") && useDoc.getState().selectedIds.length) {
         e.preventDefault();
         removeSelected();
+      } else if (mod && e.key.toLowerCase() === "o") {
+        e.preventDefault();
+        setProjectsModalOpen(true);
+      } else if (mod && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        exportCurrentProject();
+      } else if (mod && e.altKey && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        const name = prompt("Enter project name:", "Untitled Project");
+        if (name !== null) newProject(name);
       } else if (mod && e.key.toLowerCase() === "g") {
         e.preventDefault();
         if (e.shiftKey) ungroup();
@@ -676,13 +718,22 @@ export function App() {
         setToolMode("rotate");
       } else if (!mod && e.key.toLowerCase() === "a") {
         setToolMode("align");
+      } else if (!mod && e.key.toLowerCase() === "t") {
+        e.preventDefault();
+        toggleTransparency();
+      } else if (!mod && e.key.toLowerCase() === "d") {
+        e.preventDefault();
+        dropSelected();
+      } else if (!mod && e.key.toLowerCase() === "w") {
+        e.preventDefault();
+        setWireframe((v) => !v);
       } else if (e.key === "Escape") {
         setToolMode("select");
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [removeSelected, undo, redo, group, ungroup]);
+  }, [removeSelected, undo, redo, group, ungroup, toggleTransparency, dropSelected, exportCurrentProject, newProject]);
 
   return (
     <div className="app-shell">
@@ -692,6 +743,61 @@ export function App() {
           <span className="brand-name">{APP_NAME}</span>
           <span className="brand-version">v{APP_VERSION}</span>
         </div>
+
+        <div className="project-title-container">
+          {isEditingTitle ? (
+            <input
+              type="text"
+              className="project-title-input"
+              value={titleDraft}
+              onChange={(e) => setTitleDraft(e.target.value)}
+              onBlur={() => {
+                setIsEditingTitle(false);
+                if (titleDraft.trim()) renameProject(titleDraft.trim());
+                else setTitleDraft(projectName);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  setIsEditingTitle(false);
+                  if (titleDraft.trim()) renameProject(titleDraft.trim());
+                } else if (e.key === "Escape") {
+                  setIsEditingTitle(false);
+                  setTitleDraft(projectName);
+                }
+              }}
+              autoFocus
+            />
+          ) : (
+            <button
+              className="project-title-btn"
+              onClick={() => setIsEditingTitle(true)}
+              title="Click to rename design"
+            >
+              <span className="project-title-text">{projectName}</span>
+              <span className="project-title-edit-icon">✏️</span>
+            </button>
+          )}
+        </div>
+
+        <div className="toolbar-group project-actions-group">
+          <button
+            onClick={() => setProjectsModalOpen(true)}
+            className="projects-nav-btn"
+            title="Open Projects Library (Ctrl+O)"
+          >
+            📁 Projects
+          </button>
+          <button
+            onClick={() => {
+              const name = prompt("Enter project name:", "Untitled Project");
+              if (name !== null) newProject(name);
+            }}
+            title="New design (Ctrl+Alt+N)"
+          >
+            ＋ New
+          </button>
+        </div>
+
         <div className="toolbar-group">
           <button onClick={() => undo()} disabled={!canUndo} title="Undo (Ctrl+Z)">↶ Undo</button>
           <button onClick={() => redo()} disabled={!canRedo} title="Redo (Ctrl+Shift+Z)">↷ Redo</button>
@@ -708,6 +814,26 @@ export function App() {
         <span className={["status-pill", error ? "error" : busy || exporting ? "busy" : ""].filter(Boolean).join(" ")}>
           {error ? "Needs attention" : exporting ? "Exporting…" : readyExportUrl ? "STL ready" : busy ? "Building…" : "Ready"}
         </span>
+        <button
+          className="export-project-btn"
+          onClick={exportCurrentProject}
+          title="Save project file (.shapeforge) to computer (Ctrl+S)"
+        >
+          💾 Save File
+        </button>
+        <label className="export-quality" title={EXPORT_QUALITY_HINT[exportQuality]}>
+          <span>Quality</span>
+          <select
+            value={exportQuality}
+            onChange={(e) => setExportQuality(e.target.value as ExportQuality)}
+            disabled={exporting}
+            aria-label="STL export quality"
+          >
+            <option value="draft">Draft</option>
+            <option value="standard">Standard</option>
+            <option value="fine">Fine</option>
+          </select>
+        </label>
         <button className="export-btn" onClick={exportSTL} disabled={exporting}>
           {exporting ? "Exporting…" : readyExportUrl ? "Download STL" : "Export STL"}
         </button>
@@ -786,16 +912,48 @@ export function App() {
             aria-label="Align tool"
             disabled={selectedIds.length < 2}
           ><span className="tool-symbol">⋮</span></button>
+          {/* Not a mode — a toggle on the selection, so it sits below a rule
+              rather than in the run of tools that light each other out. */}
+          <span className="tool-rail-sep" />
+          <button
+            className={selectionTransparent ? "active" : ""}
+            onClick={toggleTransparency}
+            title="Make the selection see-through (T)"
+            aria-label="Toggle transparency"
+            aria-pressed={selectionTransparent}
+            disabled={!selectedIds.length}
+          >
+            <TransparencyIcon />
+          </button>
+          <button
+            className={wireframe ? "active" : ""}
+            onClick={() => setWireframe((v) => !v)}
+            title="Show edges only (W)"
+            aria-label="Toggle wireframe view"
+            aria-pressed={wireframe}
+          >
+            <WireframeIcon />
+          </button>
+          {/* An action, not a mode and not a view toggle — its own group. */}
+          <span className="tool-rail-sep" />
+          <button
+            onClick={dropSelected}
+            title="Drop onto what is below (D)"
+            aria-label="Drop"
+            disabled={!selectedIds.length}
+          >
+            <DropIcon />
+          </button>
         </div>
         <Viewport
           parts={parts}
-          result={result}
           nodes={nodes}
           selectedIds={selectedIds}
           cameraMode={cameraMode}
           toolMode={toolMode}
           resizeConstrained={resizeConstrained}
-          showResult={showResult}
+          wireframe={wireframe}
+          onSceneReady={(scene) => { sceneRef.current = scene; }}
           onSelect={onSelect}
           onSelectMany={onSelectMany}
           onTransform={onTransform}
@@ -810,7 +968,7 @@ export function App() {
             ? "Click a dot to align minimum, centre, or maximum · A Align · Esc Select"
             : toolMode === "face"
             ? "Click a flat face, then drag its arrow or type a distance to push/pull · Esc Select · Right-drag orbit"
-            : "V Select · F Face · M Move · R Rotate · A Align · Drag an object to move it · Alt-drag duplicate · Shift-drag straight · Right-drag orbit"}
+            : "V Select · F Face · M Move · R Rotate · A Align · T Transparent · W Wireframe · D Drop · Drag an object to move it · Alt-drag duplicate · Shift-drag straight · Right-drag orbit"}
         </div>
         {error && <div className="canvas-error">{error}</div>}
         {!error && busy && busySince && busyNow - busySince > 8000 && (
@@ -847,16 +1005,40 @@ export function App() {
           }}
         />
         <section className="tool-section inspector-section">
-          <div className="panel-heading compact"><div><h1>Properties</h1><p>{selected ? selected.name : "Nothing selected"}</p></div></div>
+          <div className="panel-heading compact">
+            <div>
+              <h1>Properties</h1>
+              <p>{selectedIds.length > 1 ? `Shapes (${selectedIds.length})` : selected ? selected.name : "Nothing selected"}</p>
+            </div>
+          </div>
           {selected ? (
             <Inspector
               node={selected}
+              selectedCount={selectedIds.length}
               error={invalid[selected.id] ?? null}
               onParam={(k, v) => setParam(selected.id, k, v)}
               onTransform={(patch) => setTransform(selected.id, patch)}
               resizeConstrained={resizeConstrained}
               onResizeConstrained={setResizeConstrained}
-              onHole={(h) => setHole(selected.id, h)}
+              onHole={(h) => {
+                beginHistoryBatch();
+                const ids = selectedIds.length ? selectedIds : (selected ? [selected.id] : []);
+                for (const id of ids) setHole(id, h);
+                endHistoryBatch();
+              }}
+              onColor={(c) => {
+                beginHistoryBatch();
+                const ids = selectedIds.length ? selectedIds : (selected ? [selected.id] : []);
+                for (const id of ids) {
+                  setColor(id, c);
+                  const parent = parentOf(nodes, id);
+                  if (parent && isGroup(parent)) {
+                    setColor(parent.id, c);
+                  }
+                }
+                endHistoryBatch();
+              }}
+              onTransparent={applyTransparent}
               onOp={(op) => setGroupOp(selected.id, op)}
               onRename={(n) => rename(selected.id, n)}
               onDelete={removeSelected}
@@ -949,20 +1131,12 @@ export function App() {
         </section>
         )}
 
-        <section className="tool-section result-section">
-          <label className="check">
-          <input
-            type="checkbox"
-            checked={showResult}
-            onChange={(e) => setShowResult(e.target.checked)}
-          />
-          <span>Show merged result</span>
-          </label>
-          {showResult && stats && (
-            <div className="result-stats"><span>{stats.volume.toFixed(1)} mm³</span><span>{stats.faces} faces</span><span>{Math.round(stats.ms)} ms</span></div>
-          )}
-        </section>
       </aside>
+
+      <ProjectsModal
+        isOpen={projectsModalOpen}
+        onClose={() => setProjectsModalOpen(false)}
+      />
     </div>
   );
 }

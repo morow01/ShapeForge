@@ -1,18 +1,18 @@
 import { useEffect, useRef } from "react";
 import { Scene } from "./scene";
 import type { CameraMode, ToolMode } from "./scene";
-import type { KernelMesh, PreviewBuild, ScenePart } from "../kernel/types";
+import type { PreviewBuild, ScenePart } from "../kernel/types";
 import type { SceneNode, Vec3 } from "../document/types";
 
 interface Props {
   parts: ScenePart[];
-  result: KernelMesh | null;
   nodes: SceneNode[];
   selectedIds: string[];
   cameraMode: CameraMode;
   toolMode: ToolMode;
   resizeConstrained: boolean;
-  showResult: boolean;
+  /** Edges-only view: solids stop being drawn, their wireframes carry on. */
+  wireframe: boolean;
   onSelect: (id: string | null, additive: boolean) => void;
   /** Marquee-select release: every id caught inside the drawn rectangle. */
   onSelectMany: (ids: string[], additive: boolean) => void;
@@ -30,10 +30,14 @@ interface Props {
     op: { point: Vec3; normal: Vec3; distance: number },
   ) => Promise<PreviewBuild | null>;
   onDragChange: (dragging: boolean) => void;
+  /** Handed the Scene on mount and null on unmount. A keyboard action like
+   *  Drop has to call INTO the scene (it needs the built geometry), which the
+   *  one-way props everything else uses cannot express. */
+  onSceneReady?: (scene: Scene | null) => void;
 }
 
 export function Viewport(props: Props) {
-  const { parts, result, nodes, selectedIds, cameraMode, toolMode, resizeConstrained, showResult } = props;
+  const { parts, nodes, selectedIds, cameraMode, toolMode, resizeConstrained, wireframe } = props;
 
   const hostRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<Scene | null>(null);
@@ -58,19 +62,20 @@ export function Viewport(props: Props) {
     scene.onDragChange = (dragging) => latest.current.onDragChange(dragging);
 
     scene.setParts(latest.current.parts);
-    scene.setResult(latest.current.result);
     scene.setPlacements(latest.current.nodes, latest.current.selectedIds);
     scene.setCameraMode(latest.current.cameraMode);
     scene.setToolMode(latest.current.toolMode);
     scene.setResizeConstrained(latest.current.resizeConstrained);
-    scene.setShowResult(latest.current.showResult);
+    scene.setWireframe(latest.current.wireframe);
 
     sceneRef.current = scene;
+    latest.current.onSceneReady?.(scene);
     if (import.meta.env.DEV) {
       (globalThis as unknown as { __scene?: Scene }).__scene = scene;
     }
 
     return () => {
+      latest.current.onSceneReady?.(null);
       scene.dispose();
       sceneRef.current = null;
     };
@@ -80,11 +85,6 @@ export function Viewport(props: Props) {
     sceneRef.current?.setParts(parts);
   }, [parts]);
 
-  useEffect(() => {
-    sceneRef.current?.setResult(result);
-  }, [result]);
-
-  // Placement is cheap and must follow every node/selection change.
   useEffect(() => {
     sceneRef.current?.setPlacements(nodes, selectedIds);
   }, [nodes, selectedIds]);
@@ -102,8 +102,8 @@ export function Viewport(props: Props) {
   }, [resizeConstrained]);
 
   useEffect(() => {
-    sceneRef.current?.setShowResult(showResult);
-  }, [showResult]);
+    sceneRef.current?.setWireframe(wireframe);
+  }, [wireframe]);
 
   return <div className="viewport" ref={hostRef} />;
 }

@@ -57,6 +57,11 @@ export interface EditSpec extends SpecBase {
 
 export type NodeSpec = ObjectSpec | GroupSpec | ImportSpec | EditSpec;
 
+/** How finely an STL export tessellates curved faces. The actual tolerances
+ *  live in worker.ts (EXPORT_PRESETS) next to the reasoning about them; only
+ *  the choice travels across the worker boundary. */
+export type ExportQuality = "draft" | "standard" | "fine";
+
 /** One face of a top-level part, in the part's own local frame — everything
  *  the viewport needs to let a click directly on the 3D geometry highlight
  *  and, for a planar one, push/pull it into a PushPullOp back to the kernel.
