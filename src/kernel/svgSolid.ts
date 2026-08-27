@@ -3,31 +3,68 @@ import type { Drawing, Shape3D } from "replicad";
 import type { SvgCommand } from "../svg/parse";
 
 /**
- * Millimetre outlines (see svg/parse.ts) → an extruded solid.
+ * Millimetre outlines (see svg/parse.ts) → extruded solids, one per shape.
  *
  * Runs in the worker. Everything DOM-shaped happened on the other side; what
  * arrives here is plain numbers.
  */
 
-/** Signed area of an outline, sampling curves at their endpoints only —
- *  enough to tell inside from outside and which way a loop winds. */
-function signedArea(points: [number, number][]): number {
+/**
+ * Points sampled along each cubic, not just at its endpoints.
+ *
+ * Letters are nearly all curve: the outer boundary of an "e" is perhaps
+ * eight segments, so endpoints alone approximate it as an octagon. Deciding
+ * "is this counter inside that letter" against an octagon gets the answer
+ * wrong often enough to matter — and a wrong answer there cuts a letter away
+ * instead of adding it, which is what made whole letters disappear.
+ */
+const CURVE_SAMPLES = 8;
+
+function cubicAt(
+  t: number,
+  p0: [number, number],
+  c1: [number, number],
+  c2: [number, number],
+  p1: [number, number],
+): [number, number] {
+  const u = 1 - t;
+  const a = u * u * u, b = 3 * u * u * t, c = 3 * u * t * t, d = t * t * t;
+  return [
+    a * p0[0] + b * c1[0] + c * c2[0] + d * p1[0],
+    a * p0[1] + b * c1[1] + c * c2[1] + d * p1[1],
+  ];
+}
+
+/** A polygon that follows the outline closely enough to test against. */
+function flatten(commands: SvgCommand[]): [number, number][] {
+  const points: [number, number][] = [];
+  let cursor: [number, number] = [0, 0];
+  for (const c of commands) {
+    if (c[0] === "M" || c[0] === "L") {
+      cursor = [c[1], c[2]];
+      points.push(cursor);
+    } else if (c[0] === "C") {
+      const p0 = cursor;
+      const c1: [number, number] = [c[1], c[2]];
+      const c2: [number, number] = [c[3], c[4]];
+      const p1: [number, number] = [c[5], c[6]];
+      for (let i = 1; i <= CURVE_SAMPLES; i++) {
+        points.push(cubicAt(i / CURVE_SAMPLES, p0, c1, c2, p1));
+      }
+      cursor = p1;
+    }
+  }
+  return points;
+}
+
+function areaOf(points: [number, number][]): number {
   let area = 0;
   for (let i = 0; i < points.length; i++) {
     const [x1, y1] = points[i];
     const [x2, y2] = points[(i + 1) % points.length];
     area += x1 * y2 - x2 * y1;
   }
-  return area / 2;
-}
-
-function outlinePoints(commands: SvgCommand[]): [number, number][] {
-  const points: [number, number][] = [];
-  for (const c of commands) {
-    if (c[0] === "M" || c[0] === "L") points.push([c[1], c[2]]);
-    else if (c[0] === "C") points.push([c[5], c[6]]);
-  }
-  return points;
+  return Math.abs(area / 2);
 }
 
 function pointInPolygon(point: [number, number], polygon: [number, number][]): boolean {
@@ -41,7 +78,17 @@ function pointInPolygon(point: [number, number], polygon: [number, number][]): b
   return inside;
 }
 
-/** One outline as a closed replicad drawing. */
+/** A point genuinely inside the outline rather than on its edge. The centroid
+ *  serves for letters; a shape it falls outside of (a crescent) keeps its
+ *  first vertex instead. */
+function interiorPoint(points: [number, number][]): [number, number] {
+  const mid: [number, number] = [
+    points.reduce((a, p) => a + p[0], 0) / points.length,
+    points.reduce((a, p) => a + p[1], 0) / points.length,
+  ];
+  return pointInPolygon(mid, points) ? mid : points[0];
+}
+
 function toDrawing(commands: SvgCommand[]): Drawing | null {
   const start = commands[0];
   if (!start || start[0] !== "M") return null;
@@ -58,8 +105,6 @@ function toDrawing(commands: SvgCommand[]): Drawing | null {
     }
   }
   if (!drew) return null;
-  // close() adds the closing segment when the outline does not already end
-  // where it started, which hand-written and exported SVG both do freely.
   return pen.close();
 }
 
@@ -75,50 +120,79 @@ function splitSubpaths(commands: SvgCommand[]): SvgCommand[][] {
     current.push(c);
   }
   if (current.length) out.push(current);
-  return out.filter((sub) => outlinePoints(sub).length >= 3);
+  return out;
+}
+
+interface Outline {
+  drawing: Drawing;
+  points: [number, number][];
+  inside: [number, number];
+  area: number;
 }
 
 /**
- * Builds the 2D region the artwork describes, then extrudes it.
+ * One extruded solid per shape in the artwork — a letter, a logo mark, an
+ * island — each already carrying its own holes.
  *
- * Holes are resolved by containment rather than by winding rule: a counter
- * inside an O is a hole whatever direction it happens to wind, and exported
- * artwork is not consistent about that. Outlines are taken largest first, so
- * by the time a hole is considered, the shape it sits in has already been
- * added, and nesting deeper than one level alternates solid/hole the way
- * even-odd does.
+ * Deliberately NOT one accumulated 2D region for the whole file. Fusing or
+ * cutting every outline into a single running drawing made the shapes depend
+ * on one another, so one misjudged counter could cut a hole out of a
+ * neighbouring letter or remove it outright. Separate solids keep a mistake
+ * local, and the caller unions them through the same boolean path the rest
+ * of the app uses.
+ *
+ * Holes are decided by containment, not by winding rule: the counter in an O
+ * is a hole whichever way it happens to wind, and exported artwork is not
+ * consistent about that. Depth — how many outlines enclose a shape —
+ * alternates solid, hole, solid, the way even-odd does.
  */
-export function svgSolid(paths: SvgCommand[][], thickness: number): Shape3D | null {
-  const outlines: { drawing: Drawing; points: [number, number][]; area: number }[] = [];
+export function svgSolids(paths: SvgCommand[][], thickness: number): Shape3D[] {
+  const outlines: Outline[] = [];
   for (const path of paths) {
     for (const sub of splitSubpaths(path)) {
+      const points = flatten(sub);
+      if (points.length < 3) continue;
       const drawing = toDrawing(sub);
       if (!drawing) continue;
-      const points = outlinePoints(sub);
-      outlines.push({ drawing, points, area: Math.abs(signedArea(points)) });
+      outlines.push({ drawing, points, inside: interiorPoint(points), area: areaOf(points) });
     }
   }
-  if (!outlines.length) return null;
+  if (!outlines.length) return [];
 
-  outlines.sort((a, b) => b.area - a.area);
+  // Which outlines enclose each one. Only bigger outlines can, which keeps
+  // this from depending on the arbitrary order shapes appear in the file.
+  const containers = outlines.map((outline, i) =>
+    outlines
+      .map((other, j) => ({ other, j }))
+      .filter(
+        ({ other, j }) =>
+          j !== i && other.area > outline.area && pointInPolygon(outline.inside, other.points),
+      ),
+  );
 
-  let region: Drawing | null = null;
-  for (const outline of outlines) {
-    // How many bigger outlines enclose this one: even means solid, odd means
-    // it is a hole in the one above it.
-    const inner = outlines.filter(
-      (other) =>
-        other !== outline &&
-        other.area > outline.area &&
-        pointInPolygon(outline.points[0], other.points),
-    ).length;
-    if (!region) {
-      region = outline.drawing;
-      continue;
+  const solids: Shape3D[] = [];
+  outlines.forEach((outline, i) => {
+    if (containers[i].length % 2 === 1) return; // a hole, not a shape
+
+    let region = outline.drawing;
+    outlines.forEach((hole, j) => {
+      if (j === i || containers[j].length !== containers[i].length + 1) return;
+      // The hole's immediate container is the smallest thing enclosing it, so
+      // a letter never claims a counter belonging to a letter nested inside
+      // its own bounding box.
+      let immediate: { other: Outline; j: number } | null = null;
+      for (const candidate of containers[j]) {
+        if (!immediate || candidate.other.area < immediate.other.area) immediate = candidate;
+      }
+      if (immediate && immediate.j === i) region = region.cut(hole.drawing);
+    });
+
+    try {
+      solids.push(region.sketchOnPlane("XY").extrude(thickness) as Shape3D);
+    } catch {
+      // One unbuildable outline must not cost the rest of the artwork.
     }
-    region = inner % 2 === 1 ? region.cut(outline.drawing) : region.fuse(outline.drawing);
-  }
-  if (!region) return null;
+  });
 
-  return region.sketchOnPlane("XY").extrude(thickness) as Shape3D;
+  return solids;
 }

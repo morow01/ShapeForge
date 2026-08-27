@@ -13,7 +13,7 @@ import {
 import type { Face, Shape3D } from "replicad";
 import { InvalidShapeError, solveTriangle, solveScaledTriangle } from "../geometry/triangle";
 import { getBlob } from "../document/blobStore";
-import { svgSolid } from "./svgSolid";
+import { svgSolids } from "./svgSolid";
 import type { SvgCommand } from "../svg/parse";
 import type { PushPullOp, Vec3 } from "../document/types";
 import type { BuildSpec, EditSpec, ImportSpec, NodeSpec, ObjectSpec } from "./types";
@@ -116,9 +116,13 @@ async function makeImport(spec: ImportSpec): Promise<AnySolid> {
     const blob = await getBlob(spec.blobId);
     if (!blob) throw new Error("The artwork for this import is missing.");
     const paths = JSON.parse(new TextDecoder().decode(blob)) as SvgCommand[][];
-    const solid = svgSolid(paths, Math.max(0.01, spec.svg.thickness));
-    if (!solid) throw new Error("No closed outlines in that artwork to build from.");
-    return solid;
+    const shapes = svgSolids(paths, Math.max(0.01, spec.svg.thickness));
+    if (!shapes.length) throw new Error("No closed outlines in that artwork to build from.");
+    // One solid per shape, unioned through the same path every other boolean
+    // in this app takes — including its fall back to the mesh kernel.
+    const united = combine("union", shapes.map((solid) => ({ solid, isHole: false })));
+    if (!united) throw new Error("Could not combine the shapes in that artwork.");
+    return united;
   }
 
   let cached = importCache.get(spec.blobId);
