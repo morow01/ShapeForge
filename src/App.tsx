@@ -220,6 +220,7 @@ export function App() {
    *  cell masks index them. Null whenever the tool is not running. */
   const [buildSources, setBuildSources] = useState<string[] | null>(null);
   const [buildBusy, setBuildBusy] = useState(false);
+  const [buildTally, setBuildTally] = useState({ kept: 0, total: 0 });
   // Remembered across sessions: which quality you want is a property of how
   // you print, not of one export.
   const [exportQuality, setExportQuality] = useState<ExportQuality>(
@@ -701,7 +702,7 @@ export function App() {
       .map((id) => findNode(useDoc.getState().nodes, id))
       .filter((n): n is SceneNode => !!n && !n.isHole);
     if (sources.length < 2) {
-      setError("Select at least two overlapping shapes to build from.");
+      setError("Shape Builder needs at least two overlapping shapes selected.");
       setToolMode("select");
       return;
     }
@@ -719,7 +720,7 @@ export function App() {
       .then((cells) => {
         if (stale) return;
         if (!cells.length) {
-          setError("Those shapes do not overlap — nothing to build.");
+          setError("Those shapes do not overlap, so there are no regions to build from.");
           setToolMode("select");
           return;
         }
@@ -741,7 +742,11 @@ export function App() {
   /** Commits the session: the kept regions become one built shape. */
   const commitBuild = useCallback(() => {
     const kept = sceneRef.current?.keptCells() ?? [];
-    if (buildSources && kept.length) shapeBuild(buildSources, kept);
+    if (!kept.length) {
+      setError("Click at least one region to put it in the shape, then press Enter.");
+      return;
+    }
+    if (buildSources) shapeBuild(buildSources, kept);
     setToolMode("select");
   }, [buildSources, shapeBuild]);
 
@@ -1058,6 +1063,7 @@ export function App() {
           resizeConstrained={resizeConstrained}
           wireframe={wireframe}
           onSceneReady={(scene) => { sceneRef.current = scene; }}
+          onCellsChanged={(kept, total) => setBuildTally({ kept, total })}
           onSelect={onSelect}
           onSelectMany={onSelectMany}
           onTransform={onTransform}
@@ -1069,7 +1075,9 @@ export function App() {
         />
         <div className="canvas-help">
           {toolMode === "build"
-            ? "Click a region to keep it · Alt-click to remove it · Enter builds the shape · Esc cancels"
+            ? buildBusy
+              ? "Working out the regions…"
+              : `${buildTally.kept} of ${buildTally.total} regions in the shape · Click or drag to add · Alt-click to remove · Enter builds · Esc cancels`
             : toolMode === "align"
             ? "Click a dot to align minimum, centre, or maximum · A Align · Esc Select"
             : toolMode === "face"

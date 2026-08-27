@@ -251,11 +251,14 @@ const MATERIALS = {
     depthWrite: false,
     roughness: 0.6,
   }),
-  cellHover: new THREE.MeshStandardMaterial({ color: 0xff9f1a, metalness: 0.04, roughness: 0.5 }),
+  // Hover tints rather than repaints: a region already in the shape keeps
+  // reading as part of it, and one that is still out reads as a preview of
+  // what clicking would add.
+  cellHover: new THREE.MeshStandardMaterial({ color: 0x6fd0e8, metalness: 0.04, roughness: 0.5 }),
   cellHoverRemoved: new THREE.MeshStandardMaterial({
-    color: 0xff9f1a,
+    color: 0xffc46b,
     transparent: true,
-    opacity: 0.42,
+    opacity: 0.55,
     depthWrite: false,
     roughness: 0.5,
   }),
@@ -507,6 +510,9 @@ export class Scene {
    *  by cell mask. Empty whenever the tool is not active. */
   private cellViews = new Map<number, { group: THREE.Group; mesh: THREE.Mesh; wire: THREE.LineSegments; kept: boolean }>();
   private hoverCell: number | null = null;
+  /** Set while the pointer is down in the builder: every region swept over
+   *  takes this state, so a drag paints regions the way Illustrator's does. */
+  private cellPaint: boolean | null = null;
   private selectedIds: string[] = [];
   /** Most recent nodes passed to setPlacements, so a part that is (re)created
    *  by setParts — which runs on its own async schedule from the kernel and
@@ -536,6 +542,8 @@ export class Scene {
     | ((id: string, patch: { position?: Vec3; rotation?: Vec3; scale?: Vec3 }) => void)
     | null = null;
   onAlignObjects: ((updates: { id: string; position: Vec3 }[]) => void) | null = null;
+  /** Shape Builder: how many regions are in the shape, out of how many exist. */
+  onCellsChanged: ((kept: number, total: number) => void) | null = null;
   /** Fires as a gizmo drag begins and ends, so the whole drag can become a
    *  single undo step instead of one per frame. */
   onDragChange: ((dragging: boolean) => void) | null = null;
@@ -2260,7 +2268,10 @@ export class Scene {
         const group = new THREE.Group();
         group.add(mesh, wire);
         this.scene.add(group);
-        this.cellViews.set(cell.mask, { group, mesh, wire, kept: true });
+        // Regions start OUT, not in. If they all start in, the preview looks
+        // identical to what was already on screen and a click — "add this
+        // region" — has nothing to do, which reads as the tool being broken.
+        this.cellViews.set(cell.mask, { group, mesh, wire, kept: false });
       }
     }
     // The sources would otherwise sit exactly on top of their own regions,
@@ -2268,6 +2279,7 @@ export class Scene {
     for (const view of this.parts.values()) view.group.visible = !cells;
     this.applyCellMaterials();
     this.applyMaterials();
+    this.onCellsChanged?.(0, this.cellViews.size);
   }
 
   /** Which regions are currently kept — what a commit turns into a BuildNode. */
@@ -2313,18 +2325,15 @@ export class Scene {
     return null;
   }
 
-  /** Click keeps a region, alt-click removes it — the Illustrator gesture. */
-  private clickCell(e: PointerEvent): boolean {
+  /** Click adds a region to the shape, alt-click takes it back out. */
+  private paintCell(e: PointerEvent, keep: boolean): boolean {
     const mask = this.raycastCell(e);
     if (mask === null) return false;
     const view = this.cellViews.get(mask);
-    if (!view) return false;
-    const keep = !e.altKey;
-    // Removing the last region would commit to nothing at all; the click is
-    // simply refused rather than leaving an empty build.
-    if (!keep && this.keptCells().length === 1 && view.kept) return true;
+    if (!view || view.kept === keep) return mask !== null;
     view.kept = keep;
     this.applyCellMaterials();
+    this.onCellsChanged?.(this.keptCells().length, this.cellViews.size);
     return true;
   }
 
@@ -2517,7 +2526,9 @@ export class Scene {
     // are what is on screen, and selecting the (hidden) sources underneath
     // them would mean nothing.
     if (this.toolMode === "build" && this.cellViews.size) {
-      if (this.clickCell(e)) return;
+      this.cellPaint = !e.altKey;
+      this.paintCell(e, this.cellPaint);
+      return;
     }
     // Whatever gesture starts here owns the pointer until it ends — none of
     // them re-run updateFaceHover while active (see its own guard), so any
@@ -2617,6 +2628,10 @@ export class Scene {
    */
   private onPointerMove = (e: PointerEvent) => {
     if (this.toolMode === "build" && this.cellViews.size) {
+      if (this.cellPaint !== null) {
+        this.paintCell(e, this.cellPaint);
+        return;
+      }
       const mask = this.raycastCell(e);
       if (mask !== this.hoverCell) {
         this.hoverCell = mask;
@@ -2864,7 +2879,10 @@ export class Scene {
     // The region click was already handled on pointerdown. Selection is
     // resolved here, though, so without this the same click would also pick
     // the (hidden) source underneath and change what the session is building.
-    if (this.toolMode === "build" && this.cellViews.size) return;
+    if (this.toolMode === "build" && this.cellViews.size) {
+      this.cellPaint = null;
+      return;
+    }
 
     if (this.pushPullDrag) {
       const drag = this.pushPullDrag;
