@@ -146,6 +146,12 @@ const EXPORT_QUALITY: MeshQuality = EXPORT_PRESETS.standard;
  *  topology to preserve, so it becomes one single pickable "face" covering
  *  the whole triangle set, and there is no separate edge/wireframe data —
  *  syncGeometries on the Three.js side treats edges as optional. */
+/** Facets meeting at less than this are treated as one smooth surface. Wide
+ *  enough to smooth a curved run tessellated at EDIT_QUALITY (whose facets
+ *  meet at up to ~23 degrees), narrow enough to leave a box's 90-degree
+ *  corners perfectly sharp. */
+const CREASE_COSINE = Math.cos((40 * Math.PI) / 180);
+
 function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdges } {
   const raw = m.mesh();
   const triangleCount = raw.triangles.length / 3;
@@ -180,6 +186,54 @@ function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdg
       byEdge.set(key, list);
     }
   }
+  // Manifold hands back one normal per FACET. On a flat face that is right;
+  // on anything curved it means every triangle is shaded as its own little
+  // plane, so a sphere that OCCT would have drawn smooth appears as a gem
+  // with visible facets — reported as "why is it so low polygon", when the
+  // triangle count was never the problem (884 triangles, 99% of them
+  // flat-shaded). Rebuild the normals here: average the facet normals meeting
+  // at each point, but only across facets that are within CREASE_ANGLE of one
+  // another, so a box keeps its hard edges and only genuinely curved runs are
+  // smoothed. Points where the two disagree get one vertex per group.
+  const cornersAt = new Map<string, { triangle: number; slot: number }[]>();
+  for (let triangle = 0; triangle < triangleCount; triangle++) {
+    for (let slot = 0; slot < 3; slot++) {
+      const key = positionKey(raw.triangles[triangle * 3 + slot]);
+      const list = cornersAt.get(key) ?? [];
+      list.push({ triangle, slot });
+      cornersAt.set(key, list);
+    }
+  }
+  const smoothVertices: number[] = [];
+  const smoothNormals: number[] = [];
+  const smoothIndex = new Uint32Array(triangleCount * 3);
+  for (const corners of cornersAt.values()) {
+    const at = raw.triangles[corners[0].triangle * 3 + corners[0].slot] * 3;
+    const groups: { sum: number[]; members: { triangle: number; slot: number }[] }[] = [];
+    for (const corner of corners) {
+      const n = descriptions[corner.triangle].normal;
+      let group = groups.find((g) => {
+        const length = Math.hypot(g.sum[0], g.sum[1], g.sum[2]) || 1;
+        return (g.sum[0] * n[0] + g.sum[1] * n[1] + g.sum[2] * n[2]) / length >= CREASE_COSINE;
+      });
+      if (!group) {
+        group = { sum: [0, 0, 0], members: [] };
+        groups.push(group);
+      }
+      group.sum[0] += n[0];
+      group.sum[1] += n[1];
+      group.sum[2] += n[2];
+      group.members.push(corner);
+    }
+    for (const group of groups) {
+      const length = Math.hypot(group.sum[0], group.sum[1], group.sum[2]) || 1;
+      const index = smoothVertices.length / 3;
+      smoothVertices.push(raw.vertices[at], raw.vertices[at + 1], raw.vertices[at + 2]);
+      smoothNormals.push(group.sum[0] / length, group.sum[1] / length, group.sum[2] / length);
+      for (const member of group.members) smoothIndex[member.triangle * 3 + member.slot] = index;
+    }
+  }
+
   const neighbours = Array.from({ length: triangleCount }, () => new Set<number>());
   for (const list of byEdge.values()) for (const a of list) for (const b of list) if (a !== b) neighbours[a].add(b);
   const seen = new Uint8Array(triangleCount);
@@ -192,7 +246,7 @@ function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdg
     seen[seed] = 1;
     while (queue.length) {
       const triangle = queue.pop()!;
-      ordered.push(raw.triangles[triangle * 3], raw.triangles[triangle * 3 + 1], raw.triangles[triangle * 3 + 2]);
+      ordered.push(smoothIndex[triangle * 3], smoothIndex[triangle * 3 + 1], smoothIndex[triangle * 3 + 2]);
       for (const next of neighbours[triangle]) {
         const a = descriptions[seed];
         const b = descriptions[next];
@@ -206,9 +260,11 @@ function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdg
   }
   return {
     faces: {
-      vertices: raw.vertices,
+      // Same geometry, re-indexed: a point shared by facets that disagree
+      // about their normal now carries one vertex per group.
+      vertices: Float32Array.from(smoothVertices),
       triangles: Uint32Array.from(ordered),
-      normals: raw.normals,
+      normals: Float32Array.from(smoothNormals),
       faceGroups,
     },
     edges: { lines: [], edgeGroups: [] },
