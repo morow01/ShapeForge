@@ -1162,6 +1162,7 @@ export class Scene {
   /** Cheap: placement and selection only, no kernel involvement. */
   setPlacements(objects: SceneNode[], selectedIds: string[]) {
     this.lastNodes = objects;
+    this.dropDeletedParts(objects);
     this.selectedIds = selectedIds;
     if (this.selectedFace && !selectedIds.includes(this.selectedFace.partId)) {
       this.selectedFace = null;
@@ -1174,6 +1175,44 @@ export class Scene {
     this.applyPlacements();
     this.applyMaterials();
     this.attachGizmo();
+  }
+
+  /**
+   * Takes deleted objects off screen at once, without waiting for the kernel.
+   *
+   * The document alone decides what EXISTS; the kernel only says what those
+   * things look like. Leaving a deleted part up until the next rebuild landed
+   * meant that on a heavy model Delete appeared to do nothing for as long as
+   * the rebuild took — and the doomed part, having no node left to read a
+   * colour from, sat there in the default blue while it waited.
+   *
+   * Re-parenting is not deletion. A child moved into a new group is still in
+   * the tree, so grouping keeps showing the children until the group's own
+   * mesh arrives, exactly as before.
+   */
+  private dropDeletedParts(objects: SceneNode[]) {
+    const alive = new Set<string>();
+    const walk = (nodes: SceneNode[]) => {
+      for (const node of nodes) {
+        alive.add(node.id);
+        if (node.type === "group") walk(node.children);
+        else if (node.type === "edit") walk([node.base]);
+        else if (node.type === "build") walk(node.sources);
+      }
+    };
+    walk(objects);
+
+    for (const [id, view] of [...this.parts]) {
+      if (alive.has(id)) continue;
+      // Mid-gesture geometry belongs to that gesture until it resolves.
+      if (this.pushPullDrag?.id === id || this.pushPullPending?.id === id) continue;
+      if (this.selectedFace?.partId === id) this.selectedFace = null;
+      if (this.hoverFace?.view === view) this.hoverFace = null;
+      // Matches setParts()' own removal: the geometry is not disposed here,
+      // since a rebuild may hand the very same buffers straight back.
+      this.scene.remove(view.group);
+      this.parts.delete(id);
+    }
   }
 
   private applyPlacements() {

@@ -430,6 +430,11 @@ function localKey(spec: NodeSpec): string {
  * A cache hit skips the OCCT call entirely, not just the retriangulation.
  */
 const meshCache = new Map<string, { key: string; mesh: KernelMesh; faces?: FaceInfo[]; solid?: AnySolid }>();
+/** How long one node may spend re-rolling an intermittent build failure
+ *  before it settles for what it has. See the retry loop in buildScene. */
+const RETRY_BUDGET_MS = 4000;
+/** A scene build slower than this reports its per-node timings. */
+const SLOW_BUILD_MS = 1500;
 const MAX_MESH_CACHE_ENTRIES = 256;
 const geometryCache = new Map<string, { mesh: KernelMesh; faces?: FaceInfo[]; solid: AnySolid }>();
 const MAX_GEOMETRY_CACHE_ENTRIES = 128;
@@ -594,7 +599,14 @@ const api = {
     const seen = new Set<string>();
 
     const parts: ScenePart[] = [];
+    /** Per-node wall time, reported (below) whenever a build runs long. A
+     *  build that overruns WATCHDOG_MS costs the whole mesh cache — every
+     *  later edit then rebuilds from cold and overruns again — so knowing
+     *  WHICH node is expensive is the difference between fixing it and
+     *  guessing. */
+    const spent = new Map<string, number>();
     for (const spec of specs) {
+      const specStartedAt = performance.now();
       seen.add(spec.id);
       const key = localKey(spec);
       const cached = meshCache.get(spec.id);
@@ -640,19 +652,29 @@ const api = {
           const expectedDisplayedBounds = displayedChildrenBounds(spec);
           let solid: AnySolid | null = null;
           let mesh: KernelMesh | null = null;
+          // Retrying pays off only because these failures are INTERMITTENT:
+          // OCCT can give a different answer for the same input, so a second
+          // go usually lands. Eight full rebuilds of an expensive node,
+          // though, is minutes of a frozen scene — long enough for the
+          // 3-minute watchdog to kill the worker and take the whole mesh
+          // cache with it, which leaves every following edit just as slow.
+          // Keep the retries, but spend a time budget rather than a fixed
+          // count, and always allow a real second attempt.
           for (let attempt = 0; attempt < 8; attempt++) {
             solid = await makeLocal(spec, onError, onProgress);
-            if (!solid) continue;
-            const candidate = toMesh(spec.id, solid, EDIT_QUALITY);
-            const candidateBounds = meshBounds(candidate);
-            if (
-              candidateBounds &&
-              meshMatchesSolidBounds(candidate, solid) &&
-              (!expectedDisplayedBounds || boundsAgree(candidateBounds, expectedDisplayedBounds))
-            ) {
-              mesh = candidate;
-              break;
+            if (solid) {
+              const candidate = toMesh(spec.id, solid, EDIT_QUALITY);
+              const candidateBounds = meshBounds(candidate);
+              if (
+                candidateBounds &&
+                meshMatchesSolidBounds(candidate, solid) &&
+                (!expectedDisplayedBounds || boundsAgree(candidateBounds, expectedDisplayedBounds))
+              ) {
+                mesh = candidate;
+                break;
+              }
             }
+            if (attempt >= 1 && performance.now() - specStartedAt > RETRY_BUDGET_MS) break;
           }
           if (solid && mesh) {
             const faces = faceInfoOf(mesh);
@@ -672,6 +694,20 @@ const api = {
         meshCache.delete(spec.id);
         onError(spec.id, message(e));
       }
+      // Only reached by nodes that actually rebuilt; a cache hit `continue`s
+      // above and costs nothing worth reporting.
+      spent.set(spec.id, performance.now() - specStartedAt);
+    }
+
+    // A slow build is the one failure here that snowballs, so name the nodes
+    // that ate the time instead of leaving a silent multi-second freeze.
+    const totalMs = performance.now() - t0;
+    if (totalMs > SLOW_BUILD_MS) {
+      const worst = [...spent.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 5)
+        .map(([id, ms]) => `${id} ${Math.round(ms)}ms`);
+      console.warn(`[kernel] scene build took ${Math.round(totalMs)}ms — slowest: ${worst.join(", ")}`);
     }
 
     // Do not immediately discard a node merely because Group temporarily
