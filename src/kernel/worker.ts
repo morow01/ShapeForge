@@ -6,7 +6,7 @@ import opencascade from "replicad-opencascadejs";
 import wasmUrl from "replicad-opencascadejs/wasm?url";
 import ManifoldModule from "manifold-3d";
 import manifoldWasmUrl from "manifold-3d/manifold.wasm?url";
-import { setOC, setManifold, measureVolume, MeshShape } from "replicad";
+import { setOC, setManifold, measureVolume, MeshShape, getManifold } from "replicad";
 import type { Shape3D } from "replicad";
 import {
   applyPushPullPreview,
@@ -29,6 +29,7 @@ import type { AnySolid } from "./shape";
 import type {
   BuildError,
   CellPart,
+  DisplayedSceneItem,
   ExportQuality,
   FaceInfo,
   KernelMesh,
@@ -130,6 +131,10 @@ const EDIT_QUALITY: MeshQuality = { tolerance: 0.05, angularTolerance: 0.4 };
 const EXPORT_PRESETS: Record<ExportQuality, MeshQuality> = {
   draft: { tolerance: 0.05, angularTolerance: 0.4 },
   standard: { tolerance: 0.02, angularTolerance: 0.3 },
+  // Keep the original high-quality tessellation. The timeout was caused by
+  // converting that dense mesh through Manifold before writing it, not by
+  // OCCT's tessellation itself; the refined-shell path below writes those
+  // triangles directly and therefore retains the old smoothness.
   fine: { tolerance: 0.002, angularTolerance: 0.03 },
 };
 
@@ -216,6 +221,38 @@ function toMesh(name: string, s: AnySolid, quality: MeshQuality): KernelMesh {
     return { name, faces, edges };
   }
   return { name, faces: s.mesh(quality), edges: s.meshEdges(quality) };
+}
+
+/**
+ * The BRep can report correct bounds and still occasionally tessellate with
+ * displaced/stray vertices after repeated boolean rebuilds. The viewport
+ * measures and renders the mesh, so validating only the source solid misses
+ * the exact failure the user sees. Reject any tessellation whose visible
+ * vertex envelope does not agree with its source solid.
+ */
+function meshMatchesSolidBounds(mesh: KernelMesh, solid: AnySolid): boolean {
+  try {
+    const [expectedMin, expectedMax] = solid.boundingBox.bounds;
+    const vertices = mesh.faces.vertices;
+    if (!vertices.length) return false;
+    const gotMin = [Infinity, Infinity, Infinity];
+    const gotMax = [-Infinity, -Infinity, -Infinity];
+    for (let i = 0; i + 2 < vertices.length; i += 3) {
+      for (let axis = 0; axis < 3; axis++) {
+        const value = vertices[i + axis];
+        if (!Number.isFinite(value)) return false;
+        gotMin[axis] = Math.min(gotMin[axis], value);
+        gotMax[axis] = Math.max(gotMax[axis], value);
+      }
+    }
+    return [0, 1, 2].every(
+      (axis) =>
+        Math.abs(gotMin[axis] - expectedMin[axis]) < 0.05 &&
+        Math.abs(gotMax[axis] - expectedMax[axis]) < 0.05,
+    );
+  } catch {
+    return false;
+  }
 }
 
 /** Every face of a top-level part, in its own local frame — lets the
@@ -393,6 +430,114 @@ function localKey(spec: NodeSpec): string {
  * A cache hit skips the OCCT call entirely, not just the retriangulation.
  */
 const meshCache = new Map<string, { key: string; mesh: KernelMesh; faces?: FaceInfo[]; solid?: AnySolid }>();
+const MAX_MESH_CACHE_ENTRIES = 256;
+const geometryCache = new Map<string, { mesh: KernelMesh; faces?: FaceInfo[]; solid: AnySolid }>();
+const MAX_GEOMETRY_CACHE_ENTRIES = 128;
+
+type NumericBounds = { min: number[]; max: number[] };
+
+function meshBounds(mesh: KernelMesh): NumericBounds | null {
+  const vertices = mesh.faces.vertices;
+  if (!vertices.length) return null;
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i + 2 < vertices.length; i += 3) {
+    for (let axis = 0; axis < 3; axis++) {
+      const value = vertices[i + axis];
+      if (!Number.isFinite(value)) return null;
+      min[axis] = Math.min(min[axis], value);
+      max[axis] = Math.max(max[axis], value);
+    }
+  }
+  return { min, max };
+}
+
+function solidBoundsOverlap(a: AnySolid, b: AnySolid): boolean {
+  const [aMin, aMax] = a.boundingBox.bounds;
+  const [bMin, bMax] = b.boundingBox.bounds;
+  const epsilon = 1e-5;
+  return [0, 1, 2].every(
+    (axis) => aMax[axis] >= bMin[axis] - epsilon && bMax[axis] >= aMin[axis] - epsilon,
+  );
+}
+
+/** Reconstructs a mesh-kernel solid from the verified triangles already shown
+ * in the viewport. OCCT repeats vertices along face/material boundaries, so
+ * weld coincident positions before handing the mesh to Manifold. */
+function meshShapeFromDisplayed(mesh: KernelMesh): MeshShape {
+  const manifold = getManifold();
+  const sourceVertices = mesh.faces.vertices;
+  const sourceTriangles = mesh.faces.triangles;
+  const vertices: number[] = [];
+  const triangles: number[] = [];
+  const byPosition = new Map<string, number>();
+
+  const canonical = (sourceId: number) => {
+    const offset = sourceId * 3;
+    const x = Number(sourceVertices[offset]);
+    const y = Number(sourceVertices[offset + 1]);
+    const z = Number(sourceVertices[offset + 2]);
+    const key = `${Math.round(x * 1e5)},${Math.round(y * 1e5)},${Math.round(z * 1e5)}`;
+    let id = byPosition.get(key);
+    if (id === undefined) {
+      id = vertices.length / 3;
+      byPosition.set(key, id);
+      vertices.push(x, y, z);
+    }
+    return id;
+  };
+
+  for (let i = 0; i + 2 < sourceTriangles.length; i += 3) {
+    triangles.push(
+      canonical(Number(sourceTriangles[i])),
+      canonical(Number(sourceTriangles[i + 1])),
+      canonical(Number(sourceTriangles[i + 2])),
+    );
+  }
+  return new MeshShape(new manifold.Manifold(new manifold.Mesh({
+    numProp: 3,
+    vertProperties: Float32Array.from(vertices),
+    triVerts: Uint32Array.from(triangles),
+  })));
+}
+
+function boundsAgree(a: NumericBounds, b: NumericBounds): boolean {
+  return [0, 1, 2].every(
+    (axis) => Math.abs(a.min[axis] - b.min[axis]) < 0.05 && Math.abs(a.max[axis] - b.max[axis]) < 0.05,
+  );
+}
+
+/** Bounds of the exact child meshes currently shown before Group is clicked. */
+function displayedChildrenBounds(spec: NodeSpec): NumericBounds | null {
+  if (spec.type !== "group" || spec.op !== "union" || spec.children.some((child) => child.isHole)) return null;
+  const combined: NumericBounds = { min: [Infinity, Infinity, Infinity], max: [-Infinity, -Infinity, -Infinity] };
+  for (const child of spec.children) {
+    const cached = meshCache.get(child.id);
+    if (!cached || cached.key !== localKey(child)) return null;
+    const raw = meshBounds(cached.mesh);
+    if (!raw) return null;
+    const center = [0, 1, 2].map((axis) => (raw.min[axis] + raw.max[axis]) / 2);
+    const [sx, sy, sz] = child.scale;
+    const [rx, ry, rz] = child.rotation.map((degrees) => degrees * Math.PI / 180);
+    const sinX = Math.sin(rx), cosX = Math.cos(rx);
+    const sinY = Math.sin(ry), cosY = Math.cos(ry);
+    const sinZ = Math.sin(rz), cosZ = Math.cos(rz);
+    for (const x of [raw.min[0], raw.max[0]]) for (const y of [raw.min[1], raw.max[1]]) for (const z of [raw.min[2], raw.max[2]]) {
+      let px = center[0] + (x - center[0]) * sx;
+      let py = center[1] + (y - center[1]) * sy;
+      let pz = center[2] + (z - center[2]) * sz;
+      [py, pz] = [py * cosX - pz * sinX, py * sinX + pz * cosX];
+      [px, pz] = [px * cosY + pz * sinY, -px * sinY + pz * cosY];
+      [px, py] = [px * cosZ - py * sinZ, px * sinZ + py * cosZ];
+      const point = [px + child.position[0], py + child.position[1], pz + child.position[2]];
+      for (let axis = 0; axis < 3; axis++) {
+        combined.min[axis] = Math.min(combined.min[axis], point[axis]);
+        combined.max[axis] = Math.max(combined.max[axis], point[axis]);
+      }
+    }
+  }
+  return combined.min.every(Number.isFinite) ? combined : null;
+}
 
 /** The fully placed/booleaned root solid from the latest matching scene or
  * merged-result build. Export can tessellate this directly instead of
@@ -455,7 +600,27 @@ const api = {
       const cached = meshCache.get(spec.id);
 
       if (cached && cached.key === key) {
+        // Refresh insertion order so repeatedly grouped/ungrouped children
+        // remain recent and survive the bounded dormant-entry cache below.
+        meshCache.delete(spec.id);
+        meshCache.set(spec.id, cached);
         parts.push({ id: spec.id, isHole: spec.isHole, mesh: cached.mesh, faces: cached.faces });
+        continue;
+      }
+
+      // A freshly created Group gets a new document id even when its contents
+      // are byte-for-byte identical to the Group made one cycle ago. Reuse the
+      // first verified local geometry by structural key instead of running the
+      // same unstable boolean again. Placement remains document-side, so this
+      // is valid for the same shape at any top-level position.
+      const sameGeometry = geometryCache.get(key);
+      if (sameGeometry) {
+        geometryCache.delete(key);
+        geometryCache.set(key, sameGeometry);
+        const mesh = { ...sameGeometry.mesh, name: spec.id };
+        const entry = { key, mesh, faces: sameGeometry.faces, solid: sameGeometry.solid.clone() };
+        meshCache.set(spec.id, entry);
+        parts.push({ id: spec.id, isHole: spec.isHole, mesh, faces: sameGeometry.faces });
         continue;
       }
 
@@ -472,14 +637,35 @@ const api = {
           meshCache.set(spec.id, { key, mesh });
           parts.push({ id: spec.id, isHole: spec.isHole, mesh });
         } else {
-          const solid = await makeLocal(spec, onError, onProgress);
-          if (solid) {
-            const mesh = toMesh(spec.id, solid, EDIT_QUALITY);
+          const expectedDisplayedBounds = displayedChildrenBounds(spec);
+          let solid: AnySolid | null = null;
+          let mesh: KernelMesh | null = null;
+          for (let attempt = 0; attempt < 8; attempt++) {
+            solid = await makeLocal(spec, onError, onProgress);
+            if (!solid) continue;
+            const candidate = toMesh(spec.id, solid, EDIT_QUALITY);
+            const candidateBounds = meshBounds(candidate);
+            if (
+              candidateBounds &&
+              meshMatchesSolidBounds(candidate, solid) &&
+              (!expectedDisplayedBounds || boundsAgree(candidateBounds, expectedDisplayedBounds))
+            ) {
+              mesh = candidate;
+              break;
+            }
+          }
+          if (solid && mesh) {
             const faces = faceInfoOf(mesh);
             meshCache.set(spec.id, { key, mesh, faces, solid });
+            geometryCache.set(key, { mesh, faces, solid: solid.clone() });
+            if (geometryCache.size > MAX_GEOMETRY_CACHE_ENTRIES) {
+              const oldest = geometryCache.keys().next().value;
+              if (oldest !== undefined) geometryCache.delete(oldest);
+            }
             parts.push({ id: spec.id, isHole: spec.isHole, mesh, faces });
           } else {
             meshCache.delete(spec.id);
+            onError(spec.id, "This shape could not be meshed at the correct position — try grouping again.");
           }
         }
       } catch (e) {
@@ -488,10 +674,17 @@ const api = {
       }
     }
 
-    // Drop entries for nodes that no longer exist, so deleting objects over a
-    // long session does not leak memory here.
-    for (const id of meshCache.keys()) {
-      if (!seen.has(id)) meshCache.delete(id);
+    // Do not immediately discard a node merely because Group temporarily
+    // moved it below a new root. Ungroup needs the exact known-good mesh that
+    // was visible beforehand; rebuilding a nested boolean from scratch on
+    // every cycle is what eventually produced a displaced child. Keep dormant
+    // entries, but cap them so genuinely deleted objects cannot leak memory
+    // throughout a long session. Live roots are never chosen for eviction.
+    if (meshCache.size > MAX_MESH_CACHE_ENTRIES) {
+      for (const id of meshCache.keys()) {
+        if (meshCache.size <= MAX_MESH_CACHE_ENTRIES) break;
+        if (!seen.has(id)) meshCache.delete(id);
+      }
     }
 
     // The common editing case is one top-level object (including one complex
@@ -624,6 +817,66 @@ const api = {
     return cacheServes(key, quality)
       ? blobSTLOf(resultSolidCache!.solid, EXPORT_PRESETS[quality])
       : null;
+  },
+
+  /** Complete-scene timeout fallback for the subset touched by top-level
+   * Holes. Each solid is drilled independently; unioning every scene root
+   * made a distant 887k-triangle scan participate in an unrelated Hole and
+   * could spend another three minutes after the first timeout. */
+  async exportDisplayedSTL(items: DisplayedSceneItem[]): Promise<Blob | null> {
+    await init();
+    if (!items.length) return null;
+    const solids = items
+      .filter(({ spec }) => !spec.isHole)
+      .map(({ spec, mesh }) => place(meshShapeFromDisplayed(mesh), spec));
+    const holes = items
+      .filter(({ spec }) => spec.isHole)
+      .map(({ spec, mesh }) => place(meshShapeFromDisplayed(mesh), spec));
+    if (!solids.length) return null;
+    const drilled = solids.map((shell) => {
+      let out: AnySolid = shell;
+      for (const hole of holes) {
+        if (!solidBoundsOverlap(out, hole)) continue;
+        const cut = combine("subtract", [
+          { solid: out, isHole: false },
+          { solid: hole, isHole: false },
+        ]);
+        if (cut) out = cut;
+      }
+      return out;
+    });
+    if (drilled.some((solid) => isEmptySolid(solid) || tessellatesEmpty(solid))) {
+      throw new Error("A visible solid became empty while applying its Hole subtraction.");
+    }
+    return blobSTLOfMany(drilled, EDIT_QUALITY);
+  },
+
+  /** Rebuilds primitive-only roots (including groups whose internal Holes
+   * create curved Boolean faces) for the timeout fallback. These remain cheap
+   * and keep Standard/Fine distinct even when one unrelated imported or
+   * edited scene object forced the global merge onto displayed meshes. */
+  async exportRefinedSTL(specs: NodeSpec[], quality: ExportQuality): Promise<Blob | null> {
+    await init();
+    const evaluated: { solid: AnySolid; isHole: boolean }[] = [];
+    for (const spec of specs) {
+      const world = await makeWorld(spec);
+      if (world) evaluated.push({ solid: world, isHole: spec.isHole });
+    }
+    const holes = evaluated.filter((item) => item.isHole).map((item) => item.solid);
+    const solids = evaluated.filter((item) => !item.isHole).map((item) => item.solid);
+    const drilled = solids.map((shell) => {
+      let out = shell;
+      for (const hole of holes) {
+        if (!solidBoundsOverlap(out, hole)) continue;
+        const cut = combine("subtract", [
+          { solid: out, isHole: false },
+          { solid: hole, isHole: false },
+        ]);
+        if (cut) out = cut;
+      }
+      return out;
+    });
+    return drilled.length ? blobSTLOfMany(drilled, EXPORT_PRESETS[quality]) : null;
   },
 
   /** Exports the fully booleaned result as a binary STL, ready for the slicer.

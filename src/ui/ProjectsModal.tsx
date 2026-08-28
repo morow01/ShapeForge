@@ -15,7 +15,21 @@ function timeAgo(timestamp: number): string {
   return new Date(timestamp).toLocaleDateString();
 }
 
-export function ProjectsModal({ isOpen, onClose }: { isOpen: boolean; onClose: () => void }) {
+type ProjectsModalProps = {
+  isOpen: boolean;
+  onClose: () => void;
+  onProjectLoadStart?: (name: string) => void;
+  onProjectLoadApplied?: () => void;
+  onProjectLoadFailed?: () => void;
+};
+
+export function ProjectsModal({
+  isOpen,
+  onClose,
+  onProjectLoadStart,
+  onProjectLoadApplied,
+  onProjectLoadFailed,
+}: ProjectsModalProps) {
   const currentProjectId = useDoc((s) => s.currentProjectId);
   const projects = useDoc((s) => s.projects);
   const newProject = useDoc((s) => s.newProject);
@@ -41,7 +55,10 @@ export function ProjectsModal({ isOpen, onClose }: { isOpen: boolean; onClose: (
   };
 
   const handleOpen = (id: string) => {
+    const project = projects.find((p) => p.id === id);
+    onProjectLoadStart?.(project?.name ?? "project");
     openProject(id);
+    onProjectLoadApplied?.();
     onClose();
   };
 
@@ -62,10 +79,18 @@ export function ProjectsModal({ isOpen, onClose }: { isOpen: boolean; onClose: (
     const file = e.target.files?.[0];
     e.target.value = "";
     if (file) {
-      const ok = await importProjectFile(file);
-      if (ok) {
-        onClose();
-      } else {
+      onProjectLoadStart?.(file.name);
+      try {
+        const ok = await importProjectFile(file);
+        if (ok) {
+          onProjectLoadApplied?.();
+          onClose();
+        } else {
+          onProjectLoadFailed?.();
+          alert("Failed to load project file. Please ensure it is a valid ShapeForge (.shapeforge) or CAD JSON file.");
+        }
+      } catch {
+        onProjectLoadFailed?.();
         alert("Failed to load project file. Please ensure it is a valid ShapeForge (.shapeforge) or CAD JSON file.");
       }
     }

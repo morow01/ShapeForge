@@ -679,28 +679,47 @@ export function combine(
 ): AnySolid | null {
   if (!children.length) return null;
 
+  // Capture the union envelope before handing any wrapper to either boolean
+  // kernel. OCCT operations can mutate more than the result wrapper (even
+  // when invoked on a clone), so measuring the operands after an attempt can
+  // make a displaced/dropped result validate against already-corrupted input.
+  // Plain numbers cannot be changed underneath us and remain the authority
+  // for every retry in this combine call.
+  const expectedUnionBounds = op === "union"
+    ? unionBounds(children.filter((c) => !c.isHole).map((c) => c.solid))
+    : null;
+
   const asMeshed = () =>
     children.map((c) => ({
       solid: isMesh(c.solid) ? c.solid : (c.solid as Shape3D).meshShape(FALLBACK_MESH_QUALITY),
       isHole: c.isHole,
     }));
 
-  const solidsOnly = children.filter((c) => !c.isHole).map((c) => c.solid);
   const keptAll = (candidate: AnySolid | null) =>
     !!candidate &&
     !isEmptySolid(candidate) &&
     !tessellatesEmpty(candidate) &&
-    (op !== "union" || unionKeptEverything(candidate, solidsOnly));
+    (op !== "union" || !expectedUnionBounds || matchesBounds(candidate, expectedUnionBounds));
+
+  // A failed manifold boolean does not necessarily throw; on this model it
+  // occasionally returns a perfectly renderable union with one operand in
+  // the wrong place. Every attempt needs fresh wrappers, and only a result
+  // whose bounds match the immutable inputs is allowed out.
+  const retryMesh = (attempts = 8): MeshShape | null => {
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const candidate = combineMesh(op, asMeshed());
+      if (keptAll(candidate)) return candidate;
+    }
+    return null;
+  };
 
   if (children.some((c) => isMesh(c.solid))) {
-    const meshed = combineMesh(op, asMeshed());
     // Manifold drops an operand from a union about as readily as OCCT does on
     // this kind of model — measured on a reported bracket, roughly one build
     // in eight lost a whole sub-assembly with no error raised. Whatever comes
-    // back has to still reach as far as what went in.
-    if (keptAll(meshed) || !solidsOnly.length) return meshed;
-    const retried = combineMesh(op, asMeshed());
-    return keptAll(retried) ? retried : (meshed ?? retried);
+    // back has to still reach as far as what went in. Never return the bad
+    // candidate merely because the next attempt was bad too.
+    return retryMesh();
   }
 
   const result = combineShape(op, children as { solid: Shape3D; isHole: boolean }[]);
@@ -719,12 +738,12 @@ export function combine(
   // export costs a print.
   if (keptAll(result)) return result;
 
-  const viaMesh = combineMesh(op, asMeshed());
-  if (keptAll(viaMesh)) return viaMesh;
+  const viaMesh = retryMesh();
+  if (viaMesh) return viaMesh;
 
   // Both kernels agree there is nothing here, which a subtraction is entitled
   // to produce. Anything else keeps whatever OCCT managed.
-  return result ?? viaMesh;
+  return op === "union" ? null : result;
 }
 
 function combineShape(
@@ -732,10 +751,16 @@ function combineShape(
   children: { solid: Shape3D; isHole: boolean }[],
 ): AnySolid | null {
   if (op === "subtract") {
-    let result = children[0].solid;
+    // OCCT boolean builders may consume or mutate either wrapper handed to
+    // them. Groups are rebuilt repeatedly, and reusing those wrappers made a
+    // later build occasionally start from an already-altered child — the
+    // visible part then jumped even though its document transform was still
+    // unchanged. Keep the source solids immutable and boolean disposable
+    // clones instead.
+    let result = children[0].solid.clone();
     for (let i = 1; i < children.length; i++) {
       try {
-        result = result.cut(children[i].solid) as Shape3D;
+        result = result.cut(children[i].solid.clone()) as Shape3D;
       } catch {
         const meshed = children.map((c) => ({
           solid: isMesh(c.solid) ? c.solid : (c.solid as Shape3D).meshShape(FALLBACK_MESH_QUALITY),
@@ -747,10 +772,10 @@ function combineShape(
     return result;
   }
   if (op === "intersect") {
-    let result = children[0].solid;
+    let result = children[0].solid.clone();
     for (let i = 1; i < children.length; i++) {
       try {
-        result = result.intersect(children[i].solid) as Shape3D;
+        result = result.intersect(children[i].solid.clone()) as Shape3D;
       } catch {
         const meshed = children.map((c) => ({
           solid: isMesh(c.solid) ? c.solid : (c.solid as Shape3D).meshShape(FALLBACK_MESH_QUALITY),
@@ -769,10 +794,10 @@ function combineShape(
       solid: isMesh(c.solid) ? c.solid : (c.solid as Shape3D).meshShape(FALLBACK_MESH_QUALITY),
       isHole: c.isHole,
     }));
-  let result = solids[0].solid;
+  let result = solids[0].solid.clone();
   for (let i = 1; i < solids.length; i++) {
     try {
-      result = result.fuse(solids[i].solid) as Shape3D;
+      result = result.fuse(solids[i].solid.clone()) as Shape3D;
     } catch {
       const meshed = children.map((c) => ({
         solid: isMesh(c.solid) ? c.solid : (c.solid as Shape3D).meshShape(FALLBACK_MESH_QUALITY),
@@ -789,7 +814,7 @@ function combineShape(
 
   for (const h of holes) {
     try {
-      result = result.cut(h.solid) as Shape3D;
+      result = result.cut(h.solid.clone()) as Shape3D;
     } catch {
       const meshed = children.map((c) => ({
         solid: isMesh(c.solid) ? c.solid : (c.solid as Shape3D).meshShape(FALLBACK_MESH_QUALITY),
@@ -808,21 +833,21 @@ function combineMesh(
   children: { solid: MeshShape; isHole: boolean }[],
 ): MeshShape | null {
   if (op === "subtract") {
-    let result = children[0].solid;
-    for (let i = 1; i < children.length; i++) result = result.cut(children[i].solid);
+    let result = children[0].solid.clone();
+    for (let i = 1; i < children.length; i++) result = result.cut(children[i].solid.clone());
     return result;
   }
   if (op === "intersect") {
-    let result = children[0].solid;
-    for (let i = 1; i < children.length; i++) result = result.intersect(children[i].solid);
+    let result = children[0].solid.clone();
+    for (let i = 1; i < children.length; i++) result = result.intersect(children[i].solid.clone());
     return result;
   }
   const solids = children.filter((c) => !c.isHole);
   const holes = children.filter((c) => c.isHole);
   if (!solids.length) return null;
-  let result = solids[0].solid;
-  for (let i = 1; i < solids.length; i++) result = result.fuse(solids[i].solid);
-  for (const h of holes) result = result.cut(h.solid);
+  let result = solids[0].solid.clone();
+  for (let i = 1; i < solids.length; i++) result = result.fuse(solids[i].solid.clone());
+  for (const h of holes) result = result.cut(h.solid.clone());
   return result;
 }
 
@@ -1006,6 +1031,27 @@ function boundsOf(solid: AnySolid): { min: Vec3; max: Vec3 } | null {
   }
 }
 
+function unionBounds(operands: AnySolid[]): { min: Vec3; max: Vec3 } | null {
+  const bounds = { min: [Infinity, Infinity, Infinity] as Vec3, max: [-Infinity, -Infinity, -Infinity] as Vec3 };
+  for (const operand of operands) {
+    const box = boundsOf(operand);
+    if (!box) return null;
+    for (let i = 0; i < 3; i++) {
+      bounds.min[i] = Math.min(bounds.min[i], box.min[i]);
+      bounds.max[i] = Math.max(bounds.max[i], box.max[i]);
+    }
+  }
+  return bounds.min.every(Number.isFinite) ? bounds : null;
+}
+
+function matchesBounds(result: AnySolid, expected: { min: Vec3; max: Vec3 }): boolean {
+  const got = boundsOf(result);
+  if (!got) return false;
+  return [0, 1, 2].every(
+    (i) => Math.abs(got.min[i] - expected.min[i]) < 0.05 && Math.abs(got.max[i] - expected.max[i]) < 0.05,
+  );
+}
+
 /**
  * Did the fuse actually keep everything it was given?
  *
@@ -1016,25 +1062,12 @@ function boundsOf(solid: AnySolid): { min: Vec3; max: Vec3 } | null {
  * it. What the user sees is a group with a piece of the model gone or left
  * behind somewhere else.
  *
- * A millimetre of tolerance, since the comparison is between a fused solid
- * and its inputs, not between two numbers that must agree exactly.
+ * A 0.05mm tolerance absorbs ordinary tessellation/kernel noise while still
+ * rejecting the smallest observed failed placement, which was a full 1mm.
  */
 export function unionKeptEverything(result: AnySolid, operands: AnySolid[]): boolean {
-  const got = boundsOf(result);
-  if (!got) return false;
-  const want = { min: [Infinity, Infinity, Infinity] as Vec3, max: [-Infinity, -Infinity, -Infinity] as Vec3 };
-  for (const operand of operands) {
-    const box = boundsOf(operand);
-    if (!box) return true; // nothing to compare against; leave the result alone
-    for (let i = 0; i < 3; i++) {
-      want.min[i] = Math.min(want.min[i], box.min[i]);
-      want.max[i] = Math.max(want.max[i], box.max[i]);
-    }
-  }
-  if (!want.min.every(Number.isFinite)) return true;
-  return [0, 1, 2].every(
-    (i) => Math.abs(got.min[i] - want.min[i]) < 1 && Math.abs(got.max[i] - want.max[i]) < 1,
-  );
+  const expected = unionBounds(operands);
+  return expected ? matchesBounds(result, expected) : true;
 }
 
 /**
@@ -1161,6 +1194,7 @@ export async function makeLocal(
 
   const build = async (spin: boolean, report?: (id: string, msg: string) => void) => {
     const kids: { solid: AnySolid; isHole: boolean }[] = [];
+    let complete = true;
     for (const child of spec.children) {
       // Building the same child twice can give different answers: OCCT fails
       // on coincident faces intermittently, and a child that fails is a child
@@ -1170,7 +1204,7 @@ export async function makeLocal(
       // whole sub-assembly. So a failure is retried before it is believed.
       let solid: AnySolid | null = null;
       let failure = "";
-      for (let attempt = 0; attempt < 2 && !solid; attempt++) {
+      for (let attempt = 0; attempt < 8 && !solid; attempt++) {
         try {
           solid = await makeWorld(spin ? respin(child) : child, undefined, onProgress);
         } catch (e) {
@@ -1178,12 +1212,21 @@ export async function makeLocal(
         }
       }
       if (solid) kids.push({ solid, isHole: child.isHole });
-      else report?.(child.id, failure || `${child.id} could not be built.`);
+      else {
+        complete = false;
+        report?.(child.id, failure || `${child.id} could not be built.`);
+      }
     }
-    return kids;
+    return { kids, complete };
   };
 
-  const kids = await build(false, onError);
+  const built = await build(false, onError);
+  // A partial group is never a valid preview. Continuing after one child
+  // failed is what made rails/posts vanish for a single rebuild and then
+  // return on the next group cycle. Keep the previous viewport mesh instead
+  // of replacing it with a group that is missing pieces.
+  if (!built.complete) return null;
+  const kids = built.kids;
   const result = combine(spec.op, kids);
   if (!result) return result;
 
@@ -1203,7 +1246,9 @@ export async function makeLocal(
   if (!invalid && !cracked) return result;
 
   if (hasSphere) {
-    const retryKids = await build(true);
+    const retryBuild = await build(true);
+    if (!retryBuild.complete) return result;
+    const retryKids = retryBuild.kids;
     const retry = combine(spec.op, retryKids);
     // A retry has to actually be better, not merely different: when the first
     // attempt was outright invalid any sound solid is an improvement, but when

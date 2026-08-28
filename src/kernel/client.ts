@@ -1,6 +1,6 @@
 import * as Comlink from "comlink";
 import type { KernelAPI } from "./worker";
-import type { ExportQuality, NodeSpec } from "./types";
+import type { DisplayedSceneItem, ExportQuality, NodeSpec } from "./types";
 
 function spawnWorker() {
   const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
@@ -65,6 +65,58 @@ export class KernelTimeoutError extends Error {
  * something tolerable rather than promising every large file will finish.
  */
 export const WATCHDOG_MS = 3 * 60_000;
+/** High-detail STL gets a shorter budget because export has a complete,
+ * already-rendered mesh fallback. Scene rebuilding still keeps the generous
+ * three-minute ceiling above. */
+export const EXPORT_WATCHDOG_MS = 30_000;
+/** The verified-mesh fallback must not silently start another multi-minute
+ * wait after the high-detail path reaches its deadline. */
+export const DISPLAYED_EXPORT_WATCHDOG_MS = 30_000;
+const CURVED_EXPORT_WATCHDOG_MS = 15_000;
+
+// A cache lookup is supposed to be nearly instant, but worker messages are
+// processed serially. If the scene worker is still finishing a complex
+// rebuild, a lookup sent to it waits behind that rebuild and used to consume
+// the entire three-minute watchdog before export even reached the dedicated
+// heavy worker. Do not kill a useful scene rebuild just because this optional
+// fast path is busy; fall back after a short wait and let its promise settle in
+// the background. A slightly longer second probe recovers the common race
+// where the scene finishes at almost the same moment the heavy export times
+// out (the next click used to find that cache immediately).
+const CACHE_PROBE_MS = 1_500;
+const CACHE_RECOVERY_MS = 2_000;
+
+function probeCachedSTL(
+  specs: NodeSpec[],
+  quality: ExportQuality,
+  timeoutMs: number,
+): Promise<Blob | null | undefined> {
+  const probe = sceneCurrent.raw.exportCachedSTL(specs, quality);
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      // undefined means "the scene lane was busy", while null is a genuine
+      // cache miss returned by the worker.
+      resolve(undefined);
+    }, timeoutMs);
+    probe.then(
+      (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(result);
+      },
+      () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(undefined);
+      },
+    );
+  });
+}
 
 /**
  * Runs one call against the current worker, racing it against WATCHDOG_MS.
@@ -82,6 +134,7 @@ export const WATCHDOG_MS = 3 * 60_000;
 function withWatchdog<R>(
   lane: "scene" | "heavy",
   run: (raw: KernelAPI, onProgress: (id: string) => void) => Promise<R>,
+  timeoutMs = WATCHDOG_MS,
 ): Promise<R> {
   const current = lane === "scene" ? sceneCurrent : heavyCurrent;
   const { worker, raw } = current;
@@ -96,7 +149,7 @@ function withWatchdog<R>(
       if (lane === "scene") sceneCurrent = spawnWorker();
       else heavyCurrent = spawnWorker();
       reject(new KernelTimeoutError(lastProgressId));
-    }, WATCHDOG_MS);
+    }, timeoutMs);
 
     run(raw, (id) => {
       lastProgressId = id;
@@ -176,15 +229,38 @@ export const kernel = {
   // edit-triggered rebuild — every click should produce its own file.
   exportSTL: async (specs: NodeSpec[], quality: ExportQuality) => {
     // The scene worker may already hold this exact evaluated solid. Ask it
-    // for a tessellation-only export first; a cache miss remains cheap and
-    // falls back to the isolated heavy worker so a genuine rebuild never
-    // freezes interactive editing.
-    const cached = await withWatchdog("scene", (raw) => raw.exportCachedSTL(specs, quality));
-    return cached ?? withWatchdog(
-      "heavy",
-      (raw, onProgress) => raw.exportSTL(specs, quality, Comlink.proxy(onProgress)),
-    );
+    // for a tessellation-only export first. Do not wait behind a long scene
+    // rebuild: export can proceed independently on the heavy worker.
+    const cached = await probeCachedSTL(specs, quality, CACHE_PROBE_MS);
+    if (cached) return cached;
+    try {
+      return await withWatchdog(
+        "heavy",
+        (raw, onProgress) => raw.exportSTL(specs, quality, Comlink.proxy(onProgress)),
+        EXPORT_WATCHDOG_MS,
+      );
+    } catch (error) {
+      if (!(error instanceof KernelTimeoutError)) throw error;
+      // The interactive scene often finishes while the isolated export is
+      // running. Recover its now-cached STL automatically instead of briefly
+      // showing a timeout and requiring the exact same click again.
+      const recovered = await probeCachedSTL(specs, quality, CACHE_RECOVERY_MS);
+      if (recovered) return recovered;
+      throw error;
+    }
   },
+  exportDisplayedSTL: (items: DisplayedSceneItem[]) =>
+    withWatchdog(
+      "heavy",
+      (raw) => raw.exportDisplayedSTL(items),
+      DISPLAYED_EXPORT_WATCHDOG_MS,
+    ),
+  exportRefinedSTL: (specs: NodeSpec[], quality: ExportQuality) =>
+    withWatchdog(
+      "heavy",
+      (raw) => raw.exportRefinedSTL(specs, quality),
+      CURVED_EXPORT_WATCHDOG_MS,
+    ),
   // Bounding-box centres for regrouping — see the worker's centresOf. Runs
   // on the scene lane: it is small, and it blocks a user action.
   centresOf: (specs: NodeSpec[]) => withWatchdog("scene", (raw) => raw.centresOf(specs)),

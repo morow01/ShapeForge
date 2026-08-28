@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { kernel, KernelTimeoutError, WATCHDOG_MS } from "./kernel/client";
+import { EXPORT_WATCHDOG_MS, kernel, KernelTimeoutError, WATCHDOG_MS } from "./kernel/client";
 import { Viewport } from "./viewport/Viewport";
 import { Inspector } from "./ui/Inspector";
 import { Tree } from "./ui/Tree";
@@ -21,6 +21,12 @@ import type { GroupNode, PrimitiveKind, SceneNode, Vec3 } from "./document/types
 import type { EditSpec, ExportQuality, NodeSpec, PreviewBuild, ScenePart } from "./kernel/types";
 import type { CameraMode, Scene, ToolMode } from "./viewport/scene";
 import { APP_NAME, APP_VERSION } from "./version";
+import {
+  displayedBoundsOverlap,
+  displayedMeshBounds,
+  displayedSceneSTL,
+  mergeBinarySTLs,
+} from "./export/stl";
 import { positionWithReferenceGap } from "./snapping/spacing";
 import type { SnapAnchor, SnapAxis } from "./snapping/snap";
 
@@ -140,6 +146,13 @@ const shapeOf = (n: SceneNode): unknown => {
   return [n.id, n.kind, n.params];
 };
 
+/** Safe to rebuild independently during an export fallback. Primitive-only
+ * groups include the common box-with-sphere-Hole case, while imported scans,
+ * SVG artwork, edited faces and Shape Builder results retain their already
+ * verified displayed mesh instead of risking another long kernel call. */
+const canRefineExportFallback = (n: SceneNode): boolean =>
+  n.type === "object" || (isGroup(n) && n.children.every(canRefineExportFallback));
+
 const EXPORT_QUALITY_KEY = "cad.exportQuality";
 const SNAP_KEY = "cad.smartGuides";
 /** Extrusion depth a freshly imported artwork gets, in mm. Thin enough to
@@ -152,6 +165,15 @@ const EXPORT_QUALITY_HINT: Record<ExportQuality, string> = {
   draft: "Draft — fastest, visibly faceted curves. Good for test prints.",
   standard: "Standard — faint facets on curved surfaces, exports in a moment.",
   fine: "Fine — smooth curves, but a curved part can take several seconds.",
+};
+
+type FileOperation = {
+  label: string;
+  startedAt: number;
+  /** False while the browser is still reading/parsing the selected file. */
+  waitingForScene: boolean;
+  /** Opening/importing is only finished after the rebuilt scene has appeared. */
+  sawSceneBusy: boolean;
 };
 
 export function App() {
@@ -179,7 +201,6 @@ export function App() {
     pushPullFace,
     setOps,
     setHole,
-    restoreNodes,
     setSvgThickness,
     shapeBuild,
     setColor,
@@ -209,7 +230,10 @@ export function App() {
 
   const [parts, setParts] = useState<ScenePart[]>([]);
   const [exporting, setExporting] = useState(false);
+  const [exportStartedAt, setExportStartedAt] = useState<number | null>(null);
   const [readyExportUrl, setReadyExportUrl] = useState<string | null>(null);
+  const [exportReadyNoticeOpen, setExportReadyNoticeOpen] = useState(false);
+  const [fileOperation, setFileOperation] = useState<FileOperation | null>(null);
   /** Per-node failures, keyed by node id. */
   const [invalid, setInvalid] = useState<Record<string, string>>({});
   /** Top-level node ids excluded from kernel calls after a watchdog timeout —
@@ -233,6 +257,7 @@ export function App() {
    *  cell masks index them. Null whenever the tool is not running. */
   const [buildSources, setBuildSources] = useState<string[] | null>(null);
   const [buildBusy, setBuildBusy] = useState(false);
+  const [treeChangeBusy, setTreeChangeBusy] = useState(false);
   const [buildCells, setBuildCells] = useState<{ mask: number; kept: boolean }[]>([]);
   // Remembered across sessions: which quality you want is a property of how
   // you print, not of one export.
@@ -263,9 +288,49 @@ export function App() {
       return;
     }
     setBusySince((prev) => prev ?? Date.now());
+  }, [sceneBusy]);
+
+  // Has the kernel finished building this document even once? Only the FIRST
+  // build is the scene opening; every one after it is a rebuild of an edit
+  // the user just made. Without this, pulling a face put an "Opening scene"
+  // dialog back up on a scene that was plainly already open.
+  const hasBuilt = useRef(false);
+  const [sceneOpened, setSceneOpened] = useState(false);
+  useEffect(() => {
+    if (sceneBusy) hasBuilt.current = true;
+    else if (hasBuilt.current) setSceneOpened(true);
+  }, [sceneBusy]);
+
+  // Keep the elapsed-time readout moving for every long-running operation.
+  useEffect(() => {
+    if (!sceneBusy && !exporting && !fileOperation) return;
+    setBusyNow(Date.now());
     const t = setInterval(() => setBusyNow(Date.now()), 1000);
     return () => clearInterval(t);
-  }, [sceneBusy]);
+  }, [sceneBusy, exporting, fileOperation]);
+
+  // Project/file opening begins before the document changes, then continues
+  // through the asynchronous kernel rebuild. Keep its progress card visible
+  // until that rebuild has genuinely finished (and briefly handle an empty
+  // project, which has no build phase at all).
+  useEffect(() => {
+    if (!fileOperation) return;
+    // File reads do not have kernel progress events. Do not let the empty-
+    // project fallback below dismiss the card while a large file is still
+    // being read or parsed.
+    if (!fileOperation.waitingForScene) return;
+    if (sceneBusy && !fileOperation.sawSceneBusy) {
+      setFileOperation((current) => current ? { ...current, sawSceneBusy: true } : null);
+      return;
+    }
+    if (!sceneBusy && fileOperation.sawSceneBusy) {
+      const t = window.setTimeout(() => setFileOperation(null), 250);
+      return () => window.clearTimeout(t);
+    }
+    if (!sceneBusy && busyNow - fileOperation.startedAt > 1200) {
+      setFileOperation(null);
+    }
+  }, [sceneBusy, fileOperation, busyNow]);
 
   const saveLabel = storageBlocked
     ? "⚠ Autosave unavailable — this browser is blocking local storage."
@@ -336,6 +401,28 @@ export function App() {
   const shapeKey = useMemo(() => JSON.stringify(buildableNodes.map(shapeOf)), [buildableNodes]);
 
   const sceneRef = useRef<Scene | null>(null);
+  // A prepared STL is valid only for the exact document and quality used to
+  // create it. The revision also catches a change made while export is still
+  // running, before there is a URL for the invalidation effect to clear.
+  const exportSceneRevisionRef = useRef(0);
+  useEffect(() => {
+    exportSceneRevisionRef.current += 1;
+    setReadyExportUrl(null);
+    setExportReadyNoticeOpen(false);
+  }, [nodes, skippedIds, exportQuality]);
+  useEffect(() => () => {
+    if (readyExportUrl) URL.revokeObjectURL(readyExportUrl);
+  }, [readyExportUrl]);
+  useEffect(() => {
+    if (!exportReadyNoticeOpen) return;
+    const timer = window.setTimeout(() => setExportReadyNoticeOpen(false), 10_000);
+    return () => window.clearTimeout(timer);
+  }, [exportReadyNoticeOpen]);
+  // Group/ungroup performs two asynchronous kernel measurements around the
+  // document mutation. Never allow another tree change to interleave with
+  // that sequence: an older check can otherwise restore a newer tree and
+  // leave one child expressed in the wrong coordinate frame.
+  const treeChangeBusyRef = useRef(false);
   const toolModeRef = useRef<ToolMode>("select");
   toolModeRef.current = toolMode;
   const buildId = useRef(0);
@@ -553,6 +640,12 @@ export function App() {
       setError(`${file.name} is ${(file.size / (1024 * 1024)).toFixed(0)} MB — too large to import.`);
       return;
     }
+    setFileOperation({
+      label: `Opening ${file.name}`,
+      startedAt: Date.now(),
+      waitingForScene: false,
+      sawSceneBusy: false,
+    });
     try {
       if (/.svg$/i.test(file.name)) {
         // Vector artwork is parsed here, on the main thread: reading it needs
@@ -561,6 +654,7 @@ export function App() {
         const { parseSvg } = await import("./svg/parse");
         const art = parseSvg(await file.text());
         if (!art.paths.length) {
+          setFileOperation(null);
           setError(`${file.name} has no shapes to build from — outline any text before exporting.`);
           return;
         }
@@ -572,6 +666,7 @@ export function App() {
           width: art.width,
           height: art.height,
         });
+        setFileOperation((current) => current ? { ...current, waitingForScene: true } : null);
         setError(null);
         return;
       }
@@ -579,6 +674,7 @@ export function App() {
       const bytes = await file.arrayBuffer();
       const triangles = peekBinaryTriangleCount(bytes);
       if (triangles !== null && triangles > MAX_IMPORT_TRIANGLES) {
+        setFileOperation(null);
         setError(
           `${file.name} has ${triangles.toLocaleString()} triangles — too complex to import here. ` +
             `Try simplifying/decimating it in a mesh tool first (aim under ${MAX_IMPORT_TRIANGLES.toLocaleString()}).`,
@@ -588,79 +684,48 @@ export function App() {
       const blobId = crypto.randomUUID();
       await putBlob(blobId, bytes);
       addImport(blobId, file.name, file.size);
+      setFileOperation((current) => current ? { ...current, waitingForScene: true } : null);
       setError(null);
     } catch (e) {
+      setFileOperation(null);
       setError(`Could not read ${file.name}: ${msg(e)}`);
     }
   };
 
+  const downloadReadySTL = () => {
+    if (!readyExportUrl) return;
+    const a = document.createElement("a");
+    a.href = readyExportUrl;
+    a.download = "part.stl";
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setExportReadyNoticeOpen(false);
+    setReadyExportUrl(null);
+  };
+
   const exportSTL = async () => {
     if (exporting) return;
-    // Browsers without showSaveFilePicker need the actual download click to
-    // happen synchronously inside a user gesture. The first click prepares
-    // the Blob; this second, clearly labelled click performs the download.
+    // The download click must happen inside a fresh user gesture. The first
+    // click prepares the Blob; the ready dialog or header button supplies that
+    // second click after even a long-running export.
     if (readyExportUrl) {
-      const a = document.createElement("a");
-      a.href = readyExportUrl;
-      a.download = "part.stl";
-      a.style.display = "none";
-      document.body.appendChild(a);
-      a.click();
-      setReadyExportUrl(null);
-      window.setTimeout(() => {
-        a.remove();
-        URL.revokeObjectURL(readyExportUrl);
-      }, 60_000);
+      downloadReadySTL();
       return;
     }
     setExporting(true);
+    setExportStartedAt(Date.now());
     setError(null);
-    // Ask where to save while this click still has browser user activation.
-    // Waiting for the CAD worker first can make Chromium silently reject a
-    // later synthetic <a download> click, which looked like Export did
-    // nothing even though the STL Blob had been generated successfully.
-    type SaveHandle = {
-      createWritable(): Promise<{ write(data: Blob): Promise<void>; close(): Promise<void> }>;
+    setExportReadyNoticeOpen(false);
+    const finishExport = async (blob: Blob) => {
+      setReadyExportUrl(URL.createObjectURL(blob));
+      setExportReadyNoticeOpen(true);
     };
-    const picker = (window as typeof window & {
-      showSaveFilePicker?: (options: {
-        suggestedName: string;
-        types: { description: string; accept: Record<string, string[]> }[];
-      }) => Promise<SaveHandle>;
-    }).showSaveFilePicker;
-    let saveHandle: SaveHandle | null = null;
-    if (picker) {
-      const askedAt = performance.now();
-      try {
-        saveHandle = await picker({
-          suggestedName: "part.stl",
-          types: [{ description: "STL model", accept: { "model/stl": [".stl"] } }],
-        });
-      } catch (e) {
-        // AbortError fires both when the user genuinely clicks Cancel on the
-        // dialog, AND when the browser silently refuses to show it at all —
-        // lost window focus, an enterprise policy, a privacy extension, or an
-        // automated/kiosk environment all produce the exact same error name
-        // and message, with no dialog ever appearing. Those two cases are
-        // indistinguishable from the rejection alone, and treating every
-        // AbortError as "user cancelled" made Export STL a silent no-op
-        // whenever the picker couldn't be shown — clicking it did nothing,
-        // with no error, no download, nothing. A human cannot see a dialog
-        // render and click Cancel in under ~250ms, so a near-instant reject
-        // means the picker never actually appeared; fall through to the
-        // ordinary <a download> path below instead of giving up. A genuine,
-        // slower cancel is still respected and does nothing further.
-        const instant = performance.now() - askedAt < 250;
-        if (e instanceof DOMException && e.name === "AbortError" && !instant) {
-          setExporting(false);
-          return;
-        }
-        // Unsupported/restricted picker, or a picker that never actually
-        // showed: use the ordinary download fallback.
-      }
-    }
+
     try {
-      const currentNodes = pruneSkipped(useDoc.getState().nodes, skippedIds);
+      let exportRevision = exportSceneRevisionRef.current;
+      let currentNodes = pruneSkipped(useDoc.getState().nodes, skippedIds);
       // Always export from the kernel, even for a single object. Re-using the
       // mesh already on screen is faster, but the viewport mesh is built at
       // EDIT_QUALITY and inherits whatever tessellation cracks that pass left
@@ -669,26 +734,153 @@ export function App() {
       // app that has to be right, so it gets the export-quality, healed path
       // (see blobSTLOf in worker.ts); the worker's own result cache is what
       // keeps that fast.
-      const blob = await kernel.exportSTL(currentNodes.map(toSpec), exportQuality);
+      let blob: Blob | null;
+      try {
+        blob = await kernel.exportSTL(currentNodes.map(toSpec), exportQuality);
+      } catch (e) {
+        if (!(e instanceof KernelTimeoutError) || !e.nodeId) throw e;
+
+        // The high-detail merged export can spend minutes rebuilding one
+        // complicated history even though its verified editing mesh is
+        // already on screen. Preserve every visible root as an STL shell
+        // instead of excluding the blamed object. Internal group holes and
+        // booleans are already baked into each displayed root mesh.
+        const timedOutId = e.nodeId;
+        const timedOutNode = findNode(useDoc.getState().nodes, timedOutId);
+        const fallbackItems = currentNodes.map((node) => {
+          const part = parts.find((candidate) => candidate.id === node.id);
+          return part ? { node, mesh: part.mesh } : null;
+        });
+        const missing = fallbackItems.filter((item) => !item).length;
+        if (missing) {
+          throw new Error(
+            `${timedOutNode?.name ?? "One object"} took too long and ${missing} visible ` +
+              `shape${missing === 1 ? " was" : "s were"} not ready for the complete-scene fallback.`,
+          );
+        }
+        const completeItems = fallbackItems.filter(
+          (item): item is NonNullable<typeof item> => item !== null,
+        );
+        const solids = completeItems.filter(({ node }) => !node.isHole);
+        const holes = completeItems.filter(({ node }) => node.isHole);
+        const solidBounds = new Map(
+          solids.map((item) => [item.node.id, displayedMeshBounds(item.mesh, item.node)]),
+        );
+        const holeBounds = new Map(
+          holes.map((item) => [item.node.id, displayedMeshBounds(item.mesh, item.node)]),
+        );
+        const affectedSolids = solids.filter((solid) =>
+          holes.some((hole) =>
+            displayedBoundsOverlap(solidBounds.get(solid.node.id)!, holeBounds.get(hole.node.id)!),
+          ),
+        );
+        const affectedIds = new Set(affectedSolids.map(({ node }) => node.id));
+        const relevantHoles = holes.filter((hole) =>
+          affectedSolids.some((solid) =>
+            displayedBoundsOverlap(solidBounds.get(solid.node.id)!, holeBounds.get(hole.node.id)!),
+          ),
+        );
+        const unaffectedSolids = solids.filter(({ node }) => !affectedIds.has(node.id));
+        const holesFor = (solid: (typeof solids)[number]) => holes.filter((hole) =>
+          displayedBoundsOverlap(solidBounds.get(solid.node.id)!, holeBounds.get(hole.node.id)!),
+        );
+        const refinedAffectedSolids = affectedSolids.filter(
+          (solid) =>
+            canRefineExportFallback(solid.node) &&
+            holesFor(solid).every(({ node }) => canRefineExportFallback(node)),
+        );
+        const refinedAffectedIds = new Set(refinedAffectedSolids.map(({ node }) => node.id));
+        const refinedHoles = holes.filter(
+          (hole) =>
+            canRefineExportFallback(hole.node) &&
+            refinedAffectedSolids.some((solid) =>
+              displayedBoundsOverlap(solidBounds.get(solid.node.id)!, holeBounds.get(hole.node.id)!),
+            ),
+        );
+        const displayedAffectedSolids = affectedSolids.filter(
+          ({ node }) => !refinedAffectedIds.has(node.id),
+        );
+        const displayedRelevantHoles = relevantHoles.filter((hole) =>
+          displayedAffectedSolids.some((solid) =>
+            displayedBoundsOverlap(solidBounds.get(solid.node.id)!, holeBounds.get(hole.node.id)!),
+          ),
+        );
+        const refinedFallbackItems = [
+          ...unaffectedSolids.filter(({ node }) => canRefineExportFallback(node)),
+          ...refinedAffectedSolids,
+          ...refinedHoles,
+        ];
+        const refinedIds = new Set(refinedFallbackItems.map(({ node }) => node.id));
+        const displayedFallbackItems = unaffectedSolids.filter(
+          ({ node }) => !refinedIds.has(node.id),
+        );
+        const fallbackBlobs: Blob[] = [];
+
+        if (displayedFallbackItems.length) {
+          fallbackBlobs.push(displayedSceneSTL(displayedFallbackItems));
+        }
+
+        if (refinedFallbackItems.length) {
+          try {
+            const refined = await kernel.exportRefinedSTL(
+              refinedFallbackItems.map(({ node }) => toSpec(node)),
+              exportQuality,
+            );
+            if (refined) fallbackBlobs.push(refined);
+          } catch {
+            // Refining primitive-only roots is an improvement, not a reason
+            // to lose an otherwise complete export. Retain their verified
+            // displayed shells if this optional pass cannot finish.
+            fallbackBlobs.push(displayedSceneSTL(refinedFallbackItems));
+          }
+        }
+
+        // Only meshes whose world-space boxes touch a Hole enter the boolean
+        // fallback. A distant high-triangle scan is written directly from its
+        // verified viewport mesh and cannot stall an unrelated subtraction.
+        if (displayedAffectedSolids.length) {
+          let drilled: Blob | null;
+          try {
+            drilled = await kernel.exportDisplayedSTL(
+              [...displayedAffectedSolids, ...displayedRelevantHoles].map(({ node, mesh }) => ({
+                spec: toSpec(node),
+                mesh,
+              })),
+            );
+          } catch (fallbackError) {
+            if (fallbackError instanceof KernelTimeoutError) {
+              throw new Error(
+                "The visible Hole subtraction also exceeded 30 seconds. No incomplete STL was created; " +
+                  "group each Hole with the solid it cuts, or simplify that affected object, then export again.",
+              );
+            }
+            throw fallbackError;
+          }
+          if (!drilled) throw new Error("The visible Hole fallback did not produce an STL.");
+          fallbackBlobs.push(drilled);
+        }
+        if (!fallbackBlobs.length) throw new Error("The complete-scene fallback produced no solids.");
+        blob = fallbackBlobs.length === 1
+          ? fallbackBlobs[0]
+          : await mergeBinarySTLs(fallbackBlobs);
+      }
       if (!blob) {
         setError("Nothing to export — add at least one solid.");
         return;
       }
-      if (saveHandle) {
-        const writable = await saveHandle.createWritable();
-        await writable.write(blob);
-        await writable.close();
-        return;
-      }
-      setReadyExportUrl(URL.createObjectURL(blob));
+      // Do not offer an already-stale download if the user edited the scene
+      // while the worker was preparing it. The button naturally returns to
+      // Export STL and the next click builds the current document.
+      if (exportSceneRevisionRef.current !== exportRevision) return;
+      await finishExport(blob);
     } catch (e) {
       if (e instanceof KernelTimeoutError && e.nodeId) {
         setInvalid((prev) => ({ ...prev, [e.nodeId!]: e.message }));
-        setSkippedIds((prev) => addSkip(prev, e.nodeId!));
       }
       setError(msg(e));
     } finally {
       setExporting(false);
+      setExportStartedAt(null);
     }
   };
 
@@ -828,18 +1020,21 @@ export function App() {
   const regroupCentres = useCallback(async (): Promise<Record<string, Vec3>> => {
     const { nodes, selectedIds } = useDoc.getState();
     const wanted = new Map<string, NodeSpec>();
+    const isScaled = (group: GroupNode) => group.scale.some((value) => Math.abs(value - 1) > 1e-9);
     const collect = (list: SceneNode[], ancestors: GroupNode[]) => {
       for (const n of list) {
         if (selectedIds.includes(n.id) && ancestors.length) {
-          wanted.set(n.id, toSpec(n));
-          for (const g of ancestors) {
+          const scaledAncestors = ancestors.filter(isScaled);
+          if (scaledAncestors.length) wanted.set(n.id, toSpec(n));
+          for (const g of scaledAncestors) {
             wanted.set(g.id, { ...toSpec(g), position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] });
           }
         }
         if (isGroup(n)) {
           // A group that is itself selected is about to be dissolved, so its
-          // children are moving frames too.
-          if (selectedIds.includes(n.id)) {
+          // children are moving frames too. Unit-scale groups need no kernel
+          // centres at all: their child offsets are already exact.
+          if (selectedIds.includes(n.id) && isScaled(n)) {
             wanted.set(n.id, { ...toSpec(n), position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] });
             for (const child of n.children) wanted.set(child.id, toSpec(child));
           }
@@ -858,90 +1053,36 @@ export function App() {
     }
   }, []);
 
-  /**
-   * What the model IS, independent of how it is arranged: the volume and
-   * centroid of everything the kernel would build. Grouping and ungrouping
-   * change the tree, never the part, so this number has to survive them.
-   */
-  const modelSignature = useCallback(async (nodes: SceneNode[]) => {
-    const blob = await kernel.exportSTL(nodes.map(toSpec), "draft");
-    if (!blob) return null;
-    const view = new DataView(await blob.arrayBuffer());
-    const count = view.getUint32(80, true);
-    let volume = 0;
-    const centroid = [0, 0, 0];
-    for (let i = 0; i < count; i++) {
-      const at = 84 + i * 50 + 12;
-      const p: number[][] = [];
-      for (let v = 0; v < 3; v++) {
-        p.push([
-          view.getFloat32(at + v * 12, true),
-          view.getFloat32(at + v * 12 + 4, true),
-          view.getFloat32(at + v * 12 + 8, true),
-        ]);
+  /** Serialises tree changes, but never runs a whole-scene STL export merely
+   * to permit Group/Ungroup. That safety check hit the same complex-object
+   * watchdog as export and made the Group button appear broken for 30 seconds.
+   * Frame preservation lives in the store and the worker's verified caches;
+   * this lock prevents two regroup operations from interleaving. */
+  const applyTreeChange = useCallback(
+    async (apply: (centres: Record<string, Vec3>) => void) => {
+      if (treeChangeBusyRef.current) return;
+      treeChangeBusyRef.current = true;
+      setTreeChangeBusy(true);
+      try {
+        const centres = await regroupCentres();
+        apply(centres);
+      } finally {
+        treeChangeBusyRef.current = false;
+        setTreeChangeBusy(false);
       }
-      const [x, y, z] = p;
-      const d =
-        (x[0] * (y[1] * z[2] - z[1] * y[2]) -
-          x[1] * (y[0] * z[2] - z[0] * y[2]) +
-          x[2] * (y[0] * z[1] - z[0] * y[1])) / 6;
-      volume += d;
-      for (let k = 0; k < 3; k++) centroid[k] += (d * (x[k] + y[k] + z[k])) / 4;
-    }
-    if (!Number.isFinite(volume) || Math.abs(volume) < 1e-9) return null;
-    return { volume: Math.abs(volume), centroid: centroid.map((c) => c / volume) };
-  }, []);
-
-  /**
-   * Runs a tree change and checks the model came through it unchanged, putting
-   * the document back if it did not.
-   *
-   * Grouping has repeatedly moved or erased parts here — through OCCT
-   * booleans that fail differently from one attempt to the next, and through
-   * my own arithmetic for frames that scale. Each cause gets fixed as it is
-   * found, but the guarantee should not depend on having found them all: a
-   * rearrangement that changes the part is always wrong, and is better
-   * refused than saved.
-   */
-  const guardTreeChange = useCallback(
-    async (apply: () => void, label: string) => {
-      const before = useDoc.getState();
-      const previous = before.nodes;
-      const previousSelection = before.selectedIds;
-      const signatureBefore = await modelSignature(previous);
-      apply();
-      if (!signatureBefore) return;
-      const after = await modelSignature(useDoc.getState().nodes);
-      // Loose enough to ignore the difference between the two kernels — the
-      // same model fused by OCCT and by manifold measures about 0.2% apart,
-      // and its centroid up to a millimetre — and tight enough to catch what
-      // actually goes wrong here, which is a part landing tens of millimetres
-      // away or the whole model disappearing.
-      const moved =
-        !after ||
-        Math.abs(after.volume - signatureBefore.volume) > signatureBefore.volume * 0.02 ||
-        after.centroid.some((c, i) => Math.abs(c - signatureBefore.centroid[i]) > 2);
-      if (!moved) return;
-      restoreNodes(previous, previousSelection);
-      setError(
-        !after
-          ? `${label} was undone: it left nothing to build.`
-          : `${label} was undone: it would have changed the model ` +
-            `(volume ${signatureBefore.volume.toFixed(0)} to ${after.volume.toFixed(0)} mm³).`,
-      );
     },
-    [modelSignature, restoreNodes],
+    [regroupCentres],
   );
 
-  const ungroupSelected = useCallback(async () => {
-    const centres = await regroupCentres();
-    await guardTreeChange(() => ungroup(centres), "Ungroup");
-  }, [ungroup, regroupCentres, guardTreeChange]);
+  const ungroupSelected = useCallback(
+    () => applyTreeChange((centres) => ungroup(centres)),
+    [ungroup, applyTreeChange],
+  );
 
-  const groupSelected = useCallback(async () => {
-    const centres = await regroupCentres();
-    await guardTreeChange(() => group(centres), "Group");
-  }, [group, regroupCentres, guardTreeChange]);
+  const groupSelected = useCallback(
+    () => applyTreeChange((centres) => group(centres)),
+    [group, applyTreeChange],
+  );
 
   const dropSelected = useCallback(() => {
     const updates = sceneRef.current?.dropSelected() ?? [];
@@ -952,12 +1093,15 @@ export function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement | null;
-      if (el && /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName)) return;
+      if (el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable)) return;
       const mod = e.ctrlKey || e.metaKey;
 
       if ((e.key === "Delete" || e.key === "Backspace") && useDoc.getState().selectedIds.length) {
         e.preventDefault();
         removeSelected();
+      } else if (mod && e.key.toLowerCase() === "a") {
+        e.preventDefault();
+        selectMany(useDoc.getState().nodes.map((node) => node.id));
       } else if (mod && e.key.toLowerCase() === "o") {
         e.preventDefault();
         setProjectsModalOpen(true);
@@ -1016,7 +1160,21 @@ export function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [removeSelected, undo, redo, group, ungroup, toggleTransparency, dropSelected, ungroupSelected, groupSelected, commitBuild, exportCurrentProject, newProject]);
+  }, [removeSelected, selectMany, undo, redo, group, ungroup, toggleTransparency, dropSelected, ungroupSelected, groupSelected, commitBuild, exportCurrentProject, newProject]);
+
+  const progressLabel = exporting
+    ? "Exporting STL"
+    : fileOperation?.label ?? (
+      sceneBusy && busySince && busyNow - busySince >= 500
+        ? sceneOpened ? "Updating shape" : "Opening scene"
+        : null
+    );
+  const progressStartedAt = exporting
+    ? exportStartedAt
+    : fileOperation?.startedAt ?? busySince;
+  const progressElapsed = progressStartedAt
+    ? Math.max(0, Math.floor((busyNow - progressStartedAt) / 1000))
+    : 0;
 
   return (
     <div className="app-shell">
@@ -1086,8 +1244,8 @@ export function App() {
           <button onClick={() => redo()} disabled={!canRedo} title="Redo (Ctrl+Shift+Z)">↷ Redo</button>
         </div>
         <div className="toolbar-group">
-          <button onClick={() => groupSelected()} disabled={!canGroup} title="Ctrl+G">Group</button>
-          <button onClick={() => ungroupSelected()} disabled={!canUngroup} title="Ctrl+Shift+G">Ungroup</button>
+          <button onClick={() => groupSelected()} disabled={!canGroup || treeChangeBusy} title="Ctrl+G">Group</button>
+          <button onClick={() => ungroupSelected()} disabled={!canUngroup || treeChangeBusy} title="Ctrl+Shift+G">Ungroup</button>
         </div>
         <div className="toolbar-group view-tools">
           <button className={cameraMode === "perspective" ? "on" : ""} onClick={() => setCameraMode("perspective")}>Perspective</button>
@@ -1144,6 +1302,27 @@ export function App() {
           {exporting ? "Exporting…" : readyExportUrl ? "Download STL" : "Export STL"}
         </button>
       </header>
+
+      {readyExportUrl && exportReadyNoticeOpen && (
+        <div className="export-ready-notice" role="status" aria-live="polite">
+          <div className="export-ready-icon" aria-hidden="true">✓</div>
+          <div className="export-ready-copy">
+            <strong>Your STL is ready</strong>
+            <span>You can download it now.</span>
+          </div>
+          <button className="export-ready-download" onClick={downloadReadySTL}>
+            Download
+          </button>
+          <button
+            className="export-ready-dismiss"
+            onClick={() => setExportReadyNoticeOpen(false)}
+            aria-label="Dismiss export notification"
+            title="Dismiss"
+          >
+            ×
+          </button>
+        </div>
+      )}
 
       <aside className="panel object-panel">
         <div className="panel-heading">
@@ -1329,12 +1508,43 @@ export function App() {
             ? "Click a flat face, then drag its arrow or type a distance to push/pull · Esc Select · Right-drag orbit"
             : "V Select · F Face · M Move · R Rotate · A Align · T Transparent · W Wireframe · D Drop · S Snapping · Drag an object to move it · Alt-drag duplicate · Shift-drag straight · Right-drag orbit"}
         </div>
-        {error && <div className="canvas-error">{error}</div>}
-        {!error && busy && busySince && busyNow - busySince > 8000 && (
-          <div className="canvas-notice">
-            Large or complex files can take a few minutes. ShapeForge will stop after {Math.round(WATCHDOG_MS / 60_000)} min.
-          </div>
-        )}
+        {/* One centred stack. The progress card and the slow-file warning
+            were each pinned to top: 14px of their own, so whichever drew
+            second simply covered the other — reported as "the opening dialog
+            covers the other dialog". */}
+        <div className="canvas-banners">
+          {progressLabel && (
+            <div
+              className="operation-progress"
+              role="progressbar"
+              aria-label={progressLabel}
+              aria-valuetext={`${progressElapsed} seconds elapsed`}
+            >
+              <div className="operation-progress-heading">
+                <strong>{progressLabel}</strong>
+                <span>{progressElapsed}s elapsed</span>
+              </div>
+              <div className="operation-progress-track" aria-hidden="true">
+                <span />
+              </div>
+              <small>
+                {exporting && progressElapsed >= Math.round(EXPORT_WATCHDOG_MS / 1000)
+                  ? "Switching to the complete visible-mesh fallback…"
+                  : progressElapsed >= 8
+                  ? exporting
+                    ? `High-detail export gets ${Math.round(EXPORT_WATCHDOG_MS / 1000)}s before the complete fallback.`
+                    : `Complex models can take up to ${Math.round(WATCHDOG_MS / 60_000)} min.`
+                  : "Preparing geometry…"}
+              </small>
+            </div>
+          )}
+          {error && <div className="canvas-error">{error}</div>}
+          {!error && busy && busySince && busyNow - busySince > 8000 && (
+            <div className="canvas-notice">
+              Large or complex files can take a few minutes. ShapeForge will stop after {Math.round(WATCHDOG_MS / 60_000)} min.
+            </div>
+          )}
+        </div>
       </main>
 
       <aside className="panel tools-panel">
@@ -1496,6 +1706,19 @@ export function App() {
       <ProjectsModal
         isOpen={projectsModalOpen}
         onClose={() => setProjectsModalOpen(false)}
+        onProjectLoadStart={(name) => {
+          setError(null);
+          setFileOperation({
+            label: `Opening ${name}`,
+            startedAt: Date.now(),
+            waitingForScene: false,
+            sawSceneBusy: false,
+          });
+        }}
+        onProjectLoadApplied={() => {
+          setFileOperation((current) => current ? { ...current, waitingForScene: true } : null);
+        }}
+        onProjectLoadFailed={() => setFileOperation(null)}
       />
     </div>
   );

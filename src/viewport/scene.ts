@@ -124,7 +124,26 @@ interface PushPullDrag {
    *  the newest distance instead of replaying a backlog of stale positions. */
   previewInFlight: boolean;
   queuedPreviewDistance: number | null;
+  /** How far the drag has reached, in WORLD millimetres — what the arrow,
+   *  the pill and the user all deal in. Divide by worldPerLocal for anything
+   *  the kernel sees. */
   currentDistance: number;
+  /** World millimetres of face travel per millimetre of push/pull in the
+   *  kernel's own frame. The two are only equal on an unscaled part — see
+   *  worldPerLocalAlong(). */
+  worldPerLocal: number;
+}
+
+/** What the typed-input pill would apply to while it is open. Named (rather
+ *  than inlined on the field) so applyPushPull() can take one. */
+interface PushPullPending {
+  id: string;
+  localPoint: Vec3;
+  localNormal: Vec3;
+  view: PartView;
+  originalGeom: ThreeGeometry[];
+  originalPivot: THREE.Vector3;
+  worldPerLocal: number;
 }
 
 interface ResizeTarget {
@@ -360,6 +379,29 @@ function syncKernelGeometry(mesh: KernelMesh, previous: ThreeGeometry[] = []): T
 /** One push/pull grip: a stubby arrow (shaft + cone) built pointing along
  *  +Y, so a single setFromUnitVectors aims it down any face normal. Drawn
  *  without depth testing so a face's own arrow is never buried in it. */
+/** The centre of a kernel mesh's bounding box — the very point
+ *  centreGeometry() derives a part's pivot from, read straight off a preview
+ *  build without having to put it on screen first. Null for an empty mesh. */
+function meshCentre(mesh: KernelMesh): THREE.Vector3 | null {
+  const v = mesh.faces.vertices;
+  if (!v.length) return null;
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i + 2 < v.length; i += 3) {
+    for (let k = 0; k < 3; k++) {
+      const c = v[i + k];
+      if (c < min[k]) min[k] = c;
+      if (c > max[k]) max[k] = c;
+    }
+  }
+  if (!min.every(Number.isFinite) || !max.every(Number.isFinite)) return null;
+  return new THREE.Vector3(
+    (min[0] + max[0]) / 2,
+    (min[1] + max[1]) / 2,
+    (min[2] + max[2]) / 2,
+  );
+}
+
 function makeArrow(): THREE.Object3D {
   const material = new THREE.MeshBasicMaterial({ color: 0x2457ff, depthTest: false });
   const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.14, 1.15, 12), material);
@@ -451,14 +493,7 @@ export class Scene {
    *  showPushPullInput(), read by commitOrAbandonPushPull(), cleared once it
    *  closes (blur/Enter/Escape). Carries the pre-drag geometry snapshot too,
    *  so abandoning can revert a live preview exactly. */
-  private pushPullPending: {
-    id: string;
-    localPoint: Vec3;
-    localNormal: Vec3;
-    view: PartView;
-    originalGeom: ThreeGeometry[];
-    originalPivot: THREE.Vector3;
-  } | null = null;
+  private pushPullPending: PushPullPending | null = null;
   /** Whichever face the pointer is directly over right now — Shapr3D-style
    *  hover, independent of object selection: any face of any visible part,
    *  planar or curved, not just the arrows on a pre-selected object's own
@@ -586,7 +621,11 @@ export class Scene {
   /** Push/pull: a face on `id` was pushed or pulled by `distance` (mm, along
    *  the face's own outward normal — see PushPullOp in document/types.ts). */
   onPushPullFace:
-    | ((id: string, op: { point: Vec3; normal: Vec3; distance: number }) => void)
+    | ((
+      id: string,
+      op: { point: Vec3; normal: Vec3; distance: number },
+      positionDelta: Vec3,
+    ) => void)
     | null = null;
   /** Live preview during a push/pull drag — a real (throttled) kernel
    *  rebuild of just that one node with the dragged distance tentatively
@@ -1152,6 +1191,14 @@ export class Scene {
         o.position[1] + rotatedPivot.y,
         o.position[2] + rotatedPivot.z,
       );
+      // A push/pull preview is showing a shape the document does not have
+      // yet, and that shape's bounding-box centre has moved. Cancel the
+      // slide it would otherwise impose on the rest of the object, so what
+      // the drag shows is exactly where the committed edit will land.
+      const previewing = this.pushPullDrag ?? this.pushPullPending;
+      if (previewing?.id === o.id) {
+        view.group.position.sub(this.pivotDrift(view, previewing.originalPivot, view.pivot));
+      }
       view.isHole = o.isHole;
     }
   }
@@ -1486,11 +1533,59 @@ export class Scene {
     return new THREE.Vector3(p[0], p[1], p[2]).sub(view.pivot).applyMatrix4(view.group.matrixWorld);
   }
 
-  /** Rotation only — a normal must not pick up the group's translation. */
+  /** Rotation and scale, never translation. A plane's normal transforms by
+   *  the inverse transpose (n / s, not n * s), so on a non-uniformly scaled
+   *  part this is what keeps the arrow square to the face actually on
+   *  screen. Axis-aligned faces — every box face — come out the same either
+   *  way; only slanted ones change. */
   private kernelNormalToWorld(view: PartView, n: Vec3): THREE.Vector3 {
-    return new THREE.Vector3(n[0], n[1], n[2])
+    const s = view.group.scale;
+    return new THREE.Vector3(n[0] / (s.x || 1), n[1] / (s.y || 1), n[2] / (s.z || 1))
       .applyQuaternion(view.group.getWorldQuaternion(new THREE.Quaternion()))
       .normalize();
+  }
+
+  /**
+   * How far a face moves on screen, in world millimetres, per millimetre of
+   * push/pull in the kernel's own frame.
+   *
+   * A node's scale is NOT baked into its solid: place() applies it at the
+   * end, about the solid's own bounding-box centre. So a 10 mm pull on a
+   * part scaled 0.3 across that axis only moved the face 3 mm — and, because
+   * the centre it scales about had moved too, slid the whole REST of the
+   * object the other way to make up the difference. That was the reported
+   * "the whole object is moving when pulling a face": measured on a part
+   * scaled 0.3025, a 40 mm drag moved the pulled face 26.05 mm and the
+   * untouched far side 13.95 mm. Dividing by this puts the drag back into
+   * the kernel's units; pivotDrift() cancels what is left of the slide.
+   */
+  private worldPerLocalAlong(view: PartView, n: Vec3): number {
+    const s = view.group.scale;
+    const inverse = Math.hypot(n[0] / (s.x || 1), n[1] / (s.y || 1), n[2] / (s.z || 1));
+    return inverse > 1e-9 ? 1 / inverse : 1;
+  }
+
+  /** The kernel-frame distance that shows up as `world` mm on screen. */
+  private toLocalDistance(world: number, worldPerLocal: number): number {
+    return worldPerLocal > 1e-9 ? world / worldPerLocal : world;
+  }
+
+  /**
+   * How far a part's UNTOUCHED geometry slides when an edit moves the
+   * solid's bounding-box centre from `from` to `to`. place() scales about
+   * that centre, so a centre that moves by dC carries everything else along
+   * by (1 - s) * dC. Zero on an unscaled part; on a scaled one this is what
+   * has to be cancelled — live while previewing (applyPlacements) and for
+   * real in the document (applyPushPull) — to keep the far side of the
+   * object still while one face is pulled.
+   */
+  private pivotDrift(view: PartView, from: THREE.Vector3, to: THREE.Vector3): THREE.Vector3 {
+    const s = view.group.scale;
+    return new THREE.Vector3(
+      (to.x - from.x) * (1 - s.x),
+      (to.y - from.y) * (1 - s.y),
+      (to.z - from.z) * (1 - s.z),
+    ).applyEuler(view.group.rotation);
   }
 
   /**
@@ -1610,6 +1705,7 @@ export class Scene {
         found.view,
         this.cloneGeom(found.view.geom),
         found.view.pivot.clone(),
+        this.worldPerLocalAlong(found.view, face.normal),
         handle.position,
         "0",
       );
@@ -1760,6 +1856,84 @@ export class Scene {
       previewInFlight: false,
       queuedPreviewDistance: null,
       currentDistance: 0,
+      worldPerLocal: this.worldPerLocalAlong(view, face.normal),
+    };
+    this.pushPullGeneration++;
+    this.controls.enabled = false;
+    this.gizmo.enabled = false;
+    e.preventDefault();
+    return true;
+  }
+
+  /**
+   * Starts the same push/pull gesture from anywhere on a planar face while the
+   * Face tool is active. Requiring a precise hit on the small arrow made an
+   * ordinary face drag fall through to the object's body-move gesture.
+   */
+  private beginPushPullFromFace(e: PointerEvent): boolean {
+    if (
+      this.toolMode !== "face" || this.showResult ||
+      e.ctrlKey || e.metaKey || e.shiftKey
+    ) return false;
+
+    const found = this.raycastFace(e);
+    if (!found) return false;
+    const { view, groupIndex } = found;
+    const partId = [...this.parts.entries()].find(([, candidate]) => candidate === view)?.[0];
+    const face = view.faces?.[groupIndex];
+    if (!partId || !face?.planar || face.pushPullable === false) return false;
+
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    view.group.updateWorldMatrix(true, true);
+    const at = this.kernelLocalToWorld(view, face.point);
+    const worldNormal = this.kernelNormalToWorld(view, face.normal);
+    const project = (point: THREE.Vector3) => {
+      const projected = point.clone().project(this.camera);
+      return {
+        x: ((projected.x + 1) / 2) * rect.width,
+        y: ((1 - projected.y) / 2) * rect.height,
+      };
+    };
+    const origin = project(at);
+    const along = project(at.clone().add(worldNormal));
+    const dx = along.x - origin.x;
+    const dy = along.y - origin.y;
+    const pixelsPerUnit = Math.hypot(dx, dy);
+    if (pixelsPerUnit < 1e-3) return false;
+
+    // This temporary arrow follows the drag even when it started away from the
+    // selected face's centre. The normal pooled arrow is restored on release.
+    const scale = Math.max(0.65, this.worldSnapTolerance(at) * 1.15);
+    const handle = makeArrow();
+    handle.position.copy(at).addScaledVector(worldNormal, scale * 0.2);
+    handle.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), worldNormal);
+    handle.scale.setScalar(scale);
+    this.pushPullHandles.add(handle);
+
+    this.selectedFace = { partId, groupIndex };
+    this.selectedIds = [partId];
+    this.onSelectObject?.(partId, false);
+    this.restoreSelectedFaceHighlight();
+    this.pushPullDrag = {
+      id: partId,
+      localPoint: face.point,
+      localNormal: face.normal,
+      screenDir: { x: dx / pixelsPerUnit, y: dy / pixelsPerUnit },
+      pixelsPerUnit,
+      downScreen: { x: e.clientX, y: e.clientY },
+      active: false,
+      handle,
+      handleBasePosition: handle.position.clone(),
+      worldNormal,
+      ephemeral: true,
+      view,
+      originalGeom: this.cloneGeom(view.geom),
+      originalPivot: view.pivot.clone(),
+      lastPreviewAt: 0,
+      previewInFlight: false,
+      queuedPreviewDistance: null,
+      currentDistance: 0,
+      worldPerLocal: this.worldPerLocalAlong(view, face.normal),
     };
     this.pushPullGeneration++;
     this.controls.enabled = false;
@@ -1800,6 +1974,7 @@ export class Scene {
       drag.view,
       drag.originalGeom,
       drag.originalPivot,
+      drag.worldPerLocal,
       drag.handleBasePosition,
       initialValue,
     );
@@ -1812,6 +1987,7 @@ export class Scene {
     view: PartView,
     originalGeom: ThreeGeometry[],
     originalPivot: THREE.Vector3,
+    worldPerLocal: number,
     labelWorldPosition: THREE.Vector3,
     initialValue: string,
   ) {
@@ -1822,6 +1998,7 @@ export class Scene {
       view,
       originalGeom,
       originalPivot,
+      worldPerLocal,
     };
     this.pushPullLabelEl.style.display = "block";
     this.positionPushPullLabel(labelWorldPosition, this.kernelNormalToWorld(view, localNormal));
@@ -1882,17 +2059,45 @@ export class Scene {
         this.selectedFace = null;
         clearHighlights(pending.view.mesh.geometry as THREE.BufferGeometry);
       }
-      this.onPushPullFace?.(pending.id, {
-        point: pending.localPoint,
-        normal: pending.localNormal,
-        distance,
-      });
+      void this.applyPushPull(pending, distance);
     } else {
       if (this.selectedFace?.partId === pending.id) {
         this.selectedFace = null;
       }
       this.restoreGeom(pending.view, pending.originalGeom, pending.originalPivot);
     }
+  }
+
+  /**
+   * Writes a finished push/pull to the document: the distance converted back
+   * into the kernel's own frame, plus whatever position change keeps the
+   * rest of the object exactly where it was.
+   *
+   * That correction needs the edited solid's NEW bounding-box centre, which
+   * only the kernel knows, so this asks for one more local preview build
+   * first — cheap, and the shape already on screen covers the wait. An
+   * unscaled part never needs it (pivotDrift is identically zero there), so
+   * the common case skips the round trip entirely. If the build fails the op
+   * still goes through uncorrected: the shape is what matters, and the real
+   * rebuild has its own retries.
+   */
+  private async applyPushPull(pending: PushPullPending, world: number) {
+    const op = {
+      point: pending.localPoint,
+      normal: pending.localNormal,
+      distance: this.toLocalDistance(world, pending.worldPerLocal),
+    };
+    let shift: Vec3 = [0, 0, 0];
+    const scale = pending.view.group.scale;
+    if (scale.x !== 1 || scale.y !== 1 || scale.z !== 1) {
+      const preview = await this.onPreviewPushPull?.(pending.id, op);
+      const centre = preview ? meshCentre(preview.mesh) : null;
+      if (centre) {
+        const drift = this.pivotDrift(pending.view, pending.originalPivot, centre);
+        shift = [-drift.x, -drift.y, -drift.z];
+      }
+    }
+    this.onPushPullFace?.(pending.id, op, shift);
   }
 
   /** Puts a part's render geometry (and its matching pivot) back to a saved
@@ -1939,7 +2144,7 @@ export class Scene {
         const preview = await this.onPreviewPushPull?.(drag.id, {
           point: drag.localPoint,
           normal: drag.localNormal,
-          distance: nextDistance,
+          distance: this.toLocalDistance(nextDistance, drag.worldPerLocal),
         });
         // The drag may have ended (or a newer one started) while this was in
         // flight. Never let that stale result overwrite the current scene.
@@ -1970,7 +2175,7 @@ export class Scene {
     const preview = await this.onPreviewPushPull?.(drag.id, {
       point: drag.localPoint,
       normal: drag.localNormal,
-      distance,
+      distance: this.toLocalDistance(distance, drag.worldPerLocal),
     });
     if (!preview || generation !== this.pushPullGeneration) return;
     this.applyPreviewMesh(drag, preview);
@@ -2002,10 +2207,11 @@ export class Scene {
     if (preview.faces) {
       drag.view.faces = preview.faces;
       if (this.selectedFace?.partId === drag.id) {
+        const travelled = this.toLocalDistance(drag.currentDistance, drag.worldPerLocal);
         const expected: Vec3 = [
-          drag.localPoint[0] + drag.localNormal[0] * drag.currentDistance,
-          drag.localPoint[1] + drag.localNormal[1] * drag.currentDistance,
-          drag.localPoint[2] + drag.localNormal[2] * drag.currentDistance,
+          drag.localPoint[0] + drag.localNormal[0] * travelled,
+          drag.localPoint[1] + drag.localNormal[1] * travelled,
+          drag.localPoint[2] + drag.localNormal[2] * travelled,
         ];
         let bestIndex = this.selectedFace.groupIndex;
         let bestDistance = Infinity;
@@ -2789,7 +2995,7 @@ export class Scene {
     // Before beginResize: the face arrows sit outside the bounds cage, but
     // an arrow near a corner could otherwise fall inside beginResize's own
     // screen-space grab radius and be swallowed by it.
-    if (this.beginPushPull(e)) {
+    if (this.beginPushPull(e) || this.beginPushPullFromFace(e)) {
       this.downAt = null;
       return;
     }
@@ -2814,6 +3020,10 @@ export class Scene {
       };
       return;
     }
+
+    // Face mode owns face drags. If a curved/non-editable face was hit, leave
+    // the object in place instead of silently changing the gesture into Move.
+    if (this.toolMode === "face") return;
 
     const view = this.parts.get(id);
     if (!view) return;

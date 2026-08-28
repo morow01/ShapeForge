@@ -15,7 +15,6 @@ import {
   deleteProjectStorage,
   exportProjectFile,
   getActiveProjectId,
-  highestIdSuffix,
   listProjects,
   loadCameraState,
   loadProject,
@@ -69,8 +68,12 @@ if (!activeProject) {
 const initialProjects = listProjects();
 const restored = activeProject.nodes;
 
-let counter = highestIdSuffix(restored);
-const nextId = () => `n-${++counter}`;
+// A numeric session counter is not safe for persisted projects. Live module
+// reloads reset it, and opening/restoring a document can introduce IDs above
+// its current value; the next Group then reuses an existing object's ID and
+// the viewport updates that unrelated mesh. UUIDs remain unique across saved
+// projects, reloads, undo restoration, and group/ungroup cycles.
+const nextId = () => `n-${crypto.randomUUID()}`;
 
 /* ---- undo batching -------------------------------------------------------
  * A gizmo drag fires a state change on every animation frame, and a slider
@@ -154,19 +157,26 @@ function liftOutOf(
   centres?: { group?: Vec3; child?: Vec3 },
 ): SceneNode {
   const rotation = eulerToMatrix(group.rotation);
+  const scaledGroup = group.scale.some((value) => Math.abs(value - 1) > 1e-9);
   const scaled: Vec3 =
-    centres?.group && centres.child
+    scaledGroup && centres?.group && centres.child
       ? (() => {
           const [cg, cc] = [centres.group!, centres.child!];
           return [0, 1, 2].map(
             (i) => cg[i] + (cc[i] - cg[i]) * group.scale[i] - (cc[i] - child.position[i]),
           ) as Vec3;
         })()
-      : ([
+      : scaledGroup
+        ? ([
           child.position[0] * group.scale[0],
           child.position[1] * group.scale[1],
           child.position[2] * group.scale[2],
-        ] as Vec3);
+        ] as Vec3)
+        // The overwhelmingly common group/ungroup path has unit scale. Its
+        // child position is already the exact offset we need; involving
+        // bounding centres here only introduces cancellation and lets one
+        // unstable boolean bound fling a child across the scene.
+        : ([...child.position] as Vec3);
   const offset = applyMatrix(rotation, scaled);
   // Never let a bad number reach the document: one non-finite centre would
   // otherwise turn a position into NaN, and a node with no position never
@@ -365,8 +375,14 @@ interface DocState {
   duplicateNodes: (source: SceneNode[], offset: Vec3) => string[];
   /** Push/pull: turns an ordinary object or group into an EditNode the first
    *  time it is called for that id (freezing its current definition as
-   *  `base`), or appends another op if it already is one. */
-  pushPullFace: (id: string, op: PushPullOp) => void;
+   *  `base`), or appends another op if it already is one.
+   *
+   *  `positionDelta` (world mm) is the correction that keeps the untouched
+   *  side of a SCALED part still: place() scales a node about its solid's
+   *  bounding-box centre, so an edit that moves that centre would otherwise
+   *  slide the whole object — see pivotDrift() in viewport/scene.ts. Zero,
+   *  and omitted, for unscaled parts. */
+  pushPullFace: (id: string, op: PushPullOp, positionDelta?: Vec3) => void;
   /** Replaces an edit node's ops wholesale — used to permanently drop an op
    *  that can never succeed again (see the kernel's pruneDeadOps/
    *  survivingOps), not to add one (pushPullFace does that). A no-op for
@@ -444,7 +460,6 @@ export const useDoc = create<DocState>()(
         const proj = loadProject(id);
         if (!proj) return false;
         setActiveProjectId(proj.id);
-        counter = Math.max(counter, highestIdSuffix(proj.nodes));
         const updatedProjects = listProjects();
 
         useDoc.temporal.getState().clear();
@@ -544,7 +559,6 @@ export const useDoc = create<DocState>()(
         flushSave();
         saveProject(proj);
         setActiveProjectId(proj.id);
-        counter = Math.max(counter, highestIdSuffix(proj.nodes));
         const updatedProjects = listProjects();
 
         useDoc.temporal.getState().clear();
@@ -694,7 +708,14 @@ export const useDoc = create<DocState>()(
         return clones.map((c) => c.id);
       },
 
-      pushPullFace: (id, op) => {
+      pushPullFace: (id, op, positionDelta) => {
+        const moved = !!positionDelta &&
+          positionDelta.every(Number.isFinite) &&
+          positionDelta.some((d) => d !== 0);
+        const shift = (p: Vec3): Vec3 =>
+          moved
+            ? [p[0] + positionDelta![0], p[1] + positionDelta![1], p[2] + positionDelta![2]]
+            : p;
         set((s) => ({
           nodes: updateNode(s.nodes, id, (n) => {
             if (n.type === "edit") {
@@ -702,6 +723,7 @@ export const useDoc = create<DocState>()(
               const transparent = n.transparent ?? n.base.transparent;
               return {
                 ...n,
+                position: shift(n.position),
                 color,
                 transparent,
                 base: { ...n.base, color, transparent },
@@ -722,7 +744,7 @@ export const useDoc = create<DocState>()(
               type: "edit",
               id: n.id,
               name: n.name,
-              position: n.position,
+              position: shift(n.position),
               rotation: n.rotation,
               scale: n.scale,
               isHole: n.isHole,

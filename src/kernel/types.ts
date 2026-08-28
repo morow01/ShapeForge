@@ -105,6 +105,13 @@ export interface ScenePart {
   faces?: FaceInfo[];
 }
 
+/** A verified viewport mesh paired with the document transform/hole metadata
+ * needed to reproduce the visible scene without rebuilding its CAD history. */
+export interface DisplayedSceneItem {
+  spec: NodeSpec;
+  mesh: KernelMesh;
+}
+
 /** A node whose parameters cannot describe a real solid. */
 export interface BuildError {
   id: string;
