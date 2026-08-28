@@ -1162,13 +1162,20 @@ export function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [removeSelected, selectMany, undo, redo, group, ungroup, toggleTransparency, dropSelected, ungroupSelected, groupSelected, commitBuild, exportCurrentProject, newProject]);
 
+  // The big card is for work the user is WAITING on: opening a file,
+  // exporting, the first build of a document. A rebuild triggered by an edit
+  // is not that — the shape is already on screen and the user is still
+  // working — so parking a dialog over the model every time a face is pulled
+  // was pure obstruction. Those get the quiet corner chip below instead.
+  const sceneOpening = sceneBusy && !sceneOpened && busySince && busyNow - busySince >= 500;
   const progressLabel = exporting
     ? "Exporting STL"
-    : fileOperation?.label ?? (
-      sceneBusy && busySince && busyNow - busySince >= 500
-        ? sceneOpened ? "Updating shape" : "Opening scene"
-        : null
-    );
+    : fileOperation?.label ?? (sceneOpening ? "Opening scene" : null);
+  /** An unobtrusive "still working" chip for edit rebuilds — corner of the
+   *  canvas, nothing covered, no elapsed-time drama. */
+  const workingLabel = !progressLabel && sceneBusy && busySince && busyNow - busySince >= 500
+    ? `Updating shape · ${Math.max(0, Math.floor((busyNow - busySince) / 1000))}s`
+    : null;
   const progressStartedAt = exporting
     ? exportStartedAt
     : fileOperation?.startedAt ?? busySince;
@@ -1497,6 +1504,12 @@ export function App() {
             </div>
           </div>
         )}
+        {workingLabel && (
+          <div className="canvas-working" role="status">
+            <span className="canvas-working-dot" aria-hidden="true" />
+            {workingLabel}
+          </div>
+        )}
         <div className="canvas-help">
           {toolMode === "build"
             ? buildBusy
@@ -1539,7 +1552,9 @@ export function App() {
             </div>
           )}
           {error && <div className="canvas-error">{error}</div>}
-          {!error && busy && busySince && busyNow - busySince > 8000 && (
+          {/* Only while a FILE is opening. During an ordinary edit this read
+              as a warning about a file the user was not opening. */}
+          {!error && progressLabel && !exporting && busySince && busyNow - busySince > 8000 && (
             <div className="canvas-notice">
               Large or complex files can take a few minutes. ShapeForge will stop after {Math.round(WATCHDOG_MS / 60_000)} min.
             </div>
