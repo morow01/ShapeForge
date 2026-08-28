@@ -193,6 +193,15 @@ interface PartView {
   /** Planar faces, in the kernel's ORIGINAL (pre-pivot-shift) local frame —
    *  see kernelLocalPoint(). Undefined for a part with no OCCT topology. */
   faces?: FaceInfo[];
+  /** How this part last resolved its appearance, from back when its node was
+   *  still in the document. A part can briefly outlive its node — ungroup
+   *  swaps a group for its children, and the children's meshes only arrive a
+   *  rebuild later — and resolving a MISSING node hands back the default
+   *  colour, so the object visibly flicked to blue for the whole wait.
+   *  Reported as "when I start ungrouping the bracket it changes colour to
+   *  blue". */
+  lastColor?: string;
+  lastTransparent?: boolean;
 }
 
 /** Straight down and straight up — the only directions gravity cares about. */
@@ -1073,6 +1082,7 @@ export class Scene {
     const color = resolveNodeColor(node);
     const transparent = resolveNodeTransparent(node);
     const isSelected = id ? this.selectedIds.includes(id) : false;
+    const remembered = { lastColor: color, lastTransparent: transparent };
 
     const m = new THREE.Mesh(geom[0].faces, [
       isHole ? (isSelected ? MATERIALS.holeSelected : MATERIALS.hole) : this.getSolidMaterial(color, isSelected, transparent),
@@ -1085,7 +1095,7 @@ export class Scene {
     const occluder = this.makeOccluder(geom[0].faces);
     group.add(m, wire, occluder);
     this.scene.add(group);
-    return { group, mesh: m, wire, occluder, geom, pivot, isHole, faces };
+    return { group, mesh: m, wire, occluder, geom, pivot, isHole, faces, ...remembered };
   }
 
   /** Alt-drag needs a real Object3D to drag the instant the gesture starts —
@@ -1161,8 +1171,9 @@ export class Scene {
 
   /** Cheap: placement and selection only, no kernel involvement. */
   setPlacements(objects: SceneNode[], selectedIds: string[]) {
+    const previous = this.lastNodes;
     this.lastNodes = objects;
-    this.dropDeletedParts(objects);
+    this.dropDeletedParts(previous, objects);
     this.selectedIds = selectedIds;
     if (this.selectedFace && !selectedIds.includes(this.selectedFace.partId)) {
       this.selectedFace = null;
@@ -1190,7 +1201,7 @@ export class Scene {
    * the tree, so grouping keeps showing the children until the group's own
    * mesh arrives, exactly as before.
    */
-  private dropDeletedParts(objects: SceneNode[]) {
+  private dropDeletedParts(previous: SceneNode[], objects: SceneNode[]) {
     const alive = new Set<string>();
     const walk = (nodes: SceneNode[]) => {
       for (const node of nodes) {
@@ -1206,6 +1217,12 @@ export class Scene {
       if (alive.has(id)) continue;
       // Mid-gesture geometry belongs to that gesture until it resolves.
       if (this.pushPullDrag?.id === id || this.pushPullPending?.id === id) continue;
+      // Restructuring is not deletion. Ungroup takes a group's id out of the
+      // tree but every child it was made of is still there, and the parts
+      // that replace it are already being built — so keep showing it until
+      // they land, rather than blinking the object out of existence for the
+      // length of a rebuild.
+      if (this.beingReplaced(previous, id, alive)) continue;
       if (this.selectedFace?.partId === id) this.selectedFace = null;
       if (this.hoverFace?.view === view) this.hoverFace = null;
       // Matches setParts()' own removal: the geometry is not disposed here,
@@ -1213,6 +1230,16 @@ export class Scene {
       this.scene.remove(view.group);
       this.parts.delete(id);
     }
+  }
+
+  /** Whether an id that has left the document was dismantled into pieces
+   *  that are still in it (ungroup, or a build coming apart) rather than
+   *  actually deleted. */
+  private beingReplaced(previous: SceneNode[], id: string, alive: Set<string>): boolean {
+    const was = findNode(previous, id);
+    if (!was) return false;
+    const pieces = was.type === "group" ? was.children : was.type === "build" ? was.sources : [];
+    return pieces.length > 0 && pieces.every((piece) => alive.has(piece.id));
   }
 
   private applyPlacements() {
@@ -1249,8 +1276,13 @@ export class Scene {
       const isChildSelected = !!(node && isGroup(node) && node.children.some((c) => this.selectedIds.includes(c.id)));
       const sel = isDirectlySelected || isChildSelected;
 
-      const color = resolveNodeColor(node);
-      const transparent = resolveNodeTransparent(node);
+      if (node) {
+        view.lastColor = resolveNodeColor(node);
+        view.lastTransparent = resolveNodeTransparent(node);
+      }
+      // Fall back to how it last looked, not to the default: see lastColor.
+      const color = view.lastColor ?? resolveNodeColor(node);
+      const transparent = view.lastTransparent ?? resolveNodeTransparent(node);
 
       // Index 1 (faceHighlight) is picked per-triangle-group by the geometry's
       // own .groups, set via highlightFace()/clearFaceHover() below — this
