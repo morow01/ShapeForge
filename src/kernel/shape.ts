@@ -695,11 +695,34 @@ export function combine(
       isHole: c.isHole,
     }));
 
-  const keptAll = (candidate: AnySolid | null) =>
+  // Holes are cut AFTER the fuse, so a hole that reaches the outside makes
+  // the finished shape legitimately SMALLER than the envelope of the solids
+  // that went into it. Demanding equality there rejects a perfectly correct
+  // result — and, because both kernels are then retried and both "fail",
+  // returns null for a group that is not broken at all.
+  //
+  // Measured on a reported document: a group of one solid plus two holes
+  // could never build. Its object was invisible, its error said the shape
+  // "could not be meshed at the correct position", and since a node that
+  // fails is never cached, its full 5-second rebuild was re-attempted on
+  // every single scene build for the life of the document. Two such nodes
+  // put 10s on the clock of every edit, which is what made Delete look
+  // broken.
+  //
+  // combineShape still holds the fuse ITSELF to the strict equality (see
+  // unionKeptEverything) — that is where a dropped operand is detectable.
+  // All the finished shape can be held to is that it stayed inside the
+  // envelope, which still catches an operand that landed somewhere else.
+  const cutsHoles = children.some((c) => c.isHole);
+  const boundsHold = (candidate: AnySolid, expected: { min: Vec3; max: Vec3 } | null) =>
+    op !== "union" || !expected ||
+    (cutsHoles ? withinBounds(candidate, expected) : matchesBounds(candidate, expected));
+
+  const usable = (candidate: AnySolid | null, expected: { min: Vec3; max: Vec3 } | null) =>
     !!candidate &&
     !isEmptySolid(candidate) &&
     !tessellatesEmpty(candidate) &&
-    (op !== "union" || !expectedUnionBounds || matchesBounds(candidate, expectedUnionBounds));
+    boundsHold(candidate, expected);
 
   // A failed manifold boolean does not necessarily throw; on this model it
   // occasionally returns a perfectly renderable union with one operand in
@@ -707,8 +730,21 @@ export function combine(
   // whose bounds match the immutable inputs is allowed out.
   const retryMesh = (attempts = 8): MeshShape | null => {
     for (let attempt = 0; attempt < attempts; attempt++) {
-      const candidate = combineMesh(op, asMeshed());
-      if (keptAll(candidate)) return candidate;
+      const meshed = asMeshed();
+      // Judge a MESHED result against MESHED operands. Tessellation inscribes
+      // a curved surface — the triangles never quite reach it — so a meshed
+      // shape is legitimately a hair smaller than the exact BRep envelope its
+      // operands report, and at FALLBACK_MESH_QUALITY that gap is far wider
+      // than the 0.05mm this is checked to. Measured on a Shape Builder
+      // region of cylinder/box/sphere: every one of these eight attempts was
+      // rejected on bounds alone and combine() returned null for a shape that
+      // was never wrong — so the object was invisible and re-attempted, at
+      // 1.3s a go, on every scene build.
+      const expected = op === "union"
+        ? unionBounds(meshed.filter((c) => !c.isHole).map((c) => c.solid))
+        : null;
+      const candidate = combineMesh(op, meshed);
+      if (usable(candidate, expected)) return candidate;
     }
     return null;
   };
@@ -736,7 +772,7 @@ export function combine(
   // against it before being believed. Tessellating to check costs a mesh per
   // combine; a boolean already costs far more than that, and a silently empty
   // export costs a print.
-  if (keptAll(result)) return result;
+  if (usable(result, expectedUnionBounds)) return result;
 
   const viaMesh = retryMesh();
   if (viaMesh) return viaMesh;
@@ -1042,6 +1078,16 @@ function unionBounds(operands: AnySolid[]): { min: Vec3; max: Vec3 } | null {
     }
   }
   return bounds.min.every(Number.isFinite) ? bounds : null;
+}
+
+/** A shape that never reaches OUTSIDE `expected`. All that can be asked of a
+ *  union whose holes have since been cut out of it — see combine(). */
+function withinBounds(result: AnySolid, expected: { min: Vec3; max: Vec3 }): boolean {
+  const got = boundsOf(result);
+  if (!got) return false;
+  return [0, 1, 2].every(
+    (i) => got.min[i] > expected.min[i] - 0.05 && got.max[i] < expected.max[i] + 0.05,
+  );
 }
 
 function matchesBounds(result: AnySolid, expected: { min: Vec3; max: Vec3 }): boolean {
