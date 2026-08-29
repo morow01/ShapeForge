@@ -1122,10 +1122,65 @@ const api = {
     onProgress?: (id: string) => void,
   ): Promise<{ id: string; vertices: number[]; triangles: number[] }[]> {
     await init();
+
+    // An imported mesh is ALREADY triangles, and 3MF wants triangles. Sending
+    // it through makeWorld would repair it into a manifold solid and mesh it
+    // again — minutes of work on a 5.8MB scan, for a file that ends up holding
+    // the same triangles it started with, and the reason a scan reported
+    // "very complex and was skipped after taking too long" on export. Read
+    // them straight out and apply the placement arithmetic instead.
+    //
+    // Only when nothing has to be cut out of it: a hole needs a real boolean,
+    // and that needs the solid.
+    const anyHoles = specs.some((spec) => spec.isHole);
+    const straightThrough = async (spec: NodeSpec) => {
+      if (anyHoles || spec.type !== "import" || spec.svg) return null;
+      const mesh = await loadSTLPreview(spec.id, spec.blobId);
+      const source = mesh.faces.vertices;
+      const vertices: number[] = new Array(source.length);
+      // Mirrors place(): scale about the mesh's own bounding-box centre, then
+      // rotate X then Y then Z about the ORIGIN, then translate.
+      let min = [Infinity, Infinity, Infinity];
+      let max = [-Infinity, -Infinity, -Infinity];
+      for (let i = 0; i + 2 < source.length; i += 3) {
+        for (let axis = 0; axis < 3; axis++) {
+          const value = source[i + axis];
+          if (value < min[axis]) min[axis] = value;
+          if (value > max[axis]) max[axis] = value;
+        }
+      }
+      const centre = [0, 1, 2].map((axis) => (min[axis] + max[axis]) / 2);
+      const [rx, ry, rz] = spec.rotation.map((degrees) => (degrees * Math.PI) / 180);
+      const cx = Math.cos(rx), sx = Math.sin(rx);
+      const cy = Math.cos(ry), sy = Math.sin(ry);
+      const cz = Math.cos(rz), sz = Math.sin(rz);
+      for (let i = 0; i + 2 < source.length; i += 3) {
+        let x = centre[0] + (source[i] - centre[0]) * spec.scale[0];
+        let y = centre[1] + (source[i + 1] - centre[1]) * spec.scale[1];
+        let z = centre[2] + (source[i + 2] - centre[2]) * spec.scale[2];
+        [y, z] = [y * cx - z * sx, y * sx + z * cx];
+        [x, z] = [x * cy + z * sy, -x * sy + z * cy];
+        [x, y] = [x * cz - y * sz, x * sz + y * cz];
+        vertices[i] = x + spec.position[0];
+        vertices[i + 1] = y + spec.position[1];
+        vertices[i + 2] = z + spec.position[2];
+      }
+      return {
+        id: spec.id,
+        vertices,
+        triangles: Array.from(mesh.faces.triangles),
+      };
+    };
     const { errors, onError } = collector();
     const evaluated: { id: string; solid: AnySolid; isHole: boolean }[] = [];
+    const readyMeshes: { id: string; vertices: number[]; triangles: number[] }[] = [];
     const missing: string[] = [];
     for (const spec of specs) {
+      const direct = await straightThrough(spec);
+      if (direct) {
+        readyMeshes.push(direct);
+        continue;
+      }
       let world = await makeWorld(spec, onError, onProgress);
       if (!world) world = await makeWorld(spec, onError, onProgress);
       if (!world) {
@@ -1145,6 +1200,7 @@ const api = {
 
     const holes = evaluated.filter((item) => item.isHole);
     const out: { id: string; vertices: number[]; triangles: number[] }[] = [];
+    for (const ready of readyMeshes) out.push(ready);
     for (const item of evaluated) {
       if (item.isHole) continue;
       // Mesh first, then cut on manifold: the same order exportSTL uses, and
