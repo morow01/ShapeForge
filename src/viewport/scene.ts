@@ -874,8 +874,12 @@ export class Scene {
   }
 
   private addGrid() {
-    // 10 mm cells over a 200 mm bed.
-    const grid = new THREE.GridHelper(200, 20, 0xaebac2, 0xd8e0e5);
+    // 8 mm cells over a 256 x 256 mm bed — a common FDM heatbed size
+    // (Bambu Lab's X1/P1 series among them). GridHelper is centred on its
+    // own origin, so this spans -128..128 on both axes, matching how a
+    // primitive or import already lands centred on X/Y with its base on
+    // Z=0 — the plate's centre is the document's origin.
+    const grid = new THREE.GridHelper(256, 32, 0xaebac2, 0xd8e0e5);
     grid.rotation.x = Math.PI / 2;
     this.scene.add(grid);
     this.scene.add(new THREE.AxesHelper(25));
