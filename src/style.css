@@ -272,6 +272,10 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 .edge-bar select, .edge-bar input, .edge-bar button { min-height:28px; border:1px solid #b7c7d0; border-radius:6px; background:white; padding:3px 7px; }
 .edge-bar button { color:white; background:#167f91; border-color:#167f91; font-weight:600; }
 .edge-bar button:disabled { opacity:.45; }
+/* The global button:hover rule (background:#f4f8fa) outranks the plain
+   .edge-bar button selector, so hovering turned these near-white while the
+   text stayed white — unreadable. Darken on hover instead. */
+.edge-bar button:hover:not(:disabled) { color:white; background:#11616f; border-color:#11616f; }
 .canvas-notice, .canvas-error { max-width: 100%; padding: 9px 12px; }
 /* Every top-of-canvas banner shares one column, so a second one pushes the
    first down instead of landing on top of it. */
