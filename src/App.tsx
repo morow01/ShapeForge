@@ -1784,6 +1784,7 @@ export function App() {
           onSelect={onSelect}
           onToggleCollapsed={toggleCollapsed}
           onToggleHidden={toggleHidden}
+          onRename={rename}
         />
         <div className="panel-footer">
           <span>{saveLabel}</span>

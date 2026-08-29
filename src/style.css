@@ -254,6 +254,19 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 .tree li.bad { color: #bd414b; }
 .tree li.sel.bad { color: #9b2e37; background: #ffecef; }
 .tree li .label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.label-edit {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 2px 5px;
+  color: #0f172a;
+  background: #fff;
+  border: 1.5px solid #24aaa8;
+  border-radius: 4px;
+  outline: none;
+  box-shadow: 0 0 0 2px rgb(36 170 168 / 20%);
+  font: inherit;
+  font-weight: 600;
+}
 .twisty { width: 14px; min-height: 14px; height: 14px; padding: 0; flex: none; color: #83919a; background: transparent; border: 0; font-size: 10px; }
 .twisty-spacer { width: 14px; flex: none; }
 .dot { width: 9px; height: 9px; border-radius: 3px; background: #43aede; flex: none; }
