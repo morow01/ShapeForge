@@ -518,6 +518,11 @@ interface DocState {
     fileName: string,
     byteSize: number,
     svg?: { thickness: number; width: number; height: number },
+    /** Where to put it. Omitted, imports fan out along X so several dropped at
+     *  once do not stack. A 3MF passes the origin: its parts already carry
+     *  their place in the model own coordinates, and fanning them out would
+     *  take the assembly apart. */
+    position?: Vec3,
   ) => void;
   /** Extrusion depth of an imported vector artwork, in mm. */
   setSvgThickness: (id: string, thickness: number) => void;
@@ -765,7 +770,7 @@ export const useDoc = create<DocState>()(
           return { nodes: [...s.nodes, node], selectedIds: [node.id] };
         }),
 
-      addImport: (blobId, fileName, byteSize, svg) =>
+      addImport: (blobId, fileName, byteSize, svg, position) =>
         set((s) => {
           const node: ImportNode = {
             type: "import",
@@ -777,7 +782,7 @@ export const useDoc = create<DocState>()(
             // Strip a .stl extension for the display name; keep everything
             // else so two imports of similarly-named files stay distinct.
             name: fileName.replace(/\.stl$/i, ""),
-            position: [s.nodes.length * 6, 0, 0],
+            position: position ?? [s.nodes.length * 6, 0, 0],
             rotation: [0, 0, 0],
             scale: [1, 1, 1],
             isHole: false,

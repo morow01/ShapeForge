@@ -826,6 +826,41 @@ export function App() {
       }
 
       const bytes = await file.arrayBuffer();
+
+      if (/.3mf$/i.test(file.name)) {
+        // Like SVG, parsed here rather than in the kernel: reading the package
+        // needs DOMParser. Each build item becomes its own object, which is
+        // the point of the format — a 3MF that holds four parts should arrive
+        // as four things you can move apart, not one welded lump.
+        const { parseThreeMF } = await import("./import/threemf");
+        const parts = parseThreeMF(bytes);
+        if (!parts.length) {
+          setFileOperation(null);
+          setError(`${file.name} has no printable objects in it.`);
+          return;
+        }
+        const total = parts.reduce((sum, part) => sum + part.triangles, 0);
+        if (total > MAX_IMPORT_TRIANGLES) {
+          setFileOperation(null);
+          setError(
+            `${file.name} has ${total.toLocaleString()} triangles — too complex to import here. ` +
+              `Try simplifying/decimating it in a mesh tool first (aim under ${MAX_IMPORT_TRIANGLES.toLocaleString()}).`,
+          );
+          return;
+        }
+        for (const part of parts) {
+          const partId = crypto.randomUUID();
+          await putBlob(partId, part.stl);
+          // Origin, not the usual fan-out: each part's vertices already sit
+          // in the model's own coordinates, so this is what keeps an
+          // assembly assembled.
+          addImport(partId, `${part.name}.stl`, part.stl.byteLength, undefined, part.anchor);
+        }
+        setFileOperation((current) => current ? { ...current, waitingForScene: true } : null);
+        setError(null);
+        return;
+      }
+
       const triangles = peekBinaryTriangleCount(bytes);
       if (triangles !== null && triangles > MAX_IMPORT_TRIANGLES) {
         setFileOperation(null);
@@ -2220,7 +2255,7 @@ export function App() {
               </button>
             ))}
           </div>
-          <button className="import-btn" onClick={() => importInputRef.current?.click()}>↑ Import STL or SVG</button>
+          <button className="import-btn" onClick={() => importInputRef.current?.click()}>↑ Import STL, 3MF or SVG</button>
         </section>
         <input
           ref={textFontInputRef}
@@ -2236,7 +2271,7 @@ export function App() {
         <input
           ref={importInputRef}
           type="file"
-          accept=".stl,.svg,image/svg+xml,model/stl,model/x.stl-binary,model/x.stl-ascii"
+          accept=".stl,.3mf,.svg,image/svg+xml,model/3mf,model/stl,model/x.stl-binary,model/x.stl-ascii"
           hidden
           onChange={(e) => {
             const file = e.target.files?.[0];

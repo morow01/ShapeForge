@@ -107,9 +107,6 @@ merge/export work runs separately so it does not block ordinary editing.
 - Investigate additional Illustrator-friendly vector formats. SVG should be
   the primary interchange format; PDF may be practical with path extraction,
   while EPS would require a conversion/parser dependency.
-- Add 3MF **import**. Export is done (see below); import additionally requires reading a ZIP
-  package, model XML, transforms, units, components, and potentially colours
-  and materials.
 - Continue improving snapping and smart guides.
 
 ### Large STL notes
