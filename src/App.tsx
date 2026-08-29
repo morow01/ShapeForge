@@ -280,6 +280,11 @@ export function App() {
    *  read from the scene so the bar re-renders when the selection changes. */
   const [faceSelection, setFaceSelection] = useState<{ id: string; point: Vec3 } | null>(null);
   const [wallThickness, setWallThickness] = useState(2);
+  /** The node a Hollow was just asked for. A refusal from the kernel only
+   *  writes a small marker into the tree, which next to the canvas reads as
+   *  the button having done nothing at all — so watch for one and say it out
+   *  loud instead. */
+  const [hollowPending, setHollowPending] = useState<string | null>(null);
   const [resizeConstrained, setResizeConstrained] = useState(true);
   const [wireframe, setWireframe] = useState<WireframeMode>(() => {
     const saved = localStorage.getItem(VIEW_STYLE_KEY) as WireframeMode | null;
@@ -1388,6 +1393,14 @@ export function App() {
   // working — so parking a dialog over the model every time a face is pulled
   // was pure obstruction. Those get the quiet corner chip below instead.
   const sceneOpening = sceneBusy && !sceneOpened && busySince && busyNow - busySince >= 500;
+  useEffect(() => {
+    if (!hollowPending) return;
+    const complaint = invalid[hollowPending];
+    if (!complaint) return;
+    setError(complaint);
+    setHollowPending(null);
+  }, [hollowPending, invalid]);
+
   const progressLabel = exporting
     ? "Exporting STL"
     : fileOperation?.label ?? (sceneOpening ? "Opening scene" : null);
@@ -1806,8 +1819,16 @@ export function App() {
               <input type="number" min="0.1" step="0.5" value={wallThickness}
                 onChange={(e) => setWallThickness(Math.max(0.1, Number(e.target.value) || 0.1))} /> mm
             </label>
-            <button disabled={!faceSelection} title="Hollow this object out, leaving a wall of the given thickness and opening the selected face" onClick={() => {
-              if (!faceSelection) return;
+            <button title="Hollow this object out, leaving a wall of the given thickness and opening the selected face" onClick={() => {
+              // Deliberately NOT disabled without a face. A greyed-out button
+              // that does nothing when clicked is indistinguishable from a
+              // broken one; say what is missing instead.
+              if (!faceSelection) {
+                setError("Click the face you want left open first, then press Hollow.");
+                return;
+              }
+              setError(null);
+              setHollowPending(faceSelection.id);
               finishEdit(faceSelection.id, {
                 kind: "shell",
                 thickness: wallThickness,
