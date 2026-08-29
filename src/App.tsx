@@ -31,7 +31,7 @@ import { APP_NAME, APP_VERSION } from "./version";
 /** Shown when Hollow is pressed with nothing selected; cleared as soon as a
  *  face is. Named so the clearing effect can recognise its own message and
  *  leave any other error alone. */
-const NEEDS_FACE = "Click the face you want left open first, then press Hollow.";
+const NEEDS_FACE = "Click a face first, then press Apply.";
 
 const NEXT_WIREFRAME: Record<WireframeMode, WireframeMode> = {
   off: "outlined",
@@ -1979,6 +1979,13 @@ export function App() {
                 // until the face was pushed or pulled.
                 sceneRef.current?.dismissFaceInput();
                 setError(null);
+                // These three change the face's identity rather than just
+                // moving it, so nothing may keep pointing at the old one.
+                const releaseSelection = () => {
+                  sceneRef.current?.releaseFace();
+                  lastFace.current = null;
+                  setFaceSelection(null);
+                };
                 if (faceOp === "wall") {
                   setEditPending(target.id);
                   finishEdit(target.id, {
@@ -1986,6 +1993,7 @@ export function App() {
                     thickness: Math.max(0.1, faceValue),
                     points: [target.point],
                   });
+                  releaseSelection();
                 } else if (faceOp === "offset") {
                   if (Math.abs(faceHeight) < 0.1) {
                     setError("Type a height of at least 0.1 mm — that is how far the offset face is extruded.");
@@ -1999,6 +2007,7 @@ export function App() {
                     point: target.point,
                     normal: target.normal,
                   });
+                  releaseSelection();
                 } else {
                   if (Math.abs(faceValue) < 0.1) {
                     setError("Type an inset or outset of at least 0.1 mm.");
@@ -2011,6 +2020,7 @@ export function App() {
                     point: target.point,
                     normal: target.normal,
                   });
+                  releaseSelection();
                 }
               }}>{faceOp === "wall" ? "Hollow" : "Apply"}</button>
           </div>

@@ -2388,6 +2388,22 @@ export class Scene {
    * otherwise put an abandoned live-preview shape back to what is actually
    * still the document's real, committed state.
    */
+  /**
+   * Lets go of the selected face entirely.
+   *
+   * Push/pull can keep its face across an edit because the face survives — it
+   * only moves, and pushSelectedFace advances the anchor to match. Hollow,
+   * Offset & extrude and Resize face cannot: they SPLIT or remove the face
+   * they act on (an offset turns one top face into a ring plus a new face on
+   * top of the boss), so the anchor stops matching anything. Holding on to it
+   * meant the next edit wrote an op whose face no longer existed, and every
+   * rebuild from then on reported "could not be found after rebuilding".
+   */
+  releaseFace() {
+    this.armedFace = null;
+    this.selectedFace = null;
+  }
+
   /** Closes the face's typed-distance pill without applying anything, putting
    *  the previewed geometry back. Call this BEFORE committing some other edit
    *  to the same face: left open, the pill resolves later and restores its
