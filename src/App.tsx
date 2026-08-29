@@ -1,10 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import * as THREE from "three";
 import { EXPORT_WATCHDOG_MS, kernel, KernelTimeoutError, WATCHDOG_MS } from "./kernel/client";
 import { Viewport } from "./viewport/Viewport";
 import { Inspector } from "./ui/Inspector";
 import { Tree } from "./ui/Tree";
-import { DropIcon, MagnetIcon, ShapeBuilderIcon, TransparencyIcon, WireframeIcon } from "./ui/icons";
+import { DropIcon, MagnetIcon, ShapeBuilderIcon, SolidCubeIcon, TransparencyIcon, WireframeIcon, ZoomToFitIcon } from "./ui/icons";
 import { ProjectsModal } from "./ui/ProjectsModal";
+import { SvgImportModal } from "./ui/SvgImportModal";
+import { TextModal } from "./ui/TextModal";
+import type { TextConfig } from "./ui/TextModal";
+import type { LocalFontData } from "./text/systemFonts";
 import {
   beginHistoryBatch,
   copySelected,
@@ -19,8 +24,17 @@ import { putBlob } from "./document/blobStore";
 import { loadCameraState } from "./document/persist";
 import type { GroupNode, PrimitiveKind, SceneNode, Vec3 } from "./document/types";
 import type { EditSpec, ExportQuality, NodeSpec, PreviewBuild, ScenePart } from "./kernel/types";
-import type { CameraMode, Scene, ToolMode } from "./viewport/scene";
+import type { CameraMode, Scene, ToolMode, WireframeMode } from "./viewport/scene";
 import { APP_NAME, APP_VERSION } from "./version";
+
+const NEXT_WIREFRAME: Record<WireframeMode, WireframeMode> = {
+  off: "outlined",
+  outlined: "edges",
+  edges: "mesh",
+  mesh: "xray",
+  xray: "transparent",
+  transparent: "off",
+};
 import {
   displayedBoundsOverlap,
   displayedMeshBounds,
@@ -94,6 +108,7 @@ const toSpec = (n: SceneNode): NodeSpec => {
 };
 
 const DEAD_PUSH_PULL_ERROR = "A pushed/pulled face could not be found after rebuilding";
+const RETRYABLE_MESH_ERROR = "This shape could not be rebuilt reliably.";
 
 /** Removes a skipped node from anywhere in the tree, not just the top level —
  *  a timed-out import nested inside a group must actually come out of that
@@ -155,9 +170,7 @@ const canRefineExportFallback = (n: SceneNode): boolean =>
 
 const EXPORT_QUALITY_KEY = "cad.exportQuality";
 const SNAP_KEY = "cad.smartGuides";
-/** Extrusion depth a freshly imported artwork gets, in mm. Thin enough to
- *  read as "flat artwork", thick enough to print without curling. */
-const DEFAULT_SVG_THICKNESS = 2;
+const VIEW_STYLE_KEY = "cad.viewStyle";
 
 /** What each preset costs, so the choice is not guesswork — measured on a
  *  40x30x15 box with a 10mm spherical bowl (see EXPORT_PRESETS in worker.ts). */
@@ -199,6 +212,7 @@ export function App() {
     setPositions,
     duplicateNodes,
     pushPullFace,
+    finishEdge,
     setOps,
     setHole,
     setSvgThickness,
@@ -232,10 +246,22 @@ export function App() {
   const [exporting, setExporting] = useState(false);
   const [exportStartedAt, setExportStartedAt] = useState<number | null>(null);
   const [readyExportUrl, setReadyExportUrl] = useState<string | null>(null);
+  const [exportFileName, setExportFileName] = useState<string>("model.stl");
   const [exportReadyNoticeOpen, setExportReadyNoticeOpen] = useState(false);
   const [fileOperation, setFileOperation] = useState<FileOperation | null>(null);
+  const [pendingSvg, setPendingSvg] = useState<{
+    file: File;
+    art: import("./svg/parse").SvgOutlines;
+  } | null>(null);
+  const [textFonts, setTextFonts] = useState<LocalFontData[] | null>(null);
+  const [textModalOpen, setTextModalOpen] = useState(false);
   /** Per-node failures, keyed by node id. */
   const [invalid, setInvalid] = useState<Record<string, string>>({});
+  // A rare OCCT tessellation failure can succeed on a clean replay of the
+  // exact same edit history. One automatic retry avoids leaving a transient
+  // red warning in the inspector until the user reloads the whole project.
+  const [meshRecoveryNonce, setMeshRecoveryNonce] = useState(0);
+  const meshRecoveryRef = useRef({ shapeKey: "", attempts: 0 });
   /** Top-level node ids excluded from kernel calls after a watchdog timeout —
    *  see KernelTimeoutError. Without this, the same node would just hang the
    *  next rebuild too, forever: the retry sends the exact same input to a
@@ -246,8 +272,59 @@ export function App() {
   const [skippedIds, setSkippedIds] = useState<Set<string>>(new Set());
   const [cameraMode, setCameraMode] = useState<CameraMode>(() => loadCameraState()?.mode ?? "perspective");
   const [toolMode, setToolMode] = useState<ToolMode>("select");
+  const [pendingPrimitive, setPendingPrimitive] = useState<PrimitiveKind | null>(null);
+  const [edgeSelection, setEdgeSelection] = useState<{ id: string; points: Vec3[] } | null>(null);
+  const [edgeKind, setEdgeKind] = useState<"fillet" | "chamfer">("fillet");
+  const [edgeDistance, setEdgeDistance] = useState(2);
   const [resizeConstrained, setResizeConstrained] = useState(true);
-  const [wireframe, setWireframe] = useState(false);
+  const [wireframe, setWireframe] = useState<WireframeMode>(() => {
+    const saved = localStorage.getItem(VIEW_STYLE_KEY) as WireframeMode | null;
+    if (saved === "off" || saved === "outlined" || saved === "edges" || saved === "mesh" || saved === "xray" || saved === "transparent") {
+      return saved;
+    }
+    return "off";
+  });
+  const [wireframeMenuOpen, setWireframeMenuOpen] = useState(false);
+  const wireframeMenuRef = useRef<HTMLDivElement>(null);
+  const cycleWireframe = useCallback(() => {
+    setWireframe((curr) => NEXT_WIREFRAME[curr]);
+  }, []);
+  const zoomToSelected = useCallback(() => {
+    sceneRef.current?.zoomToFit();
+  }, []);
+
+  const placePrimitive = useCallback((point: Vec3, normal: Vec3) => {
+    if (!pendingPrimitive) return;
+    const n = new THREE.Vector3(...normal).normalize();
+    // Every kernel primitive is normalised with its base on local Z=0.
+    // Node.position stores that local origin, not the displayed bounds
+    // centre (the viewport adds its pivot separately). Offsetting by half the
+    // height therefore lifted a newly placed part by exactly half its size.
+    const base = new THREE.Vector3(...point).addScaledVector(n, 0.001);
+    const rotation = new THREE.Euler().setFromQuaternion(
+      new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), n),
+      "XYZ",
+    );
+    addPrimitive(pendingPrimitive);
+    const id = useDoc.getState().selectedIds[0];
+    if (id) setTransform(id, {
+      position: base.toArray() as Vec3,
+      rotation: [rotation.x / Math.PI * 180, rotation.y / Math.PI * 180, rotation.z / Math.PI * 180],
+    });
+    setPendingPrimitive(null);
+    setToolMode("select");
+  }, [addPrimitive, pendingPrimitive, setTransform]);
+
+  useEffect(() => {
+    if (!wireframeMenuOpen) return;
+    const onDocClick = (e: PointerEvent | MouseEvent) => {
+      if (wireframeMenuRef.current && !wireframeMenuRef.current.contains(e.target as Node)) {
+        setWireframeMenuOpen(false);
+      }
+    };
+    window.addEventListener("pointerdown", onDocClick);
+    return () => window.removeEventListener("pointerdown", onDocClick);
+  }, [wireframeMenuOpen]);
   // Remembered like the export quality: whether you want things snapping is
   // a working preference, not a per-session one.
   const [snapEnabled, setSnapEnabled] = useState(
@@ -435,6 +512,9 @@ export function App() {
   // the fix for cost scaling with total object count; this cuts how often we
   // even ask, on top of that.
   useEffect(() => {
+    if (meshRecoveryRef.current.shapeKey !== shapeKey) {
+      meshRecoveryRef.current = { shapeKey, attempts: 0 };
+    }
     const specs = pruneSkipped(useDoc.getState().nodes, skippedIds).map(toSpec);
     if (!specs.length) {
       setParts([]);
@@ -449,13 +529,27 @@ export function App() {
         .then((res) => {
           if (id !== buildId.current) return;
           setParts(res.parts);
+          const hasRetryableMeshError = res.errors.some((issue) =>
+            issue.message.startsWith(RETRYABLE_MESH_ERROR),
+          );
+          const retryMeshBuild = hasRetryableMeshError && meshRecoveryRef.current.attempts < 1;
+          if (retryMeshBuild) meshRecoveryRef.current.attempts += 1;
+          const visibleErrors = retryMeshBuild
+            ? res.errors.filter((issue) => !issue.message.startsWith(RETRYABLE_MESH_ERROR))
+            : res.errors;
           setInvalid((prev) => ({
             // Keep any skipped-node warnings already showing — this build
             // never even sent them, so it has no opinion on them.
             ...Object.fromEntries([...skippedIds].map((sid) => [sid, prev[sid]])),
-            ...Object.fromEntries(res.errors.map((e) => [e.id, e.message])),
+            ...Object.fromEntries(visibleErrors.map((e) => [e.id, e.message])),
           }));
           setError(null);
+
+          if (retryMeshBuild) {
+            window.setTimeout(() => {
+              if (id === buildId.current) setMeshRecoveryNonce((value) => value + 1);
+            }, 120);
+          }
 
           // A failed push/pull op has already been skipped by the kernel, so
           // leaving it in the document cannot affect the visible shape — it
@@ -503,7 +597,7 @@ export function App() {
         });
     }, 32);
     return () => clearTimeout(t);
-  }, [shapeKey, skippedIds]);
+  }, [shapeKey, skippedIds, meshRecoveryNonce]);
 
 
   useEffect(() => {
@@ -521,6 +615,14 @@ export function App() {
       // Private mode / blocked storage: the choice just won't be remembered.
     }
   }, [exportQuality]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(VIEW_STYLE_KEY, wireframe);
+    } catch {
+      // Private mode / blocked storage: the choice just won't be remembered.
+    }
+  }, [wireframe]);
 
   const onSelect = useCallback(
     (id: string | null, additive: boolean) => select(id, additive),
@@ -594,7 +696,19 @@ export function App() {
     if (!node || node.type !== "edit") return;
     try {
       const kept = await kernel.pruneDeadOps(toSpec(node) as EditSpec);
-      if (kept) setOps(node.id, kept);
+      if (kept) {
+        if (kept.length < node.ops.length) setOps(node.id, kept);
+        // If every op survived, the repair action has proved that this is not
+        // a broken-edit warning. An identical setOps() does not change
+        // shapeKey, so the old banner otherwise remains forever even though
+        // there is nothing to remove.
+        setInvalid((prev) => {
+          if (!(node.id in prev)) return prev;
+          const next = { ...prev };
+          delete next[node.id];
+          return next;
+        });
+      }
     } catch (e) {
       setError(msg(e));
     }
@@ -649,25 +763,16 @@ export function App() {
     try {
       if (/.svg$/i.test(file.name)) {
         // Vector artwork is parsed here, on the main thread: reading it needs
-        // DOMParser, which the kernel worker does not have. What gets stored
-        // is the millimetre outlines, so a rebuild never re-reads the SVG.
+        // DOMParser, which the kernel worker does not have.
         const { parseSvg } = await import("./svg/parse");
         const art = parseSvg(await file.text());
+        setFileOperation(null);
         if (!art.paths.length) {
-          setFileOperation(null);
           setError(`${file.name} has no shapes to build from — outline any text before exporting.`);
           return;
         }
-        const blobId = crypto.randomUUID();
-        const json = new TextEncoder().encode(JSON.stringify(art.paths));
-        await putBlob(blobId, json.buffer as ArrayBuffer);
-        addImport(blobId, file.name, file.size, {
-          thickness: DEFAULT_SVG_THICKNESS,
-          width: art.width,
-          height: art.height,
-        });
-        setFileOperation((current) => current ? { ...current, waitingForScene: true } : null);
         setError(null);
+        setPendingSvg({ file, art });
         return;
       }
 
@@ -692,11 +797,80 @@ export function App() {
     }
   };
 
+  const confirmSvgImport = async (config: { width: number; height: number; thickness: number }) => {
+    if (!pendingSvg) return;
+    const { file, art } = pendingSvg;
+    setPendingSvg(null);
+
+    setFileOperation({
+      label: `Importing ${file.name}`,
+      startedAt: Date.now(),
+      waitingForScene: false,
+      sawSceneBusy: false,
+    });
+
+    try {
+      const { scaleSvgCommands } = await import("./svg/parse");
+      const scaleX = art.width > 0 ? config.width / art.width : 1;
+      const scaleY = art.height > 0 ? config.height / art.height : 1;
+      const scaledPaths = scaleSvgCommands(art.paths, scaleX, scaleY);
+
+      const blobId = crypto.randomUUID();
+      const json = new TextEncoder().encode(JSON.stringify(scaledPaths));
+      await putBlob(blobId, json.buffer as ArrayBuffer);
+      addImport(blobId, file.name, file.size, {
+        thickness: config.thickness,
+        width: config.width,
+        height: config.height,
+      });
+      setFileOperation((current) => current ? { ...current, waitingForScene: true } : null);
+      setError(null);
+    } catch (e) {
+      setFileOperation(null);
+      setError(`Could not import ${file.name}: ${msg(e)}`);
+    }
+  };
+
+  const openTextTool = async () => {
+    try {
+      const { systemFonts } = await import("./text/systemFonts");
+      const fonts = textFonts ?? await systemFonts();
+      if (!fonts.length) throw new Error("No system fonts were returned.");
+      setTextFonts(fonts);
+      setTextModalOpen(true);
+      setError(null);
+    } catch (e) {
+      setError(`Could not access system fonts: ${msg(e)} Allow font access in the browser and try again.`);
+    }
+  };
+
+  const createText = async (config: TextConfig) => {
+    setTextModalOpen(false);
+    setFileOperation({ label: `Creating “${config.text}”`, startedAt: Date.now(), waitingForScene: false, sawSceneBusy: false });
+    try {
+      const { textOutlines } = await import("./text/systemFonts");
+      const art = await textOutlines(config.font, config.text, config.size);
+      const blobId = crypto.randomUUID();
+      const json = new TextEncoder().encode(JSON.stringify(art.paths));
+      await putBlob(blobId, json.buffer as ArrayBuffer);
+      addImport(blobId, `${config.text}.text`, json.byteLength, {
+        thickness: config.thickness,
+        width: art.width,
+        height: art.height,
+      });
+      setFileOperation((current) => current ? { ...current, waitingForScene: true } : null);
+      setError(null);
+    } catch (e) {
+      setFileOperation(null);
+      setError(`Could not create text: ${msg(e)}`);
+    }
+  };
+
   const downloadReadySTL = () => {
     if (!readyExportUrl) return;
     const a = document.createElement("a");
     a.href = readyExportUrl;
-    a.download = "part.stl";
+    a.download = exportFileName || "model.stl";
     a.style.display = "none";
     document.body.appendChild(a);
     a.click();
@@ -725,7 +899,42 @@ export function App() {
 
     try {
       let exportRevision = exportSceneRevisionRef.current;
-      let currentNodes = pruneSkipped(useDoc.getState().nodes, skippedIds);
+      const docNodes = useDoc.getState().nodes;
+      const activeSelection = useDoc.getState().selectedIds;
+
+      let exportNodes: SceneNode[];
+      if (activeSelection.length > 0) {
+        const matched: SceneNode[] = [];
+        for (const id of activeSelection) {
+          const node = findNode(docNodes, id);
+          if (node && !matched.some((n) => n.id === node.id)) {
+            matched.push(node);
+          }
+        }
+        exportNodes = matched.length > 0 ? matched : docNodes;
+      } else {
+        exportNodes = docNodes;
+      }
+
+      let currentNodes = pruneSkipped(exportNodes, skippedIds);
+      if (currentNodes.length === 0) {
+        setExporting(false);
+        setError("No shapes available to export.");
+        return;
+      }
+
+      let baseName = projectName.trim() || "model";
+      if (activeSelection.length === 1) {
+        const single = findNode(docNodes, activeSelection[0]);
+        if (single?.name) {
+          baseName = single.name.trim();
+        }
+      } else if (activeSelection.length > 1) {
+        baseName = `${baseName}-selected`;
+      }
+      const safeName = baseName.replace(/[^a-zA-Z0-9_-]/g, "_") || "model";
+      setExportFileName(`${safeName}.stl`);
+
       // Always export from the kernel, even for a single object. Re-using the
       // mesh already on screen is faster, but the viewport mesh is built at
       // EDIT_QUALITY and inherits whatever tessellation cracks that pass left
@@ -1130,6 +1339,9 @@ export function App() {
         setToolMode("select");
       } else if (!mod && e.key.toLowerCase() === "f") {
         setToolMode("face");
+      } else if (!mod && e.key.toLowerCase() === "e") {
+        setToolMode("edge");
+        setEdgeSelection(null);
       } else if (!mod && e.key.toLowerCase() === "m") {
         setToolMode("move");
       } else if (!mod && e.key.toLowerCase() === "r") {
@@ -1148,19 +1360,23 @@ export function App() {
       } else if (!mod && e.key.toLowerCase() === "d") {
         e.preventDefault();
         dropSelected();
+      } else if (!mod && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        zoomToSelected();
       } else if (!mod && e.key.toLowerCase() === "s") {
         e.preventDefault();
         setSnapEnabled((v) => !v);
       } else if (!mod && e.key.toLowerCase() === "w") {
         e.preventDefault();
-        setWireframe((v) => !v);
+        cycleWireframe();
       } else if (e.key === "Escape") {
+        setPendingPrimitive(null);
         setToolMode("select");
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [removeSelected, selectMany, undo, redo, group, ungroup, toggleTransparency, dropSelected, ungroupSelected, groupSelected, commitBuild, exportCurrentProject, newProject]);
+  }, [removeSelected, selectMany, undo, redo, group, ungroup, toggleTransparency, dropSelected, ungroupSelected, groupSelected, commitBuild, exportCurrentProject, newProject, cycleWireframe, zoomToSelected]);
 
   // The big card is for work the user is WAITING on: opening a file,
   // exporting, the first build of a document. A rebuild triggered by an edit
@@ -1305,8 +1521,25 @@ export function App() {
             <option value="fine">Fine</option>
           </select>
         </label>
-        <button className="export-btn" onClick={exportSTL} disabled={exporting}>
-          {exporting ? "Exporting…" : readyExportUrl ? "Download STL" : "Export STL"}
+        <button
+          className="export-btn"
+          onClick={exportSTL}
+          disabled={exporting}
+          title={
+            selectedIds.length
+              ? `Export ${selectedIds.length} selected object${selectedIds.length > 1 ? "s" : ""} to STL`
+              : "Export entire scene to STL"
+          }
+        >
+          {exporting
+            ? "Exporting…"
+            : readyExportUrl
+            ? "Download STL"
+            : selectedIds.length === 1
+            ? "Export Selected"
+            : selectedIds.length > 1
+            ? `Export Selected (${selectedIds.length})`
+            : "Export STL"}
         </button>
       </header>
 
@@ -1314,7 +1547,7 @@ export function App() {
         <div className="export-ready-notice" role="status" aria-live="polite">
           <div className="export-ready-icon" aria-hidden="true">✓</div>
           <div className="export-ready-copy">
-            <strong>Your STL is ready</strong>
+            <strong>Your STL is ready ({exportFileName})</strong>
             <span>You can download it now.</span>
           </div>
           <button className="export-ready-download" onClick={downloadReadySTL}>
@@ -1386,6 +1619,17 @@ export function App() {
             </svg>
           </button>
           <button
+            className={toolMode === "edge" ? "active" : ""}
+            onClick={() => { setToolMode("edge"); setEdgeSelection(null); }}
+            title="Select an edge to fillet or chamfer (E)"
+            aria-label="Edge finishing tool"
+          ><span className="tool-symbol">⌞</span></button>
+          <button
+            onClick={() => void openTextTool()}
+            title="Add 3D text using an installed system font"
+            aria-label="Add text tool"
+          ><span className="tool-symbol text-tool-symbol">T</span></button>
+          <button
             className={toolMode === "move" ? "active" : ""}
             onClick={() => setToolMode("move")}
             title="Move with axis controls (M)"
@@ -1426,17 +1670,90 @@ export function App() {
           >
             <TransparencyIcon />
           </button>
-          <button
-            className={wireframe ? "active" : ""}
-            onClick={() => setWireframe((v) => !v)}
-            title="Show edges only (W)"
-            aria-label="Toggle wireframe view"
-            aria-pressed={wireframe}
-          >
-            <WireframeIcon />
-          </button>
+          <div className="tool-rail-item-container" ref={wireframeMenuRef}>
+            <button
+              className={wireframe !== "off" || wireframeMenuOpen ? "active" : ""}
+              onClick={() => setWireframeMenuOpen((v) => !v)}
+              title={
+                wireframe === "outlined"
+                  ? "View: Outlined Solid (W) — click to toggle menu"
+                  : wireframe === "edges"
+                  ? "View: Clean Edges (W) — click to toggle menu"
+                  : wireframe === "mesh"
+                  ? "View: Full Mesh (W) — click to toggle menu"
+                  : wireframe === "xray"
+                  ? "View: X-Ray (W) — click to toggle menu"
+                  : wireframe === "transparent"
+                  ? "View: Transparent (W) — click to toggle menu"
+                  : "View Modes (W) — click to toggle menu"
+              }
+              aria-label={`View mode options, currently ${wireframe}`}
+              aria-expanded={wireframeMenuOpen}
+            >
+              <WireframeIcon mode={wireframe} />
+            </button>
+            {wireframeMenuOpen && (
+              <div className="tool-rail-flyout" role="menu" aria-label="View modes">
+                <button
+                  className={wireframe === "off" ? "active" : ""}
+                  onClick={() => setWireframe("off")}
+                  title="Solid Shaded View"
+                >
+                  <span className="flyout-icon"><SolidCubeIcon /></span>
+                  <span className="flyout-label">Solid</span>
+                </button>
+                <button
+                  className={wireframe === "outlined" ? "active" : ""}
+                  onClick={() => setWireframe("outlined")}
+                  title="Transparent-view lines with completely invisible faces"
+                >
+                  <span className="flyout-icon"><WireframeIcon mode="outlined" /></span>
+                  <span className="flyout-label">Outlined</span>
+                </button>
+                <button
+                  className={wireframe === "edges" ? "active" : ""}
+                  onClick={() => setWireframe("edges")}
+                  title="Clean CAD Edges (No diagonal mesh lines)"
+                >
+                  <span className="flyout-icon"><WireframeIcon mode="edges" /></span>
+                  <span className="flyout-label">Clean Edges</span>
+                </button>
+                <button
+                  className={wireframe === "mesh" ? "active" : ""}
+                  onClick={() => setWireframe("mesh")}
+                  title="Full Mesh (Original wireframe with all triangles)"
+                >
+                  <span className="flyout-icon"><WireframeIcon mode="mesh" /></span>
+                  <span className="flyout-label">Full Mesh</span>
+                </button>
+                <button
+                  className={wireframe === "xray" ? "active" : ""}
+                  onClick={() => setWireframe("xray")}
+                  title="X-Ray See-Through Wireframe"
+                >
+                  <span className="flyout-icon"><WireframeIcon mode="xray" /></span>
+                  <span className="flyout-label">X-Ray</span>
+                </button>
+                <button
+                  className={wireframe === "transparent" ? "active" : ""}
+                  onClick={() => setWireframe("transparent")}
+                  title="All Objects Transparent / Ghosted"
+                >
+                  <span className="flyout-icon"><WireframeIcon mode="transparent" /></span>
+                  <span className="flyout-label">Transparent</span>
+                </button>
+              </div>
+            )}
+          </div>
           {/* An action, not a mode and not a view toggle — its own group. */}
           <span className="tool-rail-sep" />
+          <button
+            onClick={zoomToSelected}
+            title={selectedIds.length ? "Zoom to selected object (Z)" : "Fit all objects in view (Z)"}
+            aria-label="Zoom to selected"
+          >
+            <ZoomToFitIcon />
+          </button>
           <button
             onClick={dropSelected}
             title="Drop onto what is below (D)"
@@ -1452,6 +1769,7 @@ export function App() {
           selectedIds={selectedIds}
           cameraMode={cameraMode}
           toolMode={toolMode}
+          placementKind={pendingPrimitive}
           resizeConstrained={resizeConstrained}
           wireframe={wireframe}
           snapEnabled={snapEnabled}
@@ -1464,8 +1782,41 @@ export function App() {
           onDuplicate={onDuplicate}
           onPushPull={pushPullFace}
           onPreviewPushPull={onPreviewPushPull}
+          onSelectEdges={(id, points) => setEdgeSelection(id && points.length ? { id, points } : null)}
+          onPlaceSurface={placePrimitive}
           onDragChange={onDragChange}
         />
+        {toolMode === "place" && pendingPrimitive && (
+          <div className="edge-bar placement-bar">
+            <strong>Place {PRIMITIVES[pendingPrimitive].label}</strong>
+            <span>Choose a face or the workplane</span>
+            <button onClick={() => { setPendingPrimitive(null); setToolMode("select"); }}>Cancel</button>
+          </div>
+        )}
+        {toolMode === "edge" && (
+          <div className="edge-bar">
+            <strong>{edgeSelection ? `${edgeSelection.points.length} edge${edgeSelection.points.length === 1 ? "" : "s"} selected` : "Select edges"}</strong>
+            <select value={edgeKind} onChange={(e) => setEdgeKind(e.target.value as "fillet" | "chamfer")}>
+              <option value="fillet">Fillet</option>
+              <option value="chamfer">Chamfer</option>
+            </select>
+            <label>
+              Size
+              <input type="number" min="0.1" step="0.5" value={edgeDistance}
+                onChange={(e) => setEdgeDistance(Math.max(0.1, Number(e.target.value) || 0.1))} /> mm
+            </label>
+            <button disabled={!edgeSelection} onClick={() => {
+              if (!edgeSelection) return;
+              finishEdge(edgeSelection.id, {
+                kind: edgeKind,
+                point: edgeSelection.points[0],
+                points: edgeSelection.points,
+                distance: edgeDistance,
+              });
+              setEdgeSelection(null);
+            }}>Apply</button>
+          </div>
+        )}
         {toolMode === "build" && !buildBusy && buildCells.length > 0 && (
           // Finishing has to be visible. Enter alone was not: Esc is the key
           // people reach for to get out of a mode, and Esc throws the session
@@ -1519,7 +1870,9 @@ export function App() {
             ? "Click a dot to align minimum, centre, or maximum · A Align · Esc Select"
             : toolMode === "face"
             ? "Click a flat face, then drag its arrow or type a distance to push/pull · Esc Select · Right-drag orbit"
-            : "V Select · F Face · M Move · R Rotate · A Align · T Transparent · W Wireframe · D Drop · S Snapping · Drag an object to move it · Alt-drag duplicate · Shift-drag straight · Right-drag orbit"}
+            : toolMode === "edge"
+            ? "Click edges to add or remove them · Choose Fillet or Chamfer, then Apply · Esc Select · Right-drag orbit"
+            : "V Select · F Face · M Move · R Rotate · A Align · Z Zoom · T Transparent · W Wireframe · D Drop · S Snapping · Drag an object to move it · Alt-drag duplicate · Shift-drag straight · Right-drag orbit"}
         </div>
         {/* One centred stack. The progress card and the slow-file warning
             were each pinned to top: 14px of their own, so whichever drew
@@ -1569,7 +1922,11 @@ export function App() {
           </div>
           <div className="shape-grid">
             {(Object.keys(PRIMITIVES) as PrimitiveKind[]).map((kind) => (
-              <button key={kind} className="shape-card" onClick={() => addPrimitive(kind)}>
+              <button key={kind} className={`shape-card ${pendingPrimitive === kind ? "active" : ""}`} onClick={() => {
+                setPendingPrimitive(kind);
+                setToolMode("place");
+                select(null);
+              }}>
                 <span className={`shape-icon shape-${kind}`} />
                 <span>{PRIMITIVES[kind].label}</span>
               </button>
@@ -1735,6 +2092,23 @@ export function App() {
         }}
         onProjectLoadFailed={() => setFileOperation(null)}
       />
+
+      {pendingSvg && (
+        <SvgImportModal
+          isOpen={true}
+          fileName={pendingSvg.file.name}
+          initialWidth={pendingSvg.art.width}
+          initialHeight={pendingSvg.art.height}
+          rawWidth={pendingSvg.art.rawWidth}
+          rawHeight={pendingSvg.art.rawHeight}
+          detectedPreset={pendingSvg.art.unitPreset}
+          onClose={() => setPendingSvg(null)}
+          onImport={confirmSvgImport}
+        />
+      )}
+      {textModalOpen && textFonts && (
+        <TextModal fonts={textFonts} onClose={() => setTextModalOpen(false)} onCreate={(config) => void createText(config)} />
+      )}
     </div>
   );
 }

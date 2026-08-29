@@ -41,7 +41,7 @@ import type {
   SceneBuild,
   ResultBuild,
 } from "./types";
-import type { PushPullOp, Vec3 } from "../document/types";
+import type { EditOp, PushPullOp, Vec3 } from "../document/types";
 
 let booted: Promise<void> | null = null;
 
@@ -271,12 +271,76 @@ function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdg
   };
 }
 
+/** Rebuild display normals independently for every CAD face.
+ *
+ * OCCT occasionally returns a misleading vertex normal at a corner where a
+ * fillet terminates against a chamfer.  The triangles themselves are sound
+ * (and therefore export correctly), but sharing that normal across adjacent
+ * faces produces a dark triangular "dent" in the viewport.  Welding only
+ * equal positions inside one face gives curved faces smooth shading while
+ * keeping every real B-Rep boundary sharp. */
+function normalsPerCadFace(faces: MeshedFaces): MeshedFaces {
+  const sourceVertices = faces.vertices;
+  const sourceTriangles = faces.triangles;
+  if (!sourceTriangles.length || !faces.faceGroups.length) return faces;
+
+  const vertices: number[] = [];
+  const triangles = new Array<number>(sourceTriangles.length);
+  const normals: number[] = [];
+
+  for (const face of faces.faceGroups) {
+    const baseVertex = vertices.length / 3;
+    const local = new Map<string, number>();
+    const accumulated: number[] = [];
+    for (let offset = face.start; offset < face.start + face.count; offset += 3) {
+      const sourceIds = [sourceTriangles[offset], sourceTriangles[offset + 1], sourceTriangles[offset + 2]];
+      const points = sourceIds.map((id) => {
+        const at = id * 3;
+        return [sourceVertices[at], sourceVertices[at + 1], sourceVertices[at + 2]];
+      });
+      const ab = [points[1][0] - points[0][0], points[1][1] - points[0][1], points[1][2] - points[0][2]];
+      const ac = [points[2][0] - points[0][0], points[2][1] - points[0][1], points[2][2] - points[0][2]];
+      // Keep the cross product unnormalised so larger triangles contribute
+      // proportionally more to the smooth normal.
+      const cross = [
+        ab[1] * ac[2] - ab[2] * ac[1],
+        ab[2] * ac[0] - ab[0] * ac[2],
+        ab[0] * ac[1] - ab[1] * ac[0],
+      ];
+      for (let corner = 0; corner < 3; corner++) {
+        const point = points[corner];
+        const key = `${Math.round(point[0] * 1e6)},${Math.round(point[1] * 1e6)},${Math.round(point[2] * 1e6)}`;
+        let index = local.get(key);
+        if (index === undefined) {
+          index = vertices.length / 3;
+          local.set(key, index);
+          vertices.push(point[0], point[1], point[2]);
+          accumulated.push(0, 0, 0);
+        }
+        triangles[offset + corner] = index;
+        const localIndex = index - baseVertex;
+        accumulated[localIndex * 3] += cross[0];
+        accumulated[localIndex * 3 + 1] += cross[1];
+        accumulated[localIndex * 3 + 2] += cross[2];
+      }
+    }
+    for (let index = 0; index < accumulated.length / 3; index++) {
+      const x = accumulated[index * 3];
+      const y = accumulated[index * 3 + 1];
+      const z = accumulated[index * 3 + 2];
+      const length = Math.hypot(x, y, z) || 1;
+      normals.push(x / length, y / length, z / length);
+    }
+  }
+  return { ...faces, vertices, triangles, normals };
+}
+
 function toMesh(name: string, s: AnySolid, quality: MeshQuality): KernelMesh {
   if (isMesh(s)) {
     const { faces, edges } = meshFromMeshShape(s);
     return { name, faces, edges };
   }
-  return { name, faces: s.mesh(quality), edges: s.meshEdges(quality) };
+  return { name, faces: normalsPerCadFace(s.mesh(quality)), edges: s.meshEdges(quality) };
 }
 
 /**
@@ -301,10 +365,31 @@ function meshMatchesSolidBounds(mesh: KernelMesh, solid: AnySolid): boolean {
         gotMax[axis] = Math.max(gotMax[axis], value);
       }
     }
+    // Curved tessellation is an inscribed approximation. Requiring its bounds
+    // to agree more closely than the requested 0.05 mm mesh tolerance falsely
+    // rejects legitimate fillets (often by almost exactly 0.05 mm). Keep a
+    // small multiple of that tolerance: still tiny enough to catch the
+    // displaced-vertex failures this guard exists for, without classifying a
+    // correctly rounded edge as a broken mesh.
+    const span = [0, 1, 2].map((axis) => expectedMax[axis] - expectedMin[axis]);
+    // Angular deflection can dominate linear tolerance at a rounded extreme:
+    // an inscribed facet may legitimately stop short of the exact B-Rep bound
+    // by the sagitta implied by angularTolerance. The old fixed 0.15 mm check
+    // therefore rejected valid larger fillets even though their STL and B-Rep
+    // were sound. Bound that expected shortfall from the part's radius scale;
+    // displaced vertices still fail because they overshoot by far more.
+    const angularSagitta = Math.max(...span) / 2 *
+      (1 - Math.cos(EDIT_QUALITY.angularTolerance / 2)) * 1.5;
+    // This guard is for catastrophic stray/displaced vertices, not for
+    // judging tessellation fidelity. Five percent is still far below the
+    // multi-part jumps produced by the OCCT failure it catches, while curved
+    // edit chains can legitimately miss an analytic extremum by more than
+    // the nominal deflection after several transitions.
+    const tolerance = Math.max(EDIT_QUALITY.tolerance * 3, angularSagitta, Math.max(...span) * 0.05) + 1e-6;
     return [0, 1, 2].every(
       (axis) =>
-        Math.abs(gotMin[axis] - expectedMin[axis]) < 0.05 &&
-        Math.abs(gotMax[axis] - expectedMax[axis]) < 0.05,
+        Math.abs(gotMin[axis] - expectedMin[axis]) <= tolerance &&
+        Math.abs(gotMax[axis] - expectedMax[axis]) <= tolerance,
     );
   } catch {
     return false;
@@ -667,6 +752,46 @@ const api = {
       const key = localKey(spec);
       const cached = meshCache.get(spec.id);
 
+      /** A geometry edit is never allowed to turn a visible object into empty
+       * space. Prefer the last verified mesh in this worker; after a refresh,
+       * rebuild progressively shorter edit history until the newest sound
+       * prefix is found. */
+      const keepLastGood = async (): Promise<boolean> => {
+        if (cached) {
+          parts.push({ id: spec.id, isHole: spec.isHole, mesh: cached.mesh, faces: cached.faces });
+          return true;
+        }
+        if (spec.type !== "edit") return false;
+        for (let count = spec.ops.length - 1; count >= 0; count--) {
+          try {
+            const fallbackSpec = { ...spec, ops: spec.ops.slice(0, count) };
+            const fallbackSolid = await makeLocal(fallbackSpec, undefined, onProgress);
+            if (!fallbackSolid) continue;
+            const fallbackMesh = toMesh(spec.id, fallbackSolid, EDIT_QUALITY);
+            if (!meshMatchesSolidBounds(fallbackMesh, fallbackSolid)) continue;
+            const faces = faceInfoOf(fallbackMesh);
+            // This mesh represents a SHORTER edit prefix, not the full `key`
+            // requested above. Labelling it with the full key makes the next
+            // scene build accept the fallback as if the failed newest edit
+            // had succeeded, so the warning disappears while the geometry
+            // silently remains one edit behind. Keep its truthful key: the
+            // next build will retry the complete history instead of poisoning
+            // the cache with a visually plausible but stale result.
+            meshCache.set(spec.id, {
+              key: localKey(fallbackSpec),
+              mesh: fallbackMesh,
+              faces,
+              solid: fallbackSolid,
+            });
+            parts.push({ id: spec.id, isHole: spec.isHole, mesh: fallbackMesh, faces });
+            return true;
+          } catch {
+            // Try the next shorter, previously valid edit prefix.
+          }
+        }
+        return false;
+      };
+
       if (cached && cached.key === key) {
         // Refresh insertion order so repeatedly grouped/ungrouped children
         // remain recent and survive the bounded dormant-entry cache below.
@@ -742,12 +867,15 @@ const api = {
             }
             parts.push({ id: spec.id, isHole: spec.isHole, mesh, faces });
           } else {
-            meshCache.delete(spec.id);
-            onError(spec.id, "This shape could not be meshed at the correct position — try grouping again.");
+            await keepLastGood();
+            onError(
+              spec.id,
+              "This shape could not be rebuilt reliably. The last valid version is still shown — undo and retry the latest geometry edit.",
+            );
           }
         }
       } catch (e) {
-        meshCache.delete(spec.id);
+        await keepLastGood();
         onError(spec.id, message(e));
       }
       // Only reached by nodes that actually rebuilt; a cache hit `continue`s
@@ -1088,14 +1216,15 @@ const api = {
     await init();
     try {
       let solid: AnySolid | null;
-      if (spec.type === "edit" && spec.ops.length > 0 && !hasImport(spec.base)) {
+      if (spec.type === "edit" && spec.ops.length > 0 && !hasImport(spec.base) &&
+          spec.ops[spec.ops.length - 1].kind !== "fillet" && spec.ops[spec.ops.length - 1].kind !== "chamfer") {
         const finalOp = spec.ops[spec.ops.length - 1];
         const key = JSON.stringify({ base: spec.base, ops: spec.ops.slice(0, -1) });
         if (pushPullPreviewCache?.key !== key) {
           const base = await makePushPullPreviewBase(spec);
           pushPullPreviewCache = base ? { key, solid: base } : null;
         }
-        solid = pushPullPreviewCache ? applyPushPullPreview(pushPullPreviewCache.solid, finalOp) : null;
+        solid = pushPullPreviewCache ? applyPushPullPreview(pushPullPreviewCache.solid, finalOp as PushPullOp) : null;
       } else {
         solid = await makeLocal(spec);
       }
@@ -1127,7 +1256,7 @@ const api = {
    * this is what lets the app drop it for good. null for anything that
    * isn't an edit node — nothing to prune.
    */
-  async pruneDeadOps(spec: NodeSpec): Promise<PushPullOp[] | null> {
+  async pruneDeadOps(spec: NodeSpec): Promise<EditOp[] | null> {
     await init();
     if (spec.type !== "edit") return null;
     return survivingOps(spec);

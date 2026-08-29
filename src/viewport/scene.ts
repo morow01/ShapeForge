@@ -1,11 +1,14 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
-import { clearHighlights, getFaceIndex, highlightInGeometry, syncGeometries } from "replicad-threejs-helper";
+import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
+import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
+import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
+import { clearHighlights, getEdgeIndex, getFaceIndex, highlightInGeometry, syncGeometries } from "replicad-threejs-helper";
 import type { ReplicadMesh, ThreeGeometry } from "replicad-threejs-helper";
 import type { CellPart, FaceInfo, KernelMesh, PreviewBuild, ScenePart } from "../kernel/types";
-import type { CameraMode, SceneNode, Vec3 } from "../document/types";
-import { DEFAULT_OBJECT_COLOR, isGroup } from "../document/types";
+import type { CameraMode, PrimitiveKind, SceneNode, Vec3 } from "../document/types";
+import { DEFAULT_OBJECT_COLOR, PRIMITIVES, isGroup } from "../document/types";
 import { findNode, resolveNodeColor, resolveNodeTransparent } from "../document/tree";
 import { loadCameraState, saveCameraState } from "../document/persist";
 import { snapBounds } from "../snapping/snap";
@@ -15,7 +18,8 @@ import { CUBE_MARGIN_PX, CUBE_PX, NavCube } from "./navcube";
 import { findApex, solveScaledTriangle } from "../geometry/triangle";
 
 export type { CameraMode } from "../document/types";
-export type ToolMode = "select" | "face" | "move" | "rotate" | "align" | "build";
+export type ToolMode = "select" | "face" | "edge" | "place" | "move" | "rotate" | "align" | "build";
+export type WireframeMode = "off" | "outlined" | "edges" | "mesh" | "xray" | "transparent";
 type AlignAxis = 0 | 1 | 2;
 type AlignAnchor = "min" | "center" | "max";
 
@@ -176,6 +180,7 @@ interface ResizeDrag {
   rawSize: Vec3;
   handleSigns: Vec3;
   rotation: THREE.Quaternion;
+  handleIndex: number;
 }
 
 interface PartView {
@@ -211,6 +216,7 @@ const UP = new THREE.Vector3(0, 0, 1);
 const MATERIALS = {
   wire: new THREE.LineBasicMaterial({ color: 0x38505f, transparent: true, opacity: 0.7 }),
   wireSelected: new THREE.LineBasicMaterial({ color: 0x00c4cc, transparent: true, opacity: 0.95 }),
+  edgeHighlight: new THREE.LineBasicMaterial({ color: 0xff761a, depthTest: false }),
   solid: new THREE.MeshStandardMaterial({ color: 0x43aede, metalness: 0.04, roughness: 0.6 }),
   solidSelected: new THREE.MeshStandardMaterial({
     color: 0xf2a33a,
@@ -333,6 +339,41 @@ const MATERIALS = {
     polygonOffsetFactor: 1,
     polygonOffsetUnits: 1,
   }),
+  /** Camera-facing silhouette for line-only mode. A sphere has only a seam as
+   * a real B-Rep edge, so CAD edge lines alone make it nearly disappear. This
+   * shader discards every face pixel except a roughly two-pixel band where
+   * the surface normal is perpendicular to the view direction. */
+  outlineSurface: new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: false,
+    depthTest: true,
+    side: THREE.DoubleSide,
+    vertexShader: `
+      varying vec3 vViewNormal;
+      varying vec3 vViewPosition;
+      void main() {
+        vec4 viewPosition = modelViewMatrix * vec4(position, 1.0);
+        vViewPosition = viewPosition.xyz;
+        vViewNormal = normalize(normalMatrix * normal);
+        gl_Position = projectionMatrix * viewPosition;
+      }
+    `,
+    fragmentShader: `
+      varying vec3 vViewNormal;
+      varying vec3 vViewPosition;
+      void main() {
+        float facing = abs(dot(normalize(vViewNormal), normalize(-vViewPosition)));
+        float pixel = max(fwidth(facing), 0.002);
+        float contour = 1.0 - smoothstep(0.0, pixel * 1.8, facing);
+        if (contour < 0.02) discard;
+        gl_FragColor = vec4(0.22, 0.31, 0.37, contour * 0.85);
+      }
+    `,
+  }),
+  outlineInvisible: new THREE.MeshBasicMaterial({
+    colorWrite: false,
+    depthWrite: false,
+  }),
   // The shape's own edges ride on top of the triangles, darker and at full
   // strength (no half-transparency, unlike over a shaded solid), so the real
   // silhouette still reads through the mesh behind it.
@@ -443,6 +484,7 @@ function disposeArrow(handle: THREE.Object3D) {
 
 export class Scene {
   private solidMaterialCache = new Map<string, THREE.MeshStandardMaterial>();
+  private placementPreview: THREE.Mesh | null = null;
 
   private getSolidMaterial(
     colorHex: string = DEFAULT_OBJECT_COLOR,
@@ -477,6 +519,8 @@ export class Scene {
   private resizeBox = new THREE.Box3Helper(new THREE.Box3(), 0x00a9b7);
   private resizeHandles = new THREE.Group();
   private resizeHandleMeshes: THREE.Mesh[] = [];
+  private resizeHoverIndex = -1;
+  private resizeHoverMaterial = new THREE.MeshBasicMaterial({ color: 0xff9f1a, depthTest: false });
   private alignBox = new THREE.Box3Helper(new THREE.Box3(), 0x00a9b7);
   private alignHandles = new THREE.Group();
   private alignHandleMeshes: THREE.Mesh[] = [];
@@ -512,6 +556,8 @@ export class Scene {
   /** A face stays selected after a click, Shapr3D-style. Only this face gets
    * the push/pull arrow; hovering no longer fills the canvas with grips. */
   private selectedFace: { partId: string; groupIndex: number } | null = null;
+  private selectedEdges: { partId: string; groupIndex: number; point: Vec3; line: LineSegments2 }[] = [];
+  private hoverEdgeLine: LineSegments2 | null = null;
   private pushPullHandleHovered = false;
   private dimensionInputs: HTMLInputElement[] = [];
   /** Floating corner labels for selected triangles (Left, Right, Apex). */
@@ -519,13 +565,11 @@ export class Scene {
   /** The positioned wrapper around each dimension input — the input itself no
    *  longer carries the layout, since it now sits beside an axis badge. */
   private dimensionPills: HTMLDivElement[] = [];
-  /** The three cage edges the dimension readouts measure, drawn in their axis
-   *  colours so each number is tied to a specific edge rather than floating
-   *  somewhere near the object. */
+  /** Three dimension shafts plus four arrowhead strokes per axis. */
   private dimensionEdges = new THREE.LineSegments(
     new THREE.BufferGeometry()
-      .setAttribute("position", new THREE.BufferAttribute(new Float32Array(18), 3))
-      .setAttribute("color", new THREE.BufferAttribute(new Float32Array(18), 3)),
+      .setAttribute("position", new THREE.BufferAttribute(new Float32Array(90), 3))
+      .setAttribute("color", new THREE.BufferAttribute(new Float32Array(90), 3)),
     new THREE.LineBasicMaterial({ vertexColors: true, depthTest: false, transparent: true }),
   );
   /** Editable X/Y readouts of how far the object has moved from where the
@@ -564,8 +608,8 @@ export class Scene {
   private parts = new Map<string, PartView>();
   private resultView: PartView | null = null;
   private showResult = false;
-  /** Edges-only view: solids stop being drawn, their wireframes carry on. */
-  private wireframe = false;
+  /** Wireframe display mode: off, clean edges, full tessellated mesh, or xray. */
+  private wireframe: WireframeMode = "off";
   /** Smart Guides. Off means a drag goes exactly where the pointer goes. */
   private snapEnabled = true;
   /** Shape Builder: one view per region of the selection's arrangement, keyed
@@ -644,6 +688,8 @@ export class Scene {
   onPreviewPushPull:
     | ((id: string, op: { point: Vec3; normal: Vec3; distance: number }) => Promise<PreviewBuild | null>)
     | null = null;
+  onSelectEdges: ((id: string | null, points: Vec3[]) => void) | null = null;
+  onPlaceSurface: ((point: Vec3, normal: Vec3) => void) | null = null;
 
   constructor(host: HTMLElement) {
     this.host = host;
@@ -824,6 +870,7 @@ export class Scene {
     const axisMaterial = new THREE.MeshBasicMaterial({ color: 0x00a9b7, depthTest: false });
     for (let i = 0; i < 14; i++) {
       const handle = new THREE.Mesh(geometry, i < 8 ? cornerMaterial : axisMaterial);
+      handle.userData.baseMaterial = handle.material;
       handle.renderOrder = 21;
       this.resizeHandles.add(handle);
       this.resizeHandleMeshes.push(handle);
@@ -1070,7 +1117,7 @@ export class Scene {
   private makeOccluder(faces: ThreeGeometry["faces"]): THREE.Mesh {
     const occluder = new THREE.Mesh(faces, MATERIALS.wireOccluder);
     occluder.renderOrder = -1;
-    occluder.visible = this.wireframe;
+    occluder.visible = this.wireframe === "edges" || this.wireframe === "mesh";
     return occluder;
   }
 
@@ -1143,6 +1190,7 @@ export class Scene {
       seen.add(part.id);
       const existing = this.parts.get(part.id);
       if (existing) {
+        if (this.selectedEdges.some((edge) => edge.partId === part.id)) this.clearEdgeSelection(true);
         existing.geom = syncKernelGeometry(part.mesh, existing.geom);
         existing.pivot = this.centreGeometry(existing.geom);
         existing.mesh.geometry = existing.geom[0].faces;
@@ -1177,6 +1225,10 @@ export class Scene {
     this.selectedIds = selectedIds;
     if (this.selectedFace && !selectedIds.includes(this.selectedFace.partId)) {
       this.selectedFace = null;
+    }
+    if (this.selectedEdges.length && !selectedIds.includes(this.selectedEdges[0].partId)) {
+      this.clearEdgeSelection(true);
+      this.clearEdgeHover();
     }
     // "Moved this far from there" stops meaning anything once the object it
     // described is no longer the one selected.
@@ -1289,9 +1341,33 @@ export class Scene {
       // array is what makes that actually render as anything other than the
       // base material (a BufferGeometry's .groups are ignored entirely unless
       // .material is an array).
-      if (this.wireframe) {
-        // No filled surface left to sort against, so renderOrder goes back to
-        // the default for holes and solids alike.
+      const isOutlined = this.wireframe === "outlined";
+      const isWire = isOutlined || this.wireframe === "edges" || this.wireframe === "mesh" || this.wireframe === "xray";
+      const isEdgesOnly = this.wireframe === "edges";
+      const isMesh = this.wireframe === "mesh";
+      const isXray = this.wireframe === "xray";
+      const isTransparentMode = this.wireframe === "transparent";
+
+      if (isOutlined) {
+        // Exactly Transparent view's clean CAD lines, with face opacity
+        // reduced all the way to zero and no depth mask hiding rear lines.
+        const sphereBase = node?.type === "object"
+          ? node.kind === "sphere"
+          : node?.type === "edit" && node.base.type === "object" && node.base.kind === "sphere";
+        // The contour shader is only needed for a sphere, whose B-Rep has no
+        // silhouette edge. On planar faces viewed edge-on it can become a
+        // broad band, so ordinary edged solids keep a fully invisible mesh.
+        view.mesh.material = [sphereBase ? MATERIALS.outlineSurface : MATERIALS.outlineInvisible, MATERIALS.faceHighlight];
+        view.mesh.renderOrder = 0;
+      } else if (isEdgesOnly) {
+        // Clean CAD B-Rep edges: occluder hides back lines, mesh is invisible to color (writes depth/raycasts)
+        view.mesh.material = [
+          MATERIALS.wireOccluder,
+          MATERIALS.faceHighlight,
+        ];
+        view.mesh.renderOrder = 0;
+      } else if (isMesh || isXray) {
+        // Tessellated mesh: triangle edges drawn
         view.mesh.material = [
           sel ? MATERIALS.wireMeshSelected : MATERIALS.wireMesh,
           MATERIALS.faceHighlight,
@@ -1302,20 +1378,26 @@ export class Scene {
         // Draw after opaque solids while still respecting their depth.
         view.mesh.renderOrder = 2;
       } else {
-        const mat = this.getSolidMaterial(color, sel, transparent);
+        const isTrans = isTransparentMode || transparent;
+        const mat = this.getSolidMaterial(color, sel, isTrans);
         view.mesh.material = [mat, MATERIALS.faceHighlight];
-        view.mesh.renderOrder = transparent ? 1 : 0;
+        view.mesh.renderOrder = isTrans ? 1 : 0;
       }
-      view.wire.material = this.wireframe
+      const wireBase = isOutlined
+        ? sel
+          ? MATERIALS.wireSelected
+          : MATERIALS.wire
+        : isWire
         ? sel
           ? MATERIALS.wireOnlySelected
           : MATERIALS.wireOnly
         : sel
           ? MATERIALS.wireSelected
           : MATERIALS.wire;
+      view.wire.material = [wireBase, MATERIALS.edgeHighlight];
 
       const hasActiveResult = this.showResult && !!this.resultView;
-      view.occluder.visible = this.wireframe && !hasActiveResult;
+      view.occluder.visible = (isEdgesOnly || isMesh) && !hasActiveResult;
       if (hasActiveResult) {
         // Ghost the original part — still visible as a faint translucent
         // silhouette so the user can see what the merged result was built from.
@@ -1332,7 +1414,35 @@ export class Scene {
         view.wire.visible = true;
       }
     }
-    if (this.resultView) this.resultView.group.visible = this.showResult;
+    if (this.resultView) {
+      this.resultView.group.visible = this.showResult;
+      if (this.wireframe === "outlined") {
+        this.resultView.mesh.material = [MATERIALS.outlineInvisible, MATERIALS.faceHighlight];
+        this.resultView.wire.material = MATERIALS.wire;
+        this.resultView.wire.visible = true;
+        this.resultView.occluder.visible = false;
+      } else if (this.wireframe === "edges") {
+        this.resultView.mesh.material = [MATERIALS.wireOccluder, MATERIALS.faceHighlight];
+        this.resultView.wire.material = MATERIALS.wireOnly;
+        this.resultView.wire.visible = true;
+        this.resultView.occluder.visible = true;
+      } else if (this.wireframe === "mesh" || this.wireframe === "xray") {
+        this.resultView.mesh.material = [MATERIALS.wireMesh, MATERIALS.faceHighlight];
+        this.resultView.wire.material = MATERIALS.wireOnly;
+        this.resultView.wire.visible = true;
+        this.resultView.occluder.visible = this.wireframe === "mesh";
+      } else if (this.wireframe === "transparent") {
+        this.resultView.mesh.material = [MATERIALS.resultGhost, MATERIALS.faceHighlight];
+        this.resultView.wire.material = MATERIALS.wire;
+        this.resultView.wire.visible = true;
+        this.resultView.occluder.visible = false;
+      } else {
+        this.resultView.mesh.material = [MATERIALS.result, MATERIALS.faceHighlight];
+        this.resultView.wire.material = MATERIALS.wire;
+        this.resultView.wire.visible = true;
+        this.resultView.occluder.visible = false;
+      }
+    }
     this.restoreSelectedFaceHighlight();
     this.updateResizeOverlay();
     this.updateAlignOverlay();
@@ -1351,9 +1461,15 @@ export class Scene {
       !this.showResult;
     this.resizeBox.visible = visible;
     this.resizeHandles.visible = visible;
-    this.dimensionEdges.visible = visible;
-    for (const pill of this.dimensionPills) pill.style.display = visible ? "flex" : "none";
+    this.dimensionEdges.visible = false;
+    for (const pill of this.dimensionPills) pill.style.display = "none";
     if (!visible) {
+      if (this.resizeHoverIndex >= 0) {
+        const handle = this.resizeHandleMeshes[this.resizeHoverIndex];
+        handle.material = handle.userData.baseMaterial as THREE.Material;
+        this.resizeHoverIndex = -1;
+        for (const pill of this.dimensionPills) pill.classList.remove("hover");
+      }
       for (const badge of this.cornerBadges) badge.style.display = "none";
       return;
     }
@@ -1383,7 +1499,11 @@ export class Scene {
     this.resizeHandleMeshes[12].position.set(centre.x, centre.y, min.z);
     this.resizeHandleMeshes[13].position.set(centre.x, centre.y, max.z);
     const handleSize = Math.max(0.6, this.worldSnapTolerance(centre) * 0.9);
-    for (const handle of this.resizeHandleMeshes) handle.scale.setScalar(handleSize);
+    for (let i = 0; i < this.resizeHandleMeshes.length; i++) {
+      const handle = this.resizeHandleMeshes[i];
+      handle.userData.baseScale = handleSize;
+      handle.scale.setScalar(handleSize * (i === this.resizeHoverIndex ? 1.35 : 1));
+    }
 
     const size = box.getSize(new THREE.Vector3());
     // Each readout measures ONE specific edge; drawing that edge in the same
@@ -1409,13 +1529,31 @@ export class Scene {
     const edgePos = this.dimensionEdges.geometry.getAttribute("position") as THREE.BufferAttribute;
     const edgeCol = this.dimensionEdges.geometry.getAttribute("color") as THREE.BufferAttribute;
     const tint = new THREE.Color();
+    let vertex = 0;
     for (let i = 0; i < edges.length; i++) {
       const [a, b] = edges[i];
-      edgePos.setXYZ(i * 2, a.x, a.y, a.z);
-      edgePos.setXYZ(i * 2 + 1, b.x, b.y, b.z);
+      const direction = b.clone().sub(a).normalize();
+      const perpendicular = i === 0
+        ? new THREE.Vector3(0, 1, 0)
+        : i === 1
+          ? new THREE.Vector3(1, 0, 0)
+          : new THREE.Vector3(1, 1, 0).normalize();
+      const arrowLength = Math.min(a.distanceTo(b) * 0.12, gap * 0.75);
+      const arrowWidth = arrowLength * 0.55;
+      const segments: [THREE.Vector3, THREE.Vector3][] = [
+        [a, b],
+        [a, a.clone().addScaledVector(direction, arrowLength).addScaledVector(perpendicular, arrowWidth)],
+        [a, a.clone().addScaledVector(direction, arrowLength).addScaledVector(perpendicular, -arrowWidth)],
+        [b, b.clone().addScaledVector(direction, -arrowLength).addScaledVector(perpendicular, arrowWidth)],
+        [b, b.clone().addScaledVector(direction, -arrowLength).addScaledVector(perpendicular, -arrowWidth)],
+      ];
       tint.setHex(AXIS_COLOR_HEX[i]);
-      edgeCol.setXYZ(i * 2, tint.r, tint.g, tint.b);
-      edgeCol.setXYZ(i * 2 + 1, tint.r, tint.g, tint.b);
+      for (const [from, to] of segments) {
+        edgePos.setXYZ(vertex, from.x, from.y, from.z);
+        edgeCol.setXYZ(vertex++, tint.r, tint.g, tint.b);
+        edgePos.setXYZ(vertex, to.x, to.y, to.z);
+        edgeCol.setXYZ(vertex++, tint.r, tint.g, tint.b);
+      }
     }
     edgePos.needsUpdate = true;
     edgeCol.needsUpdate = true;
@@ -1513,6 +1651,56 @@ export class Scene {
         for (const badge of this.cornerBadges) badge.style.display = "none";
       }
     }
+    this.updateDimensionVisibility(this.resizeDrag?.handleIndex ?? this.resizeHoverIndex);
+  }
+
+  private updateDimensionVisibility(handleIndex: number) {
+    const active = this.resizeHandles.visible && handleIndex >= 0;
+    this.dimensionEdges.visible = active;
+    if (!active) {
+      this.dimensionEdges.geometry.setDrawRange(0, 0);
+      for (const pill of this.dimensionPills) pill.style.display = "none";
+      return;
+    }
+    const axis = handleIndex < 8 ? null : Math.floor((handleIndex - 8) / 2);
+    this.dimensionEdges.geometry.setDrawRange(axis === null ? 0 : axis * 10, axis === null ? 30 : 10);
+    for (let i = 0; i < this.dimensionPills.length; i++) {
+      this.dimensionPills[i].style.display = axis === null || axis === i ? "flex" : "none";
+    }
+  }
+
+  /** TinkerCAD-style hover state for the eight corner resize points. Besides
+   * making the active point unmistakable, it calls attention to the three
+   * live size readouts without starting a resize gesture. Applies to both
+   * corner points and the six dark-blue single-axis handles. */
+  private updateResizeHover(e: PointerEvent) {
+    let next = -1;
+    if (this.resizeHandles.visible && this.toolMode === "select") {
+      const rect = this.renderer.domElement.getBoundingClientRect();
+      let nearest = 16;
+      for (let i = 0; i < this.resizeHandleMeshes.length; i++) {
+        const p = this.resizeHandleMeshes[i].position.clone().project(this.camera);
+        const x = rect.left + ((p.x + 1) / 2) * rect.width;
+        const y = rect.top + ((1 - p.y) / 2) * rect.height;
+        const distance = Math.hypot(e.clientX - x, e.clientY - y);
+        if (distance < nearest) { nearest = distance; next = i; }
+      }
+    }
+    if (next === this.resizeHoverIndex) return;
+    if (this.resizeHoverIndex >= 0) {
+      const old = this.resizeHandleMeshes[this.resizeHoverIndex];
+      old.material = old.userData.baseMaterial as THREE.Material;
+      old.scale.setScalar(old.userData.baseScale ?? 1);
+    }
+    this.resizeHoverIndex = next;
+    if (next >= 0) {
+      const handle = this.resizeHandleMeshes[next];
+      handle.material = this.resizeHoverMaterial;
+      handle.scale.setScalar((handle.userData.baseScale ?? 1) * 1.35);
+    }
+    for (const pill of this.dimensionPills) pill.classList.toggle("hover", next >= 0);
+    this.updateDimensionVisibility(this.resizeDrag?.handleIndex ?? next);
+    this.renderer.domElement.style.cursor = next < 0 ? "" : next < 8 ? "nwse-resize" : "pointer";
   }
 
   /** Combined multi-selection cage with TinkerCAD-style min/centre/max dots. */
@@ -1796,7 +1984,7 @@ export class Scene {
    * marquee-select started well away from a previously-hovered face still
    * read the old hoverFace and began a push/pull nowhere near the click.
    */
-  private raycastFace(e: PointerEvent): { view: PartView; groupIndex: number } | null {
+  private raycastFace(e: PointerEvent): { view: PartView; groupIndex: number; point: Vec3; normal: Vec3 } | null {
     const rect = this.renderer.domElement.getBoundingClientRect();
     this.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
@@ -1810,7 +1998,9 @@ export class Scene {
     const geometry = view?.mesh.geometry as THREE.BufferGeometry | undefined;
     if (!view || !geometry) return null;
     const groupIndex = getFaceIndex(faceIndex, geometry);
-    return groupIndex < 0 ? null : { view, groupIndex };
+    if (groupIndex < 0 || !hit.face) return null;
+    const normal = hit.face.normal.clone().transformDirection(hit.object.matrixWorld);
+    return { view, groupIndex, point: hit.point.toArray() as Vec3, normal: normal.toArray() as Vec3 };
   }
 
   /**
@@ -1823,7 +2013,7 @@ export class Scene {
    */
   private updateFaceHover(e: PointerEvent) {
     if (
-      this.toolMode !== "face" || this.showResult || this.gizmo.dragging ||
+      (this.toolMode !== "face" && this.toolMode !== "place") || this.showResult || this.gizmo.dragging ||
       this.pushPullDrag || this.navDrag || this.resizeDrag ||
       this.grab?.active || this.marquee?.active
     ) {
@@ -1839,7 +2029,7 @@ export class Scene {
     this.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
     this.raycaster.setFromCamera(this.pointer, this.camera);
-    const overHandle = this.pushPullHandles.visible &&
+    const overHandle = this.toolMode === "face" && this.pushPullHandles.visible &&
       this.raycaster.intersectObjects(this.pushPullHandleMeshes, true).length > 0;
     if (overHandle !== this.pushPullHandleHovered) {
       this.pushPullHandleHovered = overHandle;
@@ -1862,6 +2052,65 @@ export class Scene {
     this.clearFaceHover();
     this.highlightFace(found.groupIndex, found.view.mesh.geometry as THREE.BufferGeometry);
     this.hoverFace = found;
+  }
+
+  private placementAt(e: PointerEvent): { point: THREE.Vector3; normal: THREE.Vector3 } | null {
+    const face = this.raycastFace(e);
+    if (face) {
+      return { point: new THREE.Vector3(...face.point), normal: new THREE.Vector3(...face.normal) };
+    }
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    const point = new THREE.Vector3();
+    return this.raycaster.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), point)
+      ? { point, normal: new THREE.Vector3(0, 0, 1) }
+      : null;
+  }
+
+  private placeAt(e: PointerEvent) {
+    const placement = this.placementAt(e);
+    if (placement) this.onPlaceSurface?.(placement.point.toArray() as Vec3, placement.normal.toArray() as Vec3);
+  }
+
+  private updatePlacementPreview(e: PointerEvent) {
+    if (!this.placementPreview) return;
+    const placement = this.placementAt(e);
+    this.placementPreview.visible = !!placement;
+    if (!placement) return;
+    const normal = placement.normal.normalize();
+    this.placementPreview.position.copy(placement.point).addScaledVector(normal, 0.001);
+    this.placementPreview.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+  }
+
+  setPlacementPreview(kind: PrimitiveKind | null) {
+    if (this.placementPreview) {
+      this.placementPreview.removeFromParent();
+      this.placementPreview.geometry.dispose();
+      (this.placementPreview.material as THREE.Material).dispose();
+      this.placementPreview = null;
+    }
+    if (!kind) return;
+    const p = PRIMITIVES[kind].defaults;
+    let geometry: THREE.BufferGeometry;
+    if (kind === "box") geometry = new THREE.BoxGeometry(p.width, p.depth, p.height).translate(0, 0, p.height / 2);
+    else if (kind === "sphere") geometry = new THREE.SphereGeometry(p.radius, 32, 20).translate(0, 0, p.radius);
+    else if (kind === "cylinder" || kind === "cone") {
+      geometry = new THREE.CylinderGeometry(kind === "cone" ? p.topRadius : p.radius, kind === "cone" ? p.bottomRadius : p.radius, p.height, 32);
+      geometry.rotateX(Math.PI / 2).translate(0, 0, p.height / 2);
+    } else {
+      const x = (p.sideLeft ** 2 + p.base ** 2 - p.sideRight ** 2) / (2 * p.base);
+      const y = Math.sqrt(Math.max(0, p.sideLeft ** 2 - x ** 2));
+      const shape = new THREE.Shape().moveTo(-p.base / 2, -y / 2).lineTo(p.base / 2, -y / 2).lineTo(x - p.base / 2, y / 2).closePath();
+      geometry = new THREE.ExtrudeGeometry(shape, { depth: p.thickness, bevelEnabled: false });
+    }
+    this.placementPreview = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
+      color: 0x25b7bd, transparent: true, opacity: 0.42, depthWrite: false, roughness: 0.45,
+    }));
+    this.placementPreview.renderOrder = 20;
+    this.placementPreview.visible = false;
+    this.scene.add(this.placementPreview);
   }
 
   /**
@@ -2822,21 +3071,147 @@ export class Scene {
     if (!v) this.guides.clear();
   }
 
-  setWireframe(v: boolean) {
-    if (this.wireframe === v) return;
-    this.wireframe = v;
+  setWireframe(v: WireframeMode | boolean) {
+    const mode: WireframeMode = typeof v === "boolean" ? (v ? "edges" : "off") : v;
+    if (this.wireframe === mode) return;
+    this.wireframe = mode;
     this.applyMaterials();
+  }
+
+  /** Smoothly pans and zooms the camera to frame either the selected objects
+   *  or all objects in the scene if nothing is selected, filling the screen. */
+  zoomToFit(ids?: string[]) {
+    cancelAnimationFrame(this.navAnimFrame);
+    const targetIds = ids && ids.length > 0 ? ids : this.selectedIds;
+    const box = new THREE.Box3();
+    let count = 0;
+
+    if (targetIds && targetIds.length > 0) {
+      for (const id of targetIds) {
+        const view = this.parts.get(id);
+        if (view) {
+          box.union(new THREE.Box3().setFromObject(view.group));
+          count++;
+        }
+      }
+    }
+
+    // If nothing selected or selected not found, frame the entire scene
+    if (count === 0) {
+      for (const view of this.parts.values()) {
+        box.union(new THREE.Box3().setFromObject(view.group));
+        count++;
+      }
+    }
+
+    // If scene is completely empty, frame a default volume around origin
+    if (count === 0 || box.isEmpty()) {
+      box.set(new THREE.Vector3(-20, -20, 0), new THREE.Vector3(20, 20, 20));
+    }
+
+    const center = box.getCenter(new THREE.Vector3());
+    const startPos = this.camera.position.clone();
+    const startTarget = this.controls.target.clone();
+
+    // Direction vector from target to camera (view direction)
+    let camZ = startPos.clone().sub(startTarget);
+    if (camZ.lengthSq() < 1e-4) {
+      camZ.set(1, -1, 0.8).normalize();
+    } else {
+      camZ.normalize();
+    }
+
+    // Camera X and Y axes in world space
+    const camX = new THREE.Vector3().crossVectors(this.camera.up, camZ).normalize();
+    const camY = new THREE.Vector3().crossVectors(camZ, camX).normalize();
+
+    // 8 corners of the selection bounding box
+    const corners = [
+      new THREE.Vector3(box.min.x, box.min.y, box.min.z),
+      new THREE.Vector3(box.min.x, box.min.y, box.max.z),
+      new THREE.Vector3(box.min.x, box.max.y, box.min.z),
+      new THREE.Vector3(box.min.x, box.max.y, box.max.z),
+      new THREE.Vector3(box.max.x, box.min.y, box.min.z),
+      new THREE.Vector3(box.max.x, box.min.y, box.max.z),
+      new THREE.Vector3(box.max.x, box.max.y, box.min.z),
+      new THREE.Vector3(box.max.x, box.max.y, box.max.z),
+    ];
+
+    const aspect = Math.max(this.aspect(), 0.1);
+    let endPos: THREE.Vector3;
+
+    if (this.camera instanceof THREE.PerspectiveCamera) {
+      const tanHalfFovV = Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2);
+      const tanHalfFovH = tanHalfFovV * aspect;
+
+      let maxRequiredDist = 0;
+      for (const corner of corners) {
+        const rel = corner.clone().sub(center);
+        const x = Math.abs(rel.dot(camX));
+        const y = Math.abs(rel.dot(camY));
+        const z = rel.dot(camZ);
+
+        const reqV = z + y / tanHalfFovV;
+        const reqH = z + x / tanHalfFovH;
+        maxRequiredDist = Math.max(maxRequiredDist, reqV, reqH);
+      }
+
+      // 10% padding so selection cleanly fills the screen with room for handles
+      const dist = Math.max(maxRequiredDist * 1.10, 10);
+      endPos = center.clone().add(camZ.clone().multiplyScalar(dist));
+    } else {
+      let maxHalfW = 0;
+      let maxHalfH = 0;
+      for (const corner of corners) {
+        const rel = corner.clone().sub(center);
+        maxHalfW = Math.max(maxHalfW, Math.abs(rel.dot(camX)));
+        maxHalfH = Math.max(maxHalfH, Math.abs(rel.dot(camY)));
+      }
+      const fitHalfH = Math.max(maxHalfH, maxHalfW / aspect) * 1.10;
+      const fitHalfW = fitHalfH * aspect;
+      this.camera.left = -fitHalfW;
+      this.camera.right = fitHalfW;
+      this.camera.top = fitHalfH;
+      this.camera.bottom = -fitHalfH;
+      this.camera.updateProjectionMatrix();
+
+      const orthoDist = 300;
+      endPos = center.clone().add(camZ.clone().multiplyScalar(orthoDist));
+    }
+
+    const duration = 350;
+    const startTime = performance.now();
+
+    const step = () => {
+      const t = Math.min(1, (performance.now() - startTime) / duration);
+      const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+      this.camera.position.lerpVectors(startPos, endPos, eased);
+      this.controls.target.lerpVectors(startTarget, center, eased);
+      this.controls.update();
+
+      if (t < 1) {
+        this.navAnimFrame = requestAnimationFrame(step);
+      } else {
+        this.saveCameraNow();
+      }
+    };
+    step();
   }
 
   // ---- gizmo ------------------------------------------------------------
 
   setToolMode(mode: ToolMode) {
-    const leavingFace = this.toolMode === "face" && mode !== "face";
+    const leavingFace = (this.toolMode === "face" || this.toolMode === "place") && mode !== this.toolMode;
     // The offset readout belongs to select-tool dragging; leaving would strand
     // a start point that the next return to select has no reason to honour.
     if (mode !== "select") this.clearMoveReadout();
     if (this.toolMode === "build" && mode !== "build") this.setCells(null);
     this.toolMode = mode;
+    if (mode !== "place" && this.placementPreview) this.placementPreview.visible = false;
+    if (mode !== "edge") {
+      this.clearEdgeSelection(true);
+      this.clearEdgeHover();
+    }
     if (leavingFace) {
       // A half-finished push/pull must not survive the tool switch — abandon
       // it rather than leaving its preview geometry and open distance pill
@@ -3031,6 +3406,15 @@ export class Scene {
       this.paintCell(e, this.cellPaint);
       return;
     }
+    if (this.toolMode === "edge") {
+      this.pickEdge(e);
+      this.downAt = null;
+      return;
+    }
+    if (this.toolMode === "place") {
+      e.preventDefault();
+      return;
+    }
     // Whatever gesture starts here owns the pointer until it ends — none of
     // them re-run updateFaceHover while active (see its own guard), so any
     // highlight left over from before would otherwise just sit there stale
@@ -3123,6 +3507,106 @@ export class Scene {
     };
   };
 
+  private pickEdge(e: PointerEvent) {
+    const picked = this.edgeAt(e);
+    if (!picked) return;
+    const existing = this.selectedEdges.findIndex(
+      (edge) => edge.partId === picked.id && edge.groupIndex === picked.groupIndex,
+    );
+    if (existing >= 0) {
+      this.selectedEdges[existing].line.removeFromParent();
+      this.selectedEdges[existing].line.geometry.dispose();
+      this.selectedEdges[existing].line.material.dispose();
+      this.selectedEdges.splice(existing, 1);
+    } else {
+      if (this.selectedEdges.length && this.selectedEdges[0].partId !== picked.id) this.clearEdgeSelection(false);
+      const line = this.edgeLine(picked.view, picked.groupIndex, 0xff5b13);
+      if (!line) return;
+      this.selectedEdges.push({ partId: picked.id, groupIndex: picked.groupIndex, point: picked.point, line });
+    }
+    this.clearEdgeHover();
+    this.onSelectObject?.(picked.id, false);
+    this.onSelectEdges?.(
+      this.selectedEdges[0]?.partId ?? null,
+      this.selectedEdges.map((edge) => edge.point),
+    );
+  }
+
+  private edgeAt(e: PointerEvent): { id: string; view: PartView; groupIndex: number; point: Vec3 } | null {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.set(
+      ((e.clientX - rect.left) / rect.width) * 2 - 1,
+      -((e.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    this.raycaster.params.Line = { threshold: 0.8 };
+    const wires: THREE.LineSegments[] = [];
+    for (const [id, view] of this.parts) {
+      view.wire.userData.partId = id;
+      wires.push(view.wire);
+    }
+    const hit = this.raycaster.intersectObjects(wires, false)[0];
+    if (!hit) return null;
+    const id = hit.object.userData.partId as string;
+    const view = this.parts.get(id);
+    if (!view) return null;
+    const groupIndex = getEdgeIndex(hit.index ?? 0, view.wire.geometry);
+    const group = view.wire.geometry.groups[groupIndex];
+    const positions = view.wire.geometry.getAttribute("position");
+    if (!group || !positions) return null;
+    let displayPoint: THREE.Vector3;
+    if (group.count <= 2) {
+      displayPoint = new THREE.Vector3(
+        (positions.getX(group.start) + positions.getX(group.start + 1)) / 2,
+        (positions.getY(group.start) + positions.getY(group.start + 1)) / 2,
+        (positions.getZ(group.start) + positions.getZ(group.start + 1)) / 2,
+      );
+    } else {
+      const middle = group.start + Math.min(group.count - 1, Math.floor(group.count / 2));
+      displayPoint = new THREE.Vector3(positions.getX(middle), positions.getY(middle), positions.getZ(middle));
+    }
+    const local = displayPoint.add(view.pivot);
+    return { id, view, groupIndex, point: [local.x, local.y, local.z] };
+  }
+
+  private edgeLine(view: PartView, groupIndex: number, color: number): LineSegments2 | null {
+    const group = view.wire.geometry.groups[groupIndex];
+    const positions = view.wire.geometry.getAttribute("position");
+    if (!group || !positions) return null;
+    const edgePositions = new Float32Array(group.count * 3);
+    for (let i = 0; i < group.count; i++) {
+      edgePositions[i * 3] = positions.getX(group.start + i);
+      edgePositions[i * 3 + 1] = positions.getY(group.start + i);
+      edgePositions[i * 3 + 2] = positions.getZ(group.start + i);
+    }
+    const geometry = new LineSegmentsGeometry();
+    geometry.setPositions(edgePositions);
+    const material = new LineMaterial({ color, linewidth: color === 0xff5b13 ? 4 : 3, depthTest: false });
+    material.resolution.set(this.host.clientWidth, this.host.clientHeight);
+    const line = new LineSegments2(geometry, material);
+    line.renderOrder = 39;
+    view.group.add(line);
+    return line;
+  }
+
+  private clearEdgeHover() {
+    if (!this.hoverEdgeLine) return;
+    this.hoverEdgeLine.removeFromParent();
+    this.hoverEdgeLine.geometry.dispose();
+    this.hoverEdgeLine.material.dispose();
+    this.hoverEdgeLine = null;
+  }
+
+  private clearEdgeSelection(report: boolean) {
+    for (const edge of this.selectedEdges) {
+      edge.line.removeFromParent();
+      edge.line.geometry.dispose();
+      (edge.line.material as THREE.Material).dispose();
+    }
+    this.selectedEdges = [];
+    if (report) this.onSelectEdges?.(null, []);
+  }
+
   /**
    * Click-and-drag an object's BODY to move it — TinkerCAD's primary way of
    * repositioning something, distinct from the gizmo's small arrow handles.
@@ -3132,6 +3616,22 @@ export class Scene {
    * as before — this never changes what a non-dragging click does.
    */
   private onPointerMove = (e: PointerEvent) => {
+    if (this.toolMode === "place") {
+      this.updateFaceHover(e);
+      this.updatePlacementPreview(e);
+      return;
+    }
+    if (this.toolMode === "edge") {
+      const picked = this.edgeAt(e);
+      this.clearEdgeHover();
+      if (picked && !this.selectedEdges.some((edge) => edge.partId === picked.id && edge.groupIndex === picked.groupIndex)) {
+        const hover = this.edgeLine(picked.view, picked.groupIndex, 0xffb04a);
+        if (hover) {
+          this.hoverEdgeLine = hover;
+        }
+      }
+      return;
+    }
     if (this.toolMode === "build" && this.cellViews.size) {
       if (this.cellPaint !== null) {
         this.paintCell(e, this.cellPaint);
@@ -3308,6 +3808,7 @@ export class Scene {
     const g = this.grab;
     if (!g) {
       this.updateFaceHover(e);
+      this.updateResizeHover(e);
       return;
     }
 
@@ -3454,6 +3955,7 @@ export class Scene {
       this.controls.enabled = true;
       this.gizmo.enabled = true;
       this.onDragChange?.(false);
+      this.updateDimensionVisibility(this.resizeHoverIndex);
       return;
     }
 
@@ -3479,6 +3981,10 @@ export class Scene {
 
     if (!down || this.gizmo.dragging) return;
     if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > CLICK_SLOP_PX) return;
+    if (this.toolMode === "place") {
+      this.placeAt(e);
+      return;
+    }
     // Only the face tool turns a click into a face pick. Under the select
     // tool a click on an object is just a click on the OBJECT — which is
     // what makes plain dragging reliably move things.
@@ -3583,7 +4089,9 @@ export class Scene {
       rawSize,
       handleSigns,
       rotation: quaternion,
+      handleIndex: nearestIndex,
     };
+    this.updateDimensionVisibility(nearestIndex);
     this.controls.enabled = false;
     this.gizmo.enabled = false;
     this.onDragChange?.(true);
@@ -3824,6 +4332,8 @@ export class Scene {
     if (canvas.clientWidth === w && canvas.clientHeight === h) return;
 
     this.renderer.setSize(w, h);
+    for (const edge of this.selectedEdges) edge.line.material.resolution.set(w, h);
+    this.hoverEdgeLine?.material.resolution.set(w, h);
     if (this.camera instanceof THREE.PerspectiveCamera) {
       this.camera.aspect = w / h;
     } else {

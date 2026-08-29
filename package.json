@@ -1,7 +1,7 @@
 {
   "name": "shapeforge",
   "private": true,
-  "version": "0.1.107",
+  "version": "0.2.16",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -23,8 +23,10 @@
     "vite": "^8.2.2"
   },
   "dependencies": {
+    "@types/opentype.js": "^1.3.10",
     "comlink": "^4.4.2",
     "manifold-3d": "^3.5.1",
+    "opentype.js": "^2.0.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "replicad": "^1.0.1",

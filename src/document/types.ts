@@ -238,10 +238,25 @@ export interface ImportNode extends NodeBase {
  *  match search (see findFace() in kernel/shape.ts), so it only works
  *  reliably on flat (planar) faces — the only kind push/pull targets. */
 export interface PushPullOp {
+  kind?: "pushPull";
   point: Vec3;
   normal: Vec3;
   distance: number;
 }
+
+/** A fillet or chamfer applied to the edge containing `point`. The point is
+ * stored instead of a topology index so the edit can be found again when the
+ * model is rebuilt. */
+export interface EdgeOp {
+  kind: "fillet" | "chamfer";
+  /** Legacy single-edge anchor, retained for saved-project compatibility. */
+  point: Vec3;
+  /** One stable interior point per selected edge. */
+  points?: Vec3[];
+  distance: number;
+}
+
+export type EditOp = PushPullOp | EdgeOp;
 
 /**
  * A shape produced by pushing/pulling a face of an ordinary object or group.
@@ -255,7 +270,7 @@ export interface PushPullOp {
 export interface EditNode extends NodeBase {
   type: "edit";
   base: ObjectNode | GroupNode;
-  ops: PushPullOp[];
+  ops: EditOp[];
 }
 
 /**

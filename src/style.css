@@ -112,7 +112,85 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 /* Rules off the toggles below from the run of mutually exclusive tools. */
 .tool-rail-sep { height: 1px; margin: 3px 4px; background: #dae2e7; }
 .tool-symbol { font-size: 20px; line-height: 1; }
+.text-tool-symbol { font-family: Georgia, serif; font-size: 21px; font-weight: 700; }
 .tool-icon { display: block; width: 21px; height: 21px; }
+
+.tool-rail-item-container {
+  position: relative;
+}
+
+.tool-rail-flyout {
+  position: absolute;
+  left: calc(100% + 10px);
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: row;
+  gap: 4px;
+  padding: 5px;
+  background: rgb(255 255 255 / 96%);
+  border: 1px solid #d3dce1;
+  border-radius: 9px;
+  box-shadow: 0 4px 18px rgb(31 50 62 / 18%);
+  backdrop-filter: blur(8px);
+  z-index: 100;
+  white-space: nowrap;
+  animation: flyoutSlideIn 0.14s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes flyoutSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-50%) translateX(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(-50%) translateX(0);
+  }
+}
+
+.tool-rail-flyout button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  width: 62px;
+  min-width: 62px;
+  height: 52px;
+  min-height: 52px;
+  padding: 4px 5px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #38505f;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.tool-rail-flyout button:hover {
+  background: #f0f4f7;
+  color: #1f323e;
+}
+
+.tool-rail-flyout button.active {
+  color: #087a79;
+  background: #dff5f4;
+  border-color: #55c5c3;
+  font-weight: 600;
+}
+
+.tool-rail-flyout .flyout-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tool-rail-flyout .flyout-label {
+  font-size: 10px;
+  line-height: 1.1;
+  letter-spacing: 0.01em;
+}
 
 /* Floating measurement readouts in the viewport. --axis carries the colour of
    whichever axis the value belongs to, matching the highlighted edge in 3D, so
@@ -130,6 +208,8 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
   box-shadow: 0 2px 7px rgb(0 0 0 / 16%);
   line-height: 1;
 }
+.measure-pill.hover { filter: drop-shadow(0 2px 5px rgb(24 46 58 / 24%)); transform-origin: center; }
+.measure-pill.hover input { background: #fffdf4; font-weight: 750; }
 .measure-pill > .measure-axis {
   color: var(--axis, #00a9b7);
   font: 750 10px system-ui;
@@ -186,6 +266,12 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 
 .canvas-help, .canvas-notice, .canvas-error { border-radius: 7px; box-shadow: 0 2px 10px rgb(31 50 62 / 13%); }
 .canvas-help { position: absolute; z-index: 3; left: 50%; transform: translateX(-50%); bottom: 14px; padding: 6px 11px; color: #687782; background: rgb(255 255 255 / 88%); font-size: 10px; backdrop-filter: blur(6px); }
+.edge-bar { position:absolute; z-index:12; left:50%; bottom:46px; transform:translateX(-50%); display:flex; align-items:center; gap:10px; padding:9px 12px; border:1px solid #ccd8df; border-radius:10px; background:rgba(255,255,255,.96); box-shadow:0 3px 14px rgb(31 50 62 / 18%); font-size:12px; }
+.edge-bar label { display:flex; align-items:center; gap:5px; }
+.edge-bar input { width:58px; }
+.edge-bar select, .edge-bar input, .edge-bar button { min-height:28px; border:1px solid #b7c7d0; border-radius:6px; background:white; padding:3px 7px; }
+.edge-bar button { color:white; background:#167f91; border-color:#167f91; font-weight:600; }
+.edge-bar button:disabled { opacity:.45; }
 .canvas-notice, .canvas-error { max-width: 100%; padding: 9px 12px; }
 /* Every top-of-canvas banner shares one column, so a second one pushes the
    first down instead of landing on top of it. */
@@ -1053,3 +1139,193 @@ select.num { height: 31px; }
    about how dragging behaves, not a tool you switch into. */
 .snap-toggle { display: inline-flex; align-items: center; gap: 5px; }
 .snap-icon { width: 13px; height: 13px; }
+
+/* SVG Import Setup Modal */
+.svg-import-modal {
+  max-width: 580px;
+}
+
+.text-modal { width: min(520px, calc(100vw - 32px)); }
+.text-modal-body { display: grid; gap: 14px; padding: 18px 20px; }
+.text-modal-body .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.text-preview { min-height: 72px; padding: 18px; overflow: hidden; color: #263640; background: #f5f8f9; border: 1px solid #dce5e9; border-radius: 7px; font-size: 32px; line-height: 1.15; white-space: nowrap; }
+.svg-import-filename {
+  margin: 2px 0 0 0;
+  font-size: 12px;
+  color: #64748b;
+  font-weight: 500;
+}
+.svg-import-body {
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow-y: auto;
+}
+.svg-import-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.svg-import-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #475569;
+}
+.svg-preset-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.svg-preset-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 8px 12px;
+  background: #f8fafc;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s ease;
+}
+.svg-preset-btn:hover {
+  background: #f1f5f9;
+  border-color: #94a3b8;
+}
+.svg-preset-btn.active {
+  background: #e6f7f6;
+  border-color: #008e8c;
+  box-shadow: 0 0 0 1px #008e8c;
+}
+.svg-preset-btn strong {
+  font-size: 12px;
+  color: #0f172a;
+}
+.svg-preset-btn.active strong {
+  color: #00706e;
+}
+.svg-preset-btn span {
+  font-size: 10.5px;
+  color: #64748b;
+}
+.svg-dims-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+.svg-dim-field {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.svg-dim-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #64748b;
+}
+.svg-input-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.svg-input-wrap .num {
+  width: 100%;
+  padding-right: 28px;
+  height: 32px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.svg-unit-tag {
+  position: absolute;
+  right: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #94a3b8;
+  pointer-events: none;
+}
+.svg-lock-btn {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  flex: 0 0 32px;
+  margin-bottom: 1px;
+  transition: all 0.15s ease;
+}
+.svg-lock-btn:hover {
+  background: #f1f5f9;
+  border-color: #94a3b8;
+}
+.svg-lock-btn.active {
+  background: #e2e8f0;
+  border-color: #94a3b8;
+}
+.svg-bounds-note {
+  margin: -4px 0 0;
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.45;
+}
+.svg-preview-callout {
+  padding: 10px 14px;
+  background: #f0fdfa;
+  border: 1px solid #ccfbf1;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #115e59;
+}
+.svg-preview-tag {
+  color: #0f766e;
+  font-weight: 600;
+}
+.svg-import-footer {
+  padding: 12px 20px;
+  background: #f8fafc;
+  border-top: 1px solid #e2e8f0;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+.svg-btn-cancel {
+  padding: 8px 14px;
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  color: #475569;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.svg-btn-cancel:hover {
+  background: #e2e8f0;
+  color: #1e293b;
+}
+.svg-btn-import {
+  padding: 8px 18px;
+  background: #008e8c;
+  border: 1px solid #00706e;
+  border-radius: 6px;
+  color: #fff;
+  font-weight: 650;
+  font-size: 13px;
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  transition: all 0.15s ease;
+}
+.svg-btn-import:hover {
+  background: #007b79;
+}

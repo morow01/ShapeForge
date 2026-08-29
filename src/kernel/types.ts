@@ -1,4 +1,4 @@
-import type { BooleanOp, PrimitiveKind, PushPullOp, Vec3 } from "../document/types";
+import type { BooleanOp, EditOp, PrimitiveKind, Vec3 } from "../document/types";
 
 /** Typed arrays keep large imported scans compact while structured-cloning
  *  efficiently across the worker boundary. Replicad's own meshes use arrays. */
@@ -54,7 +54,7 @@ export interface ImportSpec extends SpecBase {
 export interface EditSpec extends SpecBase {
   type: "edit";
   base: NodeSpec;
-  ops: PushPullOp[];
+  ops: EditOp[];
 }
 
 /** See BuildNode: frozen sources plus the cell masks to keep. */

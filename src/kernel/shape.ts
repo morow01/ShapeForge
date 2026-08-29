@@ -9,13 +9,14 @@ import {
   measureVolume,
   MeshShape,
   getManifold,
+  getOC,
 } from "replicad";
 import type { Face, Shape3D } from "replicad";
 import { InvalidShapeError, solveTriangle, solveScaledTriangle } from "../geometry/triangle";
 import { getBlob } from "../document/blobStore";
 import { svgMeshSolid } from "./svgSolid";
 import type { SvgCommand } from "../svg/parse";
-import type { PushPullOp, Vec3 } from "../document/types";
+import type { EditOp, PushPullOp, Vec3 } from "../document/types";
 import type { BuildSpec, EditSpec, ImportSpec, NodeSpec, ObjectSpec } from "./types";
 
 export { InvalidShapeError };
@@ -369,16 +370,8 @@ function pushPullMesh(solid: MeshShape, op: PushPullOp): MeshShape | null {
  * a group whose children require several boolean operations to combine.
  */
 export async function makePushPullPreviewBase(spec: EditSpec): Promise<Shape3D | null> {
-  const base = await makeLocal(spec.base);
-  if (!base || isMesh(base)) return null;
-
-  let solid = base;
-  for (const op of spec.ops.slice(0, -1)) {
-    const face = findFace(solid, op.point, op.normal);
-    if (!face) continue;
-    solid = pushPullFace(solid, face, op.distance);
-  }
-  return solid;
+  const solid = await makeLocal({ ...spec, ops: spec.ops.slice(0, -1) });
+  return !solid || isMesh(solid) ? null : solid;
 }
 
 /** Applies only the changing final operation to a cached preview base. */
@@ -505,13 +498,36 @@ async function replayEdit(
   // could not be replayed.
   let solid = base;
   for (const op of spec.ops) {
+    if (op.kind === "fillet" || op.kind === "chamfer") {
+      if (isMesh(solid)) {
+        onError?.(spec.id, "Edge finishing is unavailable after a mesh-based edit.");
+        continue;
+      }
+      try {
+        const anchors = op.points?.length ? op.points : [op.point];
+        const selectEdges = (edges: import("replicad").EdgeFinder) =>
+          edges.either(anchors.map((point) => (finder) => finder.containsPoint(point)));
+        const candidate = op.kind === "fillet"
+          ? solid.fillet(op.distance, selectEdges)
+          : solid.chamfer(op.distance, selectEdges);
+        if (!isOcctValid(candidate) || tessellatesEmpty(candidate) || !isWatertight(candidate)) {
+          onError?.(spec.id, `That ${op.kind} would create an invalid shape; the previous shape was kept.`);
+        } else {
+          solid = candidate;
+        }
+      } catch {
+        onError?.(spec.id, `That ${op.kind} is too large for the selected edge.`);
+      }
+      continue;
+    }
+    const faceOp = op as PushPullOp;
     if (isMesh(solid)) {
-      const edited = pushPullMesh(solid, op);
+      const edited = pushPullMesh(solid, faceOp);
       if (!edited) onError?.(spec.id, "A pushed/pulled face could not be found after rebuilding — try redoing that edit.");
       else solid = edited;
       continue;
     }
-    const face = findFace(solid, op.point, op.normal);
+    const face = findFace(solid, faceOp.point, faceOp.normal);
     if (!face) {
       onError?.(
         spec.id,
@@ -519,7 +535,7 @@ async function replayEdit(
       );
       continue;
     }
-    solid = pushPullFace(solid, face, op.distance);
+    solid = pushPullFace(solid, face, faceOp.distance);
   }
   return solid;
 }
@@ -540,18 +556,49 @@ export async function survivingOps(
   spec: EditSpec,
   onError?: (id: string, msg: string) => void,
   onProgress?: (id: string) => void,
-): Promise<PushPullOp[]> {
+): Promise<EditOp[]> {
   const base = await makeLocal(spec.base, onError, onProgress);
   if (!base || isMesh(base)) return spec.ops; // nothing to replay against — leave as-is
   let solid = base;
-  const kept: PushPullOp[] = [];
+  const kept: EditOp[] = [];
   for (const op of spec.ops) {
-    const face = findFace(solid, op.point, op.normal);
+    if (op.kind === "fillet" || op.kind === "chamfer") {
+      try {
+        const anchors = op.points?.length ? op.points : [op.point];
+        const selectEdges = (edges: import("replicad").EdgeFinder) =>
+          edges.either(anchors.map((point) => (finder) => finder.containsPoint(point)));
+        const candidate = op.kind === "fillet"
+          ? solid.fillet(op.distance, selectEdges)
+          : solid.chamfer(op.distance, selectEdges);
+        if (isOcctValid(candidate) && !tessellatesEmpty(candidate) && isWatertight(candidate)) {
+          solid = candidate;
+          kept.push(op);
+        }
+      } catch { /* dead edge edit */ }
+      continue;
+    }
+    const faceOp = op as PushPullOp;
+    const face = findFace(solid, faceOp.point, faceOp.normal);
     if (!face) continue;
-    solid = pushPullFace(solid, face, op.distance);
+    solid = pushPullFace(solid, face, faceOp.distance);
     kept.push(op);
   }
   return kept;
+}
+
+/** OpenCascade can return a closed, tessellatable solid whose local topology
+ * is nevertheless invalid (self-intersecting transition wires are common at
+ * mixed fillet/chamfer junctions). Those are the pinched corner artifacts a
+ * watertight triangle check cannot see. */
+function isOcctValid(shape: Shape3D): boolean {
+  try {
+    const analyzer = new (getOC()).BRepCheck_Analyzer(shape.wrapped, true, false, true);
+    const valid = analyzer.IsValid();
+    analyzer.delete();
+    return valid;
+  } catch {
+    return false;
+  }
 }
 
 /**

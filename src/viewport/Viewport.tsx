@@ -1,8 +1,8 @@
 import { useEffect, useRef } from "react";
 import { Scene } from "./scene";
-import type { CameraMode, ToolMode } from "./scene";
+import type { CameraMode, ToolMode, WireframeMode } from "./scene";
 import type { PreviewBuild, ScenePart } from "../kernel/types";
-import type { SceneNode, Vec3 } from "../document/types";
+import type { PrimitiveKind, SceneNode, Vec3 } from "../document/types";
 
 interface Props {
   parts: ScenePart[];
@@ -10,9 +10,10 @@ interface Props {
   selectedIds: string[];
   cameraMode: CameraMode;
   toolMode: ToolMode;
+  placementKind: PrimitiveKind | null;
   resizeConstrained: boolean;
-  /** Edges-only view: solids stop being drawn, their wireframes carry on. */
-  wireframe: boolean;
+  /** Wireframe display mode: off, clean edges, full tessellated mesh, or xray. */
+  wireframe: WireframeMode;
   /** Smart Guides on/off — snapping while dragging. */
   snapEnabled: boolean;
   onSelect: (id: string | null, additive: boolean) => void;
@@ -36,6 +37,8 @@ interface Props {
     op: { point: Vec3; normal: Vec3; distance: number },
   ) => Promise<PreviewBuild | null>;
   onDragChange: (dragging: boolean) => void;
+  onSelectEdges: (id: string | null, points: Vec3[]) => void;
+  onPlaceSurface: (point: Vec3, normal: Vec3) => void;
   /** Handed the Scene on mount and null on unmount. A keyboard action like
    *  Drop has to call INTO the scene (it needs the built geometry), which the
    *  one-way props everything else uses cannot express. */
@@ -69,12 +72,15 @@ export function Viewport(props: Props) {
       latest.current.onPushPull(id, op, positionDelta);
     scene.onPreviewPushPull = (id, op) => latest.current.onPreviewPushPull(id, op);
     scene.onDragChange = (dragging) => latest.current.onDragChange(dragging);
+    scene.onSelectEdges = (id, points) => latest.current.onSelectEdges(id, points);
+    scene.onPlaceSurface = (point, normal) => latest.current.onPlaceSurface(point, normal);
     scene.onCellsChanged = (cells) => latest.current.onCellsChanged?.(cells);
 
     scene.setParts(latest.current.parts);
     scene.setPlacements(latest.current.nodes, latest.current.selectedIds);
     scene.setCameraMode(latest.current.cameraMode);
     scene.setToolMode(latest.current.toolMode);
+    scene.setPlacementPreview(latest.current.placementKind);
     scene.setResizeConstrained(latest.current.resizeConstrained);
     scene.setWireframe(latest.current.wireframe);
     scene.setSnapEnabled(latest.current.snapEnabled);
@@ -107,6 +113,10 @@ export function Viewport(props: Props) {
   useEffect(() => {
     sceneRef.current?.setToolMode(toolMode);
   }, [toolMode]);
+
+  useEffect(() => {
+    sceneRef.current?.setPlacementPreview(props.placementKind);
+  }, [props.placementKind]);
 
   useEffect(() => {
     sceneRef.current?.setResizeConstrained(resizeConstrained);

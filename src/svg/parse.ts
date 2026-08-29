@@ -17,14 +17,30 @@ export type SvgCommand =
 
 export interface SvgOutlines {
   paths: SvgCommand[][];
-  /** Artwork size in mm — what Illustrator's artboard reports. */
+  /** Actual artwork geometry width in mm — matches Illustrator's selection. */
   width: number;
+  /** Actual artwork geometry height in mm — matches Illustrator's selection. */
   height: number;
+  /** Artboard width in mm if known */
+  artboardWidth?: number;
+  /** Artboard height in mm if known */
+  artboardHeight?: number;
+  /** Raw artwork width in SVG user units */
+  rawWidth?: number;
+  /** Raw artwork height in SVG user units */
+  rawHeight?: number;
+  /** Raw viewBox width if present */
+  viewBoxWidth?: number;
+  /** Raw viewBox height if present */
+  viewBoxHeight?: number;
+  /** How otherwise-unitless SVG coordinates were interpreted. */
+  unitPreset: "illustrator" | "web" | "physical";
 }
 
 /**
- * CSS absolute units in millimetres. A unitless user unit is a CSS pixel,
- * 1/96 inch — that constant is what lands a 96dpi export at artboard size.
+ * CSS absolute units in millimetres. A unitless user unit is normally a CSS
+ * pixel, 1/96 inch. Illustrator-authored files without physical root
+ * dimensions are detected separately in parseSvg and use PostScript points.
  */
 const MM: Record<string, number> = {
   mm: 1,
@@ -37,7 +53,7 @@ const MM: Record<string, number> = {
   "": 25.4 / 96,
 };
 
-function toMm(value: string | null): number | null {
+function toMm(value: string | null, unitlessScale = MM.px): number | null {
   if (!value) return null;
   const m = /^\s*(-?[\d.]+)\s*([a-z%]*)\s*$/i.exec(value);
   if (!m) return null;
@@ -45,8 +61,12 @@ function toMm(value: string | null): number | null {
   if (!Number.isFinite(n)) return null;
   const unit = m[2].toLowerCase();
   if (unit === "%") return null; // relative to a viewport this file lacks
-  const factor = MM[unit];
+  const factor = unit === "" || unit === "px" ? unitlessScale : MM[unit];
   return factor === undefined ? null : n * factor;
+}
+
+function hasPhysicalUnit(value: string | null): boolean {
+  return !!value && /^\s*-?[\d.]+\s*(mm|cm|q|in|pt|pc)\s*$/i.test(value);
 }
 
 /** The shapes SVG offers besides <path>, rewritten as path data. */
@@ -122,19 +142,45 @@ function transformsFor(el: Element, root: Element): string[] {
   return chain;
 }
 
+/** Expands <use> tags by cloning their referenced elements in place. */
+function expandUseElements(svg: Element) {
+  const uses = Array.from(svg.querySelectorAll("use"));
+  for (const use of uses) {
+    const rawHref = use.getAttribute("href") ?? use.getAttribute("xlink:href") ?? "";
+    const id = rawHref.startsWith("#") ? rawHref.slice(1) : rawHref;
+    if (!id) continue;
+    const target = svg.querySelector(`[id="${id}"]`);
+    if (!target) continue;
+    const clone = target.cloneNode(true) as Element;
+    clone.removeAttribute("id");
+    const x = use.getAttribute("x") ?? "0";
+    const y = use.getAttribute("y") ?? "0";
+    const transform = use.getAttribute("transform") ?? "";
+    const useTransform = `translate(${x}, ${y}) ${transform}`.trim();
+    if (useTransform) {
+      const existing = clone.getAttribute("transform") ?? "";
+      clone.setAttribute("transform", `${useTransform} ${existing}`.trim());
+    }
+    use.replaceWith(clone);
+  }
+}
+
 /**
  * Reads an SVG into millimetre outlines.
  *
- * Size comes from width/height measured against the viewBox, which is what
- * makes the result match the artboard: Illustrator writes width="100mm"
- * alongside viewBox="0 0 283.46 141.73", and the ratio between them is the
- * scale. With no physical size given, user units are CSS pixels at 96dpi.
+ * Explicit physical root dimensions are honoured against the viewBox. With
+ * no physical dimensions, Illustrator-authored files use PostScript points
+ * (72 DPI), while generic SVG uses CSS pixels (96 DPI). The returned size is
+ * the tight artwork geometry, not the artboard/viewBox.
  */
 export function parseSvg(text: string): SvgOutlines {
   const doc = new DOMParser().parseFromString(text, "image/svg+xml");
   if (doc.querySelector("parsererror")) throw new Error("That file is not valid SVG.");
   const svg = doc.querySelector("svg");
   if (!svg) throw new Error("That file has no <svg> element.");
+
+  // Expand <use> symbols and clones
+  expandUseElements(svg);
 
   const viewBox = (svg.getAttribute("viewBox") ?? "")
     .split(/[\s,]+/)
@@ -143,14 +189,41 @@ export function parseSvg(text: string): SvgOutlines {
   const hasViewBox = viewBox.length === 4 && viewBox[2] > 0 && viewBox[3] > 0;
   const [vbX, vbY, vbW, vbH] = hasViewBox ? viewBox : [0, 0, 0, 0];
 
-  const widthMm = toMm(svg.getAttribute("width"));
-  const heightMm = toMm(svg.getAttribute("height"));
+  const widthAttr = svg.getAttribute("width");
+  const heightAttr = svg.getAttribute("height");
+  const illustratorAuthored = /Adobe\s+Illustrator/i.test(text);
+  const defaultUnitScale = illustratorAuthored ? MM.pt : MM.px;
+  const widthMm = toMm(widthAttr, defaultUnitScale);
+  const heightMm = toMm(heightAttr, defaultUnitScale);
+  const hasPhysicalRootSize = hasPhysicalUnit(widthAttr) || hasPhysicalUnit(heightAttr);
+  const unitPreset: SvgOutlines["unitPreset"] = hasPhysicalRootSize
+    ? "physical"
+    : illustratorAuthored
+      ? "illustrator"
+      : "web";
 
-  let scaleX = MM.px;
-  let scaleY = MM.px;
+  let scaleX = defaultUnitScale;
+  let scaleY = defaultUnitScale;
   if (hasViewBox && widthMm !== null && heightMm !== null) {
-    scaleX = widthMm / vbW;
-    scaleY = heightMm / vbH;
+    const candidateX = widthMm / vbW;
+    const candidateY = heightMm / vbH;
+    const preserve = (svg.getAttribute("preserveAspectRatio") ?? "xMidYMid meet").trim();
+    if (/^none(?:\s|$)/i.test(preserve)) {
+      scaleX = candidateX;
+      scaleY = candidateY;
+    } else {
+      // SVG's default preserveAspectRatio is uniform `meet`; `slice` is the
+      // only other uniform choice. Never stretch X and Y independently just
+      // because rounded header dimensions disagree by a tiny amount.
+      const uniform = /\bslice\b/i.test(preserve)
+        ? Math.max(candidateX, candidateY)
+        : Math.min(candidateX, candidateY);
+      scaleX = scaleY = uniform;
+    }
+  } else if (widthMm !== null && hasViewBox && vbW > 0) {
+    scaleX = scaleY = widthMm / vbW;
+  } else if (heightMm !== null && hasViewBox && vbH > 0) {
+    scaleX = scaleY = heightMm / vbH;
   }
 
   const originX = hasViewBox ? vbX : 0;
@@ -159,9 +232,26 @@ export function parseSvg(text: string): SvgOutlines {
   const spanY = hasViewBox ? vbH : (heightMm ?? 0) / scaleY;
 
   const paths: SvgCommand[][] = [];
-  for (const el of Array.from(
+  const candidateElements = Array.from(
     svg.querySelectorAll("path,rect,circle,ellipse,line,polyline,polygon"),
-  )) {
+  ).filter((el) => {
+    if (el.closest("defs,clipPath,mask")) return false;
+    const style = (el.getAttribute("style") ?? "").toLowerCase();
+    if (style.includes("display:none") || style.includes("visibility:hidden") || style.includes("opacity:0")) {
+      return false;
+    }
+    if (el.getAttribute("display") === "none" || el.getAttribute("visibility") === "hidden" || el.getAttribute("opacity") === "0") {
+      return false;
+    }
+    const fill = (el.getAttribute("fill") ?? "").toLowerCase();
+    const stroke = (el.getAttribute("stroke") ?? "").toLowerCase();
+    if (fill === "none" && (!stroke || stroke === "none") && !style.includes("fill:") && !style.includes("stroke:")) {
+      return false;
+    }
+    return true;
+  });
+
+  for (const el of candidateElements) {
     const d = shapeToPath(el);
     if (!d) continue;
 
@@ -210,37 +300,99 @@ export function parseSvg(text: string): SvgOutlines {
     if (commands.length > 1) paths.push(commands);
   }
 
+  const { paths: centredPaths, width: shapeW, height: shapeH } = centred(paths);
+
+  const artboardW = hasViewBox ? vbW * scaleX : widthMm;
+  const artboardH = hasViewBox ? vbH * scaleY : heightMm;
+
+  const width = shapeW > 0 ? shapeW : (artboardW ?? 10);
+  const height = shapeH > 0 ? shapeH : (artboardH ?? 10);
+
   return {
-    paths: centred(paths),
-    width: hasViewBox ? vbW * scaleX : (widthMm ?? 0),
-    height: hasViewBox ? vbH * scaleY : (heightMm ?? 0),
+    paths: centredPaths,
+    width,
+    height,
+    artboardWidth: artboardW ?? undefined,
+    artboardHeight: artboardH ?? undefined,
+    rawWidth: shapeW > 0 && scaleX > 0 ? shapeW / scaleX : undefined,
+    rawHeight: shapeH > 0 && scaleY > 0 ? shapeH / scaleY : undefined,
+    viewBoxWidth: hasViewBox ? vbW : undefined,
+    viewBoxHeight: hasViewBox ? vbH : undefined,
+    unitPreset,
   };
 }
 
+/** Rescales an array of SVG commands uniformly or non-uniformly. */
+export function scaleSvgCommands(
+  paths: SvgCommand[][],
+  scaleX: number,
+  scaleY: number,
+): SvgCommand[][] {
+  if (Math.abs(scaleX - 1) < 1e-6 && Math.abs(scaleY - 1) < 1e-6) return paths;
+  return paths.map((path) =>
+    path.map((c) => {
+      if (c[0] === "M" || c[0] === "L") {
+        return [c[0], c[1] * scaleX, c[2] * scaleY] as SvgCommand;
+      }
+      if (c[0] === "C") {
+        return [
+          "C",
+          c[1] * scaleX,
+          c[2] * scaleY,
+          c[3] * scaleX,
+          c[4] * scaleY,
+          c[5] * scaleX,
+          c[6] * scaleY,
+        ] as SvgCommand;
+      }
+      return c;
+    }),
+  );
+}
+
+function cubicExtremaRoots(p0: number, c1: number, c2: number, p1: number): number[] {
+  const a = 3 * (-p0 + 3 * c1 - 3 * c2 + p1);
+  const b = 6 * (p0 - 2 * c1 + c2);
+  const c = 3 * (c1 - p0);
+  const roots: number[] = [0, 1];
+  if (Math.abs(a) < 1e-9) {
+    if (Math.abs(b) > 1e-9) {
+      const t = -c / b;
+      if (t > 0 && t < 1) roots.push(t);
+    }
+  } else {
+    const disc = b * b - 4 * a * c;
+    if (disc >= 0) {
+      const sqrtDisc = Math.sqrt(disc);
+      const t1 = (-b + sqrtDisc) / (2 * a);
+      const t2 = (-b - sqrtDisc) / (2 * a);
+      if (t1 > 0 && t1 < 1) roots.push(t1);
+      if (t2 > 0 && t2 < 1) roots.push(t2);
+    }
+  }
+  return roots;
+}
+
+function evalCubic(t: number, p0: number, c1: number, c2: number, p1: number): number {
+  const u = 1 - t;
+  return u * u * u * p0 + 3 * u * u * t * c1 + 3 * u * t * t * c2 + t * t * t * p1;
+}
+
 /**
- * Moves the artwork so its own centre sits on the origin.
- *
- * Outlines arrive in artboard coordinates, where (0,0) is a corner of the
- * board rather than anywhere near the art. Imported as-is, a 100x50 board
- * lands the shape 50mm right and 25mm up of wherever the node says it is,
- * and an A4 board throws it off the grid entirely — which is what made
- * imports appear outside the workspace instead of in the middle of it.
- *
- * Centring on the ART, not on the board: what you want in view is the
- * drawing, and empty margin around it should not push it off centre. The
- * cost is that two SVGs exported from the same board no longer line up with
- * each other by construction — they each arrive centred, and are aligned by
- * moving them, like any other pair of objects.
+ * Moves the artwork so its own centre sits on the origin and computes
+ * the tight analytical bounding box dimensions of the artwork itself.
  */
-function centred(paths: SvgCommand[][]): SvgCommand[][] {
+function centred(paths: SvgCommand[][]): {
+  paths: SvgCommand[][];
+  width: number;
+  height: number;
+} {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   const see = (x: number, y: number) => {
     minX = Math.min(minX, x); maxX = Math.max(maxX, x);
     minY = Math.min(minY, y); maxY = Math.max(maxY, y);
   };
 
-  // Curves are sampled, not just cornered: a bowl bulging past its endpoints
-  // is part of the drawing and belongs inside the bounds being centred.
   let cursor: [number, number] = [0, 0];
   for (const path of paths) {
     for (const c of path) {
@@ -249,32 +401,41 @@ function centred(paths: SvgCommand[][]): SvgCommand[][] {
         see(cursor[0], cursor[1]);
       } else if (c[0] === "C") {
         const [x0, y0] = cursor;
-        for (let i = 1; i <= 8; i++) {
-          const t = i / 8, u = 1 - t;
-          const a = u * u * u, b = 3 * u * u * t, d = 3 * u * t * t, e = t * t * t;
-          see(
-            a * x0 + b * c[1] + d * c[3] + e * c[5],
-            a * y0 + b * c[2] + d * c[4] + e * c[6],
-          );
+        const [c1x, c1y, c2x, c2y, p1x, p1y] = [c[1], c[2], c[3], c[4], c[5], c[6]];
+        for (const t of cubicExtremaRoots(x0, c1x, c2x, p1x)) {
+          see(evalCubic(t, x0, c1x, c2x, p1x), evalCubic(t, y0, c1y, c2y, p1y));
         }
-        cursor = [c[5], c[6]];
+        for (const t of cubicExtremaRoots(y0, c1y, c2y, p1y)) {
+          see(evalCubic(t, x0, c1x, c2x, p1x), evalCubic(t, y0, c1y, c2y, p1y));
+        }
+        cursor = [p1x, p1y];
+        see(p1x, p1y);
       }
     }
   }
-  if (!Number.isFinite(minX) || !Number.isFinite(minY)) return paths;
+  if (!Number.isFinite(minX) || !Number.isFinite(minY)) {
+    return { paths, width: 0, height: 0 };
+  }
 
+  const width = Math.max(0, maxX - minX);
+  const height = Math.max(0, maxY - minY);
   const dx = -(minX + maxX) / 2;
   const dy = -(minY + maxY) / 2;
-  return paths.map((path) =>
-    path.map((c) => {
-      if (c[0] === "M") return ["M", c[1] + dx, c[2] + dy] as SvgCommand;
-      if (c[0] === "L") return ["L", c[1] + dx, c[2] + dy] as SvgCommand;
-      if (c[0] === "C") {
-        return ["C", c[1] + dx, c[2] + dy, c[3] + dx, c[4] + dy, c[5] + dx, c[6] + dy] as SvgCommand;
-      }
-      return c;
-    }),
-  );
+
+  return {
+    width,
+    height,
+    paths: paths.map((path) =>
+      path.map((c) => {
+        if (c[0] === "M") return ["M", c[1] + dx, c[2] + dy] as SvgCommand;
+        if (c[0] === "L") return ["L", c[1] + dx, c[2] + dy] as SvgCommand;
+        if (c[0] === "C") {
+          return ["C", c[1] + dx, c[2] + dy, c[3] + dx, c[4] + dy, c[5] + dx, c[6] + dy] as SvgCommand;
+        }
+        return c;
+      }),
+    ),
+  };
 }
 
 function lastX(commands: SvgCommand[]): number {

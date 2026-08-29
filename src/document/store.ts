@@ -33,6 +33,8 @@ import {
 import type {
   BooleanOp,
   BuildNode,
+  EdgeOp,
+  EditOp,
   EditNode,
   GroupNode,
   ImportNode,
@@ -387,7 +389,8 @@ interface DocState {
    *  that can never succeed again (see the kernel's pruneDeadOps/
    *  survivingOps), not to add one (pushPullFace does that). A no-op for
    *  any node that isn't an edit. */
-  setOps: (id: string, ops: PushPullOp[]) => void;
+  setOps: (id: string, ops: EditOp[]) => void;
+  finishEdge: (id: string, op: EdgeOp) => void;
   setHole: (id: string, isHole: boolean) => void;
   setColor: (id: string, color: string) => void;
   setTransparent: (id: string, transparent: boolean) => void;
@@ -754,6 +757,26 @@ export const useDoc = create<DocState>()(
               ops: [op],
             };
             return edit;
+          }),
+        }));
+        afterBatchedMutation();
+      },
+
+      finishEdge: (id, op) => {
+        set((s) => ({
+          nodes: updateNode(s.nodes, id, (n) => {
+            if (n.type === "edit") return { ...n, ops: [...n.ops, op] };
+            if (n.type === "import" || n.type === "build") return n;
+            const base: ObjectNode | GroupNode = {
+              ...n,
+              position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1],
+            };
+            return {
+              type: "edit", id: n.id, name: n.name,
+              position: n.position, rotation: n.rotation, scale: n.scale,
+              isHole: n.isHole, color: n.color, transparent: n.transparent,
+              base, ops: [op],
+            } satisfies EditNode;
           }),
         }));
         afterBatchedMutation();

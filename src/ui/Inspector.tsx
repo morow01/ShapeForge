@@ -462,22 +462,22 @@ function EditInfo({
       <dl className="readout">
         <dt>Built from</dt>
         <dd>{baseLabel}</dd>
-        <dt>Push/pull edits</dt>
+        <dt>Geometry edits</dt>
         <dd>{node.ops.length}</dd>
       </dl>
       <p className="hint">
         No longer defined by width/height/radius — like an imported file, use Scale to resize it as
         a whole.
       </p>
-      {error && (
+      {error && !error.includes("could not be rebuilt reliably") && (
         <>
           <button className="danger" onClick={onPruneDeadOps}>
             Remove broken edit
           </button>
           <p className="hint">
-            One of this shape's push/pull edits can no longer find the face it targeted — usually
-            from an earlier edit that reshaped it away. This drops just that one edit for good; the
-            rest stay exactly as they are.
+            One or more edits can no longer find their face or edge, or would create invalid
+            geometry. This removes only those broken edits; valid fillets, chamfers and push/pulls
+            remain in place.
           </p>
         </>
       )}

@@ -122,6 +122,23 @@ must construct valid manifold geometry. If a 42.29 MB skull or another scan
 times out during a boolean or export, simplifying/decimating it in a mesh tool
 is still the most reliable workaround.
 
+## Observations & Architecture Highlights
+
+### 1. Clean Separation of Concerns
+- **UI Shell (`src/ui/`)**: React panels (Tree, Inspector, ProjectsModal, Tool rail) do not perform CAD math; they dispatch pure state actions to the Zustand store.
+- **Pure Math Layer (`src/geometry/`, `src/snapping/`)**: Trigonometry solvers (e.g. triangle construction modes), bounding box math, and smart-guide snapping calculations are cleanly decoupled from rendering.
+- **Worker Isolation (`src/kernel/`)**: All heavy OpenCascade/Replicad and Manifold-3D geometry operations run asynchronously in a Web Worker using `comlink`, preventing UI thread stutters and keeping canvas interactions at 60 FPS.
+
+### 2. State & History Architecture
+- **Zustand + Zundo Store (`src/document/store.ts`)**: Centralised scene graph supporting hierarchical groups, primitives, direct push/pull edits, and shape-builder nodes.
+- **History Batching**: Seamless undo/redo history batching (`beginHistoryBatch`/`endHistoryBatch`) for continuous drags (gizmo transforms, slider tweaks, and handle movements).
+- **Dual Persistence**: IndexedDB blob storage for high-volume binary assets (STLs, SVGs) paired with LocalStorage autosave and portable `.shapeforge` project bundle export/import.
+
+### 3. Performance & Resilience
+- **Zero-Copy & Typed Arrays**: Geometry data crossing the worker boundary uses compact typed arrays (`Float32Array`, `Uint32Array`) and structured cloning.
+- **Watchdog Protection**: Kernel timeouts (`WATCHDOG_MS`) safeguard against worker lockups during heavy boolean merges or complex non-manifold mesh operations.
+- **Deferred Mesh Processing**: Fast direct-triangle preview for mesh imports avoids instant, costly CSG conversions until booleans, merged views, or exports strictly require it.
+
 ## GitHub deployment
 
 This repository currently has source code but no GitHub Pages or other GitHub

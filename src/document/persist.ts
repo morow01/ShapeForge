@@ -2,11 +2,11 @@ import { PRIMITIVES } from "./types";
 import type {
   BooleanOp,
   CameraMode,
+  EditOp,
   PrimitiveKind,
   ProjectData,
   ProjectFile,
   ProjectMeta,
-  PushPullOp,
   SceneNode,
   Vec3,
 } from "./types";
@@ -112,7 +112,7 @@ export function parseNode(raw: unknown): SceneNode | null {
     const parsedBase = parseNode(n.base);
     if (!parsedBase || (parsedBase.type !== "object" && parsedBase.type !== "group")) return null;
     if (!Array.isArray(n.ops)) return null;
-    const ops = n.ops.map(parseOp).filter((op): op is PushPullOp => op !== null);
+    const ops = n.ops.map(parseOp).filter((op): op is EditOp => op !== null);
     if (!ops.length) return null;
     return { ...base, type: "edit", base: parsedBase, ops };
   }
@@ -120,9 +120,14 @@ export function parseNode(raw: unknown): SceneNode | null {
   return null;
 }
 
-function parseOp(raw: unknown): PushPullOp | null {
+function parseOp(raw: unknown): EditOp | null {
   if (!raw || typeof raw !== "object") return null;
   const o = raw as Record<string, unknown>;
+  if (o.kind === "fillet" || o.kind === "chamfer") {
+    if (!isVec3(o.point) || typeof o.distance !== "number" || !Number.isFinite(o.distance) || o.distance <= 0) return null;
+    const points = Array.isArray(o.points) ? o.points.filter(isVec3) : undefined;
+    return { kind: o.kind, point: o.point, points: points?.length ? points : undefined, distance: o.distance };
+  }
   if (!isVec3(o.point) || !isVec3(o.normal)) return null;
   if (typeof o.distance !== "number" || !Number.isFinite(o.distance)) return null;
   return { point: o.point, normal: o.normal, distance: o.distance };

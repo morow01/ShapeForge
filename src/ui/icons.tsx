@@ -23,13 +23,99 @@ export function TransparencyIcon({ className = "tool-icon" }: { className?: stri
   );
 }
 
+export function SolidCubeIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M12 3 20 7.5V16.5L12 21 4 16.5V7.5Z" fill="currentColor" opacity=".35" />
+      <g
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M12 3 20 7.5V16.5L12 21 4 16.5V7.5Z" />
+        <path d="M12 12 4 7.5M12 12l8-4.5M12 12v9" />
+      </g>
+    </svg>
+  );
+}
+
 /**
- * A wireframe globe: outline plus the two crossing meridians that read as a
- * mesh laid over a surface. Deliberately not another cube — the transparency
- * icon already is one, and side by side in the rail the two need to be
- * tellable apart at a glance.
+ * A wireframe icon that reflects the active wireframe mode:
+ * - "edges": crisp CAD boundary edges
+ * - "mesh": full tessellation mesh grid
+ * - "xray": see-through dashed structure
+ * - "off": standard wireframe globe
  */
-export function WireframeIcon({ className = "tool-icon" }: { className?: string }) {
+export function WireframeIcon({
+  mode = "off",
+  className = "tool-icon",
+}: {
+  mode?: "off" | "outlined" | "edges" | "mesh" | "xray" | "transparent" | boolean;
+  className?: string;
+}) {
+  if (mode === "outlined") {
+    return (
+      <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <g fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M12 3 20 7.5V16.5L12 21 4 16.5V7.5Z" />
+          <path d="M12 12 4 7.5M12 12l8-4.5M12 12v9" />
+        </g>
+      </svg>
+    );
+  }
+  if (mode === "transparent") {
+    return (
+      <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M12 3 20 7.5V16.5L12 21 4 16.5V7.5Z" fill="currentColor" opacity=".18" />
+        <g
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <path d="M12 3 20 7.5V16.5L12 21 4 16.5V7.5Z" />
+          <path d="M12 12 4 7.5M12 12l8-4.5M12 12v9" />
+          <path d="M12 12V3M12 12l-8 4.5M12 12l8 4.5" opacity=".55" strokeDasharray="2 2" />
+        </g>
+      </svg>
+    );
+  }
+  if (mode === "edges") {
+    return (
+      <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <g
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <path d="M12 3 20 7.5V16.5L12 21 4 16.5V7.5Z" />
+          <path d="M12 12 4 7.5M12 12l8-4.5M12 12v9" />
+        </g>
+      </svg>
+    );
+  }
+  if (mode === "xray") {
+    return (
+      <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <g
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <path d="M12 3 20 7.5V16.5L12 21 4 16.5V7.5Z" />
+          <path d="M12 12 4 7.5M12 12l8-4.5M12 12v9" />
+          <path d="M12 12V3M12 12l-8 4.5M12 12l8 4.5" opacity=".7" strokeDasharray="2 2" />
+        </g>
+      </svg>
+    );
+  }
   return (
     <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
       <g fill="none" stroke="currentColor" strokeWidth="1.5">
@@ -99,6 +185,23 @@ export function MagnetIcon({ className = "tool-icon" }: { className?: string }) 
         strokeWidth="3"
       />
       <path d="M4.9 17.5h3v3h-3zM16.1 17.5h3v3h-3z" fill="currentColor" />
+    </svg>
+  );
+}
+
+/**
+ * Zoom to fit / focus selected object: 4 corner brackets around a solid cube.
+ */
+export function ZoomToFitIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <g fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M4 8V5a1 1 0 0 1 1-1h3" />
+        <path d="M16 4h3a1 1 0 0 1 1 1v3" />
+        <path d="M20 16v3a1 1 0 0 1-1 1h-3" />
+        <path d="M8 20H5a1 1 0 0 1-1-1v-3" />
+      </g>
+      <rect x="8.5" y="8.5" width="7" height="7" rx="1.5" fill="currentColor" opacity=".6" />
     </svg>
   );
 }

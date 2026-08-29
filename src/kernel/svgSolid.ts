@@ -20,7 +20,7 @@ import type { SvgCommand } from "../svg/parse";
 const CURVE_SAMPLES = 24;
 
 /** Bump when SVG-to-solid semantics change so live worker mesh caches rebuild. */
-export const SVG_IMPORT_REVISION = 3;
+export const SVG_IMPORT_REVISION = 4;
 
 function cubicAt(
   t: number,
@@ -35,6 +35,34 @@ function cubicAt(
     a * p0[0] + b * c1[0] + c * c2[0] + d * p1[0],
     a * p0[1] + b * c1[1] + c * c2[1] + d * p1[1],
   ];
+}
+
+/** Removes degenerate consecutive vertices and closed loop duplicates. */
+function cleanPolygon(raw: [number, number][]): [number, number][] {
+  if (raw.length < 3) return [];
+  const out: [number, number][] = [];
+  for (const pt of raw) {
+    if (!Number.isFinite(pt[0]) || !Number.isFinite(pt[1])) continue;
+    if (out.length > 0) {
+      const prev = out[out.length - 1];
+      const dx = pt[0] - prev[0];
+      const dy = pt[1] - prev[1];
+      if (dx * dx + dy * dy < 1e-8) continue;
+    }
+    out.push(pt);
+  }
+  // If last vertex equals first vertex, drop closing duplicate for Manifold CrossSection
+  if (out.length >= 2) {
+    const first = out[0];
+    const last = out[out.length - 1];
+    const dx = last[0] - first[0];
+    const dy = last[1] - first[1];
+    if (dx * dx + dy * dy < 1e-8) {
+      out.pop();
+    }
+  }
+  if (out.length < 3) return [];
+  return out;
 }
 
 /** A polygon that follows the outline closely enough to test against. */
@@ -56,7 +84,7 @@ function flatten(commands: SvgCommand[]): [number, number][] {
       cursor = p1;
     }
   }
-  return points;
+  return cleanPolygon(points);
 }
 
 function signedAreaOf(points: [number, number][]): number {
@@ -124,7 +152,7 @@ export function svgMeshSolid(paths: SvgCommand[][], thickness: number): MeshShap
   for (const path of paths) {
     const polygons = splitSubpaths(path)
       .map(flatten)
-      .filter((points) => points.length >= 3);
+      .filter((points) => points.length >= 3 && areaOf(points) > 1e-4);
     if (!polygons.length) continue;
 
     try {
@@ -143,10 +171,28 @@ export function svgMeshSolid(paths: SvgCommand[][], thickness: number): MeshShap
         const isPositive = signedAreaOf(points) > 0;
         return shouldBePositive === isPositive ? points : points.slice().reverse();
       });
-      const region = new manifold.CrossSection(oriented, "NonZero");
-      solids.push(region.extrude(thickness));
+
+      let region: InstanceType<typeof manifold.CrossSection>;
+      try {
+        region = new manifold.CrossSection(oriented, "NonZero");
+      } catch {
+        region = new manifold.CrossSection(oriented, "EvenOdd");
+      }
+      const extruded = region.extrude(thickness);
+      if (extruded.numTri() > 0) {
+        solids.push(extruded);
+      }
     } catch {
-      // One malformed SVG element must not discard the rest of the artwork.
+      // Fallback: extrude each simple polygon individually so no shape is lost
+      for (const poly of polygons) {
+        try {
+          const simple = new manifold.CrossSection([poly], "EvenOdd");
+          const extruded = simple.extrude(thickness);
+          if (extruded.numTri() > 0) {
+            solids.push(extruded);
+          }
+        } catch {}
+      }
     }
   }
 
