@@ -693,7 +693,7 @@ export class Scene {
    *  so a whole-body edit driven by a face — Hollow — knows what it applies
    *  to. `point` is the same anchor push/pull stores, and it lies ON the
    *  face, which is what a FaceFinder needs to re-find it after a rebuild. */
-  onSelectFace: ((id: string | null, point: Vec3 | null) => void) | null = null;
+  onSelectFace: ((id: string | null, point: Vec3 | null, size: number) => void) | null = null;
   onPlaceSurface: ((point: Vec3, normal: Vec3) => void) | null = null;
 
   constructor(host: HTMLElement) {
@@ -2368,6 +2368,25 @@ export class Scene {
    * otherwise put an abandoned live-preview shape back to what is actually
    * still the document's real, committed state.
    */
+  /** Closes the face's typed-distance pill without applying anything, putting
+   *  the previewed geometry back. Call this BEFORE committing some other edit
+   *  to the same face: left open, the pill resolves later and restores its
+   *  pre-edit snapshot over the top of the new shape — which looked like the
+   *  wall vanishing again until the face was pushed or pulled. */
+  dismissFaceInput() {
+    if (this.pushPullPending) this.commitOrAbandonPushPull(false);
+  }
+
+  /** Pushes or pulls the selected face by a distance in WORLD millimetres,
+   *  through the same path (and the same scale conversion and position
+   *  correction) a drag would take. Returns false when no face is armed. */
+  pushSelectedFace(worldDistance: number): boolean {
+    if (!this.pushPullPending) return false;
+    this.pushPullLabelEl.value = String(worldDistance);
+    this.commitOrAbandonPushPull(true);
+    return true;
+  }
+
   private commitOrAbandonPushPull(apply: boolean) {
     const pending = this.pushPullPending;
     this.pushPullPending = null;
@@ -4369,7 +4388,29 @@ export class Scene {
     const key = id && point ? `${id}|${point.join(",")}` : null;
     if (key === this.lastFaceKey) return;
     this.lastFaceKey = key;
-    this.onSelectFace?.(id, point);
+    this.onSelectFace?.(id, point, id && view && face ? this.sizeAcross(view, face.normal) : 0);
+  }
+
+  /** How thick the part is across a face, in world millimetres: its whole
+   *  extent along that face's normal. This is the number the Size field
+   *  edits — "make this dimension 40" — as opposed to push/pull's "move this
+   *  face by 40". */
+  private sizeAcross(view: PartView, normal: Vec3): number {
+    const axis = this.kernelNormalToWorld(view, normal);
+    const geometry = view.mesh.geometry as THREE.BufferGeometry;
+    const position = geometry.getAttribute("position");
+    if (!position) return 0;
+    view.group.updateWorldMatrix(true, true);
+    const point = new THREE.Vector3();
+    let min = Infinity;
+    let max = -Infinity;
+    for (let i = 0; i < position.count; i++) {
+      point.fromBufferAttribute(position, i).applyMatrix4(view.group.matrixWorld);
+      const along = point.dot(axis);
+      if (along < min) min = along;
+      if (along > max) max = along;
+    }
+    return Number.isFinite(min) && Number.isFinite(max) ? max - min : 0;
   }
 
   private animate = () => {

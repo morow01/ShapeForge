@@ -38,7 +38,7 @@ interface Props {
   ) => Promise<PreviewBuild | null>;
   onDragChange: (dragging: boolean) => void;
   onSelectEdges: (id: string | null, points: Vec3[]) => void;
-  onSelectFace: (id: string | null, point: Vec3 | null) => void;
+  onSelectFace: (id: string | null, point: Vec3 | null, size: number) => void;
   onPlaceSurface: (point: Vec3, normal: Vec3) => void;
   /** Handed the Scene on mount and null on unmount. A keyboard action like
    *  Drop has to call INTO the scene (it needs the built geometry), which the
@@ -74,7 +74,7 @@ export function Viewport(props: Props) {
     scene.onPreviewPushPull = (id, op) => latest.current.onPreviewPushPull(id, op);
     scene.onDragChange = (dragging) => latest.current.onDragChange(dragging);
     scene.onSelectEdges = (id, points) => latest.current.onSelectEdges(id, points);
-    scene.onSelectFace = (id, point) => latest.current.onSelectFace(id, point);
+    scene.onSelectFace = (id, point, size) => latest.current.onSelectFace(id, point, size);
     scene.onPlaceSurface = (point, normal) => latest.current.onPlaceSurface(point, normal);
     scene.onCellsChanged = (cells) => latest.current.onCellsChanged?.(cells);
 

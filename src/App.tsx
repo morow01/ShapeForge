@@ -283,8 +283,7 @@ export function App() {
   const [edgeDistance, setEdgeDistance] = useState(2);
   /** The face the Face tool has selected, for Hollow. Held here rather than
    *  read from the scene so the bar re-renders when the selection changes. */
-  const [faceSelection, setFaceSelection] = useState<{ id: string; point: Vec3 } | null>(null);
-  const [wallThickness, setWallThickness] = useState(2);
+  const [faceSelection, setFaceSelection] = useState<{ id: string; point: Vec3; size: number } | null>(null);
   /** The node a Hollow was just asked for. A refusal from the kernel only
    *  writes a small marker into the tree, which next to the canvas reads as
    *  the button having done nothing at all — so watch for one and say it out
@@ -301,7 +300,12 @@ export function App() {
    * click spans frames and does. Acting on the remembered face makes the
    * ordering irrelevant.
    */
-  const lastFace = useRef<{ id: string; point: Vec3 } | null>(null);
+  const lastFace = useRef<{ id: string; point: Vec3; size: number } | null>(null);
+  /** Which of the three things a selected face can do. One field and one
+   *  button serve all of them, so the bar stays the width of the edge bar
+   *  rather than growing a row of controls. */
+  const [faceOp, setFaceOp] = useState<"push" | "wall" | "size">("push");
+  const [faceValue, setFaceValue] = useState(2);
   const [resizeConstrained, setResizeConstrained] = useState(true);
   const [wireframe, setWireframe] = useState<WireframeMode>(() => {
     const saved = localStorage.getItem(VIEW_STYLE_KEY) as WireframeMode | null;
@@ -1417,6 +1421,15 @@ export function App() {
     setError((current) => (current === NEEDS_FACE ? null : current));
   }, [faceSelection]);
 
+  const faceOpRef = useRef(faceOp);
+  useEffect(() => {
+    faceOpRef.current = faceOp;
+    const target = faceSelection ?? lastFace.current;
+    if (faceOp === "size" && target) setFaceValue(Math.round(target.size * 100) / 100);
+    if (faceOp === "wall") setFaceValue(2);
+    if (faceOp === "push") setFaceValue(5);
+  }, [faceOp]);
+
   // Leaving Face mode is the one unambiguous "done with that face".
   useEffect(() => {
     if (toolMode !== "face") lastFace.current = null;
@@ -1829,10 +1842,14 @@ export function App() {
           onPushPull={pushPullFace}
           onPreviewPushPull={onPreviewPushPull}
           onSelectEdges={(id, points) => setEdgeSelection(id && points.length ? { id, points } : null)}
-          onSelectFace={(id, point) => {
-            const next = id && point ? { id, point } : null;
+          onSelectFace={(id, point, size) => {
+            const next = id && point ? { id, point, size } : null;
             if (next) lastFace.current = next;
             setFaceSelection(next);
+            // Size means "this dimension", so it starts at what it already
+            // is; the other two are relative and start where the user left
+            // them.
+            if (next && faceOpRef.current === "size") setFaceValue(Math.round(next.size * 100) / 100);
           }}
           onPlaceSurface={placePrimitive}
           onDragChange={onDragChange}
@@ -1846,17 +1863,26 @@ export function App() {
         )}
         {toolMode === "face" && (
           <div className="edge-bar">
-            <strong>{faceSelection ? "Face selected" : "Select the opening face"}</strong>
+            <strong>{faceSelection ? "Face selected" : "Select a face"}</strong>
+            <select value={faceOp} onChange={(e) => setFaceOp(e.target.value as typeof faceOp)}>
+              <option value="push">Push / pull</option>
+              <option value="wall">Wall</option>
+              <option value="size">Size</option>
+            </select>
             <label>
-              Wall
-              <input type="number" min="0.1" step="0.5" value={wallThickness}
-                onChange={(e) => setWallThickness(Math.max(0.1, Number(e.target.value) || 0.1))} /> mm
+              {faceOp === "wall" ? "Thickness" : faceOp === "size" ? "Across" : "Distance"}
+              <input type="number" step="0.5" value={faceValue}
+                onChange={(e) => setFaceValue(Number(e.target.value) || 0)} /> mm
             </label>
             <button
-              title="Hollow this object out, leaving a wall of the given thickness and opening the selected face"
+              title={faceOp === "wall"
+                ? "Hollow this object out, leaving a wall of this thickness and opening the selected face"
+                : faceOp === "size"
+                ? "Move this face so the object measures this much across it"
+                : "Move this face out (positive) or in (negative)"}
               // Keep focus where it is: without this the press blurs the
-              // push/pull pill, which drops the face selection out from under
-              // the very click trying to use it.
+              // push/pull pill, which drops the face selection out from
+              // under the very click trying to use it.
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => {
                 // Deliberately NOT disabled without a face. A greyed-out
@@ -1867,23 +1893,39 @@ export function App() {
                   setError(NEEDS_FACE);
                   return;
                 }
+                if (faceOp !== "wall") {
+                  // Push/pull is relative, Size is absolute; both end up as
+                  // a distance to move this face, and the scene owns the
+                  // world-to-kernel conversion.
+                  const travel = faceOp === "size" ? faceValue - target.size : faceValue;
+                  setError(null);
+                  if (!sceneRef.current?.pushSelectedFace(travel)) {
+                    setError("Click the face again, then set the distance.");
+                  }
+                  return;
+                }
                 const node = findNode(nodes, target.id);
                 if (node && (node.type === "import" || node.type === "build")) {
-                  // finishEdit returns these unchanged, which is the other way
-                  // this button can look broken.
+                  // finishEdit returns these unchanged, which is the other
+                  // way this button can look broken.
                   setError(node.type === "import"
                     ? "An imported shape cannot be hollowed — build the container from a box instead."
                     : "A Shape Builder result cannot be hollowed yet.");
                   return;
                 }
+                // Close the typed-distance pill FIRST. Left open it resolves
+                // later and restores its pre-edit snapshot over the top of
+                // the new shape, which looked like the wall disappearing
+                // until the face was pushed or pulled.
+                sceneRef.current?.dismissFaceInput();
                 setError(null);
                 setHollowPending(target.id);
                 finishEdit(target.id, {
                   kind: "shell",
-                  thickness: wallThickness,
+                  thickness: Math.max(0.1, faceValue),
                   points: [target.point],
                 });
-              }}>Hollow</button>
+              }}>{faceOp === "wall" ? "Hollow" : "Apply"}</button>
           </div>
         )}
         {toolMode === "edge" && (

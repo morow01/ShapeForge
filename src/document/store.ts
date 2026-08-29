@@ -4,6 +4,7 @@ import { temporal } from "zundo";
 import type { TemporalState } from "zundo";
 import { PRIMITIVES, isGroup } from "./types";
 import { extractNodes, findNode, firstRootIndex, updateNode, walk } from "./tree";
+import { bakeScale } from "./bake";
 import {
   applyMatrix,
   eulerToMatrix,
@@ -770,15 +771,34 @@ export const useDoc = create<DocState>()(
           nodes: updateNode(s.nodes, id, (n) => {
             if (n.type === "edit") return { ...n, ops: [...n.ops, op] };
             if (n.type === "import" || n.type === "build") return n;
+            // A wall has to be the same thickness everywhere, and a node's
+            // scale is applied AFTER its ops — so a box resized into a
+            // rectangle would be hollowed uniformly in its own frame and come
+            // out with three different wall thicknesses. Fold the scale into
+            // the primitive's real size first. Only for a brand-new edit
+            // node: once ops exist their distances are recorded in the frame
+            // they were made in, and re-basing underneath them would move
+            // geometry the user has already placed.
+            const baked = op.kind === "shell" && n.type === "object" ? bakeScale(n) : null;
+            const source = baked ?? n;
+            // Baking moves the node's own frame, so an anchor captured against
+            // the UNBAKED solid no longer lands on any face and the hollow
+            // comes out sealed. The baked solid is the old one scaled about
+            // its bounding-box centre and then re-normalised back onto z = 0;
+            // work that through and the two shifts cancel exactly, leaving a
+            // plain component-wise multiply.
+            const placed = baked && baked !== n && op.kind === "shell"
+              ? { ...op, points: op.points.map((q): Vec3 => [q[0] * n.scale[0], q[1] * n.scale[1], q[2] * n.scale[2]]) }
+              : op;
             const base: ObjectNode | GroupNode = {
-              ...n,
+              ...source,
               position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1],
             };
             return {
-              type: "edit", id: n.id, name: n.name,
-              position: n.position, rotation: n.rotation, scale: n.scale,
-              isHole: n.isHole, color: n.color, transparent: n.transparent,
-              base, ops: [op],
+              type: "edit", id: source.id, name: source.name,
+              position: source.position, rotation: source.rotation, scale: source.scale,
+              isHole: source.isHole, color: source.color, transparent: source.transparent,
+              base, ops: [placed],
             } satisfies EditNode;
           }),
         }));
