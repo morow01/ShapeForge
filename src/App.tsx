@@ -1479,7 +1479,14 @@ export function App() {
     if (!editPending) return;
     const complaint = invalid[editPending];
     if (!complaint) return;
-    setError(complaint);
+    // A dead op re-reports on EVERY rebuild, so this can easily be an older
+    // edit complaining while the one just applied worked perfectly — reported
+    // as "I got error message but it performed the offset anyway". Say which
+    // it is, and name the cure, instead of letting it read as "your edit
+    // failed".
+    setError(complaint.includes("could not be found after rebuilding")
+      ? `${complaint} This is an earlier edit on that object, not the one you just made — select it and press "Remove broken edit" to clear it.`
+      : complaint);
     setEditPending(null);
   }, [editPending, invalid]);
 
