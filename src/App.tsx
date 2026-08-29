@@ -212,7 +212,7 @@ export function App() {
     setPositions,
     duplicateNodes,
     pushPullFace,
-    finishEdge,
+    finishEdit,
     setOps,
     setHole,
     setSvgThickness,
@@ -276,6 +276,10 @@ export function App() {
   const [edgeSelection, setEdgeSelection] = useState<{ id: string; points: Vec3[] } | null>(null);
   const [edgeKind, setEdgeKind] = useState<"fillet" | "chamfer">("fillet");
   const [edgeDistance, setEdgeDistance] = useState(2);
+  /** The face the Face tool has selected, for Hollow. Held here rather than
+   *  read from the scene so the bar re-renders when the selection changes. */
+  const [faceSelection, setFaceSelection] = useState<{ id: string; point: Vec3 } | null>(null);
+  const [wallThickness, setWallThickness] = useState(2);
   const [resizeConstrained, setResizeConstrained] = useState(true);
   const [wireframe, setWireframe] = useState<WireframeMode>(() => {
     const saved = localStorage.getItem(VIEW_STYLE_KEY) as WireframeMode | null;
@@ -1783,6 +1787,7 @@ export function App() {
           onPushPull={pushPullFace}
           onPreviewPushPull={onPreviewPushPull}
           onSelectEdges={(id, points) => setEdgeSelection(id && points.length ? { id, points } : null)}
+          onSelectFace={(id, point) => setFaceSelection(id && point ? { id, point } : null)}
           onPlaceSurface={placePrimitive}
           onDragChange={onDragChange}
         />
@@ -1791,6 +1796,24 @@ export function App() {
             <strong>Place {PRIMITIVES[pendingPrimitive].label}</strong>
             <span>Choose a face or the workplane</span>
             <button onClick={() => { setPendingPrimitive(null); setToolMode("select"); }}>Cancel</button>
+          </div>
+        )}
+        {toolMode === "face" && (
+          <div className="edge-bar">
+            <strong>{faceSelection ? "Face selected" : "Select the opening face"}</strong>
+            <label>
+              Wall
+              <input type="number" min="0.1" step="0.5" value={wallThickness}
+                onChange={(e) => setWallThickness(Math.max(0.1, Number(e.target.value) || 0.1))} /> mm
+            </label>
+            <button disabled={!faceSelection} title="Hollow this object out, leaving a wall of the given thickness and opening the selected face" onClick={() => {
+              if (!faceSelection) return;
+              finishEdit(faceSelection.id, {
+                kind: "shell",
+                thickness: wallThickness,
+                points: [faceSelection.point],
+              });
+            }}>Hollow</button>
           </div>
         )}
         {toolMode === "edge" && (
@@ -1807,7 +1830,7 @@ export function App() {
             </label>
             <button disabled={!edgeSelection} onClick={() => {
               if (!edgeSelection) return;
-              finishEdge(edgeSelection.id, {
+              finishEdit(edgeSelection.id, {
                 kind: edgeKind,
                 point: edgeSelection.points[0],
                 points: edgeSelection.points,

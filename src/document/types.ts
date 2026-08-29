@@ -256,7 +256,25 @@ export interface EdgeOp {
   distance: number;
 }
 
-export type EditOp = PushPullOp | EdgeOp;
+/**
+ * Hollows the solid out into a container: everything more than `thickness`
+ * from the surface is removed, and the faces anchored by `points` are taken
+ * away entirely so there is an opening.
+ *
+ * The wall goes INWARDS, so the outside of the shape keeps the size it had.
+ *
+ * Faces are anchored by an interior point rather than a topology index, for
+ * the same reason EdgeOp anchors edges that way: indices do not survive a
+ * rebuild, a point does.
+ */
+export interface ShellOp {
+  kind: "shell";
+  thickness: number;
+  /** One point on each face to open. Empty means a fully closed hollow. */
+  points: Vec3[];
+}
+
+export type EditOp = PushPullOp | EdgeOp | ShellOp;
 
 /**
  * A shape produced by pushing/pulling a face of an ordinary object or group.

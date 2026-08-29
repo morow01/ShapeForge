@@ -689,6 +689,11 @@ export class Scene {
     | ((id: string, op: { point: Vec3; normal: Vec3; distance: number }) => Promise<PreviewBuild | null>)
     | null = null;
   onSelectEdges: ((id: string | null, points: Vec3[]) => void) | null = null;
+  /** The face currently selected, and the kernel-local point that anchors it,
+   *  so a whole-body edit driven by a face — Hollow — knows what it applies
+   *  to. `point` is the same anchor push/pull stores, and it lies ON the
+   *  face, which is what a FaceFinder needs to re-find it after a rebuild. */
+  onSelectFace: ((id: string | null, point: Vec3 | null) => void) | null = null;
   onPlaceSurface: ((point: Vec3, normal: Vec3) => void) | null = null;
 
   constructor(host: HTMLElement) {
@@ -4345,6 +4350,28 @@ export class Scene {
     this.camera.updateProjectionMatrix();
   }
 
+  /**
+   * Tells the app which face is selected, when that changes.
+   *
+   * Driven from the frame loop with change detection rather than from each
+   * assignment site: this.selectedFace is set and cleared from a dozen places
+   * (a click, a push/pull starting, the selection changing, a rebuild
+   * dropping the part), and any one of them left unhooked would strand the
+   * app on a face the user can no longer see.
+   */
+  private lastFaceKey: string | null = null;
+  private emitFaceSelection() {
+    const selected = this.selectedFace;
+    const view = selected ? this.parts.get(selected.partId) : undefined;
+    const face = selected && view ? view.faces?.[selected.groupIndex] : undefined;
+    const id = face ? selected!.partId : null;
+    const point = face?.point ?? null;
+    const key = id && point ? `${id}|${point.join(",")}` : null;
+    if (key === this.lastFaceKey) return;
+    this.lastFaceKey = key;
+    this.onSelectFace?.(id, point);
+  }
+
   private animate = () => {
     this.frame = requestAnimationFrame(this.animate);
     this.renderFrame();
@@ -4358,6 +4385,7 @@ export class Scene {
     this.updateResizeOverlay();
     this.updateAlignOverlay();
     this.updatePushPullOverlay();
+    this.emitFaceSelection();
     this.updateMoveReadout();
     this.renderer.render(this.scene, this.camera);
     this.renderNavCube();

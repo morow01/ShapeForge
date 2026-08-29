@@ -33,7 +33,6 @@ import {
 import type {
   BooleanOp,
   BuildNode,
-  EdgeOp,
   EditOp,
   EditNode,
   GroupNode,
@@ -390,7 +389,11 @@ interface DocState {
    *  survivingOps), not to add one (pushPullFace does that). A no-op for
    *  any node that isn't an edit. */
   setOps: (id: string, ops: EditOp[]) => void;
-  finishEdge: (id: string, op: EdgeOp) => void;
+  /** Appends one edit op to a node, turning an ordinary object or group into
+   *  an EditNode the first time. Takes any EditOp — a fillet, a chamfer, or a
+   *  hollow — since the node does not care which; only the kernel's replay
+   *  does. */
+  finishEdit: (id: string, op: EditOp) => void;
   setHole: (id: string, isHole: boolean) => void;
   setColor: (id: string, color: string) => void;
   setTransparent: (id: string, transparent: boolean) => void;
@@ -762,7 +765,7 @@ export const useDoc = create<DocState>()(
         afterBatchedMutation();
       },
 
-      finishEdge: (id, op) => {
+      finishEdit: (id, op) => {
         set((s) => ({
           nodes: updateNode(s.nodes, id, (n) => {
             if (n.type === "edit") return { ...n, ops: [...n.ops, op] };

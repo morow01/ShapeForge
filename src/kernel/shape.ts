@@ -16,7 +16,7 @@ import { InvalidShapeError, solveTriangle, solveScaledTriangle } from "../geomet
 import { getBlob } from "../document/blobStore";
 import { svgMeshSolid } from "./svgSolid";
 import type { SvgCommand } from "../svg/parse";
-import type { EditOp, PushPullOp, Vec3 } from "../document/types";
+import type { EditOp, PushPullOp, ShellOp, Vec3 } from "../document/types";
 import type { BuildSpec, EditSpec, ImportSpec, NodeSpec, ObjectSpec } from "./types";
 
 export { InvalidShapeError };
@@ -218,6 +218,20 @@ function findFace(solid: Shape3D, point: Vec3, normal: Vec3, tolerance = 0.05): 
  * directions therefore start from the face itself and never leave a sliver
  * behind it.
  */
+/**
+ * Hollows `solid` out, opening the faces anchored by `points`.
+ *
+ * replicad negates the thickness before handing it to OCCT
+ * (MakeThickSolidByJoin with -thickness), so a POSITIVE thickness walls the
+ * shape inwards and the outside keeps the size it had — which is what a
+ * container wants: a 40mm box with a 2mm wall is still 40mm on the outside.
+ */
+function shellSolid(solid: Shape3D, op: ShellOp): Shape3D {
+  const selectFaces = (faces: import("replicad").FaceFinder) =>
+    faces.either(op.points.map((point) => (finder: import("replicad").FaceFinder) => finder.containsPoint(point)));
+  return solid.shell(op.thickness, selectFaces) as Shape3D;
+}
+
 function pushPullFace(solid: Shape3D, face: Face, distance: number): Shape3D {
   if (Math.abs(distance) < 1e-6) return solid;
   const n = face.normalAt(face.center);
@@ -520,6 +534,27 @@ async function replayEdit(
       }
       continue;
     }
+    if (op.kind === "shell") {
+      if (isMesh(solid)) {
+        onError?.(spec.id, "Hollowing is unavailable after a mesh-based edit.");
+        continue;
+      }
+      if (!op.points.length) {
+        onError?.(spec.id, "That hollow has no opening face left after rebuilding — try redoing it.");
+        continue;
+      }
+      try {
+        const candidate = shellSolid(solid, op);
+        if (!isOcctValid(candidate) || tessellatesEmpty(candidate) || !isWatertight(candidate)) {
+          onError?.(spec.id, "That wall is too thick for this shape; the previous shape was kept.");
+        } else {
+          solid = candidate;
+        }
+      } catch {
+        onError?.(spec.id, "That wall is too thick for this shape; the previous shape was kept.");
+      }
+      continue;
+    }
     const faceOp = op as PushPullOp;
     if (isMesh(solid)) {
       const edited = pushPullMesh(solid, faceOp);
@@ -575,6 +610,16 @@ export async function survivingOps(
           kept.push(op);
         }
       } catch { /* dead edge edit */ }
+      continue;
+    }
+    if (op.kind === "shell") {
+      try {
+        const candidate = op.points.length ? shellSolid(solid, op) : null;
+        if (candidate && isOcctValid(candidate) && !tessellatesEmpty(candidate) && isWatertight(candidate)) {
+          solid = candidate;
+          kept.push(op);
+        }
+      } catch { /* dead hollow */ }
       continue;
     }
     const faceOp = op as PushPullOp;
