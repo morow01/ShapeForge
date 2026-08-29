@@ -1909,7 +1909,16 @@ export function App() {
                   setError(null);
                   if (!sceneRef.current?.pushSelectedFace(travel)) {
                     setError("Click the face again, then set the distance.");
+                    return;
                   }
+                  // The object just grew (or shrank) by exactly `travel` across
+                  // this face, so remember that rather than the size it had
+                  // before — otherwise a second Size measures against the old
+                  // shape and reads as a relative move.
+                  const grown = { ...target, size: target.size + travel };
+                  lastFace.current = grown;
+                  setFaceSelection(grown);
+                  if (faceOp === "size") setFaceValue(Math.round(grown.size * 100) / 100);
                   return;
                 }
                 const node = findNode(nodes, target.id);

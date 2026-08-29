@@ -2414,6 +2414,20 @@ export class Scene {
       originalGeom: [],
       originalPivot: armed.view.pivot.clone(),
     }, worldDistance);
+    // The face is still there — it has simply moved. Keeping it armed, at
+    // where it now is, means a second edit does not need the face clicking
+    // again (which said "Click the face again, then set the distance." and
+    // left a stale size behind, so a Size typed after one edit measured
+    // against the shape BEFORE it).
+    const travel = this.toLocalDistance(worldDistance, armed.worldPerLocal);
+    this.armedFace = {
+      ...armed,
+      localPoint: [
+        armed.localPoint[0] + armed.localNormal[0] * travel,
+        armed.localPoint[1] + armed.localNormal[1] * travel,
+        armed.localPoint[2] + armed.localNormal[2] * travel,
+      ],
+    };
     return true;
   }
 
@@ -3255,6 +3269,7 @@ export class Scene {
   // ---- gizmo ------------------------------------------------------------
 
   setToolMode(mode: ToolMode) {
+    if (mode !== "face") this.armedFace = null;
     const leavingFace = (this.toolMode === "face" || this.toolMode === "place") && mode !== this.toolMode;
     // The offset readout belongs to select-tool dragging; leaving would strand
     // a start point that the next return to select has no reason to honour.
@@ -4415,7 +4430,8 @@ export class Scene {
     const face = selected && view ? view.faces?.[selected.groupIndex] : undefined;
     const id = face ? selected!.partId : null;
     const point = face?.point ?? null;
-    if (!id) this.armedFace = null;
+    // Deliberately NOT cleared just because selectedFace went null: applying
+    // an edit clears that, and the bar is still pointed at the same face.
     const key = id && point ? `${id}|${point.join(",")}` : null;
     if (key === this.lastFaceKey) return;
     this.lastFaceKey = key;
