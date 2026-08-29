@@ -718,40 +718,59 @@ export async function survivingOps(
   if (!base || isMesh(base)) return spec.ops; // nothing to replay against — leave as-is
   let solid = base;
   const kept: EditOp[] = [];
+
+  /**
+   * Runs an op, and only believes a failure after it has failed repeatedly.
+   *
+   * What this function leaves out is DESTRUCTIVE: pruneDeadOps writes the
+   * surviving list straight back over the node's own ops, so an op dropped
+   * here is gone from the document for good. And these failures are known to
+   * be intermittent — the same OCCT flakiness the group build already retries
+   * around — so a single bad roll must not delete a fillet the user made and
+   * can still see on screen. A push/pull vanishing is at least obvious; a
+   * fillet vanishing just looks like the corners went sharp by themselves.
+   */
+  const settled = (attempt: () => Shape3D | null): Shape3D | null => {
+    for (let tries = 0; tries < 3; tries++) {
+      try {
+        const candidate = attempt();
+        if (candidate && isOcctValid(candidate) && !tessellatesEmpty(candidate) && isWatertight(candidate)) {
+          return candidate;
+        }
+      } catch { /* an intermittent failure earns another go */ }
+    }
+    return null;
+  };
+
   for (const op of spec.ops) {
     if (op.kind === "fillet" || op.kind === "chamfer") {
-      try {
-        const anchors = op.points?.length ? op.points : [op.point];
-        const candidate = op.kind === "fillet"
-          ? solid.fillet(op.distance, edgesAt(anchors))
-          : solid.chamfer(op.distance, edgesAt(anchors));
-        if (isOcctValid(candidate) && !tessellatesEmpty(candidate) && isWatertight(candidate)) {
-          solid = candidate;
-          kept.push(op);
-        }
-      } catch { /* dead edge edit */ }
+      const anchors = op.points?.length ? op.points : [op.point];
+      const candidate = settled(() => (op.kind === "fillet"
+        ? solid.fillet(op.distance, edgesAt(anchors))
+        : solid.chamfer(op.distance, edgesAt(anchors))) as Shape3D);
+      if (candidate) {
+        solid = candidate;
+        kept.push(op);
+      }
       continue;
     }
     if (op.kind === "shell") {
-      try {
-        const candidate = op.points.length ? shellSolid(solid, op) : null;
-        if (candidate && isOcctValid(candidate) && !tessellatesEmpty(candidate) && isWatertight(candidate)) {
-          solid = candidate;
-          kept.push(op);
-        }
-      } catch { /* dead hollow */ }
+      const candidate = op.points.length ? settled(() => shellSolid(solid, op)) : null;
+      if (candidate) {
+        solid = candidate;
+        kept.push(op);
+      }
       continue;
     }
     if (op.kind === "resizeFace") {
-      const face = findFace(solid, op.point, op.normal);
-      if (!face) continue;
-      try {
-        const candidate = resizePlanarFace(solid, face, op);
-        if (isOcctValid(candidate) && !tessellatesEmpty(candidate) && isWatertight(candidate)) {
-          solid = candidate;
-          kept.push(op);
-        }
-      } catch { /* dead face resize */ }
+      const candidate = settled(() => {
+        const face = findFace(solid, op.point, op.normal);
+        return face ? resizePlanarFace(solid, face, op) : null;
+      });
+      if (candidate) {
+        solid = candidate;
+        kept.push(op);
+      }
       continue;
     }
     // An op this build does not understand is not a DEAD op — dropping it

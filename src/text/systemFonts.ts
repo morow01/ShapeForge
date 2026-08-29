@@ -15,8 +15,32 @@ declare global {
   }
 }
 
+/** Thrown when the browser has no queryLocalFonts at all, as opposed to
+ *  having it and refusing. The two need different advice: one is a permission
+ *  the user can grant, the other is a browser that will never have it. */
+export const NO_FONT_LISTING = "This browser cannot list installed fonts.";
+
+/**
+ * Wraps a font file the user picked into the same shape queryLocalFonts
+ * returns, so the rest of the text pipeline cannot tell the difference.
+ *
+ * queryLocalFonts is Chromium-only — Firefox and Safari have no equivalent
+ * and no plan for one — so without this the text tool simply does not exist
+ * in half the browsers. Everyone can open a .ttf.
+ */
+export function fontFromFile(file: File): LocalFontData {
+  const name = file.name.replace(/.[^.]+$/, "");
+  return {
+    family: name,
+    fullName: name,
+    postscriptName: name,
+    style: "",
+    blob: async () => file,
+  };
+}
+
 export async function systemFonts(): Promise<LocalFontData[]> {
-  if (!window.queryLocalFonts) throw new Error("System-font access is not supported by this browser.");
+  if (!window.queryLocalFonts) throw new Error(NO_FONT_LISTING);
   const fonts = await window.queryLocalFonts();
   return fonts.sort((a, b) => a.fullName.localeCompare(b.fullName));
 }

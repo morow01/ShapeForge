@@ -9,6 +9,7 @@ import { ProjectsModal } from "./ui/ProjectsModal";
 import { SvgImportModal } from "./ui/SvgImportModal";
 import { TextModal } from "./ui/TextModal";
 import type { TextConfig } from "./ui/TextModal";
+import { NO_FONT_LISTING } from "./text/systemFonts";
 import type { LocalFontData } from "./text/systemFonts";
 import {
   beginHistoryBatch,
@@ -533,6 +534,7 @@ export function App() {
   const toolModeRef = useRef<ToolMode>("select");
   toolModeRef.current = toolMode;
   const buildId = useRef(0);
+  const textFontInputRef = useRef<HTMLInputElement>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
 
   // A slider fires far more onChange events than there are meaningful
@@ -870,7 +872,29 @@ export function App() {
       setTextModalOpen(true);
       setError(null);
     } catch (e) {
-      setError(`Could not access system fonts: ${msg(e)} Allow font access in the browser and try again.`);
+      const reason = msg(e);
+      // queryLocalFonts is Chromium-only. In Firefox and Safari there is no
+      // permission to grant, so telling the user to allow font access sent
+      // them hunting for a setting that does not exist. Offer the route that
+      // works in every browser instead: point at a font file.
+      if (reason.includes(NO_FONT_LISTING)) {
+        setError("This browser cannot list installed fonts — Chrome and Edge can. Pick a font file instead (.ttf, .otf or .woff).");
+        textFontInputRef.current?.click();
+        return;
+      }
+      setError(`Could not access system fonts: ${reason} Allow font access in the browser and try again.`);
+    }
+  };
+
+  /** The everywhere-fallback: one font, chosen from disk. */
+  const useFontFile = async (file: File) => {
+    try {
+      const { fontFromFile } = await import("./text/systemFonts");
+      setTextFonts([fontFromFile(file)]);
+      setTextModalOpen(true);
+      setError(null);
+    } catch (e) {
+      setError(`Could not read ${file.name}: ${msg(e)}`);
     }
   };
 
@@ -2090,6 +2114,17 @@ export function App() {
           </div>
           <button className="import-btn" onClick={() => importInputRef.current?.click()}>↑ Import STL or SVG</button>
         </section>
+        <input
+          ref={textFontInputRef}
+          type="file"
+          accept=".ttf,.otf,.woff,font/ttf,font/otf,font/woff"
+          hidden
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            e.target.value = ""; // so picking the same file twice still fires onChange
+            if (file) void useFontFile(file);
+          }}
+        />
         <input
           ref={importInputRef}
           type="file"
