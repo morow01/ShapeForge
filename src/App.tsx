@@ -289,7 +289,12 @@ export function App() {
    *  writes a small marker into the tree, which next to the canvas reads as
    *  the button having done nothing at all — so watch for one and say it out
    *  loud instead. */
-  const [hollowPending, setHollowPending] = useState<string | null>(null);
+  /** The node a face edit was just asked for. A kernel refusal only writes a
+   *  small marker into the tree, which next to the canvas reads as the button
+   *  having done nothing at all — so watch for one and say it out loud. Any
+   *  face edit, not just Hollow: an inset too big for the face failed exactly
+   *  as silently. */
+  const [editPending, setEditPending] = useState<string | null>(null);
   /**
    * The last face that WAS selected, kept even after the scene lets go of it.
    *
@@ -305,7 +310,10 @@ export function App() {
   /** Which of the three things a selected face can do. One field and one
    *  button serve all of them, so the bar stays the width of the edge bar
    *  rather than growing a row of controls. */
-  const [faceOp, setFaceOp] = useState<"push" | "wall" | "resize">("push");
+  const [faceOp, setFaceOp] = useState<"push" | "wall" | "resize" | "offset">("push");
+  /** Offset & extrude is the one face operation that needs two numbers: how
+   *  far in from the edge, and how far out from there. */
+  const [faceHeight, setFaceHeight] = useState(3);
   const [faceValue, setFaceValue] = useState(2);
   const [resizeConstrained, setResizeConstrained] = useState(true);
   const [wireframe, setWireframe] = useState<WireframeMode>(() => {
@@ -1459,6 +1467,7 @@ export function App() {
     if (faceOp === "resize") setFaceValue(2);
     if (faceOp === "wall") setFaceValue(2);
     if (faceOp === "push") setFaceValue(5);
+    if (faceOp === "offset") setFaceValue(2);
   }, [faceOp]);
 
   // Leaving Face mode is the one unambiguous "done with that face".
@@ -1467,12 +1476,12 @@ export function App() {
   }, [toolMode]);
 
   useEffect(() => {
-    if (!hollowPending) return;
-    const complaint = invalid[hollowPending];
+    if (!editPending) return;
+    const complaint = invalid[editPending];
     if (!complaint) return;
     setError(complaint);
-    setHollowPending(null);
-  }, [hollowPending, invalid]);
+    setEditPending(null);
+  }, [editPending, invalid]);
 
   const progressLabel = exporting
     ? "Exporting STL"
@@ -1895,17 +1904,30 @@ export function App() {
               <option value="push">Push / pull</option>
               <option value="wall">Wall</option>
               <option value="resize">Resize face</option>
+              <option value="offset">Offset &amp; extrude</option>
             </select>
             <label>
-              {faceOp === "wall" ? "Thickness" : faceOp === "resize" ? "Inset / outset" : "Distance"}
+              {faceOp === "wall" ? "Thickness"
+                : faceOp === "resize" ? "Inset / outset"
+                : faceOp === "offset" ? "Inset"
+                : "Distance"}
               <input type="number" step="0.5" value={faceValue}
                 onChange={(e) => setFaceValue(Number(e.target.value) || 0)} /> mm
             </label>
+            {faceOp === "offset" && (
+              <label>
+                Height
+                <input type="number" step="0.5" value={faceHeight}
+                  onChange={(e) => setFaceHeight(Number(e.target.value) || 0)} /> mm
+              </label>
+            )}
             <button
               title={faceOp === "wall"
                 ? "Hollow this object out, leaving a wall of this thickness and opening the selected face"
                 : faceOp === "resize"
                 ? "Resize the selected face in its own plane: positive grows it, negative insets it"
+                : faceOp === "offset"
+                ? "Inset the face's own outline, then extrude it: positive height raises a rim, negative sinks a pocket"
                 : "Move this face out (positive) or in (negative)"}
               // Keep focus where it is: without this the press blurs the
               // push/pull pill, which drops the face selection out from
@@ -1958,17 +1980,31 @@ export function App() {
                 sceneRef.current?.dismissFaceInput();
                 setError(null);
                 if (faceOp === "wall") {
-                  setHollowPending(target.id);
+                  setEditPending(target.id);
                   finishEdit(target.id, {
                     kind: "shell",
                     thickness: Math.max(0.1, faceValue),
                     points: [target.point],
+                  });
+                } else if (faceOp === "offset") {
+                  if (Math.abs(faceHeight) < 0.1) {
+                    setError("Type a height of at least 0.1 mm — that is how far the offset face is extruded.");
+                    return;
+                  }
+                  setEditPending(target.id);
+                  finishEdit(target.id, {
+                    kind: "offsetExtrude",
+                    inset: faceValue,
+                    height: faceHeight,
+                    point: target.point,
+                    normal: target.normal,
                   });
                 } else {
                   if (Math.abs(faceValue) < 0.1) {
                     setError("Type an inset or outset of at least 0.1 mm.");
                     return;
                   }
+                  setEditPending(target.id);
                   finishEdit(target.id, {
                     kind: "resizeFace",
                     offset: faceValue,

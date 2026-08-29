@@ -288,7 +288,26 @@ export interface ResizeFaceOp {
   offset: number;
 }
 
-export type EditOp = PushPullOp | EdgeOp | ShellOp | ResizeFaceOp;
+/**
+ * Insets (or outsets) a planar face's own outline, then extrudes that smaller
+ * outline along the face normal — the standard way to raise a rim or sink a
+ * pocket that follows the real edge of a face, rounded corners and all,
+ * rather than a box laid over the top of it.
+ *
+ * Two numbers because it is two things: how far in from the edge, and how far
+ * out (or in) to go from there.
+ */
+export interface OffsetExtrudeOp {
+  kind: "offsetExtrude";
+  point: Vec3;
+  normal: Vec3;
+  /** Distance in from the face's edge. Negative overhangs it instead. */
+  inset: number;
+  /** Along the face normal: positive adds material, negative cuts a pocket. */
+  height: number;
+}
+
+export type EditOp = PushPullOp | EdgeOp | ShellOp | ResizeFaceOp | OffsetExtrudeOp;
 
 /**
  * A shape produced by pushing/pulling a face of an ordinary object or group.

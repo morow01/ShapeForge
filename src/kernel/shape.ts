@@ -11,13 +11,14 @@ import {
   getManifold,
   getOC,
   Plane,
+  sketchFaceOffset,
 } from "replicad";
 import type { Face, Shape3D } from "replicad";
 import { InvalidShapeError, solveTriangle, solveScaledTriangle } from "../geometry/triangle";
 import { getBlob } from "../document/blobStore";
 import { svgMeshSolid } from "./svgSolid";
 import type { SvgCommand } from "../svg/parse";
-import type { EditOp, PushPullOp, ResizeFaceOp, ShellOp, Vec3 } from "../document/types";
+import type { EditOp, OffsetExtrudeOp, PushPullOp, ResizeFaceOp, ShellOp, Vec3 } from "../document/types";
 import type { BuildSpec, EditSpec, ImportSpec, NodeSpec, ObjectSpec } from "./types";
 
 export { InvalidShapeError };
@@ -312,6 +313,23 @@ function resizePlanarFace(solid: Shape3D, face: Face, op: ResizeFaceOp): Shape3D
   } finally {
     neutral.delete();
   }
+}
+
+/**
+ * Insets a face's own outline and extrudes that, so the new feature follows
+ * the real edge of the face — rounded corners included — rather than a box
+ * laid over the top of it.
+ *
+ * sketchFaceOffset takes a NEGATIVE offset to move inside the face, so the
+ * op's "inset" (positive = inwards, which is how anyone would read it) is
+ * negated here rather than in the document, where the sign would be a trap
+ * for every future reader.
+ */
+function offsetExtrudeFace(solid: Shape3D, face: Face, op: OffsetExtrudeOp): Shape3D {
+  const prism = sketchFaceOffset(face, -op.inset).extrude(op.height) as Shape3D;
+  // Extruding backwards along the normal produces the prism on the inside of
+  // the solid, which is the material to remove.
+  return (op.height >= 0 ? solid.fuse(prism) : solid.cut(prism)) as Shape3D;
 }
 
 function pushPullFace(solid: Shape3D, face: Face, distance: number): Shape3D {
@@ -663,6 +681,28 @@ async function replayEdit(
       }
       continue;
     }
+    if (op.kind === "offsetExtrude") {
+      if (isMesh(solid)) {
+        onError?.(spec.id, "Offset and extrude is unavailable after a mesh-based edit.");
+        continue;
+      }
+      const face = findFace(solid, op.point, op.normal);
+      if (!face) {
+        onError?.(spec.id, "An offset face could not be found after rebuilding — try redoing that edit.");
+        continue;
+      }
+      try {
+        const candidate = offsetExtrudeFace(solid, face, op);
+        if (!isOcctValid(candidate) || tessellatesEmpty(candidate) || !isWatertight(candidate)) {
+          onError?.(spec.id, "That inset leaves nothing of the face to extrude; the previous shape was kept.");
+        } else {
+          solid = candidate;
+        }
+      } catch {
+        onError?.(spec.id, "That inset leaves nothing of the face to extrude; the previous shape was kept.");
+      }
+      continue;
+    }
     // Anything that is not a push/pull by now is an op this build of the
     // kernel does not know. That happens for real: the worker is NOT hot
     // reloaded, so a page left open across a kernel change keeps running the
@@ -756,6 +796,17 @@ export async function survivingOps(
     }
     if (op.kind === "shell") {
       const candidate = op.points.length ? settled(() => shellSolid(solid, op)) : null;
+      if (candidate) {
+        solid = candidate;
+        kept.push(op);
+      }
+      continue;
+    }
+    if (op.kind === "offsetExtrude") {
+      const candidate = settled(() => {
+        const face = findFace(solid, op.point, op.normal);
+        return face ? offsetExtrudeFace(solid, face, op) : null;
+      });
       if (candidate) {
         solid = candidate;
         kept.push(op);

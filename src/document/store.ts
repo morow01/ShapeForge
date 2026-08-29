@@ -114,7 +114,7 @@ function editAfterScaleBake(op: EditOp, scale: Vec3): EditOp {
   if (op.kind === "shell") {
     return { ...op, points: op.points.map((point) => scaledPoint(point, scale)) };
   }
-  if (op.kind === "resizeFace") {
+  if (op.kind === "resizeFace" || op.kind === "offsetExtrude") {
     return {
       ...op,
       point: scaledPoint(op.point, scale),
