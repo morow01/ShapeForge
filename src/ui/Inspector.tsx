@@ -333,57 +333,60 @@ export function Inspector({
               />
               <span>Lock proportions</span>
             </label>
-            {!isMulti && (
+            {!isMulti && showMm && localSize && (
+              // Full-width, one per row — the SAME layout ObjectParams uses
+              // for a primitive's own Dimensions, and for the same reason:
+              // a slider needs room a 3-column .triple grid cannot give it.
+              // That mismatch, not any real difference between shapes, is
+              // why sliders looked like they came and went between objects.
+              WDH_LABELS.map((label, i) => {
+                const currentVal = round(localSize[i] * node.scale[i]);
+                // Same rule the primitive path uses: the slider always
+                // reaches at least the current value, with room to grow
+                // past it, rather than a fixed ceiling a bigger object
+                // would immediately max out.
+                const maxVal = Math.max(1000, Math.ceil(currentVal / 50) * 50);
+                return (
+                  <Field
+                    key={label}
+                    field={{ key: label, label, min: 0.1, max: maxVal, step: 0.5 }}
+                    value={currentVal}
+                    onChange={(v) => {
+                      if (!Number.isFinite(v) || v <= 0) return;
+                      const nextFactor = Math.max(0.0001, v / localSize[i]);
+                      const scale = resizeConstrained
+                        ? ([nextFactor, nextFactor, nextFactor] as Vec3)
+                        : (node.scale.map((val, at) => (at === i ? nextFactor : val)) as Vec3);
+                      onTransform({ scale });
+                    }}
+                  />
+                );
+              })
+            )}
+            {!isMulti && !showMm && (
               <div className="triple">
-                {showMm && localSize
-                  ? WDH_LABELS.map((label, i) => {
-                      const currentVal = round(localSize[i] * node.scale[i]);
-                      return (
-                        <label key={label}>
-                          <span className="field-label">{label}</span>
-                          <input
-                            className="num"
-                            type="number"
-                            min={0.1}
-                            step={0.5}
-                            value={currentVal}
-                            onFocus={beginHistoryBatch}
-                            onBlur={endHistoryBatch}
-                            onChange={(e) => {
-                              const typed = Number(e.target.value);
-                              if (!Number.isFinite(typed) || typed <= 0) return;
-                              const nextFactor = Math.max(0.0001, typed / localSize[i]);
-                              const scale = resizeConstrained
-                                ? ([nextFactor, nextFactor, nextFactor] as Vec3)
-                                : (node.scale.map((v, at) => (at === i ? nextFactor : v)) as Vec3);
-                              onTransform({ scale });
-                            }}
-                          />
-                        </label>
-                      );
-                    })
-                  : AXES.map((axis, i) => (
-                      <label key={axis}>
-                        <span className="field-label">{axis} %</span>
-                        <input
-                          className="num"
-                          type="number"
-                          min={1}
-                          max={1000}
-                          step={1}
-                          value={round(node.scale[i] * 100)}
-                          onFocus={beginHistoryBatch}
-                          onBlur={endHistoryBatch}
-                          onChange={(e) => {
-                            const value = Math.max(0.01, Number(e.target.value) / 100);
-                            const scale = resizeConstrained
-                              ? ([value, value, value] as Vec3)
-                              : (node.scale.map((v, at) => (at === i ? value : v)) as Vec3);
-                            onTransform({ scale });
-                          }}
-                        />
-                      </label>
-                    ))}
+                {AXES.map((axis, i) => (
+                  <label key={axis}>
+                    <span className="field-label">{axis} %</span>
+                    <input
+                      className="num"
+                      type="number"
+                      min={1}
+                      max={1000}
+                      step={1}
+                      value={round(node.scale[i] * 100)}
+                      onFocus={beginHistoryBatch}
+                      onBlur={endHistoryBatch}
+                      onChange={(e) => {
+                        const value = Math.max(0.01, Number(e.target.value) / 100);
+                        const scale = resizeConstrained
+                          ? ([value, value, value] as Vec3)
+                          : (node.scale.map((v, at) => (at === i ? value : v)) as Vec3);
+                        onTransform({ scale });
+                      }}
+                    />
+                  </label>
+                ))}
               </div>
             )}
           </>
