@@ -253,7 +253,7 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 .tree li.sel { color: #096f6e; background: #dff5f4; }
 .tree li.bad { color: #bd414b; }
 .tree li.sel.bad { color: #9b2e37; background: #ffecef; }
-.tree li .label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tree li .label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .twisty { width: 14px; min-height: 14px; height: 14px; padding: 0; flex: none; color: #83919a; background: transparent; border: 0; font-size: 10px; }
 .twisty-spacer { width: 14px; flex: none; }
 .dot { width: 9px; height: 9px; border-radius: 3px; background: #43aede; flex: none; }
@@ -262,6 +262,26 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 .dot.import { background: #a47bd2; }
 .op { margin-left: auto; padding: 0 4px; color: #71808a; border: 1px solid #cdd6dc; border-radius: 3px; font-size: 9px; font-weight: 800; }
 .warn { margin-left: auto; font-weight: 800; }
+/* Dot + label alone say "hidden" at a glance; .op/.warn stay full-strength so
+   a group's boolean badge and a broken-edit warning are never the thing that
+   quietly fades away. */
+.tree li.row-hidden .dot, .tree li.row-hidden .label { opacity: .4; }
+/* Present on every row, not just on hover: visibility is state the user
+   should be able to read at rest, the same way the twisty always is. */
+.visibility {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 2px;
+  color: #9aa7ae;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+}
+.tree li:hover .visibility { color: #5c6b74; }
+.tree li .visibility:hover { color: #2c3a41; background: rgb(0 0 0 / 6%); }
+.tree li.row-hidden .visibility { color: #c65a63; }
+.visibility-icon { display: block; width: 15px; height: 15px; }
 .panel-footer { display: flex; justify-content: space-between; gap: 6px; margin-top: 12px; padding: 10px 3px 0; color: #96a1a8; border-top: 1px solid #e3e8eb; font-size: 10px; }
 
 .canvas-help, .canvas-notice, .canvas-error { border-radius: 7px; box-shadow: 0 2px 10px rgb(31 50 62 / 13%); }

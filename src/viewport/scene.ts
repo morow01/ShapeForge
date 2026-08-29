@@ -1422,19 +1422,24 @@ export class Scene {
 
       const hasActiveResult = this.showResult && !!this.resultView;
       view.occluder.visible = (isEdgesOnly || isMesh) && !hasActiveResult;
+      // The eye icon in the Objects panel. A node nested in a group has no
+      // ScenePart of its own (see toSpec in App.tsx), so this only ever
+      // fires for a TOP-LEVEL id — exactly the case where hiding can be a
+      // free visibility toggle rather than a kernel rebuild.
+      const hiddenByUser = !!node?.hidden;
       if (hasActiveResult) {
         // Ghost the original part — still visible as a faint translucent
         // silhouette so the user can see what the merged result was built from.
         view.mesh.material = [MATERIALS.resultGhost, MATERIALS.faceHighlight];
         view.mesh.renderOrder = 3; // draw after the solid result
         view.wire.visible = false;
-        view.group.visible = true;
+        view.group.visible = !hiddenByUser;
       } else {
         // A Shape Builder session replaces the sources with their regions;
         // leaving the sources drawn would z-fight the very geometry that came
         // out of them, and the two coincident surfaces stripe against each
         // other as the camera moves.
-        view.group.visible = !this.cellViews.size;
+        view.group.visible = !this.cellViews.size && !hiddenByUser;
         view.wire.visible = true;
       }
     }
@@ -3180,9 +3185,12 @@ export class Scene {
       }
     }
 
-    // If nothing selected or selected not found, frame the entire scene
+    // If nothing selected or selected not found, frame the entire (visible)
+    // scene — a part hidden via the eye icon should not pull the camera out
+    // to make room for something the user just asked not to see.
     if (count === 0) {
       for (const view of this.parts.values()) {
+        if (!view.group.visible) continue;
         box.union(new THREE.Box3().setFromObject(view.group));
         count++;
       }
@@ -3627,6 +3635,7 @@ export class Scene {
     this.raycaster.params.Line = { threshold: 0.8 };
     const wires: THREE.LineSegments[] = [];
     for (const [id, view] of this.parts) {
+      if (!view.group.visible) continue; // hidden via the eye icon: not pickable
       view.wire.userData.partId = id;
       wires.push(view.wire);
     }
@@ -4282,7 +4291,11 @@ export class Scene {
     this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
     this.raycaster.setFromCamera(this.pointer, this.camera);
 
-    const targets = [...this.parts.values()].map((v) => v.mesh);
+    // A hidden object's mesh is still in this.parts (see applyMaterials) —
+    // only Group.visible says it is not there. THREE.Raycaster does not
+    // check that on its own, so without this an object hidden via the eye
+    // icon would stay clickable and draggable while invisible.
+    const targets = [...this.parts.values()].filter((v) => v.group.visible).map((v) => v.mesh);
     const hit = this.raycaster.intersectObjects(targets, false)[0];
     if (!hit) return null;
     for (const [id, view] of this.parts) {

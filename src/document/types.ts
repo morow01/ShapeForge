@@ -198,6 +198,18 @@ interface NodeBase {
   color?: string;
   /** Whether the solid object is rendered with translucency. */
   transparent?: boolean;
+  /**
+   * Hidden from the viewport, from export, and — when this node sits inside
+   * a group — from the boolean that produces the group's own shape.
+   *
+   * A top-level node's mesh is still built and cached exactly as normal;
+   * only its Group.visible is toggled, so showing it again is instant and
+   * costs no rebuild. A node nested inside a group has no mesh of its own to
+   * hide — the group renders as one unioned solid — so hiding one there
+   * means excluding it from that union, which does need a rebuild (see
+   * toSpec's children filter in App.tsx).
+   */
+  hidden?: boolean;
 }
 
 export interface ObjectNode extends NodeBase {

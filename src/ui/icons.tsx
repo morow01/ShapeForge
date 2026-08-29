@@ -205,3 +205,28 @@ export function ZoomToFitIcon({ className = "tool-icon" }: { className?: string 
     </svg>
   );
 }
+
+/** Open eye — shown on a visible object's row; click to hide it. */
+export function EyeIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <g fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" />
+        <circle cx="12" cy="12" r="2.6" />
+      </g>
+    </svg>
+  );
+}
+
+/** Slashed eye — shown on a hidden object's row; click to show it again. */
+export function EyeOffIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <g fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M2.5 12S6 5.5 12 5.5c1.83 0 3.4.51 4.71 1.24M21.5 12S18 18.5 12 18.5c-1.83 0-3.4-.51-4.71-1.24" />
+        <path d="M9.6 10.1a2.6 2.6 0 0 0 3.6 3.6" />
+        <path d="M4 4l16 16" />
+      </g>
+    </svg>
+  );
+}

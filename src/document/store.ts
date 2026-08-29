@@ -562,6 +562,10 @@ interface DocState {
   setTransparent: (id: string, transparent: boolean) => void;
   setGroupOp: (id: string, op: BooleanOp) => void;
   toggleCollapsed: (id: string) => void;
+  /** Flips a node's `hidden` flag — the eye icon in the Objects panel. Works
+   *  on any node type at any depth; see NodeBase.hidden for what hiding
+   *  means at each depth. */
+  toggleHidden: (id: string) => void;
   rename: (id: string, name: string) => void;
   /** `centres` maps a group id to its world bounding-box centre — see
    *  ungroup(). Needed when a selection reaches inside a SCALED group, since
@@ -1063,6 +1067,11 @@ export const useDoc = create<DocState>()(
           nodes: updateNode(s.nodes, id, (n) =>
             isGroup(n) ? { ...n, collapsed: !n.collapsed } : n,
           ),
+        })),
+
+      toggleHidden: (id) =>
+        set((s) => ({
+          nodes: updateNode(s.nodes, id, (n) => ({ ...n, hidden: !n.hidden })),
         })),
 
       rename: (id, name) => {

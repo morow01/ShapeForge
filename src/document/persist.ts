@@ -52,6 +52,7 @@ export function parseNode(raw: unknown): SceneNode | null {
     isHole: n.isHole === true,
     color: typeof n.color === "string" && /^#[0-9a-fA-F]{6}$/.test(n.color) ? n.color : undefined,
     transparent: typeof n.transparent === "boolean" ? n.transparent : undefined,
+    hidden: n.hidden === true,
   };
 
   if (n.type === "group") {

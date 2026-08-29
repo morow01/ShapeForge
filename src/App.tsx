@@ -59,7 +59,13 @@ const toSpec = (n: SceneNode): NodeSpec => {
       type: "group",
       id: n.id,
       op: n.op,
-      children: n.children.map(toSpec),
+      // A hidden TOP-LEVEL node still builds normally (see NodeBase.hidden) —
+      // only Scene.applyMaterials toggles its visibility, instantly, with no
+      // rebuild. A hidden node NESTED in a group has no ScenePart of its own
+      // to hide, since the group renders as one unioned solid; excluding it
+      // here, from the boolean itself, is the only way "hidden" can mean
+      // anything for it.
+      children: n.children.filter((c) => !c.hidden).map(toSpec),
       position: n.position,
       rotation: n.rotation,
       scale: n.scale,
@@ -156,7 +162,13 @@ const shapeOf = (n: SceneNode): unknown => {
       n.op,
       // A child's hole flag affects this group's boolean, while this group's
       // own hole flag only affects its parent (or root display material).
-      n.children.map((c) => [shapeOf(c), c.position, c.rotation, c.scale, c.isHole]),
+      // A child's HIDDEN flag is the same story: toSpec drops a hidden child
+      // out of this group's boolean entirely (see toSpec in this file), so
+      // toggling it changes what gets built here — even though a TOP-LEVEL
+      // node's own hidden flag deliberately does not appear anywhere in
+      // shapeOf, since hiding one of those is a free viewport toggle with
+      // nothing for the kernel to redo.
+      n.children.map((c) => [shapeOf(c), c.position, c.rotation, c.scale, c.isHole, c.hidden]),
     ];
   }
   // blobId never changes for an import node, so this is stable — importSTL()
@@ -229,6 +241,7 @@ export function App() {
     setTransparent,
     setGroupOp,
     toggleCollapsed,
+    toggleHidden,
     rename,
     group,
     ungroup,
@@ -1020,7 +1033,12 @@ export function App() {
         }
         exportNodes = matched.length > 0 ? matched : docNodes;
       } else {
-        exportNodes = docNodes;
+        // Exporting the whole scene leaves out anything hidden — a hidden
+        // object is being kept out of the way, not asked to be printed. An
+        // EXPLICIT selection above is a different signal: picking a hidden
+        // object by name in the tree and pressing Export means export it, so
+        // that branch never filters on hidden.
+        exportNodes = docNodes.filter((n) => !n.hidden);
       }
 
       let currentNodes = pruneSkipped(exportNodes, skippedIds);
@@ -1765,6 +1783,7 @@ export function App() {
           invalid={invalid}
           onSelect={onSelect}
           onToggleCollapsed={toggleCollapsed}
+          onToggleHidden={toggleHidden}
         />
         <div className="panel-footer">
           <span>{saveLabel}</span>

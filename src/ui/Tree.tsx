@@ -1,5 +1,6 @@
 import { isGroup } from "../document/types";
 import { resolveNodeColor, resolveNodeTransparent } from "../document/tree";
+import { EyeIcon, EyeOffIcon } from "./icons";
 import type { SceneNode } from "../document/types";
 
 interface Props {
@@ -8,9 +9,10 @@ interface Props {
   invalid: Record<string, string>;
   onSelect: (id: string, additive: boolean) => void;
   onToggleCollapsed: (id: string) => void;
+  onToggleHidden: (id: string) => void;
 }
 
-export function Tree({ nodes, selectedIds, invalid, onSelect, onToggleCollapsed }: Props) {
+export function Tree({ nodes, selectedIds, invalid, onSelect, onToggleCollapsed, onToggleHidden }: Props) {
   return (
     <ul className="tree">
       {nodes.map((n) => (
@@ -22,19 +24,21 @@ export function Tree({ nodes, selectedIds, invalid, onSelect, onToggleCollapsed 
           invalid={invalid}
           onSelect={onSelect}
           onToggleCollapsed={onToggleCollapsed}
+          onToggleHidden={onToggleHidden}
         />
       ))}
     </ul>
   );
 }
 
-function Row({ node, depth, selectedIds, invalid, onSelect, onToggleCollapsed }: {
+function Row({ node, depth, selectedIds, invalid, onSelect, onToggleCollapsed, onToggleHidden }: {
   node: SceneNode;
   depth: number;
   selectedIds: string[];
   invalid: Record<string, string>;
   onSelect: (id: string, additive: boolean) => void;
   onToggleCollapsed: (id: string) => void;
+  onToggleHidden: (id: string) => void;
 }) {
   const selected = selectedIds.includes(node.id);
   const bad = !!invalid[node.id];
@@ -42,11 +46,14 @@ function Row({ node, depth, selectedIds, invalid, onSelect, onToggleCollapsed }:
   const open = group && !node.collapsed;
   const color = resolveNodeColor(node);
   const transparent = resolveNodeTransparent(node);
+  const hidden = !!node.hidden;
 
   return (
     <>
       <li
-        className={[selected ? "sel" : "", bad ? "bad" : ""].filter(Boolean).join(" ")}
+        className={[selected ? "sel" : "", bad ? "bad" : "", hidden ? "row-hidden" : ""]
+          .filter(Boolean)
+          .join(" ")}
         style={{ paddingLeft: 7 + depth * 13 }}
         onClick={(e) => onSelect(node.id, e.shiftKey || e.ctrlKey || e.metaKey)}
         title={bad ? invalid[node.id] : undefined}
@@ -89,6 +96,20 @@ function Row({ node, depth, selectedIds, invalid, onSelect, onToggleCollapsed }:
         <span className="label">{node.name}</span>
         {group && <span className="op">{node.op[0].toUpperCase()}</span>}
         {bad && <span className="warn">!</span>}
+        <button
+          className="visibility"
+          // A click here is about visibility, not selection — stop it from
+          // also selecting (or additively toggling) the row underneath.
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleHidden(node.id);
+          }}
+          title={hidden ? "Show" : "Hide"}
+          aria-label={hidden ? "Show" : "Hide"}
+          aria-pressed={hidden}
+        >
+          {hidden ? <EyeOffIcon className="visibility-icon" /> : <EyeIcon className="visibility-icon" />}
+        </button>
       </li>
 
       {group &&
@@ -102,6 +123,7 @@ function Row({ node, depth, selectedIds, invalid, onSelect, onToggleCollapsed }:
             invalid={invalid}
             onSelect={onSelect}
             onToggleCollapsed={onToggleCollapsed}
+            onToggleHidden={onToggleHidden}
           />
         ))}
     </>
