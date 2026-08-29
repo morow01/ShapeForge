@@ -555,6 +555,20 @@ async function replayEdit(
       }
       continue;
     }
+    // Anything that is not a push/pull by now is an op this build of the
+    // kernel does not know. That happens for real: the worker is NOT hot
+    // reloaded, so a page left open across a kernel change keeps running the
+    // old one — the UI offers an edit the kernel has never heard of, the op
+    // lands in the document, and the shape quietly does not change. Falling
+    // through to the push/pull branch made that look like nothing at all
+    // (reported twice as "when I click hollow nothing happens"). Say it.
+    if (op.kind !== undefined && op.kind !== "pushPull") {
+      onError?.(
+        spec.id,
+        `This shape uses a "${op.kind}" edit that this session cannot build — reload the page (Ctrl+Shift+R) and try again.`,
+      );
+      continue;
+    }
     const faceOp = op as PushPullOp;
     if (isMesh(solid)) {
       const edited = pushPullMesh(solid, faceOp);
@@ -620,6 +634,13 @@ export async function survivingOps(
           kept.push(op);
         }
       } catch { /* dead hollow */ }
+      continue;
+    }
+    // An op this build does not understand is not a DEAD op — dropping it
+    // here would delete an edit the user made, permanently, just because the
+    // worker predates the feature. Keep it and leave the solid alone.
+    if (op.kind !== undefined && op.kind !== "pushPull") {
+      kept.push(op);
       continue;
     }
     const faceOp = op as PushPullOp;

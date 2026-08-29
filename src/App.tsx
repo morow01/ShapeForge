@@ -27,6 +27,11 @@ import type { EditSpec, ExportQuality, NodeSpec, PreviewBuild, ScenePart } from 
 import type { CameraMode, Scene, ToolMode, WireframeMode } from "./viewport/scene";
 import { APP_NAME, APP_VERSION } from "./version";
 
+/** Shown when Hollow is pressed with nothing selected; cleared as soon as a
+ *  face is. Named so the clearing effect can recognise its own message and
+ *  leave any other error alone. */
+const NEEDS_FACE = "Click the face you want left open first, then press Hollow.";
+
 const NEXT_WIREFRAME: Record<WireframeMode, WireframeMode> = {
   off: "outlined",
   outlined: "edges",
@@ -1393,6 +1398,13 @@ export function App() {
   // working — so parking a dialog over the model every time a face is pulled
   // was pure obstruction. Those get the quiet corner chip below instead.
   const sceneOpening = sceneBusy && !sceneOpened && busySince && busyNow - busySince >= 500;
+  // Nagging is for as long as the problem lasts, not forever: the moment a
+  // face IS selected, the note asking for one has served its purpose.
+  useEffect(() => {
+    if (!faceSelection) return;
+    setError((current) => (current === NEEDS_FACE ? null : current));
+  }, [faceSelection]);
+
   useEffect(() => {
     if (!hollowPending) return;
     const complaint = invalid[hollowPending];
@@ -1824,7 +1836,7 @@ export function App() {
               // that does nothing when clicked is indistinguishable from a
               // broken one; say what is missing instead.
               if (!faceSelection) {
-                setError("Click the face you want left open first, then press Hollow.");
+                setError(NEEDS_FACE);
                 return;
               }
               setError(null);
