@@ -11,11 +11,16 @@ body { overflow: hidden; font-size: 13px; }
 
 .app-shell {
   display: grid;
-  grid-template-columns: 220px minmax(360px, 1fr) 310px;
+  /* tool rail | Objects panel | viewport | Inspector */
+  grid-template-columns: 56px 220px minmax(360px, 1fr) 310px;
   grid-template-rows: 58px minmax(0, 1fr);
   height: 100%;
   background: #edf1f4;
 }
+/* The Objects panel is a toggle (see the topbar button), not a fixed part of
+   the layout — collapsing its track to 0 rather than unmounting the grid
+   column keeps every other column's index stable. */
+.app-shell.objects-collapsed { grid-template-columns: 56px 0 minmax(360px, 1fr) 310px; }
 
 .topbar {
   grid-column: 1 / -1;
@@ -77,26 +82,27 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 .status-pill.error { color: #aa3540; background: #ffeaec; }
 
 .panel { min-height: 0; overflow: auto; background: #fff; }
-.object-panel { grid-column: 1; grid-row: 2; display: flex; flex-direction: column; padding: 16px 12px; border-right: 1px solid #d7dee3; }
-.tools-panel { grid-column: 3; grid-row: 2; border-left: 1px solid #d7dee3; }
-.workspace { grid-column: 2; grid-row: 2; position: relative; min-width: 0; min-height: 0; overflow: hidden; }
+.object-panel { grid-column: 2; grid-row: 2; display: flex; flex-direction: column; padding: 16px 12px; border-right: 1px solid #d7dee3; }
+.tools-panel { grid-column: 4; grid-row: 2; border-left: 1px solid #d7dee3; }
+.workspace { grid-column: 3; grid-row: 2; position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 .viewport { position: absolute; inset: 0; overflow: hidden; }
 .viewport canvas { display: block; }
 
+/* Illustrator-style: a docked strip at the very left of the window, not a
+   card floating over the canvas — full height, always in the same place
+   regardless of what the Objects panel next to it is doing. */
 .tool-rail {
-  position: absolute;
+  grid-column: 1;
+  grid-row: 2;
   z-index: 4;
-  top: 14px;
-  left: 14px;
   display: flex;
   flex-direction: column;
+  align-items: center;
   gap: 3px;
-  padding: 5px;
-  background: rgb(255 255 255 / 94%);
-  border: 1px solid #d3dce1;
-  border-radius: 9px;
-  box-shadow: 0 4px 15px rgb(31 50 62 / 15%);
-  backdrop-filter: blur(7px);
+  padding: 8px 6px;
+  overflow-y: auto;
+  background: #fff;
+  border-right: 1px solid #d7dee3;
 }
 .tool-rail button {
   display: grid;
@@ -712,10 +718,16 @@ select.num { height: 31px; }
 .empty-state.small { padding: 13px 10px; }
 
 @media (max-width: 900px) {
-  .app-shell { grid-template-columns: 180px minmax(320px, 1fr) 270px; }
+  .app-shell { grid-template-columns: 56px 180px minmax(320px, 1fr) 270px; }
+  .app-shell.objects-collapsed { grid-template-columns: 56px 0 minmax(320px, 1fr) 270px; }
   .topbar { gap: 6px; padding: 0 8px; }
   .brand { min-width: 140px; }
-  .view-tools button:nth-child(n+3) { display: none; }
+  /* Objects is now the first view-tool button (see the JSX) and, being a
+     whole panel's on/off switch rather than a camera setting, is worth
+     keeping regardless of width — n+4 instead of the old n+3 keeps exactly
+     the same three camera/snap buttons this rule always curated (Perspective,
+     Ortho always shown; Snap the one that drops), just shifted by one. */
+  .view-tools button:nth-child(n+4) { display: none; }
 }
 
 /* ---- Project Management & Topbar Title ---- */

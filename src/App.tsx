@@ -46,6 +46,7 @@ import {
   displayedBoundsOverlap,
   displayedMeshBounds,
   displayedSceneSTL,
+  localMeshBounds,
   mergeBinarySTLs,
 } from "./export/stl";
 import { positionWithReferenceGap } from "./snapping/spacing";
@@ -190,6 +191,7 @@ const canRefineExportFallback = (n: SceneNode): boolean =>
 const EXPORT_QUALITY_KEY = "cad.exportQuality";
 const EXPORT_FORMAT_KEY = "cad.exportFormat";
 const SNAP_KEY = "cad.smartGuides";
+const OBJECTS_PANEL_KEY = "cad.objectsPanelOpen";
 const VIEW_STYLE_KEY = "cad.viewStyle";
 
 /** What each preset costs, so the choice is not guesswork — measured on a
@@ -384,6 +386,11 @@ export function App() {
   const [snapEnabled, setSnapEnabled] = useState(
     () => localStorage.getItem(SNAP_KEY) !== "off",
   );
+  // The Objects panel is not always wanted — a single object needs it least
+  // of all — so it is a toggle, remembered the same way Snap is.
+  const [objectsPanelOpen, setObjectsPanelOpen] = useState(
+    () => localStorage.getItem(OBJECTS_PANEL_KEY) !== "off",
+  );
   /** Shape Builder session: the ids that were decomposed, in the order the
    *  cell masks index them. Null whenever the tool is not running. */
   const [buildSources, setBuildSources] = useState<string[] | null>(null);
@@ -479,6 +486,21 @@ export function App() {
         : "Autosaves to this browser";
 
   const selected = selectedIds.length ? findNode(nodes, selectedIds[selectedIds.length - 1]) : null;
+  // A compound shape (group/edit/build/import) has no width/depth/height
+  // parameter to read the way a primitive does — its real size only exists
+  // in its evaluated mesh. Measured in the node's own LOCAL frame (before
+  // scale/rotation/position), matching exactly what a primitive's raw
+  // parameter already describes, so the Inspector can show it the same way:
+  // an editable millimetre field, not a bare percentage.
+  const selectedLocalSize = useMemo((): Vec3 | null => {
+    if (!selected) return null;
+    const part = parts.find((p) => p.id === selected.id);
+    if (!part) return null;
+    const bounds = localMeshBounds(part.mesh);
+    if (!bounds) return null;
+    const size = bounds.max.map((v, i) => v - bounds.min[i]) as Vec3;
+    return size.every((v) => v > 1e-6) ? size : null;
+  }, [selected, parts]);
   const canGroup = selectedIds.length >= 2;
   const canUngroup = selectedIds.some((id) => {
     const n = findNode(nodes, id);
@@ -669,6 +691,14 @@ export function App() {
       // Private mode / blocked storage: the choice just won't be remembered.
     }
   }, [snapEnabled]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(OBJECTS_PANEL_KEY, objectsPanelOpen ? "on" : "off");
+    } catch {
+      // Private mode / blocked storage: the choice just won't be remembered.
+    }
+  }, [objectsPanelOpen]);
 
   useEffect(() => {
     try {
@@ -1582,7 +1612,7 @@ export function App() {
     : 0;
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${objectsPanelOpen ? "" : " objects-collapsed"}`}>
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark">S</span>
@@ -1653,6 +1683,14 @@ export function App() {
           <button onClick={() => ungroupSelected()} disabled={!canUngroup || treeChangeBusy} title="Ctrl+Shift+G">Ungroup</button>
         </div>
         <div className="toolbar-group view-tools">
+          <button
+            className={objectsPanelOpen ? "on" : ""}
+            onClick={() => setObjectsPanelOpen((v) => !v)}
+            title={objectsPanelOpen ? "Hide the Objects panel" : "Show the Objects panel"}
+            aria-pressed={objectsPanelOpen}
+          >
+            Objects
+          </button>
           <button className={cameraMode === "perspective" ? "on" : ""} onClick={() => setCameraMode("perspective")}>Perspective</button>
           <button className={cameraMode === "orthographic" ? "on" : ""} onClick={() => setCameraMode("orthographic")}>Ortho</button>
           <button
@@ -1759,207 +1797,210 @@ export function App() {
         </div>
       )}
 
-      <aside className="panel object-panel">
-        <div className="panel-heading">
-          <div>
-            <h1>Objects</h1>
-            <p>{nodes.length} in design</p>
-          </div>
+      <div className="tool-rail" role="toolbar" aria-label="Design tools">
+        <button
+          className={toolMode === "select" ? "active" : ""}
+          onClick={() => setToolMode("select")}
+          title="Select and resize (V)"
+          aria-label="Select tool"
+        ><span className="tool-symbol cursor-symbol">➤</span></button>
+        <button
+          className={toolMode === "face" ? "active" : ""}
+          onClick={() => setToolMode("face")}
+          title="Select a face to push/pull (F)"
+          aria-label="Face tool"
+        >
+          {/* A cube with its top face picked out — the one face lit against
+              two plain ones is what distinguishes "edit a face" from the
+              shape library's solid Box icon. */}
+          <svg className="tool-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+            <path d="M12 3 20 7.4 12 11.8 4 7.4Z" fill="currentColor" />
+            <path d="M4 8.9 11.4 13v7.9L4 16.8Z" fill="currentColor" opacity=".3" />
+            <path d="M20 8.9 12.6 13v7.9L20 16.8Z" fill="currentColor" opacity=".45" />
+          </svg>
+        </button>
+        <button
+          className={toolMode === "edge" ? "active" : ""}
+          onClick={() => { setToolMode("edge"); setEdgeSelection(null); }}
+          title="Select an edge to fillet or chamfer (E)"
+          aria-label="Edge finishing tool"
+        ><span className="tool-symbol">⌞</span></button>
+        <button
+          onClick={() => void openTextTool()}
+          title="Add 3D text using an installed system font"
+          aria-label="Add text tool"
+        ><span className="tool-symbol text-tool-symbol">T</span></button>
+        <button
+          className={toolMode === "move" ? "active" : ""}
+          onClick={() => setToolMode("move")}
+          title="Move with axis controls (M)"
+          aria-label="Move tool"
+        ><span className="tool-symbol">✥</span></button>
+        <button
+          className={toolMode === "rotate" ? "active" : ""}
+          onClick={() => setToolMode("rotate")}
+          title="Rotate (R)"
+          aria-label="Rotate tool"
+        ><span className="tool-symbol">↻</span></button>
+        <button
+          className={toolMode === "align" ? "active" : ""}
+          onClick={() => setToolMode("align")}
+          title="Align selected objects (A)"
+          aria-label="Align tool"
+          disabled={selectedIds.length < 2}
+        ><span className="tool-symbol">⋮</span></button>
+        <button
+          className={toolMode === "build" ? "active" : ""}
+          onClick={() => setToolMode("build")}
+          title="Shape Builder: combine overlapping shapes region by region (B)"
+          aria-label="Shape Builder tool"
+          disabled={selectedIds.length < 2}
+        >
+          <ShapeBuilderIcon />
+        </button>
+        {/* Not a mode — a toggle on the selection, so it sits below a rule
+            rather than in the run of tools that light each other out. */}
+        <span className="tool-rail-sep" />
+        <button
+          className={selectionTransparent ? "active" : ""}
+          onClick={toggleTransparency}
+          title="Make the selection see-through (T)"
+          aria-label="Toggle transparency"
+          aria-pressed={selectionTransparent}
+          disabled={!selectedIds.length}
+        >
+          <TransparencyIcon />
+        </button>
+        <div className="tool-rail-item-container" ref={wireframeMenuRef}>
           <button
-            className="icon-button"
-            onClick={() => {
-              if (!nodes.length || confirm("Discard this design and start a new one?")) clearAll();
-            }}
-            disabled={!nodes.length}
-            title="New design"
+            className={wireframe !== "off" || wireframeMenuOpen ? "active" : ""}
+            onClick={() => setWireframeMenuOpen((v) => !v)}
+            title={
+              wireframe === "outlined"
+                ? "View: Outlined Solid (W) — click to toggle menu"
+                : wireframe === "edges"
+                ? "View: Clean Edges (W) — click to toggle menu"
+                : wireframe === "mesh"
+                ? "View: Full Mesh (W) — click to toggle menu"
+                : wireframe === "xray"
+                ? "View: X-Ray (W) — click to toggle menu"
+                : wireframe === "transparent"
+                ? "View: Transparent (W) — click to toggle menu"
+                : "View Modes (W) — click to toggle menu"
+            }
+            aria-label={`View mode options, currently ${wireframe}`}
+            aria-expanded={wireframeMenuOpen}
           >
-            ＋
+            <WireframeIcon mode={wireframe} />
           </button>
+          {wireframeMenuOpen && (
+            <div className="tool-rail-flyout" role="menu" aria-label="View modes">
+              <button
+                className={wireframe === "off" ? "active" : ""}
+                onClick={() => setWireframe("off")}
+                title="Solid Shaded View"
+              >
+                <span className="flyout-icon"><SolidCubeIcon /></span>
+                <span className="flyout-label">Solid</span>
+              </button>
+              <button
+                className={wireframe === "outlined" ? "active" : ""}
+                onClick={() => setWireframe("outlined")}
+                title="Transparent-view lines with completely invisible faces"
+              >
+                <span className="flyout-icon"><WireframeIcon mode="outlined" /></span>
+                <span className="flyout-label">Outlined</span>
+              </button>
+              <button
+                className={wireframe === "edges" ? "active" : ""}
+                onClick={() => setWireframe("edges")}
+                title="Clean CAD Edges (No diagonal mesh lines)"
+              >
+                <span className="flyout-icon"><WireframeIcon mode="edges" /></span>
+                <span className="flyout-label">Clean Edges</span>
+              </button>
+              <button
+                className={wireframe === "mesh" ? "active" : ""}
+                onClick={() => setWireframe("mesh")}
+                title="Full Mesh (Original wireframe with all triangles)"
+              >
+                <span className="flyout-icon"><WireframeIcon mode="mesh" /></span>
+                <span className="flyout-label">Full Mesh</span>
+              </button>
+              <button
+                className={wireframe === "xray" ? "active" : ""}
+                onClick={() => setWireframe("xray")}
+                title="X-Ray See-Through Wireframe"
+              >
+                <span className="flyout-icon"><WireframeIcon mode="xray" /></span>
+                <span className="flyout-label">X-Ray</span>
+              </button>
+              <button
+                className={wireframe === "transparent" ? "active" : ""}
+                onClick={() => setWireframe("transparent")}
+                title="All Objects Transparent / Ghosted"
+              >
+                <span className="flyout-icon"><WireframeIcon mode="transparent" /></span>
+                <span className="flyout-label">Transparent</span>
+              </button>
+            </div>
+          )}
         </div>
-        {nodes.length === 0 && <div className="empty-state">Add a shape from the library to begin.</div>}
-        <Tree
-          nodes={nodes}
-          selectedIds={selectedIds}
-          invalid={invalid}
-          onSelect={onSelect}
-          onToggleCollapsed={toggleCollapsed}
-          onToggleHidden={toggleHidden}
-          onRename={rename}
-        />
-        <div className="panel-footer">
-          <span>{saveLabel}</span>
-          <span>{selectedIds.length} selected</span>
-        </div>
-      </aside>
+        {/* An action, not a mode and not a view toggle — its own group. */}
+        <span className="tool-rail-sep" />
+        <button
+          onClick={zoomToSelected}
+          title={selectedIds.length ? "Zoom to selected object (Z)" : "Fit all objects in view (Z)"}
+          aria-label="Zoom to selected"
+        >
+          <ZoomToFitIcon />
+        </button>
+        <button
+          onClick={dropSelected}
+          title="Drop onto what is below (D)"
+          aria-label="Drop"
+          disabled={!selectedIds.length}
+        >
+          <DropIcon />
+        </button>
+      </div>
+
+      {objectsPanelOpen && (
+        <aside className="panel object-panel">
+          <div className="panel-heading">
+            <div>
+              <h1>Objects</h1>
+              <p>{nodes.length} in design</p>
+            </div>
+            <button
+              className="icon-button"
+              onClick={() => {
+                if (!nodes.length || confirm("Discard this design and start a new one?")) clearAll();
+              }}
+              disabled={!nodes.length}
+              title="New design"
+            >
+              ＋
+            </button>
+          </div>
+          {nodes.length === 0 && <div className="empty-state">Add a shape from the library to begin.</div>}
+          <Tree
+            nodes={nodes}
+            selectedIds={selectedIds}
+            invalid={invalid}
+            onSelect={onSelect}
+            onToggleCollapsed={toggleCollapsed}
+            onToggleHidden={toggleHidden}
+            onRename={rename}
+          />
+          <div className="panel-footer">
+            <span>{saveLabel}</span>
+            <span>{selectedIds.length} selected</span>
+          </div>
+        </aside>
+      )}
 
       <main className="workspace">
-        <div className="tool-rail" role="toolbar" aria-label="Design tools">
-          <button
-            className={toolMode === "select" ? "active" : ""}
-            onClick={() => setToolMode("select")}
-            title="Select and resize (V)"
-            aria-label="Select tool"
-          ><span className="tool-symbol cursor-symbol">➤</span></button>
-          <button
-            className={toolMode === "face" ? "active" : ""}
-            onClick={() => setToolMode("face")}
-            title="Select a face to push/pull (F)"
-            aria-label="Face tool"
-          >
-            {/* A cube with its top face picked out — the one face lit against
-                two plain ones is what distinguishes "edit a face" from the
-                shape library's solid Box icon. */}
-            <svg className="tool-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-              <path d="M12 3 20 7.4 12 11.8 4 7.4Z" fill="currentColor" />
-              <path d="M4 8.9 11.4 13v7.9L4 16.8Z" fill="currentColor" opacity=".3" />
-              <path d="M20 8.9 12.6 13v7.9L20 16.8Z" fill="currentColor" opacity=".45" />
-            </svg>
-          </button>
-          <button
-            className={toolMode === "edge" ? "active" : ""}
-            onClick={() => { setToolMode("edge"); setEdgeSelection(null); }}
-            title="Select an edge to fillet or chamfer (E)"
-            aria-label="Edge finishing tool"
-          ><span className="tool-symbol">⌞</span></button>
-          <button
-            onClick={() => void openTextTool()}
-            title="Add 3D text using an installed system font"
-            aria-label="Add text tool"
-          ><span className="tool-symbol text-tool-symbol">T</span></button>
-          <button
-            className={toolMode === "move" ? "active" : ""}
-            onClick={() => setToolMode("move")}
-            title="Move with axis controls (M)"
-            aria-label="Move tool"
-          ><span className="tool-symbol">✥</span></button>
-          <button
-            className={toolMode === "rotate" ? "active" : ""}
-            onClick={() => setToolMode("rotate")}
-            title="Rotate (R)"
-            aria-label="Rotate tool"
-          ><span className="tool-symbol">↻</span></button>
-          <button
-            className={toolMode === "align" ? "active" : ""}
-            onClick={() => setToolMode("align")}
-            title="Align selected objects (A)"
-            aria-label="Align tool"
-            disabled={selectedIds.length < 2}
-          ><span className="tool-symbol">⋮</span></button>
-          <button
-            className={toolMode === "build" ? "active" : ""}
-            onClick={() => setToolMode("build")}
-            title="Shape Builder: combine overlapping shapes region by region (B)"
-            aria-label="Shape Builder tool"
-            disabled={selectedIds.length < 2}
-          >
-            <ShapeBuilderIcon />
-          </button>
-          {/* Not a mode — a toggle on the selection, so it sits below a rule
-              rather than in the run of tools that light each other out. */}
-          <span className="tool-rail-sep" />
-          <button
-            className={selectionTransparent ? "active" : ""}
-            onClick={toggleTransparency}
-            title="Make the selection see-through (T)"
-            aria-label="Toggle transparency"
-            aria-pressed={selectionTransparent}
-            disabled={!selectedIds.length}
-          >
-            <TransparencyIcon />
-          </button>
-          <div className="tool-rail-item-container" ref={wireframeMenuRef}>
-            <button
-              className={wireframe !== "off" || wireframeMenuOpen ? "active" : ""}
-              onClick={() => setWireframeMenuOpen((v) => !v)}
-              title={
-                wireframe === "outlined"
-                  ? "View: Outlined Solid (W) — click to toggle menu"
-                  : wireframe === "edges"
-                  ? "View: Clean Edges (W) — click to toggle menu"
-                  : wireframe === "mesh"
-                  ? "View: Full Mesh (W) — click to toggle menu"
-                  : wireframe === "xray"
-                  ? "View: X-Ray (W) — click to toggle menu"
-                  : wireframe === "transparent"
-                  ? "View: Transparent (W) — click to toggle menu"
-                  : "View Modes (W) — click to toggle menu"
-              }
-              aria-label={`View mode options, currently ${wireframe}`}
-              aria-expanded={wireframeMenuOpen}
-            >
-              <WireframeIcon mode={wireframe} />
-            </button>
-            {wireframeMenuOpen && (
-              <div className="tool-rail-flyout" role="menu" aria-label="View modes">
-                <button
-                  className={wireframe === "off" ? "active" : ""}
-                  onClick={() => setWireframe("off")}
-                  title="Solid Shaded View"
-                >
-                  <span className="flyout-icon"><SolidCubeIcon /></span>
-                  <span className="flyout-label">Solid</span>
-                </button>
-                <button
-                  className={wireframe === "outlined" ? "active" : ""}
-                  onClick={() => setWireframe("outlined")}
-                  title="Transparent-view lines with completely invisible faces"
-                >
-                  <span className="flyout-icon"><WireframeIcon mode="outlined" /></span>
-                  <span className="flyout-label">Outlined</span>
-                </button>
-                <button
-                  className={wireframe === "edges" ? "active" : ""}
-                  onClick={() => setWireframe("edges")}
-                  title="Clean CAD Edges (No diagonal mesh lines)"
-                >
-                  <span className="flyout-icon"><WireframeIcon mode="edges" /></span>
-                  <span className="flyout-label">Clean Edges</span>
-                </button>
-                <button
-                  className={wireframe === "mesh" ? "active" : ""}
-                  onClick={() => setWireframe("mesh")}
-                  title="Full Mesh (Original wireframe with all triangles)"
-                >
-                  <span className="flyout-icon"><WireframeIcon mode="mesh" /></span>
-                  <span className="flyout-label">Full Mesh</span>
-                </button>
-                <button
-                  className={wireframe === "xray" ? "active" : ""}
-                  onClick={() => setWireframe("xray")}
-                  title="X-Ray See-Through Wireframe"
-                >
-                  <span className="flyout-icon"><WireframeIcon mode="xray" /></span>
-                  <span className="flyout-label">X-Ray</span>
-                </button>
-                <button
-                  className={wireframe === "transparent" ? "active" : ""}
-                  onClick={() => setWireframe("transparent")}
-                  title="All Objects Transparent / Ghosted"
-                >
-                  <span className="flyout-icon"><WireframeIcon mode="transparent" /></span>
-                  <span className="flyout-label">Transparent</span>
-                </button>
-              </div>
-            )}
-          </div>
-          {/* An action, not a mode and not a view toggle — its own group. */}
-          <span className="tool-rail-sep" />
-          <button
-            onClick={zoomToSelected}
-            title={selectedIds.length ? "Zoom to selected object (Z)" : "Fit all objects in view (Z)"}
-            aria-label="Zoom to selected"
-          >
-            <ZoomToFitIcon />
-          </button>
-          <button
-            onClick={dropSelected}
-            title="Drop onto what is below (D)"
-            aria-label="Drop"
-            disabled={!selectedIds.length}
-          >
-            <DropIcon />
-          </button>
-        </div>
         <Viewport
           parts={parts}
           nodes={nodes}
@@ -2300,6 +2341,7 @@ export function App() {
           {selected ? (
             <Inspector
               node={selected}
+              localSize={selectedLocalSize}
               selectedCount={selectedIds.length}
               error={invalid[selected.id] ?? null}
               onParam={(k, v) => setParam(selected.id, k, v)}

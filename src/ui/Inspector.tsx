@@ -35,6 +35,13 @@ function filletLimit(node: { kind?: string; params: Record<string, number> }, st
 
 interface Props {
   node: SceneNode;
+  /** The selected node's own measured extent (width/depth/height before its
+   *  scale is applied), read from its evaluated mesh — a group, an edit, an
+   *  import or a build has no size parameter of its own, only this. Null
+   *  before the mesh has built, or if it built to nothing; the Size section
+   *  falls back to a plain percentage in either case. Unused for a
+   *  primitive, which already has a real Dimensions section of its own. */
+  localSize: Vec3 | null;
   selectedCount?: number;
   error: string | null;
   onParam: (key: string, value: number) => void;
@@ -56,6 +63,10 @@ interface Props {
 }
 
 const AXES = ["X", "Y", "Z"] as const;
+/** Labels for the millimetre Size fields on a compound shape — the same
+ *  words a Box primitive's own Dimensions fields already use for the same
+ *  three axes. */
+const WDH_LABELS = ["Width", "Depth", "Height"] as const;
 
 function isLightColor(hex: string): boolean {
   const c = hex.replace("#", "");
@@ -69,6 +80,7 @@ function isLightColor(hex: string): boolean {
 
 export function Inspector({
   node,
+  localSize,
   selectedCount = 1,
   error,
   onParam,
@@ -295,41 +307,90 @@ export function Inspector({
         </>
       )}
 
-      <h2>Size</h2>
-      <label className="check">
-        <input
-          type="checkbox"
-          checked={resizeConstrained}
-          onChange={(e) => onResizeConstrained(e.target.checked)}
-        />
-        <span>Lock proportions</span>
-      </label>
+      {/* A primitive already has a real Width/Depth/Height in its own
+          Dimensions section above — showing it again here as millimetres
+          would just be the same number twice. Everything else (a group, an
+          edited/combined shape, an import, a Shape Builder result) has no
+          parameter to read a size from AT ALL, only this section — which,
+          without localSize, could only ever offer a bare percentage of
+          nothing in particular. localSize is the compound shape's own
+          measured extent (see localMeshBounds in export/stl.ts), in exactly
+          the frame a primitive's raw parameter already describes, so it can
+          be shown and edited the SAME way: a millimetre field, scale solved
+          backwards from what was typed. Falls back to the percentage view
+          when there is no mesh yet to measure (still building, or a result
+          that evaluated to nothing) — never leaves the section empty. */}
+      {(() => {
+        const showMm = node.type !== "object" && !!localSize;
+        return (
+          <>
+            <h2>{showMm ? "Size (mm)" : "Size"}</h2>
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={resizeConstrained}
+                onChange={(e) => onResizeConstrained(e.target.checked)}
+              />
+              <span>Lock proportions</span>
+            </label>
+            {!isMulti && (
+              <div className="triple">
+                {showMm && localSize
+                  ? WDH_LABELS.map((label, i) => {
+                      const currentVal = round(localSize[i] * node.scale[i]);
+                      return (
+                        <label key={label}>
+                          <span className="field-label">{label}</span>
+                          <input
+                            className="num"
+                            type="number"
+                            min={0.1}
+                            step={0.5}
+                            value={currentVal}
+                            onFocus={beginHistoryBatch}
+                            onBlur={endHistoryBatch}
+                            onChange={(e) => {
+                              const typed = Number(e.target.value);
+                              if (!Number.isFinite(typed) || typed <= 0) return;
+                              const nextFactor = Math.max(0.0001, typed / localSize[i]);
+                              const scale = resizeConstrained
+                                ? ([nextFactor, nextFactor, nextFactor] as Vec3)
+                                : (node.scale.map((v, at) => (at === i ? nextFactor : v)) as Vec3);
+                              onTransform({ scale });
+                            }}
+                          />
+                        </label>
+                      );
+                    })
+                  : AXES.map((axis, i) => (
+                      <label key={axis}>
+                        <span className="field-label">{axis} %</span>
+                        <input
+                          className="num"
+                          type="number"
+                          min={1}
+                          max={1000}
+                          step={1}
+                          value={round(node.scale[i] * 100)}
+                          onFocus={beginHistoryBatch}
+                          onBlur={endHistoryBatch}
+                          onChange={(e) => {
+                            const value = Math.max(0.01, Number(e.target.value) / 100);
+                            const scale = resizeConstrained
+                              ? ([value, value, value] as Vec3)
+                              : (node.scale.map((v, at) => (at === i ? value : v)) as Vec3);
+                            onTransform({ scale });
+                          }}
+                        />
+                      </label>
+                    ))}
+              </div>
+            )}
+          </>
+        );
+      })()}
       {!isMulti && (
         <>
-          <div className="triple">
-            {AXES.map((axis, i) => (
-              <label key={axis}>
-                <span className="field-label">{axis} %</span>
-                <input
-                  className="num"
-                  type="number"
-                  min={1}
-                  max={1000}
-                  step={1}
-                  value={round(node.scale[i] * 100)}
-                  onFocus={beginHistoryBatch}
-                  onBlur={endHistoryBatch}
-                  onChange={(e) => {
-                    const value = Math.max(0.01, Number(e.target.value) / 100);
-                    const scale = resizeConstrained
-                      ? ([value, value, value] as Vec3)
-                      : (node.scale.map((v, at) => (at === i ? value : v)) as Vec3);
-                    onTransform({ scale });
-                  }}
-                />
-              </label>
-            ))}
-          </div>
           <p className="hint">
             {resizeConstrained
               ? "Corner and size edits preserve proportions."

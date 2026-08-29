@@ -6,6 +6,34 @@ export interface WorldBounds {
   max: Vec3;
 }
 
+/**
+ * Bounds of a mesh's own vertices, before ANY of the node's placement
+ * transform — scale, rotation, position — is applied. The same frame a
+ * primitive's raw Width/Depth/Height parameter already describes, which is
+ * what lets a compound shape's Inspector show real millimetre dimensions the
+ * same way: (this extent) * node.scale[axis] is the displayed size, and
+ * solving that backwards for a typed value gives the scale to set.
+ *
+ * Deliberately a separate scan from meshTransform() below rather than a
+ * shared refactor of it — that function's own correctness (world bounds fed
+ * into the export-time Hole-overlap check) is not worth the risk for what
+ * would only save a few lines.
+ */
+export function localMeshBounds(mesh: KernelMesh): WorldBounds | null {
+  const vertices = mesh.faces.vertices;
+  if (!vertices.length) return null;
+  const min: Vec3 = [Infinity, Infinity, Infinity];
+  const max: Vec3 = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < vertices.length; i += 3) {
+    for (let axis = 0; axis < 3; axis++) {
+      const value = Number(vertices[i + axis]);
+      if (value < min[axis]) min[axis] = value;
+      if (value > max[axis]) max[axis] = value;
+    }
+  }
+  return min.every(Number.isFinite) ? { min, max } : null;
+}
+
 function meshTransform(mesh: KernelMesh, node: SceneNode) {
   const vertices = mesh.faces.vertices;
   const boundsMin: Vec3 = [Infinity, Infinity, Infinity];
