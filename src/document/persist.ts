@@ -113,7 +113,12 @@ export function parseNode(raw: unknown): SceneNode | null {
     if (!parsedBase || (parsedBase.type !== "object" && parsedBase.type !== "group")) return null;
     if (!Array.isArray(n.ops)) return null;
     const ops = n.ops.map(parseOp).filter((op): op is EditOp => op !== null);
-    if (!ops.length) return null;
+    // Losing the edits is bad; losing the OBJECT is worse. An edit node whose
+    // op list cannot be read still has a perfectly good base shape, and
+    // returning null here deleted the whole thing — which is exactly what "I
+    // refreshed the page and my extruded object is gone" was: one unreadable
+    // op, and the box went with it.
+    if (!ops.length) return { ...parsedBase, id: base.id, name: base.name, position: base.position, rotation: base.rotation, scale: base.scale, isHole: base.isHole };
     return { ...base, type: "edit", base: parsedBase, ops };
   }
 
@@ -138,6 +143,18 @@ function parseOp(raw: unknown): EditOp | null {
     if (typeof o.offset !== "number" || !Number.isFinite(o.offset)) return null;
     return { kind: "resizeFace", point: o.point, normal: o.normal, offset: o.offset };
   }
+  if (o.kind === "offsetExtrude") {
+    if (!isVec3(o.point) || !isVec3(o.normal)) return null;
+    if (typeof o.inset !== "number" || !Number.isFinite(o.inset)) return null;
+    if (typeof o.height !== "number" || !Number.isFinite(o.height)) return null;
+    return { kind: "offsetExtrude", point: o.point, normal: o.normal, inset: o.inset, height: o.height };
+  }
+  // An op kind this build has never heard of is still somebody's work, and
+  // the kernel already knows to report and skip one rather than misapply it
+  // (see replayEdit). Deleting it here instead — which is what happened when
+  // offsetExtrude was added without teaching this function about it — takes
+  // the edit out of the saved file for good the next time it is written.
+  if (typeof o.kind === "string" && o.kind !== "pushPull") return o as unknown as EditOp;
   if (!isVec3(o.point) || !isVec3(o.normal)) return null;
   if (typeof o.distance !== "number" || !Number.isFinite(o.distance)) return null;
   return { point: o.point, normal: o.normal, distance: o.distance };
