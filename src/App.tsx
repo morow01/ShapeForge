@@ -878,19 +878,29 @@ export function App() {
       // them hunting for a setting that does not exist. Offer the route that
       // works in every browser instead: point at a font file.
       if (reason.includes(NO_FONT_LISTING)) {
-        setError("This browser cannot list installed fonts — Chrome and Edge can. Pick a font file instead (.ttf, .otf or .woff).");
-        textFontInputRef.current?.click();
+        // Open the dialog with an empty font list rather than firing an OS
+        // file picker straight at the user — reported as "it shows open
+        // dialog and wants me to open fonts". The dialog explains why there
+        // is no list and offers the picker as a deliberate choice.
+        setTextFonts([]);
+        setTextModalOpen(true);
+        setError(null);
         return;
       }
       setError(`Could not access system fonts: ${reason} Allow font access in the browser and try again.`);
     }
   };
 
-  /** The everywhere-fallback: one font, chosen from disk. */
+  /** The everywhere-fallback: fonts chosen from disk, kept for the session so
+   *  a second piece of text does not mean finding the file again. */
   const useFontFile = async (file: File) => {
     try {
       const { fontFromFile } = await import("./text/systemFonts");
-      setTextFonts([fontFromFile(file)]);
+      const font = fontFromFile(file);
+      setTextFonts((previous) => {
+        const rest = (previous ?? []).filter((f) => f.postscriptName !== font.postscriptName);
+        return [...rest, font];
+      });
       setTextModalOpen(true);
       setError(null);
     } catch (e) {
@@ -2298,7 +2308,7 @@ export function App() {
         />
       )}
       {textModalOpen && textFonts && (
-        <TextModal fonts={textFonts} onClose={() => setTextModalOpen(false)} onCreate={(config) => void createText(config)} />
+        <TextModal fonts={textFonts ?? []} onClose={() => setTextModalOpen(false)} onCreate={(config) => void createText(config)} onPickFile={() => textFontInputRef.current?.click()} />
       )}
     </div>
   );
