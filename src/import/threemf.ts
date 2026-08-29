@@ -236,12 +236,17 @@ export function parseThreeMF(bytes: ArrayBuffer, maxTriangles = Infinity): Three
       if (seen.has(key)) continue;
       const child = partAt(childPath).objects.get(id);
       if (!child) continue;
-      out.push(...collect(
+      // Appended one at a time, NOT spread. push(...million) passes a
+      // million arguments and blows the call stack — a half-million-triangle
+      // skull died on "Maximum call stack size exceeded" while its STL twin
+      // imported fine.
+      const fromChild = collect(
         child,
         multiply(matrix, parseMatrix(component.getAttribute("transform"))),
         new Set([...seen, key]),
         childPath,
-      ));
+      );
+      for (const triangle of fromChild) out.push(triangle);
     }
     return out;
   };
