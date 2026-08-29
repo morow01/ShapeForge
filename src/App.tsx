@@ -290,6 +290,18 @@ export function App() {
    *  the button having done nothing at all — so watch for one and say it out
    *  loud instead. */
   const [hollowPending, setHollowPending] = useState<string | null>(null);
+  /**
+   * The last face that WAS selected, kept even after the scene lets go of it.
+   *
+   * Clicking a face opens the push/pull pill and focuses it. Pressing a button
+   * then blurs that pill, which resolves the pending push/pull, which clears
+   * scene.selectedFace — and the frame loop reports that as "no face" before
+   * the button's own click handler runs. A synthetic click never shows this
+   * (every event lands in one task, so no frame runs in between); a human
+   * click spans frames and does. Acting on the remembered face makes the
+   * ordering irrelevant.
+   */
+  const lastFace = useRef<{ id: string; point: Vec3 } | null>(null);
   const [resizeConstrained, setResizeConstrained] = useState(true);
   const [wireframe, setWireframe] = useState<WireframeMode>(() => {
     const saved = localStorage.getItem(VIEW_STYLE_KEY) as WireframeMode | null;
@@ -1405,6 +1417,11 @@ export function App() {
     setError((current) => (current === NEEDS_FACE ? null : current));
   }, [faceSelection]);
 
+  // Leaving Face mode is the one unambiguous "done with that face".
+  useEffect(() => {
+    if (toolMode !== "face") lastFace.current = null;
+  }, [toolMode]);
+
   useEffect(() => {
     if (!hollowPending) return;
     const complaint = invalid[hollowPending];
@@ -1812,7 +1829,11 @@ export function App() {
           onPushPull={pushPullFace}
           onPreviewPushPull={onPreviewPushPull}
           onSelectEdges={(id, points) => setEdgeSelection(id && points.length ? { id, points } : null)}
-          onSelectFace={(id, point) => setFaceSelection(id && point ? { id, point } : null)}
+          onSelectFace={(id, point) => {
+            const next = id && point ? { id, point } : null;
+            if (next) lastFace.current = next;
+            setFaceSelection(next);
+          }}
           onPlaceSurface={placePrimitive}
           onDragChange={onDragChange}
         />
@@ -1831,22 +1852,38 @@ export function App() {
               <input type="number" min="0.1" step="0.5" value={wallThickness}
                 onChange={(e) => setWallThickness(Math.max(0.1, Number(e.target.value) || 0.1))} /> mm
             </label>
-            <button title="Hollow this object out, leaving a wall of the given thickness and opening the selected face" onClick={() => {
-              // Deliberately NOT disabled without a face. A greyed-out button
-              // that does nothing when clicked is indistinguishable from a
-              // broken one; say what is missing instead.
-              if (!faceSelection) {
-                setError(NEEDS_FACE);
-                return;
-              }
-              setError(null);
-              setHollowPending(faceSelection.id);
-              finishEdit(faceSelection.id, {
-                kind: "shell",
-                thickness: wallThickness,
-                points: [faceSelection.point],
-              });
-            }}>Hollow</button>
+            <button
+              title="Hollow this object out, leaving a wall of the given thickness and opening the selected face"
+              // Keep focus where it is: without this the press blurs the
+              // push/pull pill, which drops the face selection out from under
+              // the very click trying to use it.
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                // Deliberately NOT disabled without a face. A greyed-out
+                // button that does nothing when clicked is indistinguishable
+                // from a broken one; say what is missing instead.
+                const target = faceSelection ?? lastFace.current;
+                if (!target) {
+                  setError(NEEDS_FACE);
+                  return;
+                }
+                const node = findNode(nodes, target.id);
+                if (node && (node.type === "import" || node.type === "build")) {
+                  // finishEdit returns these unchanged, which is the other way
+                  // this button can look broken.
+                  setError(node.type === "import"
+                    ? "An imported shape cannot be hollowed — build the container from a box instead."
+                    : "A Shape Builder result cannot be hollowed yet.");
+                  return;
+                }
+                setError(null);
+                setHollowPending(target.id);
+                finishEdit(target.id, {
+                  kind: "shell",
+                  thickness: wallThickness,
+                  points: [target.point],
+                });
+              }}>Hollow</button>
           </div>
         )}
         {toolMode === "edge" && (
