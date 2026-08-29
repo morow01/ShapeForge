@@ -16,6 +16,8 @@ export interface ThreeMFPart {
    * assembled: the centre of its footprint, and the bottom of it.
    */
   anchor: [number, number, number];
+  /** minX, maxX, minY, maxY, minZ — kept only long enough to place the set. */
+  bounds: [number, number, number, number, number];
 }
 
 /** 3MF states its units; everything downstream is millimetres. */
@@ -108,9 +110,38 @@ function binarySTL(triangles: [number, number, number][][]): ArrayBuffer {
  * Kept on the main thread for the same reason SVG is: this needs DOMParser,
  * which the kernel worker does not have.
  */
-export function parseThreeMF(bytes: ArrayBuffer): ThreeMFPart[] {
+/** Occurrences of an ASCII needle in raw bytes.
+ *
+ *  Used to size a package up before deciding to parse it. The geometry inside
+ *  a slicer project can be enormous — a dragon that zips to 26MB held 149MB of
+ *  model XML — and building a DOM for that only to refuse it on the triangle
+ *  limit is how a browser tab dies. Counting the bytes costs nothing. */
+function countOccurrences(haystack: Uint8Array, needle: string): number {
+  const pattern = new TextEncoder().encode(needle);
+  let found = 0;
+  outer: for (let i = 0; i + pattern.length <= haystack.length; i++) {
+    for (let j = 0; j < pattern.length; j++) {
+      if (haystack[i + j] !== pattern[j]) continue outer;
+    }
+    found++;
+  }
+  return found;
+}
+
+export function parseThreeMF(bytes: ArrayBuffer, maxTriangles = Infinity): ThreeMFPart[] {
   const files = unzipSync(new Uint8Array(bytes));
   const decoder = new TextDecoder();
+
+  // Every .model part, not just the root: the production extension puts the
+  // geometry in its own part and leaves the root holding references.
+  const modelParts = Object.keys(files).filter((name) => /.model$/i.test(name));
+  const total = modelParts.reduce((sum, name) => sum + countOccurrences(files[name], "<triangle "), 0);
+  if (total > maxTriangles) {
+    throw new Error(
+      `it holds ${total.toLocaleString()} triangles — too complex to import here. ` +
+        `Try simplifying/decimating it in a mesh tool first (aim under ${maxTriangles.toLocaleString()}).`,
+    );
+  }
 
   // The relationship file names the model part; only fall back to the
   // conventional path when it cannot be read.
@@ -121,20 +152,51 @@ export function parseThreeMF(bytes: ArrayBuffer): ThreeMFPart[] {
       ?? /3dmodel[^>]*Target="([^"]+)"/i.exec(decoder.decode(rels));
     if (target) modelPath = target[1].replace(/^\//, "");
   }
-  const modelBytes = files[modelPath] ?? files["3D/3dmodel.model"];
-  if (!modelBytes) throw new Error("no 3D model part inside the 3MF package");
+  /**
+   * One model part, parsed once.
+   *
+   * A 3MF may be split across several: the production extension lets a
+   * component (or a build item) name another part with p:path and reference an
+   * object id inside IT. Every slicer project file is built this way — the
+   * root model is a few kilobytes of references and the meshes live in
+   * 3D/Objects/*.model — so a reader that only ever looks at the root finds
+   * objects with no mesh and concludes, wrongly, that there is nothing to
+   * print.
+   */
+  const partCache = new Map<string, { objects: Map<string, Element>; scale: number }>();
+  const partAt = (rawPath: string) => {
+    const key = rawPath.replace(/^\//, "");
+    const cached = partCache.get(key);
+    if (cached) return cached;
+    const partBytes = files[key];
+    if (!partBytes) throw new Error(`it references ${key}, which is not in the package`);
+    const parsed = new DOMParser().parseFromString(decoder.decode(partBytes), "application/xml");
+    if (parsed.querySelector("parsererror")) throw new Error(`${key} inside it is not valid XML`);
+    const objects = new Map<string, Element>();
+    for (const object of Array.from(parsed.getElementsByTagName("object"))) {
+      const id = object.getAttribute("id");
+      if (id) objects.set(id, object);
+    }
+    // Each part states its own units.
+    const entry = {
+      objects,
+      scale: UNIT_MM[parsed.documentElement.getAttribute("unit") ?? "millimeter"] ?? 1,
+    };
+    partCache.set(key, entry);
+    return entry;
+  };
 
-  const doc = new DOMParser().parseFromString(decoder.decode(modelBytes), "application/xml");
-  if (doc.querySelector("parsererror")) throw new Error("the 3D model inside it is not valid XML");
-
-  const model = doc.documentElement;
-  const scale = UNIT_MM[model.getAttribute("unit") ?? "millimeter"] ?? 1;
-
-  const objects = new Map<string, Element>();
-  for (const object of Array.from(doc.getElementsByTagName("object"))) {
-    const id = object.getAttribute("id");
-    if (id) objects.set(id, object);
+  if (!files[modelPath] && !files["3D/3dmodel.model"]) {
+    throw new Error("no 3D model part inside the 3MF package");
   }
+  const rootPath = files[modelPath] ? modelPath : "3D/3dmodel.model";
+  partAt(rootPath); // validates it up front, and caches its units
+  const doc = new DOMParser().parseFromString(decoder.decode(files[rootPath]), "application/xml");
+
+  /** p:path, however the document spells the prefix. */
+  const pathOf = (element: Element): string | null =>
+    element.getAttributeNS("http://schemas.microsoft.com/3dmanufacturing/production/2015/06", "path")
+      ?? element.getAttribute("p:path");
 
   /** Triangles of one object, in the frame `matrix` puts it in. `seen` breaks
    *  a components cycle rather than recursing until the stack gives out. */
@@ -142,8 +204,10 @@ export function parseThreeMF(bytes: ArrayBuffer): ThreeMFPart[] {
     object: Element,
     matrix: Matrix,
     seen: Set<string>,
+    partPath: string,
   ): [number, number, number][][] => {
     const out: [number, number, number][][] = [];
+    const scale = partAt(partPath).scale;
     const mesh = object.getElementsByTagName("mesh")[0];
     if (mesh) {
       const points: [number, number, number][] = [];
@@ -164,13 +228,19 @@ export function parseThreeMF(bytes: ArrayBuffer): ThreeMFPart[] {
     }
     for (const component of Array.from(object.getElementsByTagName("component"))) {
       const id = component.getAttribute("objectid");
-      if (!id || seen.has(id)) continue;
-      const child = objects.get(id);
+      if (!id) continue;
+      // The referenced object may live in another part; ids are per-part, so
+      // the cycle guard has to be keyed by both.
+      const childPath = (pathOf(component) ?? partPath).replace(/^\//, "");
+      const key = `${childPath}#${id}`;
+      if (seen.has(key)) continue;
+      const child = partAt(childPath).objects.get(id);
       if (!child) continue;
       out.push(...collect(
         child,
         multiply(matrix, parseMatrix(component.getAttribute("transform"))),
-        new Set([...seen, id]),
+        new Set([...seen, key]),
+        childPath,
       ));
     }
     return out;
@@ -180,9 +250,16 @@ export function parseThreeMF(bytes: ArrayBuffer): ThreeMFPart[] {
   const items = Array.from(doc.getElementsByTagName("item"));
   for (const item of items) {
     const id = item.getAttribute("objectid");
-    const object = id ? objects.get(id) : undefined;
-    if (!object || !id) continue;
-    const triangles = collect(object, parseMatrix(item.getAttribute("transform")), new Set([id]));
+    if (!id) continue;
+    const itemPath = (pathOf(item) ?? rootPath).replace(/^\//, "");
+    const object = partAt(itemPath).objects.get(id);
+    if (!object) continue;
+    const triangles = collect(
+      object,
+      parseMatrix(item.getAttribute("transform")),
+      new Set([`${itemPath}#${id}`]),
+      itemPath,
+    );
     if (!triangles.length) continue;
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity;
     for (const triangle of triangles) {
@@ -199,7 +276,35 @@ export function parseThreeMF(bytes: ArrayBuffer): ThreeMFPart[] {
       triangles: triangles.length,
       stl: binarySTL(triangles),
       anchor: [(minX + maxX) / 2, (minY + maxY) / 2, minZ],
+      bounds: [minX, maxX, minY, maxY, minZ],
     });
+  }
+
+  // Put the whole assembly on the workspace origin, base on the plate, while
+  // keeping every part exactly where it sits RELATIVE to the others.
+  //
+  // A slicer project carries build-plate coordinates — this dragon's box
+  // arrived at x 78..162, y -186..-93 — which mean nothing in a workspace
+  // centred on its origin, and would drop an import somewhere off in space.
+  // Shifting the set as one keeps an assembly assembled while landing it
+  // where it can actually be seen.
+  if (parts.length) {
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity;
+    for (const part of parts) {
+      minX = Math.min(minX, part.bounds[0]);
+      maxX = Math.max(maxX, part.bounds[1]);
+      minY = Math.min(minY, part.bounds[2]);
+      maxY = Math.max(maxY, part.bounds[3]);
+      minZ = Math.min(minZ, part.bounds[4]);
+    }
+    const shift = [(minX + maxX) / 2, (minY + maxY) / 2, minZ];
+    for (const part of parts) {
+      part.anchor = [
+        part.anchor[0] - shift[0],
+        part.anchor[1] - shift[1],
+        part.anchor[2] - shift[2],
+      ];
+    }
   }
   return parts;
 }

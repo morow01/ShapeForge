@@ -833,19 +833,10 @@ export function App() {
         // the point of the format — a 3MF that holds four parts should arrive
         // as four things you can move apart, not one welded lump.
         const { parseThreeMF } = await import("./import/threemf");
-        const parts = parseThreeMF(bytes);
+        const parts = parseThreeMF(bytes, MAX_IMPORT_TRIANGLES);
         if (!parts.length) {
           setFileOperation(null);
           setError(`${file.name} has no printable objects in it.`);
-          return;
-        }
-        const total = parts.reduce((sum, part) => sum + part.triangles, 0);
-        if (total > MAX_IMPORT_TRIANGLES) {
-          setFileOperation(null);
-          setError(
-            `${file.name} has ${total.toLocaleString()} triangles — too complex to import here. ` +
-              `Try simplifying/decimating it in a mesh tool first (aim under ${MAX_IMPORT_TRIANGLES.toLocaleString()}).`,
-          );
           return;
         }
         for (const part of parts) {
