@@ -87,6 +87,35 @@ function scaledNormal(normal: Vec3, scale: Vec3): Vec3 {
   return [x / length, y / length, z / length];
 }
 
+/**
+ * The two scale factors in the plane of a face with this normal.
+ *
+ * A face op's IN-PLANE measurement (an offset's inset, a face resize) can only
+ * be folded into a baked size when those two agree — otherwise one inset
+ * becomes two different distances and there is no single number to rewrite it
+ * to.
+ */
+function inPlaneScales(normal: Vec3, scale: Vec3): [number, number] {
+  const axis = normal.map(Math.abs).indexOf(Math.max(...normal.map(Math.abs)));
+  const others = [0, 1, 2].filter((i) => i !== axis);
+  return [scale[others[0]], scale[others[1]]];
+}
+
+/** Whether this op's own measurements survive a scale bake exactly. */
+function rebasable(op: EditOp, scale: Vec3): boolean {
+  if (isPushPullOp(op)) return true; // one distance, along one normal
+  if (op.kind === "offsetExtrude" || op.kind === "resizeFace") {
+    // The height is along the normal (always exact); the inset is in the
+    // face's plane, so it needs those two factors to match.
+    const [a, b] = inPlaneScales(op.normal, scale);
+    return Math.abs(a - b) < 1e-9;
+  }
+  // A fillet radius or a wall thickness is measured in every direction at
+  // once. Under a non-uniform scale there is no factor that keeps it right,
+  // so those histories are left alone rather than silently reshaped.
+  return scale[0] === scale[1] && scale[1] === scale[2];
+}
+
 /** Perpendicular distance produced on screen by one local millimetre. */
 function distanceScale(normal: Vec3, scale: Vec3): number {
   const inverse = Math.hypot(
@@ -102,6 +131,31 @@ function distanceScale(normal: Vec3, scale: Vec3): number {
  * edge radius and face offset) are already world millimetres and stay as-is;
  * Push/Pull is the exception because the viewport deliberately reports its
  * distance in the old local frame. */
+/**
+ * The same re-anchoring for an op the user has only just asked for.
+ *
+ * Its ANCHOR still has to move into the baked frame — the point was picked on
+ * the unbaked solid. Its measurements must not: a thickness or a height typed
+ * into the toolbar is already in millimetres, whereas the ops already stored
+ * on the node were recorded in the old local frame and do need converting.
+ * Running both through the same function scaled the new one twice, so a
+ * 2mm extrusion on a node scaled 1.5 came out 3mm.
+ *
+ * Push/Pull is the exception, as ever: the viewport hands its distance over in
+ * the old local frame on purpose, so it converts like a stored op.
+ */
+function incomingAfterScaleBake(op: EditOp, scale: Vec3): EditOp {
+  if (isPushPullOp(op)) return editAfterScaleBake(op, scale);
+  if (op.kind === "shell") {
+    return { ...op, points: op.points.map((point) => scaledPoint(point, scale)) };
+  }
+  return {
+    ...op,
+    point: scaledPoint((op as { point: Vec3 }).point, scale),
+    normal: scaledNormal((op as { normal: Vec3 }).normal, scale),
+  } as EditOp;
+}
+
 function editAfterScaleBake(op: EditOp, scale: Vec3): EditOp {
   if (isPushPullOp(op)) {
     return {
@@ -114,11 +168,22 @@ function editAfterScaleBake(op: EditOp, scale: Vec3): EditOp {
   if (op.kind === "shell") {
     return { ...op, points: op.points.map((point) => scaledPoint(point, scale)) };
   }
-  if (op.kind === "resizeFace" || op.kind === "offsetExtrude") {
+  if (op.kind === "offsetExtrude") {
+    // Height is along the normal, inset is across it — different factors.
     return {
       ...op,
       point: scaledPoint(op.point, scale),
       normal: scaledNormal(op.normal, scale),
+      inset: op.inset * inPlaneScales(op.normal, scale)[0],
+      height: op.height * distanceScale(op.normal, scale),
+    };
+  }
+  if (op.kind === "resizeFace") {
+    return {
+      ...op,
+      point: scaledPoint(op.point, scale),
+      normal: scaledNormal(op.normal, scale),
+      offset: op.offset * inPlaneScales(op.normal, scale)[0],
     };
   }
   return {
@@ -136,7 +201,7 @@ function editAfterScaleBake(op: EditOp, scale: Vec3): EditOp {
 function rebaseScaledPushPullEdit(node: EditNode): EditNode | null {
   const scale = node.scale;
   if (scale.every((value) => value === 1)) return node;
-  if (node.base.type !== "object" || !node.ops.every(isPushPullOp)) return null;
+  if (node.base.type !== "object" || !node.ops.every((op) => rebasable(op, scale))) return null;
   const proxy: ObjectNode = {
     ...node.base,
     position: node.position,
@@ -900,7 +965,7 @@ export const useDoc = create<DocState>()(
               if (!rebased || rebased === n) return { ...n, ops: [...n.ops, op] };
               return {
                 ...rebased,
-                ops: [...rebased.ops, editAfterScaleBake(op, n.scale)],
+                ops: [...rebased.ops, incomingAfterScaleBake(op, n.scale)],
               };
             }
             if (n.type === "import" || n.type === "build") return n;
@@ -921,7 +986,7 @@ export const useDoc = create<DocState>()(
             // work that through and the two shifts cancel exactly, leaving a
             // plain component-wise multiply.
             const placed = baked && baked !== n
-              ? editAfterScaleBake(op, n.scale)
+              ? incomingAfterScaleBake(op, n.scale)
               : op;
             const base: ObjectNode | GroupNode = {
               ...source,
