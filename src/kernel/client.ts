@@ -225,6 +225,15 @@ export const kernel = {
   buildResult: coalesceLatest((specs: NodeSpec[]) =>
     withWatchdog("heavy", (raw, onProgress) => raw.buildResult(specs, Comlink.proxy(onProgress))),
   ),
+  /** Per-object meshes for a 3MF export. Same watchdog and same heavy lane as
+   *  exportSTL; no cache probe, because the scene worker only ever caches the
+   *  unioned result and 3MF wants the objects kept apart. */
+  exportMeshes: async (specs: NodeSpec[], quality: ExportQuality) =>
+    withWatchdog(
+      "heavy",
+      (raw, onProgress) => raw.exportMeshes(specs, quality, Comlink.proxy(onProgress)),
+      EXPORT_WATCHDOG_MS,
+    ),
   // Not coalesced: an explicit user action (the Export STL button), not an
   // edit-triggered rebuild — every click should produce its own file.
   exportSTL: async (specs: NodeSpec[], quality: ExportQuality) => {

@@ -6,6 +6,7 @@ import { Inspector } from "./ui/Inspector";
 import { Tree } from "./ui/Tree";
 import { DropIcon, MagnetIcon, ShapeBuilderIcon, SolidCubeIcon, TransparencyIcon, WireframeIcon, ZoomToFitIcon } from "./ui/icons";
 import { ProjectsModal } from "./ui/ProjectsModal";
+import { buildThreeMF } from "./export/threemf";
 import { SvgImportModal } from "./ui/SvgImportModal";
 import { TextModal } from "./ui/TextModal";
 import type { TextConfig } from "./ui/TextModal";
@@ -20,7 +21,7 @@ import {
   useTemporal,
 } from "./document/store";
 import { MAX_BUILD_SOURCES, PRIMITIVES, isGroup } from "./document/types";
-import { findNode, parentOf, resolveNodeTransparent } from "./document/tree";
+import { findNode, parentOf, resolveNodeTransparent, resolveNodeColor } from "./document/tree";
 import { putBlob } from "./document/blobStore";
 import { loadCameraState } from "./document/persist";
 import type { GroupNode, PrimitiveKind, SceneNode, Vec3 } from "./document/types";
@@ -175,6 +176,7 @@ const canRefineExportFallback = (n: SceneNode): boolean =>
   n.type === "object" || (isGroup(n) && n.children.every(canRefineExportFallback));
 
 const EXPORT_QUALITY_KEY = "cad.exportQuality";
+const EXPORT_FORMAT_KEY = "cad.exportFormat";
 const SNAP_KEY = "cad.smartGuides";
 const VIEW_STYLE_KEY = "cad.viewStyle";
 
@@ -377,6 +379,13 @@ export function App() {
   const [buildCells, setBuildCells] = useState<{ mask: number; kept: boolean }[]>([]);
   // Remembered across sessions: which quality you want is a property of how
   // you print, not of one export.
+  /** STL states no units at all, so a slicer has to guess; 3MF says
+   *  millimetres outright, keeps the objects apart and carries their colours.
+   *  Remembered like the quality, since it is a per-user habit. */
+  const [exportFormat, setExportFormat] = useState<"stl" | "3mf">(
+    () => (localStorage.getItem(EXPORT_FORMAT_KEY) === "3mf" ? "3mf" : "stl"),
+  );
+  useEffect(() => { localStorage.setItem(EXPORT_FORMAT_KEY, exportFormat); }, [exportFormat]);
   const [exportQuality, setExportQuality] = useState<ExportQuality>(
     () => (localStorage.getItem(EXPORT_QUALITY_KEY) as ExportQuality | null) ?? "fine",
   );
@@ -1005,7 +1014,30 @@ export function App() {
         baseName = `${baseName}-selected`;
       }
       const safeName = baseName.replace(/[^a-zA-Z0-9_-]/g, "_") || "model";
-      setExportFileName(`${safeName}.stl`);
+      setExportFileName(`${safeName}.${exportFormat}`);
+
+      if (exportFormat === "3mf") {
+        // One object per shape rather than the single fused body an STL gets,
+        // each keeping the name and colour it has in the tree.
+        const meshes = await kernel.exportMeshes(currentNodes.map(toSpec), exportQuality);
+        if (!meshes.length) {
+          setExporting(false);
+          setError("Nothing solid to export — every shape in the selection is a hole.");
+          return;
+        }
+        const named = meshes.map((mesh) => {
+          const node = findNode(docNodes, mesh.id);
+          return {
+            name: node?.name ?? "Shape",
+            color: resolveNodeColor(node),
+            vertices: mesh.vertices,
+            triangles: mesh.triangles,
+          };
+        });
+        await finishExport(buildThreeMF(named));
+        setExporting(false);
+        return;
+      }
 
       // Always export from the kernel, even for a single object. Re-using the
       // mesh already on screen is faster, but the viewport mesh is built at
@@ -1627,25 +1659,38 @@ export function App() {
             <option value="fine">Fine</option>
           </select>
         </label>
+        <label className="export-quality">
+          FORMAT
+          <select
+            value={exportFormat}
+            onChange={(e) => setExportFormat(e.target.value as "stl" | "3mf")}
+            disabled={exporting}
+            aria-label="Export file format"
+            title="STL states no units, so a slicer has to guess the scale. 3MF states millimetres, keeps each object separate and carries its colour."
+          >
+            <option value="stl">STL</option>
+            <option value="3mf">3MF</option>
+          </select>
+        </label>
         <button
           className="export-btn"
           onClick={exportSTL}
           disabled={exporting}
           title={
             selectedIds.length
-              ? `Export ${selectedIds.length} selected object${selectedIds.length > 1 ? "s" : ""} to STL`
-              : "Export entire scene to STL"
+              ? `Export ${selectedIds.length} selected object${selectedIds.length > 1 ? "s" : ""} to ${exportFormat.toUpperCase()}`
+              : `Export entire scene to ${exportFormat.toUpperCase()}`
           }
         >
           {exporting
             ? "Exporting…"
             : readyExportUrl
-            ? "Download STL"
+            ? `Download ${exportFormat.toUpperCase()}`
             : selectedIds.length === 1
             ? "Export Selected"
             : selectedIds.length > 1
             ? `Export Selected (${selectedIds.length})`
-            : "Export STL"}
+            : `Export ${exportFormat.toUpperCase()}`}
         </button>
       </header>
 
@@ -1653,7 +1698,7 @@ export function App() {
         <div className="export-ready-notice" role="status" aria-live="polite">
           <div className="export-ready-icon" aria-hidden="true">✓</div>
           <div className="export-ready-copy">
-            <strong>Your STL is ready ({exportFileName})</strong>
+            <strong>Your {exportFormat.toUpperCase()} is ready ({exportFileName})</strong>
             <span>You can download it now.</span>
           </div>
           <button className="export-ready-download" onClick={downloadReadySTL}>

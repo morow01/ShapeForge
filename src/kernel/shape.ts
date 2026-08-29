@@ -1358,7 +1358,7 @@ const SEAM_CHECK_QUALITY = { tolerance: 0.05, angularTolerance: 0.4 };
 const FALLBACK_MESH_QUALITY = { tolerance: 0.05, angularTolerance: 0.4 };
 
 /** World bounds of a solid, or null when it will not report any. */
-function boundsOf(solid: AnySolid): { min: Vec3; max: Vec3 } | null {
+export function boundsOf(solid: AnySolid): { min: Vec3; max: Vec3 } | null {
   try {
     const [min, max] = solid.boundingBox.bounds;
     const box = { min: min as Vec3, max: max as Vec3 };

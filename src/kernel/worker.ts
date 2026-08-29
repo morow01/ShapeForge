@@ -22,6 +22,7 @@ import {
   makePushPullPreviewBase,
   place,
   survivingOps,
+  boundsOf,
 } from "./shape";
 import { SVG_IMPORT_REVISION } from "./svgSolid";
 import { loadSTLPreview } from "./stlPreview";
@@ -1101,6 +1102,82 @@ const api = {
 
   /** Exports the fully booleaned result as a binary STL, ready for the slicer.
    * Uses the same Manifold-first top-level union as buildResult for robustness. */
+  /**
+   * One evaluated mesh per top-level SOLID, holes already cut out of them, at
+   * export quality.
+   *
+   * Deliberately not the single unioned body exportSTL produces: 3MF can hold
+   * several objects, each with its own name and colour, and losing that on the
+   * way out would throw away the main reason to prefer the format. Holes are
+   * still resolved here — a hole is not an object, it is an absence — so what
+   * comes back is what should be printed.
+   *
+   * Same evaluation and the same refusal to lose a shape quietly as exportSTL:
+   * a shape that will not build is retried once, and if it still will not, the
+   * export FAILS rather than writing a file with a piece missing.
+   */
+  async exportMeshes(
+    specs: NodeSpec[],
+    quality: ExportQuality,
+    onProgress?: (id: string) => void,
+  ): Promise<{ id: string; vertices: number[]; triangles: number[] }[]> {
+    await init();
+    const { errors, onError } = collector();
+    const evaluated: { id: string; solid: AnySolid; isHole: boolean }[] = [];
+    const missing: string[] = [];
+    for (const spec of specs) {
+      let world = await makeWorld(spec, onError, onProgress);
+      if (!world) world = await makeWorld(spec, onError, onProgress);
+      if (!world) {
+        missing.push(spec.id);
+        continue;
+      }
+      evaluated.push({ id: spec.id, solid: world, isHole: spec.isHole });
+    }
+    if (missing.length) {
+      const why = errors.map((e) => e.message).find(Boolean);
+      throw new Error(
+        `${missing.length} shape${missing.length > 1 ? "s" : ""} could not be built, so the ` +
+          `export was stopped rather than saving a part with ${missing.length > 1 ? "them" : "it"} ` +
+          `missing.${why ? ` (${why})` : ""}`,
+      );
+    }
+
+    const holes = evaluated.filter((item) => item.isHole);
+    const out: { id: string; vertices: number[]; triangles: number[] }[] = [];
+    for (const item of evaluated) {
+      if (item.isHole) continue;
+      // Mesh first, then cut on manifold: the same order exportSTL uses, and
+      // for the same reason — OCCT's default tessellation turns one sphere
+      // into six figures of triangles.
+      let solid: AnySolid = isMesh(item.solid)
+        ? item.solid
+        : (item.solid as Shape3D).meshShape(EXPORT_PRESETS[quality]);
+      for (const hole of holes) {
+        const cutter = isMesh(hole.solid)
+          ? hole.solid
+          : (hole.solid as Shape3D).meshShape(EXPORT_PRESETS[quality]);
+        // Only where they actually meet, so a hole meant for one object cannot
+        // quietly bite into another.
+        const a = boundsOf(solid);
+        const b = boundsOf(cutter);
+        if (!a || !b) continue;
+        const apart = [0, 1, 2].some((i) => a.min[i] > b.max[i] || b.min[i] > a.max[i]);
+        if (apart) continue;
+        try {
+          solid = (solid as MeshShape).cut((cutter as MeshShape).clone());
+        } catch { /* leave the solid whole rather than losing it */ }
+      }
+      const mesh = isMesh(solid) ? solid.mesh() : (solid as Shape3D).mesh(EXPORT_PRESETS[quality]);
+      out.push({
+        id: item.id,
+        vertices: Array.from(mesh.vertices),
+        triangles: Array.from(mesh.triangles),
+      });
+    }
+    return out;
+  },
+
   async exportSTL(
     specs: NodeSpec[],
     quality: ExportQuality,
