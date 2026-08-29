@@ -1285,12 +1285,24 @@ export function place(s: AnySolid, spec: NodeSpec): AnySolid {
     if (Math.abs(sx - sy) < 1e-9 && Math.abs(sx - sz) < 1e-9) {
       out = out.scale(sx, center);
     } else {
+      // Non-uniform scale is manifold-3d only — OCCT cannot express it.
+      // Everything else this function still owes the shape (the rotation
+      // below, the final translate) stays on this SAME raw manifold object
+      // via its own native ops, instead of rewrapping it as a MeshShape and
+      // sending the rotation through MeshShape.rotate()'s OCCT gp_Trsf
+      // bridge. That bridge rebuilds a transform/matrix per axis and was
+      // caught handing back a solid rotated to an entirely wrong place —
+      // nondeterministically, on byte-identical input repeated seconds
+      // apart — which points at the conversion, not the geometry. manifold's
+      // own rotate() applies X, then Y, then Z about the global origin,
+      // exactly the order this function already promises below.
       const mesh = isMesh(out) ? out : out.meshShape();
-      const transformed = mesh.wrapped
+      let wrapped = mesh.wrapped
         .translate([-center[0], -center[1], -center[2]])
         .scale(spec.scale)
         .translate(center);
-      out = new MeshShape(transformed);
+      if (rx || ry || rz) wrapped = wrapped.rotate([rx, ry, rz]);
+      return new MeshShape(wrapped.translate(spec.position));
     }
   }
   if (rx) out = out.rotate(rx, [0, 0, 0], [1, 0, 0]);
