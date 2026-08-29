@@ -547,6 +547,25 @@ export class Scene {
    *  closes (blur/Enter/Escape). Carries the pre-drag geometry snapshot too,
    *  so abandoning can revert a live preview exactly. */
   private pushPullPending: PushPullPending | null = null;
+  /**
+   * The face a TYPED edit should act on, held independently of the pill.
+   *
+   * pushPullPending is torn down the moment the pill loses focus — and the
+   * pill loses focus as soon as the user touches any other control, which
+   * includes the operation dropdown and the distance field they have to use
+   * to describe the edit in the first place. Anything driven from the bar
+   * therefore cannot rely on it: by the time the button is pressed, the
+   * face it was going to act on is already gone. Reported as "SIZE doesn't
+   * do anything". Only originalGeom/originalPivot belong to the pill's own
+   * undo snapshot; everything applyPushPull() needs is here.
+   */
+  private armedFace: {
+    id: string;
+    localPoint: Vec3;
+    localNormal: Vec3;
+    view: PartView;
+    worldPerLocal: number;
+  } | null = null;
   /** Whichever face the pointer is directly over right now — Shapr3D-style
    *  hover, independent of object selection: any face of any visible part,
    *  planar or curved, not just the arrows on a pre-selected object's own
@@ -2325,6 +2344,7 @@ export class Scene {
       originalPivot,
       worldPerLocal,
     };
+    this.armedFace = { id, localPoint, localNormal, view, worldPerLocal };
     this.pushPullLabelEl.style.display = "block";
     this.positionPushPullLabel(labelWorldPosition, this.kernelNormalToWorld(view, localNormal));
     this.pushPullLabelEl.value = initialValue;
@@ -2379,11 +2399,21 @@ export class Scene {
 
   /** Pushes or pulls the selected face by a distance in WORLD millimetres,
    *  through the same path (and the same scale conversion and position
-   *  correction) a drag would take. Returns false when no face is armed. */
+   *  correction) a drag would take. Returns false when no face is armed, or
+   *  when the distance is below the same 0.5mm floor a drag uses. */
   pushSelectedFace(worldDistance: number): boolean {
-    if (!this.pushPullPending) return false;
-    this.pushPullLabelEl.value = String(worldDistance);
-    this.commitOrAbandonPushPull(true);
+    const armed = this.armedFace;
+    if (!armed || !Number.isFinite(worldDistance) || Math.abs(worldDistance) < 0.5) return false;
+    // Close the pill first if it is still open, so it cannot resolve later
+    // and restore its snapshot over the top of this edit.
+    this.dismissFaceInput();
+    void this.applyPushPull({
+      ...armed,
+      // Only the pill's revert path reads these; applyPushPull does not touch
+      // originalGeom, and takes the pivot as it stands right now.
+      originalGeom: [],
+      originalPivot: armed.view.pivot.clone(),
+    }, worldDistance);
     return true;
   }
 
@@ -4385,6 +4415,7 @@ export class Scene {
     const face = selected && view ? view.faces?.[selected.groupIndex] : undefined;
     const id = face ? selected!.partId : null;
     const point = face?.point ?? null;
+    if (!id) this.armedFace = null;
     const key = id && point ? `${id}|${point.join(",")}` : null;
     if (key === this.lastFaceKey) return;
     this.lastFaceKey = key;

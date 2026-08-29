@@ -1894,10 +1894,18 @@ export function App() {
                   return;
                 }
                 if (faceOp !== "wall") {
-                  // Push/pull is relative, Size is absolute; both end up as
-                  // a distance to move this face, and the scene owns the
+                  // Push/pull is relative, Size is absolute; both end up as a
+                  // distance to move this face, and the scene owns the
                   // world-to-kernel conversion.
                   const travel = faceOp === "size" ? faceValue - target.size : faceValue;
+                  // The kernel ignores anything under half a millimetre, so
+                  // say that rather than letting the press look ignored.
+                  if (Math.abs(travel) < 0.5) {
+                    setError(faceOp === "size"
+                      ? `That face already measures ${Math.round(target.size * 100) / 100} mm across — type a different size.`
+                      : "Type a distance of at least 0.5 mm.");
+                    return;
+                  }
                   setError(null);
                   if (!sceneRef.current?.pushSelectedFace(travel)) {
                     setError("Click the face again, then set the distance.");
