@@ -712,7 +712,7 @@ export class Scene {
    *  so a whole-body edit driven by a face — Hollow — knows what it applies
    *  to. `point` is the same anchor push/pull stores, and it lies ON the
    *  face, which is what a FaceFinder needs to re-find it after a rebuild. */
-  onSelectFace: ((id: string | null, point: Vec3 | null, size: number) => void) | null = null;
+  onSelectFace: ((id: string | null, point: Vec3 | null, normal: Vec3 | null, size: number) => void) | null = null;
   onPlaceSurface: ((point: Vec3, normal: Vec3) => void) | null = null;
 
   constructor(host: HTMLElement) {
@@ -4435,7 +4435,12 @@ export class Scene {
     const key = id && point ? `${id}|${point.join(",")}` : null;
     if (key === this.lastFaceKey) return;
     this.lastFaceKey = key;
-    this.onSelectFace?.(id, point, id && view && face ? this.sizeAcross(view, face.normal) : 0);
+    this.onSelectFace?.(
+      id,
+      point,
+      face?.normal ?? null,
+      id && view && face ? this.sizeAcross(view, face.normal) : 0,
+    );
   }
 
   /** How thick the part is across a face, in world millimetres: its whole

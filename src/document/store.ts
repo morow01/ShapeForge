@@ -68,6 +68,98 @@ if (!activeProject) {
 }
 
 const initialProjects = listProjects();
+
+const isPushPullOp = (op: EditOp): op is PushPullOp =>
+  op.kind === undefined || op.kind === "pushPull";
+
+const scaledPoint = (point: Vec3, scale: Vec3): Vec3 => [
+  point[0] * scale[0],
+  point[1] * scale[1],
+  point[2] * scale[2],
+];
+
+/** A plane normal under a component-wise scale uses the inverse transpose. */
+function scaledNormal(normal: Vec3, scale: Vec3): Vec3 {
+  const x = normal[0] / scale[0];
+  const y = normal[1] / scale[1];
+  const z = normal[2] / scale[2];
+  const length = Math.hypot(x, y, z) || 1;
+  return [x / length, y / length, z / length];
+}
+
+/** Perpendicular distance produced on screen by one local millimetre. */
+function distanceScale(normal: Vec3, scale: Vec3): number {
+  const inverse = Math.hypot(
+    normal[0] / scale[0],
+    normal[1] / scale[1],
+    normal[2] / scale[2],
+  );
+  return inverse > 1e-9 ? 1 / inverse : 1;
+}
+
+/** Re-anchors a newly requested edit after a primitive's display scale has
+ * been folded into its real dimensions. Metric tool values (wall thickness,
+ * edge radius and face offset) are already world millimetres and stay as-is;
+ * Push/Pull is the exception because the viewport deliberately reports its
+ * distance in the old local frame. */
+function editAfterScaleBake(op: EditOp, scale: Vec3): EditOp {
+  if (isPushPullOp(op)) {
+    return {
+      kind: "pushPull",
+      point: scaledPoint(op.point, scale),
+      normal: scaledNormal(op.normal, scale),
+      distance: op.distance * distanceScale(op.normal, scale),
+    };
+  }
+  if (op.kind === "shell") {
+    return { ...op, points: op.points.map((point) => scaledPoint(point, scale)) };
+  }
+  if (op.kind === "resizeFace") {
+    return {
+      ...op,
+      point: scaledPoint(op.point, scale),
+      normal: scaledNormal(op.normal, scale),
+    };
+  }
+  return {
+    ...op,
+    point: scaledPoint(op.point, scale),
+    points: op.points?.map((point) => scaledPoint(point, scale)),
+  };
+}
+
+/** Existing Push/Pull-only edits can be rebased exactly enough for ordinary
+ * axis-aligned modelling. This is what lets a box be stretched long, pulled,
+ * and then hollowed without the final display scale stretching its walls to
+ * different thicknesses. More exotic edit histories are left untouched
+ * rather than silently changing their geometry. */
+function rebaseScaledPushPullEdit(node: EditNode): EditNode | null {
+  const scale = node.scale;
+  if (scale.every((value) => value === 1)) return node;
+  if (node.base.type !== "object" || !node.ops.every(isPushPullOp)) return null;
+  const proxy: ObjectNode = {
+    ...node.base,
+    position: node.position,
+    rotation: node.rotation,
+    scale,
+  };
+  const baked = bakeScale(proxy);
+  if (!baked || baked === proxy) return null;
+  const base: ObjectNode = {
+    ...baked,
+    position: [0, 0, 0],
+    rotation: [0, 0, 0],
+    scale: [1, 1, 1],
+  };
+  return {
+    ...node,
+    position: baked.position,
+    rotation: baked.rotation,
+    scale: [1, 1, 1],
+    base,
+    ops: node.ops.map((op) => editAfterScaleBake(op, scale)),
+  };
+}
 const restored = activeProject.nodes;
 
 // A numeric session counter is not safe for persisted projects. Live module
@@ -659,6 +751,28 @@ export const useDoc = create<DocState>()(
         set((s) => ({
           nodes: updateNode(s.nodes, id, (n) => {
             if (n.type !== "object") return n;
+            // Corner radius is a real millimetre value, not something that
+            // should be stretched by the resize handles. A long box is often
+            // still a 20 mm primitive carrying (say) scale [5, 1, 1]; applying
+            // a radius before that scale turns its circular corners into
+            // ellipses. Bake the visible box dimensions first, deliberately
+            // without its old radius, then round the already-long box.
+            if (
+              n.kind === "box" && key === "fillet" &&
+              n.scale.some((component) => Math.abs(component - 1) > 1e-4)
+            ) {
+              const unrounded: ObjectNode = {
+                ...n,
+                params: { ...n.params, fillet: 0 },
+              };
+              const baked = bakeScale(unrounded);
+              if (baked && baked !== unrounded) {
+                return {
+                  ...baked,
+                  params: nextParams(baked, key, value),
+                };
+              }
+            }
             if (
               n.kind === "triangle" &&
               (Math.abs(n.scale[0] - 1) > 1e-4 ||
@@ -726,39 +840,51 @@ export const useDoc = create<DocState>()(
         set((s) => ({
           nodes: updateNode(s.nodes, id, (n) => {
             if (n.type === "edit") {
-              const color = n.color || n.base.color;
-              const transparent = n.transparent ?? n.base.transparent;
+              const rebased = rebaseScaledPushPullEdit(n);
+              const source = rebased ?? n;
+              const nextOp = rebased && rebased !== n
+                ? editAfterScaleBake(op, n.scale)
+                : op;
+              const color = source.color || source.base.color;
+              const transparent = source.transparent ?? source.base.transparent;
               return {
-                ...n,
-                position: shift(n.position),
+                ...source,
+                // pivotDrift is only needed while the display scale remains.
+                // A successful rebase has made that scale real and reset it.
+                position: rebased && rebased !== n ? source.position : shift(source.position),
                 color,
                 transparent,
-                base: { ...n.base, color, transparent },
-                ops: [...n.ops, op],
+                base: { ...source.base, color, transparent },
+                ops: [...source.ops, nextOp],
               };
             }
             // Neither is parametric any more, and the UI offers push/pull on
             // neither: an import has no face topology, and a build's shape is
             // owned by its cell selection.
             if (n.type === "import" || n.type === "build") return n;
+            const baked = n.type === "object" ? bakeScale(n) : null;
+            const source = baked ?? n;
+            const nextOp = baked && baked !== n
+              ? editAfterScaleBake(op, n.scale)
+              : op;
             const base: ObjectNode | GroupNode = {
-              ...n,
+              ...source,
               position: [0, 0, 0],
               rotation: [0, 0, 0],
               scale: [1, 1, 1],
             };
             const edit: EditNode = {
               type: "edit",
-              id: n.id,
-              name: n.name,
-              position: shift(n.position),
-              rotation: n.rotation,
-              scale: n.scale,
-              isHole: n.isHole,
-              color: n.color,
-              transparent: n.transparent,
+              id: source.id,
+              name: source.name,
+              position: baked && baked !== n ? source.position : shift(source.position),
+              rotation: source.rotation,
+              scale: source.scale,
+              isHole: source.isHole,
+              color: source.color,
+              transparent: source.transparent,
               base,
-              ops: [op],
+              ops: [nextOp],
             };
             return edit;
           }),
@@ -769,17 +895,24 @@ export const useDoc = create<DocState>()(
       finishEdit: (id, op) => {
         set((s) => ({
           nodes: updateNode(s.nodes, id, (n) => {
-            if (n.type === "edit") return { ...n, ops: [...n.ops, op] };
+            if (n.type === "edit") {
+              const rebased = rebaseScaledPushPullEdit(n);
+              if (!rebased || rebased === n) return { ...n, ops: [...n.ops, op] };
+              return {
+                ...rebased,
+                ops: [...rebased.ops, editAfterScaleBake(op, n.scale)],
+              };
+            }
             if (n.type === "import" || n.type === "build") return n;
-            // A wall has to be the same thickness everywhere, and a node's
-            // scale is applied AFTER its ops — so a box resized into a
-            // rectangle would be hollowed uniformly in its own frame and come
-            // out with three different wall thicknesses. Fold the scale into
-            // the primitive's real size first. Only for a brand-new edit
-            // node: once ops exist their distances are recorded in the frame
-            // they were made in, and re-basing underneath them would move
-            // geometry the user has already placed.
-            const baked = op.kind === "shell" && n.type === "object" ? bakeScale(n) : null;
+            // Metric face tools have to run against the object's real size.
+            // A node's scale is applied AFTER its ops, so a box stretched into
+            // a rectangle and then hollowed in the old frame comes out with
+            // different wall thicknesses on each axis. Fold a primitive's
+            // display scale into its dimensions before its first geometry edit.
+            // Existing Push/Pull-only histories take the rebase path above;
+            // more exotic histories stay untouched rather than shifting old
+            // geometry behind the user's back.
+            const baked = n.type === "object" ? bakeScale(n) : null;
             const source = baked ?? n;
             // Baking moves the node's own frame, so an anchor captured against
             // the UNBAKED solid no longer lands on any face and the hollow
@@ -787,8 +920,8 @@ export const useDoc = create<DocState>()(
             // its bounding-box centre and then re-normalised back onto z = 0;
             // work that through and the two shifts cancel exactly, leaving a
             // plain component-wise multiply.
-            const placed = baked && baked !== n && op.kind === "shell"
-              ? { ...op, points: op.points.map((q): Vec3 => [q[0] * n.scale[0], q[1] * n.scale[1], q[2] * n.scale[2]]) }
+            const placed = baked && baked !== n
+              ? editAfterScaleBake(op, n.scale)
               : op;
             const base: ObjectNode | GroupNode = {
               ...source,

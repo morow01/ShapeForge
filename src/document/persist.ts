@@ -128,6 +128,16 @@ function parseOp(raw: unknown): EditOp | null {
     const points = Array.isArray(o.points) ? o.points.filter(isVec3) : undefined;
     return { kind: o.kind, point: o.point, points: points?.length ? points : undefined, distance: o.distance };
   }
+  if (o.kind === "shell") {
+    if (typeof o.thickness !== "number" || !Number.isFinite(o.thickness) || o.thickness <= 0) return null;
+    const points = Array.isArray(o.points) ? o.points.filter(isVec3) : [];
+    return { kind: "shell", thickness: o.thickness, points };
+  }
+  if (o.kind === "resizeFace") {
+    if (!isVec3(o.point) || !isVec3(o.normal)) return null;
+    if (typeof o.offset !== "number" || !Number.isFinite(o.offset)) return null;
+    return { kind: "resizeFace", point: o.point, normal: o.normal, offset: o.offset };
+  }
   if (!isVec3(o.point) || !isVec3(o.normal)) return null;
   if (typeof o.distance !== "number" || !Number.isFinite(o.distance)) return null;
   return { point: o.point, normal: o.normal, distance: o.distance };

@@ -18,6 +18,21 @@ import {
 import type { TriangleSolution } from "../geometry/triangle";
 import type { BooleanOp, ParamField, PrimitiveKind, SceneNode, Vec3 } from "../document/types";
 
+/**
+ * The largest corner radius a box can actually take: half its smallest side.
+ *
+ * Beyond that the rounds on opposite faces would have to overlap, OCCT
+ * refuses the fillet, and the corners come back sharp with no explanation.
+ * Rounded down to the field's own step so the end of the slider is a value
+ * that works rather than one that fails.
+ */
+function filletLimit(node: { kind?: string; params: Record<string, number> }, step: number): number {
+  const { width, depth, height } = node.params;
+  const smallest = Math.min(width ?? 0, depth ?? 0, height ?? 0);
+  if (!(smallest > 0)) return 0;
+  return Math.max(0, Math.floor(smallest / 2 / step) * step);
+}
+
 interface Props {
   node: SceneNode;
   selectedCount?: number;
@@ -610,11 +625,18 @@ function ObjectParams({
 
         const axes = axesByKey[f.key];
         const uniform = !!axes && axes.every((a) => Math.abs(node.scale[a] - node.scale[axes[0]]) < 1e-9);
+        // A corner radius has to turn through the shape, so it can never
+        // exceed half the smallest side; past that OCCT refuses and the
+        // corners simply stay sharp. The slider ran to a flat 500 whatever
+        // the box was, so nearly all of its travel did nothing — reported as
+        // "after about 50 the corners cannot be rounded anymore", which is
+        // exactly half of a 100mm side.
+        const shown = f.key === "fillet" ? { ...f, max: filletLimit(node, f.step) } : f;
         if (!axes || !uniform || base <= 0) {
           return (
             <Field
               key={f.key}
-              field={f}
+              field={shown}
               value={base}
               lockable={isAngleField}
               locked={isLocked}
@@ -622,7 +644,7 @@ function ObjectParams({
               lockDisabled={lockDisabled}
               disabled={isConstrained3rdAngle}
               dotColorClass={dotColorClass}
-              onChange={(v) => onParam(f.key, v)}
+              onChange={(v) => onParam(f.key, Math.min(v, shown.max))}
             />
           );
         }

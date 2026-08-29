@@ -10,13 +10,14 @@ import {
   MeshShape,
   getManifold,
   getOC,
+  Plane,
 } from "replicad";
 import type { Face, Shape3D } from "replicad";
 import { InvalidShapeError, solveTriangle, solveScaledTriangle } from "../geometry/triangle";
 import { getBlob } from "../document/blobStore";
 import { svgMeshSolid } from "./svgSolid";
 import type { SvgCommand } from "../svg/parse";
-import type { EditOp, PushPullOp, ShellOp, Vec3 } from "../document/types";
+import type { EditOp, PushPullOp, ResizeFaceOp, ShellOp, Vec3 } from "../document/types";
 import type { BuildSpec, EditSpec, ImportSpec, NodeSpec, ObjectSpec } from "./types";
 
 export { InvalidShapeError };
@@ -230,6 +231,87 @@ function shellSolid(solid: Shape3D, op: ShellOp): Shape3D {
   const selectFaces = (faces: import("replicad").FaceFinder) =>
     faces.either(op.points.map((point) => (finder: import("replicad").FaceFinder) => finder.containsPoint(point)));
   return solid.shell(op.thickness, selectFaces) as Shape3D;
+}
+
+/**
+ * Re-finds edges selected in the viewport.
+ *
+ * The displayed wire is a Float32 tessellation, while OpenCascade keeps the
+ * analytic edge in double precision. `containsPoint()` only tolerates about
+ * one millionth of a millimetre, so an entirely ordinary rounding difference
+ * on a long part made a selected inside edge resolve to no edge at all. The
+ * 0.02 mm search is still far smaller than a modelling click target, but is
+ * comfortably above display-mesh rounding and tessellation noise.
+ */
+const EDGE_ANCHOR_TOLERANCE = 0.02;
+
+function edgesAt(
+  anchors: Vec3[],
+): (edges: import("replicad").EdgeFinder) => import("replicad").EdgeFinder {
+  return (edges) => edges.either(
+    anchors.map((point) => (finder) => finder.withinDistance(EDGE_ANCHOR_TOLERANCE, point)),
+  );
+}
+
+/**
+ * Insets/outsets a planar face without moving it along its normal.
+ *
+ * OpenCascade expresses this as a draft on every face immediately adjoining
+ * the selected face. The plane at the solid's opposite extent is neutral, so
+ * that far side remains fixed while the selected outline grows or shrinks and
+ * its connecting faces become sloped. `offset` is per edge: +2 mm makes a
+ * rectangular face 4 mm wider and 4 mm deeper.
+ */
+function resizePlanarFace(solid: Shape3D, face: Face, op: ResizeFaceOp): Shape3D {
+  if (Math.abs(op.offset) < 1e-6) return solid;
+  const center = face.center;
+  const rawNormal = face.normalAt(center);
+  const normal = new Vector([rawNormal.x, rawNormal.y, rawNormal.z]).normalized();
+  const faceProjection = center.x * normal.x + center.y * normal.y + center.z * normal.z;
+  const [min, max] = solid.boundingBox.bounds;
+  let oppositeProjection = Infinity;
+  for (const x of [min[0], max[0]]) {
+    for (const y of [min[1], max[1]]) {
+      for (const z of [min[2], max[2]]) {
+        oppositeProjection = Math.min(oppositeProjection, x * normal.x + y * normal.y + z * normal.z);
+      }
+    }
+  }
+  const height = faceProjection - oppositeProjection;
+  if (!Number.isFinite(height) || height < 0.1) {
+    throw new Error("The opposite side of this face could not be found.");
+  }
+
+  const boundary = face.edges;
+  const adjoining = solid.faces.filter((candidate) =>
+    !candidate.isSame(face) &&
+    candidate.edges.some((edge) => boundary.some((selectedEdge) => edge.isSame(selectedEdge))),
+  );
+  if (!adjoining.length) throw new Error("No adjoining faces could be resized.");
+
+  // Positive OCCT draft angles taper IN, so negate the angle to make the
+  // user-facing positive value mean grow/outset.
+  const angle = -Math.atan(op.offset / height) * 180 / Math.PI;
+  if (!Number.isFinite(angle) || Math.abs(angle) >= 80) {
+    throw new Error("That resize is too large for this face.");
+  }
+  const origin: Vec3 = [
+    center.x - normal.x * height,
+    center.y - normal.y * height,
+    center.z - normal.z * height,
+  ];
+  const helper = Math.abs(normal.z) < 0.9 ? new Vector([0, 0, 1]) : new Vector([1, 0, 0]);
+  const xDirection = helper.cross(normal).normalized();
+  const neutral = new Plane(origin, [xDirection.x, xDirection.y, xDirection.z], [normal.x, normal.y, normal.z]);
+  try {
+    return solid.draft(
+      angle,
+      (finder) => finder.inList(adjoining.map((candidate) => candidate.clone())),
+      neutral,
+    ).asShape3D();
+  } finally {
+    neutral.delete();
+  }
 }
 
 function pushPullFace(solid: Shape3D, face: Face, distance: number): Shape3D {
@@ -519,18 +601,22 @@ async function replayEdit(
       }
       try {
         const anchors = op.points?.length ? op.points : [op.point];
-        const selectEdges = (edges: import("replicad").EdgeFinder) =>
-          edges.either(anchors.map((point) => (finder) => finder.containsPoint(point)));
         const candidate = op.kind === "fillet"
-          ? solid.fillet(op.distance, selectEdges)
-          : solid.chamfer(op.distance, selectEdges);
+          ? solid.fillet(op.distance, edgesAt(anchors))
+          : solid.chamfer(op.distance, edgesAt(anchors));
         if (!isOcctValid(candidate) || tessellatesEmpty(candidate) || !isWatertight(candidate)) {
           onError?.(spec.id, `That ${op.kind} would create an invalid shape; the previous shape was kept.`);
         } else {
           solid = candidate;
         }
-      } catch {
-        onError?.(spec.id, `That ${op.kind} is too large for the selected edge.`);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        onError?.(
+          spec.id,
+          /no edge was selected/i.test(detail)
+            ? "The selected edge could not be found after rebuilding — select it again."
+            : `That ${op.kind} is too large for the selected edge.`,
+        );
       }
       continue;
     }
@@ -552,6 +638,28 @@ async function replayEdit(
         }
       } catch {
         onError?.(spec.id, "That wall is too thick for this shape; the previous shape was kept.");
+      }
+      continue;
+    }
+    if (op.kind === "resizeFace") {
+      if (isMesh(solid)) {
+        onError?.(spec.id, "Face resize is unavailable after a mesh-based edit.");
+        continue;
+      }
+      const face = findFace(solid, op.point, op.normal);
+      if (!face) {
+        onError?.(spec.id, "A resized face could not be found after rebuilding — try redoing that edit.");
+        continue;
+      }
+      try {
+        const candidate = resizePlanarFace(solid, face, op);
+        if (!isOcctValid(candidate) || tessellatesEmpty(candidate) || !isWatertight(candidate)) {
+          onError?.(spec.id, "That face resize would create an invalid shape; the previous shape was kept.");
+        } else {
+          solid = candidate;
+        }
+      } catch {
+        onError?.(spec.id, "That face cannot be resized by this amount; the previous shape was kept.");
       }
       continue;
     }
@@ -614,11 +722,9 @@ export async function survivingOps(
     if (op.kind === "fillet" || op.kind === "chamfer") {
       try {
         const anchors = op.points?.length ? op.points : [op.point];
-        const selectEdges = (edges: import("replicad").EdgeFinder) =>
-          edges.either(anchors.map((point) => (finder) => finder.containsPoint(point)));
         const candidate = op.kind === "fillet"
-          ? solid.fillet(op.distance, selectEdges)
-          : solid.chamfer(op.distance, selectEdges);
+          ? solid.fillet(op.distance, edgesAt(anchors))
+          : solid.chamfer(op.distance, edgesAt(anchors));
         if (isOcctValid(candidate) && !tessellatesEmpty(candidate) && isWatertight(candidate)) {
           solid = candidate;
           kept.push(op);
@@ -634,6 +740,18 @@ export async function survivingOps(
           kept.push(op);
         }
       } catch { /* dead hollow */ }
+      continue;
+    }
+    if (op.kind === "resizeFace") {
+      const face = findFace(solid, op.point, op.normal);
+      if (!face) continue;
+      try {
+        const candidate = resizePlanarFace(solid, face, op);
+        if (isOcctValid(candidate) && !tessellatesEmpty(candidate) && isWatertight(candidate)) {
+          solid = candidate;
+          kept.push(op);
+        }
+      } catch { /* dead face resize */ }
       continue;
     }
     // An op this build does not understand is not a DEAD op — dropping it

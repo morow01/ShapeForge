@@ -274,7 +274,21 @@ export interface ShellOp {
   points: Vec3[];
 }
 
-export type EditOp = PushPullOp | EdgeOp | ShellOp;
+/**
+ * Resizes one planar face in its own plane. Positive values grow its outline
+ * outwards, negative values inset it. The opposite extent of the solid stays
+ * fixed, so the faces joining the two become sloped rather than the whole
+ * object merely being scaled.
+ */
+export interface ResizeFaceOp {
+  kind: "resizeFace";
+  point: Vec3;
+  normal: Vec3;
+  /** Per-edge inset/outset in millimetres, not the total width change. */
+  offset: number;
+}
+
+export type EditOp = PushPullOp | EdgeOp | ShellOp | ResizeFaceOp;
 
 /**
  * A shape produced by pushing/pulling a face of an ordinary object or group.

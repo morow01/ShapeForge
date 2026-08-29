@@ -283,7 +283,7 @@ export function App() {
   const [edgeDistance, setEdgeDistance] = useState(2);
   /** The face the Face tool has selected, for Hollow. Held here rather than
    *  read from the scene so the bar re-renders when the selection changes. */
-  const [faceSelection, setFaceSelection] = useState<{ id: string; point: Vec3; size: number } | null>(null);
+  const [faceSelection, setFaceSelection] = useState<{ id: string; point: Vec3; normal: Vec3; size: number } | null>(null);
   /** The node a Hollow was just asked for. A refusal from the kernel only
    *  writes a small marker into the tree, which next to the canvas reads as
    *  the button having done nothing at all — so watch for one and say it out
@@ -300,11 +300,11 @@ export function App() {
    * click spans frames and does. Acting on the remembered face makes the
    * ordering irrelevant.
    */
-  const lastFace = useRef<{ id: string; point: Vec3; size: number } | null>(null);
+  const lastFace = useRef<{ id: string; point: Vec3; normal: Vec3; size: number } | null>(null);
   /** Which of the three things a selected face can do. One field and one
    *  button serve all of them, so the bar stays the width of the edge bar
    *  rather than growing a row of controls. */
-  const [faceOp, setFaceOp] = useState<"push" | "wall" | "size">("push");
+  const [faceOp, setFaceOp] = useState<"push" | "wall" | "resize">("push");
   const [faceValue, setFaceValue] = useState(2);
   const [resizeConstrained, setResizeConstrained] = useState(true);
   const [wireframe, setWireframe] = useState<WireframeMode>(() => {
@@ -1421,11 +1421,8 @@ export function App() {
     setError((current) => (current === NEEDS_FACE ? null : current));
   }, [faceSelection]);
 
-  const faceOpRef = useRef(faceOp);
   useEffect(() => {
-    faceOpRef.current = faceOp;
-    const target = faceSelection ?? lastFace.current;
-    if (faceOp === "size" && target) setFaceValue(Math.round(target.size * 100) / 100);
+    if (faceOp === "resize") setFaceValue(2);
     if (faceOp === "wall") setFaceValue(2);
     if (faceOp === "push") setFaceValue(5);
   }, [faceOp]);
@@ -1842,14 +1839,10 @@ export function App() {
           onPushPull={pushPullFace}
           onPreviewPushPull={onPreviewPushPull}
           onSelectEdges={(id, points) => setEdgeSelection(id && points.length ? { id, points } : null)}
-          onSelectFace={(id, point, size) => {
-            const next = id && point ? { id, point, size } : null;
+          onSelectFace={(id, point, normal, size) => {
+            const next = id && point && normal ? { id, point, normal, size } : null;
             if (next) lastFace.current = next;
             setFaceSelection(next);
-            // Size means "this dimension", so it starts at what it already
-            // is; the other two are relative and start where the user left
-            // them.
-            if (next && faceOpRef.current === "size") setFaceValue(Math.round(next.size * 100) / 100);
           }}
           onPlaceSurface={placePrimitive}
           onDragChange={onDragChange}
@@ -1867,18 +1860,18 @@ export function App() {
             <select value={faceOp} onChange={(e) => setFaceOp(e.target.value as typeof faceOp)}>
               <option value="push">Push / pull</option>
               <option value="wall">Wall</option>
-              <option value="size">Size</option>
+              <option value="resize">Resize face</option>
             </select>
             <label>
-              {faceOp === "wall" ? "Thickness" : faceOp === "size" ? "Across" : "Distance"}
+              {faceOp === "wall" ? "Thickness" : faceOp === "resize" ? "Inset / outset" : "Distance"}
               <input type="number" step="0.5" value={faceValue}
                 onChange={(e) => setFaceValue(Number(e.target.value) || 0)} /> mm
             </label>
             <button
               title={faceOp === "wall"
                 ? "Hollow this object out, leaving a wall of this thickness and opening the selected face"
-                : faceOp === "size"
-                ? "Move this face so the object measures this much across it"
+                : faceOp === "resize"
+                ? "Resize the selected face in its own plane: positive grows it, negative insets it"
                 : "Move this face out (positive) or in (negative)"}
               // Keep focus where it is: without this the press blurs the
               // push/pull pill, which drops the face selection out from
@@ -1893,17 +1886,12 @@ export function App() {
                   setError(NEEDS_FACE);
                   return;
                 }
-                if (faceOp !== "wall") {
-                  // Push/pull is relative, Size is absolute; both end up as a
-                  // distance to move this face, and the scene owns the
-                  // world-to-kernel conversion.
-                  const travel = faceOp === "size" ? faceValue - target.size : faceValue;
+                if (faceOp === "push") {
+                  const travel = faceValue;
                   // The kernel ignores anything under half a millimetre, so
                   // say that rather than letting the press look ignored.
                   if (Math.abs(travel) < 0.5) {
-                    setError(faceOp === "size"
-                      ? `That face already measures ${Math.round(target.size * 100) / 100} mm across — type a different size.`
-                      : "Type a distance of at least 0.5 mm.");
+                    setError("Type a distance of at least 0.5 mm.");
                     return;
                   }
                   setError(null);
@@ -1911,23 +1899,22 @@ export function App() {
                     setError("Click the face again, then set the distance.");
                     return;
                   }
-                  // The object just grew (or shrank) by exactly `travel` across
-                  // this face, so remember that rather than the size it had
-                  // before — otherwise a second Size measures against the old
-                  // shape and reads as a relative move.
+                  // Remember the selected face at its new location so a
+                  // second typed Push/Pull does not require another click.
                   const grown = { ...target, size: target.size + travel };
                   lastFace.current = grown;
                   setFaceSelection(grown);
-                  if (faceOp === "size") setFaceValue(Math.round(grown.size * 100) / 100);
                   return;
                 }
                 const node = findNode(nodes, target.id);
                 if (node && (node.type === "import" || node.type === "build")) {
                   // finishEdit returns these unchanged, which is the other
                   // way this button can look broken.
-                  setError(node.type === "import"
-                    ? "An imported shape cannot be hollowed — build the container from a box instead."
-                    : "A Shape Builder result cannot be hollowed yet.");
+                  setError(faceOp === "wall"
+                    ? node.type === "import"
+                      ? "An imported shape cannot be hollowed — build the container from a box instead."
+                      : "A Shape Builder result cannot be hollowed yet."
+                    : "An imported or Shape Builder result cannot resize individual faces yet.");
                   return;
                 }
                 // Close the typed-distance pill FIRST. Left open it resolves
@@ -1936,12 +1923,25 @@ export function App() {
                 // until the face was pushed or pulled.
                 sceneRef.current?.dismissFaceInput();
                 setError(null);
-                setHollowPending(target.id);
-                finishEdit(target.id, {
-                  kind: "shell",
-                  thickness: Math.max(0.1, faceValue),
-                  points: [target.point],
-                });
+                if (faceOp === "wall") {
+                  setHollowPending(target.id);
+                  finishEdit(target.id, {
+                    kind: "shell",
+                    thickness: Math.max(0.1, faceValue),
+                    points: [target.point],
+                  });
+                } else {
+                  if (Math.abs(faceValue) < 0.1) {
+                    setError("Type an inset or outset of at least 0.1 mm.");
+                    return;
+                  }
+                  finishEdit(target.id, {
+                    kind: "resizeFace",
+                    offset: faceValue,
+                    point: target.point,
+                    normal: target.normal,
+                  });
+                }
               }}>{faceOp === "wall" ? "Hollow" : "Apply"}</button>
           </div>
         )}
@@ -2021,7 +2021,11 @@ export function App() {
             : toolMode === "align"
             ? "Click a dot to align minimum, centre, or maximum · A Align · Esc Select"
             : toolMode === "face"
-            ? "Click a flat face, then drag its arrow or type a distance to push/pull · Esc Select · Right-drag orbit"
+            ? faceOp === "wall"
+              ? "Select the face to leave open, set a thickness, then Hollow · Esc Select · Right-drag orbit"
+              : faceOp === "resize"
+                ? "Select a flat face, then use a positive value to grow its outline or a negative value to inset it · Esc Select · Right-drag orbit"
+                : "Click a flat face, then drag its arrow or type a distance to push/pull · Esc Select · Right-drag orbit"
             : toolMode === "edge"
             ? "Click edges to add or remove them · Choose Fillet or Chamfer, then Apply · Esc Select · Right-drag orbit"
             : "V Select · F Face · M Move · R Rotate · A Align · Z Zoom · T Transparent · W Wireframe · D Drop · S Snapping · Drag an object to move it · Alt-drag duplicate · Shift-drag straight · Right-drag orbit"}

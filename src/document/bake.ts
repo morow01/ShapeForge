@@ -22,7 +22,7 @@ import { solveScaledTriangle } from "../geometry/triangle";
  */
 export function bakeScale(node: ObjectNode): ObjectNode | null {
   const [sx, sy, sz] = node.scale;
-  if (sx === sy && sy === sz) return node; // uniform: nothing to fold in
+  if (sx === 1 && sy === 1 && sz === 1) return node;
   if (!(sx > 0 && sy > 0 && sz > 0)) return null;
   // Rotation about X or Y turns the scale axes away from the parameter axes,
   // so width/depth/height no longer describe what the scale stretches.
@@ -35,12 +35,29 @@ export function bakeScale(node: ObjectNode): ObjectNode | null {
   if (node.kind === "box") {
     // Round edges would turn elliptical; rebuilding at the new size would not
     // reproduce them.
-    if ((p.fillet ?? 0) > 0) return null;
+    if ((p.fillet ?? 0) > 0 && !(sx === sy && sy === sz)) return null;
     height = p.height;
-    params = { ...p, width: p.width * sx, depth: p.depth * sy, height: p.height * sz };
+    params = {
+      ...p,
+      width: p.width * sx,
+      depth: p.depth * sy,
+      height: p.height * sz,
+      fillet: (p.fillet ?? 0) * (sx === sy && sy === sz ? sx : 1),
+    };
   } else if (node.kind === "cylinder" && sx === sy) {
     height = p.height;
     params = { ...p, radius: p.radius * sx, height: p.height * sz };
+  } else if (node.kind === "sphere" && sx === sy && sy === sz) {
+    height = p.radius * 2;
+    params = { ...p, radius: p.radius * sx };
+  } else if (node.kind === "cone" && sx === sy) {
+    height = p.height;
+    params = {
+      ...p,
+      bottomRadius: p.bottomRadius * sx,
+      topRadius: p.topRadius * sx,
+      height: p.height * sz,
+    };
   } else if (node.kind === "triangle") {
     height = p.thickness;
     try {
