@@ -57,9 +57,13 @@ function meshTransform(mesh: KernelMesh, node: SceneNode) {
     let y = (Number(vertices[index * 3 + 1]) - center[1]) * node.scale[1] + center[1];
     let z = (Number(vertices[index * 3 + 2]) - center[2]) * node.scale[2] + center[2];
     const [rx, ry, rz] = radians;
-    if (rx) [y, z] = [y * Math.cos(rx) - z * Math.sin(rx), y * Math.sin(rx) + z * Math.cos(rx)];
-    if (ry) [x, z] = [x * Math.cos(ry) + z * Math.sin(ry), -x * Math.sin(ry) + z * Math.cos(ry)];
+    // Z, then Y, then X — see place() in kernel/shape.ts for why this order
+    // (not the X/Y/Z listing order the angles come in) is what composes to
+    // the same Rx·Ry·Rz the viewport's THREE.Euler('XYZ') produces. This
+    // function had the same reversed order that bug fix corrected there.
     if (rz) [x, y] = [x * Math.cos(rz) - y * Math.sin(rz), x * Math.sin(rz) + y * Math.cos(rz)];
+    if (ry) [x, z] = [x * Math.cos(ry) + z * Math.sin(ry), -x * Math.sin(ry) + z * Math.cos(ry)];
+    if (rx) [y, z] = [y * Math.cos(rx) - z * Math.sin(rx), y * Math.sin(rx) + z * Math.cos(rx)];
     return [x + node.position[0], y + node.position[1], z + node.position[2]];
   };
 }

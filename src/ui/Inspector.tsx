@@ -43,6 +43,19 @@ interface Props {
    *  primitive, which already has a real Dimensions section of its own. */
   localSize: Vec3 | null;
   selectedCount?: number;
+  /** Combined WORLD bounding box of a multi-object selection — null below 2
+   *  selected, or before any of them have a built mesh. The Size/Position
+   *  sections below read Width/Depth/Height and centre position straight
+   *  off this rather than off `node`, which for a multi-selection is just
+   *  whichever object was selected last and does not speak for the rest. */
+  selectionBounds?: { min: Vec3; max: Vec3 } | null;
+  /** Multi-select only: scales every selected object about the selection's
+   *  own shared box centre so its extent on one axis becomes the typed
+   *  value. */
+  onResizeSelectionAxis?: (axis: 0 | 1 | 2, mm: number) => void;
+  /** Multi-select only: moves the whole selection as one rigid body so its
+   *  shared box centre lands on the typed value along one axis. */
+  onMoveSelectionAxis?: (axis: 0 | 1 | 2, mm: number) => void;
   error: string | null;
   onParam: (key: string, value: number) => void;
   onTransform: (patch: { position?: Vec3; rotation?: Vec3; scale?: Vec3 }) => void;
@@ -82,6 +95,9 @@ export function Inspector({
   node,
   localSize,
   selectedCount = 1,
+  selectionBounds = null,
+  onResizeSelectionAxis,
+  onMoveSelectionAxis,
   error,
   onParam,
   onTransform,
@@ -324,7 +340,7 @@ export function Inspector({
         const showMm = node.type !== "object" && !!localSize;
         return (
           <>
-            <h2>{showMm ? "Size (mm)" : "Size"}</h2>
+            <h2>{isMulti ? "Size (mm)" : showMm ? "Size (mm)" : "Size"}</h2>
             <label className="check">
               <input
                 type="checkbox"
@@ -333,6 +349,29 @@ export function Inspector({
               />
               <span>Lock proportions</span>
             </label>
+            {isMulti && selectionBounds &&
+              // Same full-width row layout as the compound-shape mm fields
+              // below — a slider needs the room a 3-column .triple grid
+              // can't give it. The selection's own combined world box
+              // stands in for `localSize`: there is no single node's scale
+              // to solve backwards from here, so onResizeSelectionAxis
+              // takes the plain millimetre value and does the whole
+              // selection's worth of scale/position math itself.
+              WDH_LABELS.map((label, i) => {
+                const currentVal = round(selectionBounds.max[i] - selectionBounds.min[i]);
+                const maxVal = Math.max(1000, Math.ceil(currentVal / 50) * 50);
+                return (
+                  <Field
+                    key={label}
+                    field={{ key: label, label, min: 0.1, max: maxVal, step: 0.5 }}
+                    value={currentVal}
+                    onChange={(v) => {
+                      if (!Number.isFinite(v) || v <= 0) return;
+                      onResizeSelectionAxis?.(i as 0 | 1 | 2, v);
+                    }}
+                  />
+                );
+              })}
             {!isMulti && showMm && localSize && (
               // Full-width, one per row — the SAME layout ObjectParams uses
               // for a primitive's own Dimensions, and for the same reason:
@@ -431,6 +470,36 @@ export function Inspector({
                   onFocus={beginHistoryBatch}
                   onBlur={endHistoryBatch}
                   onChange={(e) => setAxis("rotation", i, Number(e.target.value))}
+                />
+              </label>
+            ))}
+          </div>
+        </>
+      )}
+      {isMulti && selectionBounds && (
+        // No Rotation section here — a multi-selection has no single
+        // rotation to show; each object keeps its own. Position is the
+        // selection's shared box centre, editable the same way a single
+        // object's is: typing a value moves the WHOLE selection as one
+        // rigid body (see Scene.moveSelectionAxis) rather than setting any
+        // one object's own position field.
+        <>
+          <h2>Position (mm)</h2>
+          <div className="triple">
+            {AXES.map((axis, i) => (
+              <label key={axis}>
+                <span className="field-label">{axis}</span>
+                <input
+                  className="num"
+                  type="number"
+                  step={1}
+                  value={round((selectionBounds.min[i] + selectionBounds.max[i]) / 2)}
+                  onFocus={beginHistoryBatch}
+                  onBlur={endHistoryBatch}
+                  onChange={(e) => {
+                    const v = Number(e.target.value);
+                    if (Number.isFinite(v)) onMoveSelectionAxis?.(i as 0 | 1 | 2, v);
+                  }}
                 />
               </label>
             ))}

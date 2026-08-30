@@ -524,6 +524,60 @@ export function App() {
     const size = bounds.max.map((v, i) => v - bounds.min[i]) as Vec3;
     return size.every((v) => v > 1e-6) ? size : null;
   }, [selected, parts]);
+  // Multi-select has no single node to read a Size/Position from the way one
+  // selected object (or a Group, which IS one node) does. Its own combined
+  // WORLD bounding box is the only real answer — the same box the resize
+  // cage already draws around a multi-selection (see Scene.
+  // getSelectionBounds) — so this is that same computation done in plain
+  // React state instead of read off the live viewport, to stay reactive the
+  // same way selectedLocalSize above already is. Null below 2 selected, or
+  // once none of them have a built mesh yet.
+  const selectionBounds = useMemo((): { min: Vec3; max: Vec3 } | null => {
+    if (selectedIds.length < 2) return null;
+    const min: Vec3 = [Infinity, Infinity, Infinity];
+    const max: Vec3 = [-Infinity, -Infinity, -Infinity];
+    let count = 0;
+    for (const id of selectedIds) {
+      const node = findNode(nodes, id);
+      const part = parts.find((p) => p.id === id);
+      if (!node || node.hidden || !part) continue;
+      const bounds = displayedMeshBounds(part.mesh, node);
+      for (let axis = 0; axis < 3; axis++) {
+        min[axis] = Math.min(min[axis], bounds.min[axis]);
+        max[axis] = Math.max(max[axis], bounds.max[axis]);
+      }
+      count++;
+    }
+    return count > 0 && min.every(Number.isFinite) ? { min, max } : null;
+  }, [selectedIds, nodes, parts]);
+  // Scales every selected object about the selection's own shared box
+  // centre — see Scene.resizeSelectionAxis for the actual maths, the same
+  // the multi-target resize DRAG already applies live. One undo step for
+  // however many objects that touches, matching setPositions's own align-
+  // click precedent.
+  const resizeSelectionAxis = useCallback(
+    (axis: 0 | 1 | 2, mm: number) => {
+      const updates = sceneRef.current?.resizeSelectionAxis(axis, mm, resizeConstrained) ?? [];
+      if (!updates.length) return;
+      beginHistoryBatch();
+      for (const { id, scale, position } of updates) setTransform(id, { scale, position });
+      endHistoryBatch();
+    },
+    [resizeConstrained, setTransform],
+  );
+  // Translates the whole selection as one rigid body so its shared box
+  // centre lands on the typed value — everything keeps its size and its
+  // position relative to the rest of the selection.
+  const moveSelectionAxis = useCallback(
+    (axis: 0 | 1 | 2, mm: number) => {
+      const updates = sceneRef.current?.moveSelectionAxis(axis, mm) ?? [];
+      if (!updates.length) return;
+      beginHistoryBatch();
+      for (const { id, position } of updates) setTransform(id, { position });
+      endHistoryBatch();
+    },
+    [setTransform],
+  );
   const canGroup = selectedIds.length >= 2;
   const canUngroup = selectedIds.some((id) => {
     const n = findNode(nodes, id);
@@ -2374,6 +2428,9 @@ export function App() {
               node={selected}
               localSize={selectedLocalSize}
               selectedCount={selectedIds.length}
+              selectionBounds={selectionBounds}
+              onResizeSelectionAxis={resizeSelectionAxis}
+              onMoveSelectionAxis={moveSelectionAxis}
               error={invalid[selected.id] ?? null}
               onParam={(k, v) => setParam(selected.id, k, v)}
               onTransform={(patch) => setTransform(selected.id, patch)}

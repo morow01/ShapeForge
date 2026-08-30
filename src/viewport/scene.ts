@@ -3012,6 +3012,108 @@ export class Scene {
     return updates;
   }
 
+  /** Live world bounding box of the current selection (visible parts only),
+   *  or null with nothing selected/visible — the same box the resize cage
+   *  itself draws (see updateResizeOverlay), exposed so the Inspector can
+   *  show real Size/Position numbers for a multi-object selection instead
+   *  of nothing at all. A single node already has its own position/size to
+   *  show; this is only useful once there is no single node to ask. */
+  getSelectionBounds(): { min: Vec3; max: Vec3 } | null {
+    const box = new THREE.Box3();
+    let count = 0;
+    for (const id of this.selectedIds) {
+      const view = this.parts.get(id);
+      if (!view || !view.group.visible) continue;
+      view.group.updateWorldMatrix(true, true);
+      box.expandByObject(view.group);
+      count++;
+    }
+    if (count === 0 || box.isEmpty()) return null;
+    return { min: box.min.toArray() as Vec3, max: box.max.toArray() as Vec3 };
+  }
+
+  /** Resizes every selected object together along one world axis, scaling
+   *  each about the selection's own shared box centre — exactly the maths
+   *  the multi-target resize DRAG already applies every frame (see the
+   *  `resizeDrag.targets.length > 1` branch above), just solved for and
+   *  committed once instead of live per pointer move. `constrained` mirrors
+   *  the Lock Proportions checkbox: true scales all three axes by the same
+   *  ratio the requested axis needed, not just that one axis. Returns the
+   *  per-object updates for the caller to commit as a single undo step —
+   *  this method touches no document state itself. */
+  resizeSelectionAxis(
+    axis: 0 | 1 | 2,
+    newSizeMm: number,
+    constrained: boolean,
+  ): { id: string; scale: Vec3; position: Vec3 }[] {
+    const entries = this.selectedIds
+      .map((id) => ({ id, view: this.parts.get(id), node: findNode(this.lastNodes, id) }))
+      .filter(
+        (e): e is { id: string; view: PartView; node: SceneNode } =>
+          !!e.view && e.view.group.visible && !!e.node,
+      );
+    if (!entries.length || !(newSizeMm > 0)) return [];
+
+    const box = new THREE.Box3();
+    for (const { view } of entries) {
+      view.group.updateWorldMatrix(true, true);
+      box.expandByObject(view.group);
+    }
+    if (box.isEmpty()) return [];
+    const size = box.getSize(new THREE.Vector3());
+    const centre = box.getCenter(new THREE.Vector3());
+    if (!(size.getComponent(axis) > 1e-6)) return [];
+
+    const ratio = Math.max(0.01, newSizeMm / size.getComponent(axis));
+    const factors: Vec3 = constrained ? [ratio, ratio, ratio] : [1, 1, 1];
+    if (!constrained) factors[axis] = ratio;
+
+    return entries.map(({ id, node }) => {
+      const scale: Vec3 = [
+        Math.max(0.01, node.scale[0] * factors[0]),
+        Math.max(0.01, node.scale[1] * factors[1]),
+        Math.max(0.01, node.scale[2] * factors[2]),
+      ];
+      const position: Vec3 = [
+        centre.x + (node.position[0] - centre.x) * factors[0],
+        centre.y + (node.position[1] - centre.y) * factors[1],
+        centre.z + (node.position[2] - centre.z) * factors[2],
+      ];
+      return { id, scale, position };
+    });
+  }
+
+  /** Moves every selected object together so the selection's shared box
+   *  centre lands on `newValueMm` along one world axis — everything keeps
+   *  its own size and its position relative to the rest of the selection,
+   *  the whole group just translates as one rigid body. Same
+   *  commit-not-mutate contract as resizeSelectionAxis. */
+  moveSelectionAxis(axis: 0 | 1 | 2, newValueMm: number): { id: string; position: Vec3 }[] {
+    const entries = this.selectedIds
+      .map((id) => ({ id, view: this.parts.get(id), node: findNode(this.lastNodes, id) }))
+      .filter(
+        (e): e is { id: string; view: PartView; node: SceneNode } =>
+          !!e.view && e.view.group.visible && !!e.node,
+      );
+    if (!entries.length) return [];
+
+    const box = new THREE.Box3();
+    for (const { view } of entries) {
+      view.group.updateWorldMatrix(true, true);
+      box.expandByObject(view.group);
+    }
+    if (box.isEmpty()) return [];
+    const centre = box.getCenter(new THREE.Vector3());
+    const delta = newValueMm - centre.getComponent(axis);
+    if (!Number.isFinite(delta) || Math.abs(delta) < 1e-9) return [];
+
+    return entries.map(({ id, node }) => {
+      const position = [...node.position] as Vec3;
+      position[axis] += delta;
+      return { id, position };
+    });
+  }
+
   /** How far this part can fall before something stops it, or null if nothing
    *  does (it is already resting). */
   private dropDistance(movingId: string, view: PartView): number | null {
