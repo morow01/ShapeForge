@@ -32,6 +32,10 @@ type AlignAnchor = "min" | "center" | "max";
 const CLICK_SLOP_PX = 7;
 const SNAP_TOLERANCE_PX = 10;
 const DEG = Math.PI / 180;
+/** How much a resize/align dot grows on hover — same modest pop the
+ *  push/pull arrow's own hover already uses. A colour change alone read as
+ *  too subtle to notice; the earlier 1.35x read as too much. */
+const HOVER_GROW = 1.18;
 /** Minimum gap between live push/pull preview rebuilds during a drag — each
  *  one is a real OCCT/manifold call, not free, so this bounds how often a
  *  fast mouse-move can ask for a new one. Short enough to read as live. */
@@ -1596,7 +1600,11 @@ export class Scene {
     this.resizeHandleMeshes[12].position.set(centre.x, centre.y, min.z);
     this.resizeHandleMeshes[13].position.set(centre.x, centre.y, max.z);
     const handleSize = Math.max(0.6, this.worldSnapTolerance(centre) * 0.9);
-    for (const handle of this.resizeHandleMeshes) handle.scale.setScalar(handleSize);
+    for (let i = 0; i < this.resizeHandleMeshes.length; i++) {
+      const handle = this.resizeHandleMeshes[i];
+      handle.userData.baseScale = handleSize;
+      handle.scale.setScalar(handleSize * (i === this.resizeHoverIndex ? HOVER_GROW : 1));
+    }
 
     const size = box.getSize(new THREE.Vector3());
     // Each readout measures ONE specific edge; drawing that edge in the same
@@ -1783,11 +1791,13 @@ export class Scene {
     if (this.resizeHoverIndex >= 0) {
       const old = this.resizeHandleMeshes[this.resizeHoverIndex];
       old.material = old.userData.baseMaterial as THREE.Material;
+      old.scale.setScalar(old.userData.baseScale ?? 1);
     }
     this.resizeHoverIndex = next;
     if (next >= 0) {
       const handle = this.resizeHandleMeshes[next];
       handle.material = this.resizeHoverMaterial;
+      handle.scale.setScalar((handle.userData.baseScale ?? 1) * HOVER_GROW);
     }
     for (const pill of this.dimensionPills) pill.classList.toggle("hover", next >= 0);
     this.updateDimensionVisibility(this.resizeDrag?.handleIndex ?? next);
@@ -1847,7 +1857,11 @@ export class Scene {
       this.alignHandleMeshes[6 + i].position.set(box.max.x + offset, box.max.y, zs[i]);
     }
     const handleSize = Math.max(0.55, this.worldSnapTolerance(centre) * 0.75);
-    for (const handle of this.alignHandleMeshes) handle.scale.setScalar(handleSize);
+    for (let i = 0; i < this.alignHandleMeshes.length; i++) {
+      const handle = this.alignHandleMeshes[i];
+      handle.userData.baseScale = handleSize;
+      handle.scale.setScalar(handleSize * (i === this.alignHoverIndex ? HOVER_GROW : 1));
+    }
   }
 
   /** Same nearest-on-screen hover as the resize corners (updateResizeHover):
@@ -1870,11 +1884,13 @@ export class Scene {
     if (this.alignHoverIndex >= 0) {
       const old = this.alignHandleMeshes[this.alignHoverIndex];
       old.material = old.userData.baseMaterial as THREE.Material;
+      old.scale.setScalar(old.userData.baseScale ?? 1);
     }
     this.alignHoverIndex = next;
     if (next >= 0) {
       const handle = this.alignHandleMeshes[next];
       handle.material = this.alignHoverMaterial;
+      handle.scale.setScalar((handle.userData.baseScale ?? 1) * HOVER_GROW);
       this.showAlignPreview(handle.userData.alignAxis as AlignAxis, handle.userData.alignAnchor as AlignAnchor);
     } else {
       this.clearAlignPreview();
