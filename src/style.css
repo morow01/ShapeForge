@@ -87,6 +87,20 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 .workspace { grid-column: 3; grid-row: 2; position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 .viewport { position: absolute; inset: 0; overflow: hidden; }
 .viewport canvas { display: block; }
+.scale-hint {
+  position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
+  display: none; align-items: center; gap: 5px;
+  background: #fff; border: 1px solid #e1e7eb; border-radius: 999px;
+  padding: 8px 18px; font-size: 13px; color: #52616c; white-space: nowrap;
+  box-shadow: 0 4px 16px rgb(20 30 38 / 10%);
+  pointer-events: none; z-index: 5;
+}
+.scale-hint kbd {
+  font: inherit; font-weight: 700; font-size: 12px; color: #75838d;
+  background: #f0f4f7; border-radius: 6px; padding: 2px 8px;
+  transition: background .1s ease, color .1s ease;
+}
+.scale-hint kbd.active { color: #00807e; background: #d7f3f1; }
 
 /* Illustrator-style: a docked strip at the very left of the window, not a
    card floating over the canvas — full height, always in the same place
@@ -241,6 +255,10 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 .panel-heading.compact { margin-bottom: 12px; }
 .panel-heading h1, .tool-section > h1 { margin: 0; color: #273640; font-size: 13px; font-weight: 750; letter-spacing: .01em; }
 .panel-heading p { margin: 2px 0 0; color: #95a0a8; font-size: 10px; }
+.panel-heading.disclosure-trigger { width: 100%; border: none; background: none; padding: 4px 3px; margin: 0 0 2px; cursor: pointer; text-align: left; border-radius: 6px; }
+.panel-heading.disclosure-trigger:hover { background: #f0f4f7; }
+.disclosure-caret { color: #95a0a8; font-size: 11px; transition: transform .12s ease; flex: none; }
+.panel-heading.disclosure-trigger.open .disclosure-caret { transform: rotate(90deg); }
 .icon-button { width: 31px; padding: 0; color: #008f8d; font-size: 19px; }
 
 .tool-section { padding: 16px; border-bottom: 1px solid #e0e6ea; }
@@ -403,6 +421,8 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 
 .inspector-section { background: #fff; }
 .inspector h2 { margin: 15px 0 6px; color: #75838d; font-size: 10px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; }
+.h2-row { display: flex; align-items: center; justify-content: space-between; }
+.h2-row h2 { margin: 15px 0 6px; }
 
 /* ---- TinkerCAD-style Solid/Hole Toggle & Color Picker ---- */
 .shape-type-container {
@@ -644,6 +664,14 @@ select.num { height: 31px; }
 .lock-icon-btn:hover:not(:disabled) { opacity: 0.9; background: #eef3f6; border-color: #cbd7df; transform: scale(1.1); }
 .lock-icon-btn.locked { opacity: 1; background: #e6f7f6; border-color: #24aaa8; filter: drop-shadow(0 1px 2px rgb(36 170 168 / 20%)); }
 .lock-icon-btn:disabled { opacity: 0.15; cursor: not-allowed; }
+/* The base dimmed-when-off look fits the small per-field angle-lock
+   buttons it was built for — three auxiliary icons in a busy row, where
+   playing down the neutral state is the point. This is a single,
+   prominent, section-header-level control instead: dimming it there reads
+   as "disabled", not "off", so it stays fully visible unlocked too and
+   only the teal highlight communicates the locked state. */
+.lock-icon-btn.size-lock { opacity: 1; }
+.lock-icon-btn.size-lock:hover { background: #eef3f6; border-color: #cbd7df; transform: scale(1.1); }
 .field-row { display: flex; align-items: center; gap: 7px; }
 .field-row input[type="range"] { flex: 1; min-width: 0; accent-color: #00a7a5; }
 .field-row input[type="range"]:disabled, .field-row .num:disabled { opacity: 0.6; cursor: not-allowed; background: #f0f4f7; }

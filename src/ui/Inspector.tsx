@@ -26,9 +26,31 @@ import type { BooleanOp, ParamField, PrimitiveKind, SceneNode, Vec3 } from "../d
  * Rounded down to the field's own step so the end of the slider is a value
  * that works rather than one that fails.
  */
-function filletLimit(node: { kind?: string; params: Record<string, number> }, step: number): number {
-  const { width, depth, height } = node.params;
-  const smallest = Math.min(width ?? 0, depth ?? 0, height ?? 0);
+function filletLimit(
+  node: { kind?: string; params: Record<string, number>; scale?: Vec3 },
+  step: number,
+): number {
+  const { width, depth, height, filletMode } = node.params;
+  // The fillet's own limit has to track what Width/Depth/Height actually
+  // DISPLAY, not the raw params underneath — a uniformly-scaled box (see
+  // DIM_AXES: width/depth/height each ride their own scale axis) shows the
+  // SCALED size in those fields, so a box resized well past its original
+  // 20mm still measured its fillet limit off the original, unscaled 20,
+  // capping the slider at a fraction of the room the kernel actually has.
+  const [sx, sy, sz] = node.scale ?? [1, 1, 1];
+  const effWidth = (width ?? 0) * sx;
+  const effDepth = (depth ?? 0) * sy;
+  const effHeight = (height ?? 0) * sz;
+  // Mirrors makePrimitive's own maxR in kernel/shape.ts exactly — height
+  // only bounds the radius in "Every edge" mode, which rounds the top and
+  // bottom rims too. "Side edges" only rounds the four vertical edges (a
+  // rounded rectangle extruded straight up), so a short box does not cap
+  // it at all — a box with a small height and a wide footprint still had
+  // its slider capped by that height, well under what the kernel would
+  // actually build.
+  const smallest = (filletMode ?? 0) === 1
+    ? Math.min(effWidth, effDepth, effHeight)
+    : Math.min(effWidth, effDepth);
   if (!(smallest > 0)) return 0;
   return Math.max(0, Math.floor(smallest / 2 / step) * step);
 }
@@ -147,11 +169,7 @@ export function Inspector({
 
   return (
     <div className="inspector">
-      {isMulti ? (
-        <div className="multi-selection-badge">
-          <span>Shapes ({selectedCount})</span>
-        </div>
-      ) : (
+      {isMulti ? null : (
         <input
           className="name"
           value={node.name}
@@ -316,6 +334,7 @@ export function Inspector({
             <ObjectParams
               node={node}
               resizeConstrained={resizeConstrained}
+              onResizeConstrained={onResizeConstrained}
               onParam={onParam}
               onTransform={onTransform}
             />
@@ -338,69 +357,94 @@ export function Inspector({
           that evaluated to nothing) — never leaves the section empty. */}
       {(() => {
         const showMm = node.type !== "object" && !!localSize;
+        // A primitive already got its own lock toggle next to Dimensions,
+        // above — this is the only sizing section anything else (a group,
+        // an edit, an import, a Shape Builder result, or a multi-object
+        // selection) has, so it needs its own copy there instead.
+        const showLockHere = isMulti || node.type !== "object";
         return (
           <>
-            <h2>{isMulti ? "Size (mm)" : showMm ? "Size (mm)" : "Size"}</h2>
-            <label className="check">
-              <input
-                type="checkbox"
-                checked={resizeConstrained}
-                onChange={(e) => onResizeConstrained(e.target.checked)}
-              />
-              <span>Lock proportions</span>
-            </label>
-            {isMulti && selectionBounds &&
-              // Same full-width row layout as the compound-shape mm fields
-              // below — a slider needs the room a 3-column .triple grid
-              // can't give it. The selection's own combined world box
-              // stands in for `localSize`: there is no single node's scale
-              // to solve backwards from here, so onResizeSelectionAxis
-              // takes the plain millimetre value and does the whole
-              // selection's worth of scale/position math itself.
-              WDH_LABELS.map((label, i) => {
-                const currentVal = round(selectionBounds.max[i] - selectionBounds.min[i]);
-                const maxVal = Math.max(1000, Math.ceil(currentVal / 50) * 50);
-                return (
-                  <Field
-                    key={label}
-                    field={{ key: label, label, min: 0.1, max: maxVal, step: 0.5, noSlider: true }}
-                    value={currentVal}
-                    onChange={(v) => {
-                      if (!Number.isFinite(v) || v <= 0) return;
-                      onResizeSelectionAxis?.(i as 0 | 1 | 2, v);
-                    }}
-                  />
-                );
-              })}
+            <div className="h2-row">
+              <h2>{isMulti ? "Size (mm)" : showMm ? "Size (mm)" : "Size"}</h2>
+              {showLockHere && (
+                <button
+                  type="button"
+                  className={`lock-icon-btn size-lock ${resizeConstrained ? "locked" : ""}`}
+                  onClick={() => onResizeConstrained(!resizeConstrained)}
+                  title={resizeConstrained ? "Proportions locked — click to resize each dimension independently" : "Click to lock proportions"}
+                >
+                  {resizeConstrained ? "🔒" : "🔓"}
+                </button>
+              )}
+            </div>
+            {isMulti && selectionBounds && (
+              // Same compact 3-column row Position (below) already uses —
+              // no slider to give room to here anymore, so there is no
+              // reason this needs 3x Position's height. The selection's own
+              // combined world box stands in for `localSize`: there is no
+              // single node's scale to solve backwards from here, so
+              // onResizeSelectionAxis takes the plain millimetre value and
+              // does the whole selection's worth of scale/position math
+              // itself.
+              <div className="triple">
+                {WDH_LABELS.map((label, i) => {
+                  const currentVal = round(selectionBounds.max[i] - selectionBounds.min[i]);
+                  return (
+                    <label key={label}>
+                      <span className="field-label">{label}</span>
+                      <input
+                        className="num"
+                        type="number"
+                        min={0.1}
+                        step={0.5}
+                        value={currentVal}
+                        onFocus={beginHistoryBatch}
+                        onBlur={endHistoryBatch}
+                        onChange={(e) => {
+                          const v = Number(e.target.value);
+                          if (!Number.isFinite(v) || v <= 0) return;
+                          onResizeSelectionAxis?.(i as 0 | 1 | 2, v);
+                        }}
+                      />
+                    </label>
+                  );
+                })}
+              </div>
+            )}
             {!isMulti && showMm && localSize && (
-              // Full-width, one per row — the SAME layout ObjectParams uses
-              // for a primitive's own Dimensions, and for the same reason:
-              // a slider needs room a 3-column .triple grid cannot give it.
-              // That mismatch, not any real difference between shapes, is
-              // why sliders looked like they came and went between objects.
-              WDH_LABELS.map((label, i) => {
-                const currentVal = round(localSize[i] * node.scale[i]);
-                // Same rule the primitive path uses: the slider always
-                // reaches at least the current value, with room to grow
-                // past it, rather than a fixed ceiling a bigger object
-                // would immediately max out.
-                const maxVal = Math.max(1000, Math.ceil(currentVal / 50) * 50);
-                return (
-                  <Field
-                    key={label}
-                    field={{ key: label, label, min: 0.1, max: maxVal, step: 0.5, noSlider: true }}
-                    value={currentVal}
-                    onChange={(v) => {
-                      if (!Number.isFinite(v) || v <= 0) return;
-                      const nextFactor = Math.max(0.0001, v / localSize[i]);
-                      const scale = resizeConstrained
-                        ? ([nextFactor, nextFactor, nextFactor] as Vec3)
-                        : (node.scale.map((val, at) => (at === i ? nextFactor : val)) as Vec3);
-                      onTransform({ scale });
-                    }}
-                  />
-                );
-              })
+              // Same compact 3-column row Position (below) uses — no slider
+              // to give room to anymore (see ParamField.noSlider's own doc
+              // comment), so this has no more reason to be 3x Position's
+              // height than the primitive Dimensions section or the
+              // multi-select Size section do.
+              <div className="triple">
+                {WDH_LABELS.map((label, i) => {
+                  const currentVal = round(localSize[i] * node.scale[i]);
+                  return (
+                    <label key={label}>
+                      <span className="field-label">{label}</span>
+                      <input
+                        className="num"
+                        type="number"
+                        min={0.1}
+                        step={0.5}
+                        value={currentVal}
+                        onFocus={beginHistoryBatch}
+                        onBlur={endHistoryBatch}
+                        onChange={(e) => {
+                          const v = Number(e.target.value);
+                          if (!Number.isFinite(v) || v <= 0) return;
+                          const nextFactor = Math.max(0.0001, v / localSize[i]);
+                          const scale = resizeConstrained
+                            ? ([nextFactor, nextFactor, nextFactor] as Vec3)
+                            : (node.scale.map((val, at) => (at === i ? nextFactor : val)) as Vec3);
+                          onTransform({ scale });
+                        }}
+                      />
+                    </label>
+                  );
+                })}
+              </div>
             )}
             {!isMulti && !showMm && (
               <div className="triple">
@@ -666,11 +710,13 @@ const DIM_AXES: Partial<Record<PrimitiveKind, Record<string, number[]>>> = {
 function ObjectParams({
   node,
   resizeConstrained = false,
+  onResizeConstrained,
   onParam,
   onTransform,
 }: {
   node: Extract<SceneNode, { type: "object" }>;
   resizeConstrained?: boolean;
+  onResizeConstrained: (value: boolean) => void;
   onParam: (key: string, value: number) => void;
   onTransform: (patch: { position?: Vec3; rotation?: Vec3; scale?: Vec3 }) => void;
 }) {
@@ -716,8 +762,18 @@ function ObjectParams({
           </p>
         </>
       )}
-      <h2>Dimensions</h2>
-      {fields.map((f) => {
+      <div className="h2-row">
+        <h2>Dimensions</h2>
+        <button
+          type="button"
+          className={`lock-icon-btn size-lock ${resizeConstrained ? "locked" : ""}`}
+          onClick={() => onResizeConstrained(!resizeConstrained)}
+          title={resizeConstrained ? "Proportions locked — click to resize each dimension independently" : "Click to lock proportions"}
+        >
+          {resizeConstrained ? "🔒" : "🔓"}
+        </button>
+      </div>
+      {groupDimensionFields(fields.map((f) => {
         let base = node.params[f.key] ?? 0;
         if (solvedTriangle) {
           if (f.key === "base") base = solvedTriangle.sides.base;
@@ -770,56 +826,62 @@ function ObjectParams({
         // exactly half of a 100mm side.
         const shown = f.key === "fillet" ? { ...f, max: filletLimit(node, f.step) } : f;
         if (!axes || !uniform || base <= 0) {
-          return (
+          return {
+            field: shown,
+            el: (
+              <Field
+                key={f.key}
+                field={shown}
+                value={base}
+                lockable={isAngleField}
+                locked={isLocked}
+                onToggleLock={onToggleLock}
+                lockDisabled={lockDisabled}
+                disabled={isConstrained3rdAngle}
+                dotColorClass={dotColorClass}
+                onChange={(v) => onParam(f.key, Math.min(v, shown.max))}
+              />
+            ),
+          };
+        }
+        const factor = node.scale[axes[0]];
+        const currentVal = round(base * factor);
+        const maxVal = Math.max(f.max, Math.ceil(currentVal / 50) * 50);
+        return {
+          field: f,
+          el: (
             <Field
               key={f.key}
-              field={shown}
-              value={base}
+              field={{
+                ...f,
+                min: f.min,
+                max: maxVal,
+                step: f.step,
+              }}
+              value={currentVal}
               lockable={isAngleField}
               locked={isLocked}
               onToggleLock={onToggleLock}
               lockDisabled={lockDisabled}
               disabled={isConstrained3rdAngle}
               dotColorClass={dotColorClass}
-              onChange={(v) => onParam(f.key, Math.min(v, shown.max))}
+              onChange={(v) => {
+                if (!Number.isFinite(v) || v <= 0) return;
+                const nextFactor = Math.max(0.0001, v / base);
+                const isLockedTriangle =
+                  node.kind === "triangle" &&
+                  !!(node.params.lockAngleLeft || node.params.lockAngleRight || node.params.lockAngleApex);
+                const scale = (resizeConstrained || (isLockedTriangle && f.key === "base"))
+                  ? (isLockedTriangle && !resizeConstrained
+                      ? ([nextFactor, nextFactor, node.scale[2]] as Vec3)
+                      : ([nextFactor, nextFactor, nextFactor] as Vec3))
+                  : (node.scale.map((val, at) => (axes.includes(at) ? nextFactor : val)) as Vec3);
+                onTransform({ scale });
+              }}
             />
-          );
-        }
-        const factor = node.scale[axes[0]];
-        const currentVal = round(base * factor);
-        const maxVal = Math.max(f.max, Math.ceil(currentVal / 50) * 50);
-        return (
-          <Field
-            key={f.key}
-            field={{
-              ...f,
-              min: f.min,
-              max: maxVal,
-              step: f.step,
-            }}
-            value={currentVal}
-            lockable={isAngleField}
-            locked={isLocked}
-            onToggleLock={onToggleLock}
-            lockDisabled={lockDisabled}
-            disabled={isConstrained3rdAngle}
-            dotColorClass={dotColorClass}
-            onChange={(v) => {
-              if (!Number.isFinite(v) || v <= 0) return;
-              const nextFactor = Math.max(0.0001, v / base);
-              const isLockedTriangle =
-                node.kind === "triangle" &&
-                !!(node.params.lockAngleLeft || node.params.lockAngleRight || node.params.lockAngleApex);
-              const scale = (resizeConstrained || (isLockedTriangle && f.key === "base"))
-                ? (isLockedTriangle && !resizeConstrained
-                    ? ([nextFactor, nextFactor, node.scale[2]] as Vec3)
-                    : ([nextFactor, nextFactor, nextFactor] as Vec3))
-                : (node.scale.map((val, at) => (axes.includes(at) ? nextFactor : val)) as Vec3);
-              onTransform({ scale });
-            }}
-          />
-        );
-      })}
+          ),
+        };
+      }))}
       {node.kind === "triangle" && (
         <TriangleReadout params={node.params} scale={node.scale} />
       )}
@@ -903,6 +965,37 @@ function TriangleReadout({
       </dl>
     </>
   );
+}
+
+/**
+ * Packs consecutive precise-dimension fields (noSlider — see ParamField's
+ * own doc comment) into the same compact 3-column row Position/Rotation
+ * already use, instead of each sitting in its own full-width, two-line
+ * Field block. A run of one is left alone — a single lone box floating in
+ * an otherwise-empty 3-column row reads worse than the plain full-width
+ * field it already was (this is why Sphere, with just Radius, is
+ * untouched). A slider field (corner radius) or a dropdown breaks the run
+ * and renders on its own row exactly as before, since neither one fits
+ * the compact layout — corner radius genuinely needs a slider's width, and
+ * a dropdown is a different kind of control entirely.
+ */
+function groupDimensionFields(entries: { field: ParamField; el: React.ReactNode }[]): React.ReactNode[] {
+  const rows: React.ReactNode[] = [];
+  let run: React.ReactNode[] = [];
+  const flushRun = () => {
+    if (run.length >= 2) rows.push(<div className="triple" key={`dim-row-${rows.length}`}>{run}</div>);
+    else if (run.length === 1) rows.push(run[0]);
+    run = [];
+  };
+  for (const { field, el } of entries) {
+    if (!field.options && field.noSlider) run.push(el);
+    else {
+      flushRun();
+      rows.push(el);
+    }
+  }
+  flushRun();
+  return rows;
 }
 
 const fmt = (n: number) => (Math.round(n * 100) / 100).toString();

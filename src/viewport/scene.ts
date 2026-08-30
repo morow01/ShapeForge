@@ -551,6 +551,15 @@ export class Scene {
   private resizeHandleMeshes: THREE.Mesh[] = [];
   private resizeHoverIndex = -1;
   private resizeHoverMaterial = new THREE.MeshBasicMaterial({ color: 0xff9f1a, depthTest: false });
+  /** Floating reminder shown only while a resize handle is actually being
+   *  dragged — Shift/Alt are otherwise undiscoverable modifiers with no
+   *  visible affordance anywhere else in the UI. The Shift/Alt keycaps
+   *  light up live as each key is actually held (see updateScaleHint),
+   *  not just statically listed, so it doubles as confirmation the
+   *  modifier registered. */
+  private scaleHintEl!: HTMLDivElement;
+  private scaleHintShiftEl!: HTMLSpanElement;
+  private scaleHintAltEl!: HTMLSpanElement;
   /** The align cage — always the union of every selected object, exactly
    *  like resizeBox in plain select mode (see updateResizeOverlay). Earlier
    *  attempts drew a second, separate outline per "moving" object to make
@@ -836,6 +845,7 @@ export class Scene {
 
     this.setupResizeOverlay();
     this.setupAlignOverlay();
+    this.setupScaleHint();
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0xedf1f4);
@@ -1194,6 +1204,35 @@ export class Scene {
       }
     }
     this.alignHandles.visible = false;
+  }
+
+  private setupScaleHint() {
+    const el = document.createElement("div");
+    el.className = "scale-hint";
+    const shift = document.createElement("kbd");
+    shift.textContent = "Shift";
+    const alt = document.createElement("kbd");
+    alt.textContent = "Alt";
+    el.append(
+      "Hold ",
+      shift,
+      " for uniform scale. ",
+      alt,
+      " to scale from centre",
+    );
+    el.style.display = "none";
+    this.host.appendChild(el);
+    this.scaleHintEl = el;
+    this.scaleHintShiftEl = shift;
+    this.scaleHintAltEl = alt;
+  }
+
+  /** Live-highlights whichever of Shift/Alt is actually held right now, so
+   *  the hint doubles as confirmation a modifier registered rather than
+   *  just a static legend. */
+  private updateScaleHint(e: PointerEvent) {
+    this.scaleHintShiftEl.classList.toggle("active", e.shiftKey);
+    this.scaleHintAltEl.classList.toggle("active", e.altKey);
   }
 
   setResizeConstrained(value: boolean) {
@@ -4106,11 +4145,18 @@ export class Scene {
     }
 
     if (this.resizeDrag) {
+      this.updateScaleHint(e);
       const d = Math.hypot(e.clientX - this.resizeDrag.centreX, e.clientY - this.resizeDrag.centreY);
       const ratio = d / this.resizeDrag.startDistance;
       const factors: Vec3 = [1, 1, 1];
+      // Shift flips whichever way proportions currently lock, for exactly
+      // the length of the drag — free resize for a quick one-off uniform
+      // scale without unlocking the padlock, or the reverse when it is
+      // already unlocked. Never mutates resizeConstrained itself, so it
+      // reverts the instant the key is released or the drag ends.
+      const constrainedNow = e.shiftKey ? !this.resizeConstrained : this.resizeConstrained;
 
-      if (this.resizeConstrained) {
+      if (constrainedNow) {
         factors[0] = Math.max(0.01, ratio);
         factors[1] = Math.max(0.01, ratio);
         factors[2] = Math.max(0.01, ratio);
@@ -4179,12 +4225,21 @@ export class Scene {
         for (let i = 0; i < 3; i++) scale[i] = Math.max(0.01, this.resizeDrag.startScale[i] * factors[i]);
         const view = this.parts.get(this.resizeDrag.id);
         const localShift = new THREE.Vector3();
-        for (let i = 0; i < 3; i++) {
-          localShift.setComponent(
-            i,
-            this.resizeDrag.handleSigns[i] * this.resizeDrag.rawSize[i] *
-              (scale[i] - this.resizeDrag.startScale[i]) / 2,
-          );
+        // Alt held: keep the object's own centre fixed instead of the
+        // opposite handle — every axis grows/shrinks symmetrically about
+        // where it already is, rather than anchoring on whichever corner
+        // or face is diagonally/directly opposite the one being dragged.
+        // A zero shift IS "scale from centre": the shift below exists
+        // specifically to slide the centre so the OPPOSITE handle stays
+        // put, so skipping it is the whole change.
+        if (!e.altKey) {
+          for (let i = 0; i < 3; i++) {
+            localShift.setComponent(
+              i,
+              this.resizeDrag.handleSigns[i] * this.resizeDrag.rawSize[i] *
+                (scale[i] - this.resizeDrag.startScale[i]) / 2,
+            );
+          }
         }
         const worldShift = localShift.applyQuaternion(this.resizeDrag.rotation);
         const position: Vec3 = [
@@ -4359,6 +4414,7 @@ export class Scene {
       this.gizmo.enabled = true;
       this.onDragChange?.(false);
       this.updateDimensionVisibility(this.resizeHoverIndex);
+      this.scaleHintEl.style.display = "none";
       return;
     }
 
@@ -4498,6 +4554,8 @@ export class Scene {
     this.controls.enabled = false;
     this.gizmo.enabled = false;
     this.onDragChange?.(true);
+    this.scaleHintEl.style.display = "flex";
+    this.updateScaleHint(e);
     e.preventDefault();
     return true;
   }
@@ -4881,6 +4939,7 @@ export class Scene {
     for (const pill of this.movePills) pill.remove();
     for (const pill of this.dimensionPills) pill.remove();
     for (const badge of this.cornerBadges) badge.remove();
+    this.scaleHintEl.remove();
     this.moveGuide.geometry.dispose();
     (this.moveGuide.material as THREE.Material).dispose();
     this.dimensionEdges.geometry.dispose();

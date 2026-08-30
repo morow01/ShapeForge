@@ -194,6 +194,7 @@ const EXPORT_FORMAT_KEY = "cad.exportFormat";
 const SNAP_KEY = "cad.smartGuides";
 const OBJECTS_PANEL_KEY = "cad.objectsPanelOpen";
 const VIEW_STYLE_KEY = "cad.viewStyle";
+const RESIZE_CONSTRAINED_KEY = "cad.resizeConstrained";
 
 /** What each preset costs, so the choice is not guesswork — measured on a
  *  40x30x15 box with a 10mm spherical bowl (see EXPORT_PRESETS in worker.ts). */
@@ -333,7 +334,12 @@ export function App() {
    *  far in from the edge, and how far out from there. */
   const [faceHeight, setFaceHeight] = useState(3);
   const [faceValue, setFaceValue] = useState(2);
-  const [resizeConstrained, setResizeConstrained] = useState(true);
+  // Remembered the same way Snap is — whether the padlock is on is a
+  // working preference (how THIS person likes to resize things), not
+  // something that should reset back to locked every time the page loads.
+  const [resizeConstrained, setResizeConstrained] = useState(
+    () => localStorage.getItem(RESIZE_CONSTRAINED_KEY) !== "off",
+  );
   const [wireframe, setWireframe] = useState<WireframeMode>(() => {
     const saved = localStorage.getItem(VIEW_STYLE_KEY) as WireframeMode | null;
     if (saved === "off" || saved === "outlined" || saved === "edges" || saved === "mesh" || saved === "xray" || saved === "transparent") {
@@ -438,6 +444,11 @@ export function App() {
   const [movingAnchor, setMovingAnchor] = useState<SnapAnchor>("min");
   const [gapDirection, setGapDirection] = useState<-1 | 1>(1);
   const [spacingSwapped, setSpacingSwapped] = useState(false);
+  // Collapsed by default — six controls plus a hint line is a lot to force
+  // open the instant two objects happen to be selected, when most of the
+  // time that selection is for checking size/position, not for this one
+  // specific tool. A person who wants it clicks the header open.
+  const [spacingOpen, setSpacingOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sceneBusy, setSceneBusy] = useState(false);
   const busy = sceneBusy;
@@ -768,6 +779,14 @@ export function App() {
       // Private mode / blocked storage: the choice just won't be remembered.
     }
   }, [snapEnabled]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(RESIZE_CONSTRAINED_KEY, resizeConstrained ? "on" : "off");
+    } catch {
+      // Private mode / blocked storage: the choice just won't be remembered.
+    }
+  }, [resizeConstrained]);
 
   useEffect(() => {
     try {
@@ -2466,7 +2485,17 @@ export function App() {
 
         {selectedIds.length === 2 && (
         <section className="tool-section spacing-section">
-          <div className="panel-heading compact"><div><h1>Exact spacing</h1><p>Set the gap between two objects</p></div></div>
+          <button
+            type="button"
+            className={`panel-heading compact disclosure-trigger${spacingOpen ? " open" : ""}`}
+            onClick={() => setSpacingOpen((v) => !v)}
+            aria-expanded={spacingOpen}
+          >
+            <div><h1>Exact spacing</h1><p>Set the gap between two objects</p></div>
+            <span className="disclosure-caret">▸</span>
+          </button>
+          {spacingOpen && (
+          <>
           <div className="spacing-objects">
           <div>
             <span className="field-label">Stays fixed</span>
@@ -2545,6 +2574,8 @@ export function App() {
             ? `${spacingSelection.fixedNode.name} stays fixed; ${spacingSelection.movingNode.name} moves along ${gapAxis.toUpperCase()}.`
             : "Select exactly two top-level objects. The first stays fixed."}
           </p>
+          </>
+          )}
         </section>
         )}
 
