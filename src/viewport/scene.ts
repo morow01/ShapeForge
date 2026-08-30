@@ -268,6 +268,18 @@ const MATERIALS = {
     roughness: 0.6,
     side: THREE.FrontSide,
   }),
+  /** TinkerCAD-style amber preview of where hovering an align dot would
+   *  send an object — warmer and more visible than resultGhost since this
+   *  is an active preview a person is meant to read, not a background
+   *  dimming. */
+  alignPreview: new THREE.MeshBasicMaterial({
+    color: 0xff9f1a,
+    transparent: true,
+    opacity: 0.35,
+    depthWrite: false,
+    depthTest: true,
+    side: THREE.DoubleSide,
+  }),
   // Material index 1 on every part's geometry (see applyMaterials) — painted
   // over whichever face group is currently hovered/clicked.
   // Using vibrant amber ensures high visibility across all solid colors
@@ -531,6 +543,11 @@ export class Scene {
   private alignHandleMeshes: THREE.Mesh[] = [];
   private alignHoverIndex = -1;
   private alignHoverMaterial = new THREE.MeshBasicMaterial({ color: 0x00a9b7, depthTest: false });
+  /** Faint ghosts of wherever hovering the current align dot would actually
+   *  move things — shown instead of a person having to click it to find
+   *  out, and cleared the instant the hover moves off. */
+  private alignPreviewGroup = new THREE.Group();
+  private alignPreviewMeshes: THREE.Mesh[] = [];
   /** One arrow on the explicitly selected planar face — push/pull. */
   private pushPullHandles = new THREE.Group();
   private pushPullHandleMeshes: THREE.Object3D[] = [];
@@ -845,7 +862,7 @@ export class Scene {
     this.gizmo.addEventListener("objectChange", this.onGizmoChange);
     this.scene.add(this.gizmo.getHelper());
     this.scene.add(this.guides.group);
-    this.scene.add(this.resizeBox, this.resizeHandles, this.alignBox, this.alignHandles);
+    this.scene.add(this.resizeBox, this.resizeHandles, this.alignBox, this.alignHandles, this.alignPreviewGroup);
     this.scene.add(this.pushPullHandles);
 
     this.addLights();
@@ -1781,6 +1798,7 @@ export class Scene {
         handle.material = handle.userData.baseMaterial as THREE.Material;
         this.alignHoverIndex = -1;
       }
+      this.clearAlignPreview();
       return;
     }
 
@@ -1838,6 +1856,9 @@ export class Scene {
       const handle = this.alignHandleMeshes[next];
       handle.material = this.alignHoverMaterial;
       handle.scale.setScalar((handle.userData.baseScale ?? 1) * 1.35);
+      this.showAlignPreview(handle.userData.alignAxis as AlignAxis, handle.userData.alignAnchor as AlignAnchor);
+    } else {
+      this.clearAlignPreview();
     }
     if (this.alignHandles.visible) {
       this.renderer.domElement.style.cursor = next < 0 ? "" : "pointer";
@@ -1857,11 +1878,17 @@ export class Scene {
     return true;
   }
 
-  private alignSelection(axis: AlignAxis, anchor: AlignAnchor) {
+  /** The move each selected object needs to land on the given align dot —
+   *  shared by alignSelection (which applies it) and showAlignPreview
+   *  (which only draws it). Only ever returns entries for objects that
+   *  would actually move: an object already sitting on the target, or the
+   *  Exact Spacing panel's fixed object, contributes exactly zero delta and
+   *  is left out. */
+  private alignMoves(axis: AlignAxis, anchor: AlignAnchor): { id: string; view: PartView; delta: number }[] {
     const selected = this.selectedIds
       .map((id) => ({ id, view: this.parts.get(id), node: findNode(this.lastNodes, id) }))
       .filter((item): item is { id: string; view: PartView; node: SceneNode } => !!item.view && !!item.node);
-    if (selected.length < 2) return;
+    if (selected.length < 2) return [];
 
     const boxes = selected.map(({ view }) => new THREE.Box3().setFromObject(view.group));
     // With exactly two selected and one of them designated "stays fixed" in
@@ -1880,8 +1907,8 @@ export class Scene {
         ? reference.max.getComponent(axis)
         : reference.getCenter(new THREE.Vector3()).getComponent(axis);
 
-    const updates: { id: string; position: Vec3 }[] = [];
-    selected.forEach(({ id, view, node }, index) => {
+    const moves: { id: string; view: PartView; delta: number }[] = [];
+    selected.forEach(({ id, view }, index) => {
       const box = boxes[index];
       const current = anchor === "min"
         ? box.min.getComponent(axis)
@@ -1890,13 +1917,48 @@ export class Scene {
           : box.getCenter(new THREE.Vector3()).getComponent(axis);
       const delta = target - current;
       if (Math.abs(delta) < 1e-9) return;
+      moves.push({ id, view, delta });
+    });
+    return moves;
+  }
+
+  private alignSelection(axis: AlignAxis, anchor: AlignAnchor) {
+    const moves = this.alignMoves(axis, anchor);
+    if (!moves.length) return;
+    const updates: { id: string; position: Vec3 }[] = [];
+    for (const { id, view, delta } of moves) {
+      const node = findNode(this.lastNodes, id);
+      if (!node) continue;
       const position = [...node.position] as Vec3;
       position[axis] += delta;
       view.group.position.setComponent(axis, view.group.position.getComponent(axis) + delta);
       updates.push({ id, position });
-    });
+    }
     if (updates.length) this.onAlignObjects?.(updates);
     this.updateAlignOverlay();
+  }
+
+  private clearAlignPreview() {
+    if (!this.alignPreviewMeshes.length) return;
+    for (const mesh of this.alignPreviewMeshes) this.alignPreviewGroup.remove(mesh);
+    this.alignPreviewMeshes = [];
+  }
+
+  /** TinkerCAD-style: a faint ghost at wherever the hovered dot would
+   *  actually send each object, in place before a person commits to
+   *  clicking it. Position only — same rotation/scale as the real part, so
+   *  the ghost reads as "this object, moved" rather than a generic marker. */
+  private showAlignPreview(axis: AlignAxis, anchor: AlignAnchor) {
+    this.clearAlignPreview();
+    for (const { view, delta } of this.alignMoves(axis, anchor)) {
+      const ghost = new THREE.Mesh(view.geom[0].faces, MATERIALS.alignPreview);
+      ghost.position.copy(view.group.position).setComponent(axis, view.group.position.getComponent(axis) + delta);
+      ghost.rotation.copy(view.group.rotation);
+      ghost.scale.copy(view.group.scale);
+      ghost.renderOrder = 30;
+      this.alignPreviewGroup.add(ghost);
+      this.alignPreviewMeshes.push(ghost);
+    }
   }
 
   /**
