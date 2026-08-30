@@ -1,0 +1,55 @@
+# Builds the app and publishes it to GitHub Pages on every push to main —
+# including the commits `npm run release:patch` (etc.) itself pushes, so a
+# release ships to the public URL the same way it already ships a git tag.
+#
+# One-time manual step this workflow depends on but can't do itself: in the
+# repo's Settings -> Pages, set "Source" to "GitHub Actions". Until that's
+# set, this workflow will build successfully but the deploy job will fail
+# with a permissions/not-configured error.
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  # Lets a deploy be re-run by hand from the Actions tab without an empty
+  # commit, e.g. after flipping the Pages source setting for the first time.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one Pages deployment at a time; a second push while one is still
+# running waits for it rather than racing it, but never queues more than
+# the single latest attempt behind the in-flight one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+        env:
+          GITHUB_PAGES: "true"
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
