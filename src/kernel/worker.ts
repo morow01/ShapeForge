@@ -1166,7 +1166,11 @@ const api = {
       const source = mesh.faces.vertices;
       const vertices: number[] = new Array(source.length);
       // Mirrors place(): scale about the mesh's own bounding-box centre, then
-      // rotate X then Y then Z about the ORIGIN, then translate.
+      // rotate Z, then Y, then X, each about the ORIGIN, then translate. That
+      // order (not the X/Y/Z listing order the angles come in) is what
+      // composes to the same Rx·Ry·Rz the viewport's THREE.Euler('XYZ')
+      // produces — see place()'s own doc comment for the reasoning and the
+      // reported bug this duplicated arithmetic shared with it.
       let min = [Infinity, Infinity, Infinity];
       let max = [-Infinity, -Infinity, -Infinity];
       for (let i = 0; i + 2 < source.length; i += 3) {
@@ -1185,9 +1189,9 @@ const api = {
         let x = centre[0] + (source[i] - centre[0]) * spec.scale[0];
         let y = centre[1] + (source[i + 1] - centre[1]) * spec.scale[1];
         let z = centre[2] + (source[i + 2] - centre[2]) * spec.scale[2];
-        [y, z] = [y * cx - z * sx, y * sx + z * cx];
-        [x, z] = [x * cy + z * sy, -x * sy + z * cy];
         [x, y] = [x * cz - y * sz, x * sz + y * cz];
+        [x, z] = [x * cy + z * sy, -x * sy + z * cy];
+        [y, z] = [y * cx - z * sx, y * sx + z * cx];
         vertices[i] = x + spec.position[0];
         vertices[i + 1] = y + spec.position[1];
         vertices[i + 2] = z + spec.position[2];

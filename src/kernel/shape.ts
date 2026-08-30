@@ -1287,8 +1287,35 @@ function bakeNonUniformScale(spec: NodeSpec): NodeSpec {
   };
 }
 
-/** Applies rotation (about the node origin) then translation. Works on either
- *  kernel's solid — both expose the same translate/rotate signatures. */
+/**
+ * Applies rotation (about the node origin) then translation. Works on either
+ * kernel's solid — both expose the same translate/rotate signatures.
+ *
+ * Order matters here as much as the angles do. The viewport shows a
+ * standalone object's rotation by setting a plain THREE.Group's rotation to
+ * [rx, ry, rz] with Euler order 'XYZ' — which, despite the name, composes as
+ * Rx·Ry·Rz (three.js's own Matrix4.makeRotationFromEuler for 'XYZ' builds
+ * exactly that product). A GROUPED object's rotation, by contrast, is baked
+ * directly into the returned solid's geometry by THIS function, on the
+ * kernel side — so it has to reproduce that same Rx·Ry·Rz composition, not
+ * just use the same three angles in the order they're listed.
+ *
+ * Reported: a compound-rotated filleted box read as visibly re-oriented
+ * (~4° off a fitted surface normal, verified by sampling three points on a
+ * flat face before/after) the instant it was grouped with anything, even
+ * though nothing about its rotation value ever changed. Measured cause: this
+ * function was rotating X, then Y, then Z — each about the fixed global
+ * axis, which composes to Rz·Ry·Rx, the reverse product. Rz·Ry·Rx and
+ * Rx·Ry·Rz only agree when the rotations commute, which three arbitrary
+ * non-zero Euler angles essentially never do. Applying the SAME three
+ * global-axis rotations in the opposite order — Z, then Y, then X — is what
+ * actually composes to Rx·Ry·Rz, matching the viewport exactly.
+ *
+ * manifold-3d's own single-call rotate([x, y, z]) documents the identical
+ * X-then-Y-then-Z global-axis composition (Rz·Ry·Rx) as the three
+ * sequential OCCT .rotate() calls below, so the MeshShape branch needed the
+ * same reversal — three single-axis calls, not one three-axis call.
+ */
 export function place(s: AnySolid, spec: NodeSpec): AnySolid {
   const [rx, ry, rz] = spec.rotation;
   let out = s;
@@ -1311,21 +1338,26 @@ export function place(s: AnySolid, spec: NodeSpec): AnySolid {
       // bridge. That bridge rebuilds a transform/matrix per axis and was
       // caught handing back a solid rotated to an entirely wrong place —
       // nondeterministically, on byte-identical input repeated seconds
-      // apart — which points at the conversion, not the geometry. manifold's
-      // own rotate() applies X, then Y, then Z about the global origin,
-      // exactly the order this function already promises below.
+      // apart — which points at the conversion, not the geometry.
       const mesh = isMesh(out) ? out : out.meshShape();
       let wrapped = mesh.wrapped
         .translate([-center[0], -center[1], -center[2]])
         .scale(spec.scale)
         .translate(center);
-      if (rx || ry || rz) wrapped = wrapped.rotate([rx, ry, rz]);
+      // Three single-axis calls, Z first — see this function's own doc
+      // comment. manifold's rotate() always applies X-then-Y-then-Z
+      // internally regardless of which components of the one argument it's
+      // given are zero, so reproducing Rx·Ry·Rz means three separate calls
+      // in reverse order, not one call with the array reordered.
+      if (rz) wrapped = wrapped.rotate([0, 0, rz]);
+      if (ry) wrapped = wrapped.rotate([0, ry, 0]);
+      if (rx) wrapped = wrapped.rotate([rx, 0, 0]);
       return new MeshShape(wrapped.translate(spec.position));
     }
   }
-  if (rx) out = out.rotate(rx, [0, 0, 0], [1, 0, 0]);
-  if (ry) out = out.rotate(ry, [0, 0, 0], [0, 1, 0]);
   if (rz) out = out.rotate(rz, [0, 0, 0], [0, 0, 1]);
+  if (ry) out = out.rotate(ry, [0, 0, 0], [0, 1, 0]);
+  if (rx) out = out.rotate(rx, [0, 0, 0], [1, 0, 0]);
   return out.translate(spec.position);
 }
 
