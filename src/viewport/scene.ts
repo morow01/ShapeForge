@@ -490,25 +490,6 @@ function makeArrow(): THREE.Object3D {
   return group;
 }
 
-/** The 12 edges of a box, as a flat position array (2 endpoints per
- *  segment) — what LineSegmentsGeometry.setPositions wants, and what
- *  Box3Helper computes internally but keeps to itself. */
-function boxEdgePositions(box: THREE.Box3): number[] {
-  const { min, max } = box;
-  const corners: Vec3[] = [
-    [min.x, min.y, min.z], [max.x, min.y, min.z], [max.x, max.y, min.z], [min.x, max.y, min.z],
-    [min.x, min.y, max.z], [max.x, min.y, max.z], [max.x, max.y, max.z], [min.x, max.y, max.z],
-  ];
-  const edges: [number, number][] = [
-    [0, 1], [1, 2], [2, 3], [3, 0],
-    [4, 5], [5, 6], [6, 7], [7, 4],
-    [0, 4], [1, 5], [2, 6], [3, 7],
-  ];
-  const positions: number[] = [];
-  for (const [a, b] of edges) positions.push(...corners[a], ...corners[b]);
-  return positions;
-}
-
 function disposeArrow(handle: THREE.Object3D) {
   handle.traverse((child) => {
     const mesh = child as THREE.Mesh;
@@ -557,32 +538,17 @@ export class Scene {
   private resizeHandleMeshes: THREE.Mesh[] = [];
   private resizeHoverIndex = -1;
   private resizeHoverMaterial = new THREE.MeshBasicMaterial({ color: 0xff9f1a, depthTest: false });
+  /** The align cage — always the union of every selected object, exactly
+   *  like resizeBox in plain select mode (see updateResizeOverlay). Earlier
+   *  attempts drew a second, separate outline per "moving" object to make
+   *  the pairing legible, first amber then teal — asked back for plain: no
+   *  new visual language, just the same selection cage select mode already
+   *  draws, kept on screen while align is active. Depth-tested-off Box3
+   *  edges over an unselected object in between read faintly rather than
+   *  invisibly (see setupResizeOverlay's boxMaterial.depthTest = false) —
+   *  that's the same look select mode already has with a gap between two
+   *  selected objects, not a new trap. */
   private alignBox = new THREE.Box3Helper(new THREE.Box3(), 0x00a9b7);
-  /** One cage per selected object that ISN'T the fixed one (every selected
-   *  object, when there is no fixed one — 3+ selected, where "fixed" has no
-   *  meaning). The fixed object already reads as selected via alignBox
-   *  hugging it tightly, but everything else had no individual sign it was
-   *  part of the pairing at all: its own ordinary selection tint is easy to
-   *  miss against a similarly-lit fill of its own colour, and with 3+
-   *  selected the one shared alignBox cage around their union does not say
-   *  which objects are inside it. Same teal as alignBox — a first pass
-   *  tried amber specifically to read as "this one moves," but that made
-   *  the pairing look like two different kinds of selection instead of one:
-   *  every selected object gets the same plain outline colour.
-   *  Pooled LineSegments2 with a real pixel linewidth, not Box3Helper's
-   *  plain LineBasicMaterial: a 1px line at that same colour turned out to
-   *  disappear at normal zoom against a similarly-lit fill — the same
-   *  low-contrast trap the wire-outline work earlier in this session ran
-   *  into — so this reuses the already-proven-visible pixel-width line
-   *  material selectedEdges/hoverEdgeLine use for exactly that reason. */
-  private alignMovingBoxMaterial = new LineMaterial({
-    color: 0x00a9b7,
-    linewidth: 3,
-    depthTest: false,
-    transparent: true,
-  });
-  private alignMovingBoxGroup = new THREE.Group();
-  private alignMovingBoxes: LineSegments2[] = [];
   private alignHandles = new THREE.Group();
   private alignHandleMeshes: THREE.Mesh[] = [];
   private alignHoverIndex = -1;
@@ -910,7 +876,6 @@ export class Scene {
       this.resizeBox,
       this.resizeHandles,
       this.alignBox,
-      this.alignMovingBoxGroup,
       this.alignHandles,
       this.alignPreviewGroup,
     );
@@ -1196,8 +1161,6 @@ export class Scene {
     boxMaterial.transparent = true;
     boxMaterial.opacity = 0.8;
     this.alignBox.renderOrder = 24;
-
-    this.alignMovingBoxMaterial.resolution.set(this.host.clientWidth, this.host.clientHeight);
 
     const geometry = new THREE.SphereGeometry(1, 20, 14);
     for (let axis = 0; axis < 3; axis++) {
@@ -1854,7 +1817,6 @@ export class Scene {
     this.alignBox.visible = visible;
     this.alignHandles.visible = visible;
     if (!visible) {
-      this.setAlignMovingBoxes([]);
       if (this.alignHoverIndex >= 0) {
         const handle = this.alignHandleMeshes[this.alignHoverIndex];
         handle.material = handle.userData.baseMaterial as THREE.Material;
@@ -1866,25 +1828,18 @@ export class Scene {
 
     for (const { view } of entries) view.group.updateWorldMatrix(true, true);
     const fixedEntry = entries.length === 2 ? entries.find((e) => e.id === this.alignFixedId) : undefined;
-    let box: THREE.Box3;
-    if (fixedEntry) {
-      box = new THREE.Box3().setFromObject(fixedEntry.view.group);
-    } else {
-      box = new THREE.Box3();
-      for (const { view } of entries) box.expandByObject(view.group);
-    }
-    this.alignBox.box.copy(box);
+    // The dots sit on the actual reference the align math targets — the
+    // fixed object's own edges when there is one, the shared union
+    // otherwise (see alignMoves). The drawn cage is a different question:
+    // it's the selection indicator, so it always covers every selected
+    // object, same as resizeBox does in plain select mode — otherwise the
+    // moving object(s) lose their "you are selected" outline entirely the
+    // moment a fixed object is designated.
+    const union = new THREE.Box3();
+    for (const { view } of entries) union.expandByObject(view.group);
+    const box = fixedEntry ? new THREE.Box3().setFromObject(fixedEntry.view.group) : union;
+    this.alignBox.box.copy(union);
     this.alignBox.updateMatrixWorld(true);
-
-    // One box per object that isn't the fixed one — just the single moving
-    // object when there is a fixed pairing, or every selected object
-    // individually when there isn't (3+ selected, where alignBox's own cage
-    // is the whole union and says nothing about which objects are inside).
-    this.setAlignMovingBoxes(
-      entries
-        .filter((e) => e.id !== fixedEntry?.id)
-        .map((e) => new THREE.Box3().setFromObject(e.view.group)),
-    );
 
     const centre = box.getCenter(new THREE.Vector3());
     const offset = Math.max(2, this.worldSnapTolerance(centre) * 3.2);
@@ -2020,25 +1975,6 @@ export class Scene {
     this.alignPreviewMeshes = [];
   }
 
-  /** Resizes the amber-outline pool to exactly one box per entry, reusing
-   *  existing LineSegments2 instances (and their GPU buffers) rather than
-   *  rebuilding the pool from scratch on every overlay update. */
-  private setAlignMovingBoxes(boxes: THREE.Box3[]) {
-    while (this.alignMovingBoxes.length < boxes.length) {
-      const line = new LineSegments2(new LineSegmentsGeometry(), this.alignMovingBoxMaterial);
-      line.renderOrder = 24;
-      this.alignMovingBoxGroup.add(line);
-      this.alignMovingBoxes.push(line);
-    }
-    while (this.alignMovingBoxes.length > boxes.length) {
-      const line = this.alignMovingBoxes.pop()!;
-      this.alignMovingBoxGroup.remove(line);
-      line.geometry.dispose();
-    }
-    boxes.forEach((box, i) => {
-      this.alignMovingBoxes[i].geometry.setPositions(boxEdgePositions(box));
-    });
-  }
 
   /** TinkerCAD-style: a faint ghost at wherever the hovered dot would
    *  actually send each object, in place before a person commits to
@@ -4679,7 +4615,6 @@ export class Scene {
     this.renderer.setSize(w, h);
     for (const edge of this.selectedEdges) edge.line.material.resolution.set(w, h);
     this.hoverEdgeLine?.material.resolution.set(w, h);
-    this.alignMovingBoxMaterial.resolution.set(w, h);
     if (this.camera instanceof THREE.PerspectiveCamera) {
       this.camera.aspect = w / h;
     } else {
