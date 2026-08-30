@@ -149,10 +149,24 @@ function incomingAfterScaleBake(op: EditOp, scale: Vec3): EditOp {
   if (op.kind === "shell") {
     return { ...op, points: op.points.map((point) => scaledPoint(point, scale)) };
   }
+  // Only a face op (resizeFace/offsetExtrude) carries a normal — a fresh
+  // Fillet/Chamfer's EdgeOp does not, so treating every remaining kind as
+  // one unconditionally read a normal off an object that had none and threw,
+  // which made Apply silently do nothing on any object whose display scale
+  // actually needed baking (a plain object at scale [1,1,1] skips this
+  // function entirely, which is what let that go unnoticed). Mirrors the
+  // same kind split editAfterScaleBake below already makes for existing ops.
+  if (op.kind === "resizeFace" || op.kind === "offsetExtrude") {
+    return {
+      ...op,
+      point: scaledPoint(op.point, scale),
+      normal: scaledNormal(op.normal, scale),
+    };
+  }
   return {
     ...op,
     point: scaledPoint((op as { point: Vec3 }).point, scale),
-    normal: scaledNormal((op as { normal: Vec3 }).normal, scale),
+    points: (op as { points?: Vec3[] }).points?.map((point) => scaledPoint(point, scale)),
   } as EditOp;
 }
 
