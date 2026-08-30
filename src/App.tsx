@@ -2489,16 +2489,29 @@ export function App() {
             <div><h1>Shape library</h1><p>Drag or click to add</p></div>
           </div>
           <div className="shape-grid">
-            {(Object.keys(PRIMITIVES) as PrimitiveKind[]).map((kind) => (
-              <button key={kind} className={`shape-card ${pendingPrimitive === kind ? "active" : ""}`} onClick={() => {
-                setPendingPrimitive(kind);
-                setToolMode("place");
-                select(null);
-              }}>
-                <span className={`shape-icon shape-${kind}`} />
-                <span>{PRIMITIVES[kind].label}</span>
-              </button>
-            ))}
+            {(Object.keys(PRIMITIVES) as PrimitiveKind[]).map((kind) => {
+              // Parked alongside the two-object auto-connector — the whole
+              // feature is paused, not just that one panel, so the entry
+              // point that lets someone place a Connector at all needs to be
+              // off too.
+              const paused = kind === "connector";
+              return (
+                <button
+                  key={kind}
+                  className={`shape-card ${pendingPrimitive === kind ? "active" : ""} ${paused ? "paused" : ""}`}
+                  disabled={paused}
+                  title={paused ? "Paused for now — coming back to this soon" : undefined}
+                  onClick={() => {
+                    setPendingPrimitive(kind);
+                    setToolMode("place");
+                    select(null);
+                  }}
+                >
+                  <span className={`shape-icon shape-${kind}`} />
+                  <span>{PRIMITIVES[kind].label}</span>
+                </button>
+              );
+            })}
           </div>
           <button className="import-btn" onClick={() => importInputRef.current?.click()}>↑ Import STL, 3MF or SVG</button>
         </section>

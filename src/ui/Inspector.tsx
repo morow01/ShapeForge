@@ -778,6 +778,8 @@ function ObjectParams({
           <button
             type="button"
             className="connector-pair-btn"
+            disabled
+            title="Paused for now — coming back to this soon"
             onClick={() =>
               onDuplicateWithParams({ fit: node.params.fit === 1 ? 0 : 1 })
             }
@@ -785,9 +787,10 @@ function ObjectParams({
             ⧉ Copy as matching {node.params.fit === 1 ? "Plug" : "Socket"}
           </button>
           <p className="hint">
-            Makes an exact copy at this same position and rotation — union
-            the Plug into one part, subtract the Socket from the other. Don't
-            reposition either copy, or they will no longer line up.
+            Paused for now — coming back to this soon. Makes an exact copy at
+            this same position and rotation — union the Plug into one part,
+            subtract the Socket from the other. Don't reposition either
+            copy, or they will no longer line up.
           </p>
         </div>
       )}
