@@ -332,7 +332,10 @@ export type EditOp = PushPullOp | EdgeOp | ShellOp | ResizeFaceOp | OffsetExtrud
  */
 export interface EditNode extends NodeBase {
   type: "edit";
-  base: ObjectNode | GroupNode;
+  // A Shape Builder result is already one frozen, resolved solid — pushing,
+  // pulling, filleting or chamfering it further is exactly as meaningful as
+  // doing the same to a Group's fused solid, which this already allowed.
+  base: ObjectNode | GroupNode | BuildNode;
   ops: EditOp[];
 }
 

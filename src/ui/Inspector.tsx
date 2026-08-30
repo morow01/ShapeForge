@@ -534,7 +534,11 @@ function EditInfo({
   error: string | null;
   onPruneDeadOps: () => void;
 }) {
-  const baseLabel = isGroup(node.base) ? "Combined shape" : PRIMITIVES[node.base.kind].label;
+  const baseLabel = isGroup(node.base)
+    ? "Combined shape"
+    : node.base.type === "build"
+    ? "Built shape"
+    : PRIMITIVES[node.base.kind].label;
   return (
     <>
       <h2>Edited shape</h2>

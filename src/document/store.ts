@@ -977,7 +977,12 @@ export const useDoc = create<DocState>()(
                 ops: [...rebased.ops, incomingAfterScaleBake(op, n.scale)],
               };
             }
-            if (n.type === "import" || n.type === "build") return n;
+            // An import has no OCCT face topology to run these tools against
+            // (see faceInfoOf in the kernel worker), so it stays excluded. A
+            // Build result is already one frozen, resolved solid — exactly
+            // like a Group's fused one, already allowed below — so editing
+            // it further is just as meaningful.
+            if (n.type === "import") return n;
             // Metric face tools have to run against the object's real size.
             // A node's scale is applied AFTER its ops, so a box stretched into
             // a rectangle and then hollowed in the old frame comes out with
@@ -997,7 +1002,7 @@ export const useDoc = create<DocState>()(
             const placed = baked && baked !== n
               ? incomingAfterScaleBake(op, n.scale)
               : op;
-            const base: ObjectNode | GroupNode = {
+            const base: ObjectNode | GroupNode | BuildNode = {
               ...source,
               position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1],
             };

@@ -111,7 +111,10 @@ export function parseNode(raw: unknown): SceneNode | null {
 
   if (n.type === "edit") {
     const parsedBase = parseNode(n.base);
-    if (!parsedBase || (parsedBase.type !== "object" && parsedBase.type !== "group")) return null;
+    if (
+      !parsedBase ||
+      (parsedBase.type !== "object" && parsedBase.type !== "group" && parsedBase.type !== "build")
+    ) return null;
     if (!Array.isArray(n.ops)) return null;
     const ops = n.ops.map(parseOp).filter((op): op is EditOp => op !== null);
     // Losing the edits is bad; losing the OBJECT is worse. An edit node whose
