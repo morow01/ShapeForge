@@ -1596,11 +1596,7 @@ export class Scene {
     this.resizeHandleMeshes[12].position.set(centre.x, centre.y, min.z);
     this.resizeHandleMeshes[13].position.set(centre.x, centre.y, max.z);
     const handleSize = Math.max(0.6, this.worldSnapTolerance(centre) * 0.9);
-    for (let i = 0; i < this.resizeHandleMeshes.length; i++) {
-      const handle = this.resizeHandleMeshes[i];
-      handle.userData.baseScale = handleSize;
-      handle.scale.setScalar(handleSize * (i === this.resizeHoverIndex ? 1.35 : 1));
-    }
+    for (const handle of this.resizeHandleMeshes) handle.scale.setScalar(handleSize);
 
     const size = box.getSize(new THREE.Vector3());
     // Each readout measures ONE specific edge; drawing that edge in the same
@@ -1787,13 +1783,11 @@ export class Scene {
     if (this.resizeHoverIndex >= 0) {
       const old = this.resizeHandleMeshes[this.resizeHoverIndex];
       old.material = old.userData.baseMaterial as THREE.Material;
-      old.scale.setScalar(old.userData.baseScale ?? 1);
     }
     this.resizeHoverIndex = next;
     if (next >= 0) {
       const handle = this.resizeHandleMeshes[next];
       handle.material = this.resizeHoverMaterial;
-      handle.scale.setScalar((handle.userData.baseScale ?? 1) * 1.35);
     }
     for (const pill of this.dimensionPills) pill.classList.toggle("hover", next >= 0);
     this.updateDimensionVisibility(this.resizeDrag?.handleIndex ?? next);
@@ -1853,11 +1847,7 @@ export class Scene {
       this.alignHandleMeshes[6 + i].position.set(box.max.x + offset, box.max.y, zs[i]);
     }
     const handleSize = Math.max(0.55, this.worldSnapTolerance(centre) * 0.75);
-    for (let i = 0; i < this.alignHandleMeshes.length; i++) {
-      const handle = this.alignHandleMeshes[i];
-      handle.userData.baseScale = handleSize;
-      handle.scale.setScalar(handleSize * (i === this.alignHoverIndex ? 1.35 : 1));
-    }
+    for (const handle of this.alignHandleMeshes) handle.scale.setScalar(handleSize);
   }
 
   /** Same nearest-on-screen hover as the resize corners (updateResizeHover):
@@ -1880,13 +1870,11 @@ export class Scene {
     if (this.alignHoverIndex >= 0) {
       const old = this.alignHandleMeshes[this.alignHoverIndex];
       old.material = old.userData.baseMaterial as THREE.Material;
-      old.scale.setScalar(old.userData.baseScale ?? 1);
     }
     this.alignHoverIndex = next;
     if (next >= 0) {
       const handle = this.alignHandleMeshes[next];
       handle.material = this.alignHoverMaterial;
-      handle.scale.setScalar((handle.userData.baseScale ?? 1) * 1.35);
       this.showAlignPreview(handle.userData.alignAxis as AlignAxis, handle.userData.alignAnchor as AlignAnchor);
     } else {
       this.clearAlignPreview();
