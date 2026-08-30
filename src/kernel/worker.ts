@@ -27,6 +27,7 @@ import {
 import { SVG_IMPORT_REVISION } from "./svgSolid";
 import { loadSTLPreview } from "./stlPreview";
 import type { AnySolid } from "./shape";
+import { RETRYABLE_MESH_ERROR } from "./types";
 import type {
   BuildError,
   CellPart,
@@ -897,7 +898,7 @@ const api = {
             await keepLastGood();
             onError(
               spec.id,
-              "This shape could not be rebuilt reliably. The last valid version is still shown — undo and retry the latest geometry edit.",
+              `${RETRYABLE_MESH_ERROR} The last valid version is still shown — undo and retry the latest geometry edit.`,
             );
           }
         }

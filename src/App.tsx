@@ -26,6 +26,7 @@ import { findNode, parentOf, resolveNodeTransparent, resolveNodeColor } from "./
 import { putBlob } from "./document/blobStore";
 import { loadCameraState } from "./document/persist";
 import type { GroupNode, PrimitiveKind, SceneNode, Vec3 } from "./document/types";
+import { RETRYABLE_MESH_ERROR } from "./kernel/types";
 import type { EditSpec, ExportQuality, NodeSpec, PreviewBuild, ScenePart } from "./kernel/types";
 import type { CameraMode, Scene, ToolMode, WireframeMode } from "./viewport/scene";
 import { APP_NAME, APP_VERSION } from "./version";
@@ -123,7 +124,6 @@ const toSpec = (n: SceneNode): NodeSpec => {
 };
 
 const DEAD_PUSH_PULL_ERROR = "A pushed/pulled face could not be found after rebuilding";
-const RETRYABLE_MESH_ERROR = "This shape could not be rebuilt reliably.";
 
 /** Removes a skipped node from anywhere in the tree, not just the top level —
  *  a timed-out import nested inside a group must actually come out of that

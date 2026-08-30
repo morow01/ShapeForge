@@ -118,6 +118,20 @@ export interface BuildError {
   message: string;
 }
 
+/** Prefix of worker.ts's "could not be rebuilt reliably" message — a node
+ *  whose boolean genuinely failed on every retry within the SAME kernel
+ *  worker. Measured on a reported case: the exact same geometry (byte-for-
+ *  byte identical node data) failed deterministically for several minutes
+ *  in one worker session, then succeeded deterministically every time in a
+ *  freshly spawned one — so retrying against the SAME worker again, which is
+ *  all buildScene's own internal attempts and App.tsx's one-shot recovery
+ *  do, cannot help. client.ts's buildScene wrapper watches for this prefix
+ *  and gives the rebuild one attempt against a fresh worker before handing
+ *  the error to the UI. Shared here (rather than each site owning its own
+ *  copy of the literal) because the match silently stops working the moment
+ *  any one of them drifts from worker.ts's actual wording. */
+export const RETRYABLE_MESH_ERROR = "This shape could not be rebuilt reliably.";
+
 export interface SceneBuild {
   parts: ScenePart[];
   errors: BuildError[];

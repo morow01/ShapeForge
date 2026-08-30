@@ -1,6 +1,7 @@
 import * as Comlink from "comlink";
 import type { KernelAPI } from "./worker";
-import type { DisplayedSceneItem, ExportQuality, NodeSpec } from "./types";
+import { RETRYABLE_MESH_ERROR } from "./types";
+import type { DisplayedSceneItem, ExportQuality, NodeSpec, SceneBuild } from "./types";
 
 function spawnWorker() {
   const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
@@ -218,10 +219,39 @@ function coalesceLatest<Args extends unknown[], R>(
   return (...args: Args) => run(args);
 }
 
+/**
+ * A node that fails every retry inside ONE call to buildScene (see the
+ * RETRY_BUDGET_MS loop in worker.ts) is not necessarily broken — reproduced
+ * directly: the exact same node data, byte-for-byte, failed "could not be
+ * rebuilt reliably" deterministically for several minutes against one
+ * already-long-running scene worker, then built cleanly every single time
+ * the instant a freshly spawned worker took the same call. Every existing
+ * retry — buildScene's own internal attempts, and the UI's one-shot
+ * recovery (see App.tsx's meshRecoveryNonce) — asks the SAME worker again,
+ * which this evidence says cannot help; the boolean kernel itself is what
+ * degrades over a long session, not the geometry.
+ *
+ * Gives a build with this specific error class exactly one more attempt
+ * against a brand new scene worker before it ever reaches the UI. Bounded
+ * to one extra attempt, not a loop: a genuinely invalid input fails the
+ * same way on a fresh worker too, and retrying that forever would just
+ * hide a real error behind a growing pile of abandoned workers.
+ */
+function buildSceneWithFreshWorkerRetry(specs: NodeSpec[]): Promise<SceneBuild> {
+  const attempt = () =>
+    withWatchdog("scene", (raw, onProgress) => raw.buildScene(specs, Comlink.proxy(onProgress)));
+  return attempt().then((first) => {
+    const retryableCount = (build: SceneBuild) =>
+      build.errors.filter((e) => e.message.startsWith(RETRYABLE_MESH_ERROR)).length;
+    if (retryableCount(first) === 0) return first;
+    sceneCurrent.worker.terminate();
+    sceneCurrent = spawnWorker();
+    return attempt().then((retried) => (retryableCount(retried) <= retryableCount(first) ? retried : first));
+  });
+}
+
 export const kernel = {
-  buildScene: coalesceLatest((specs: NodeSpec[]) =>
-    withWatchdog("scene", (raw, onProgress) => raw.buildScene(specs, Comlink.proxy(onProgress))),
-  ),
+  buildScene: coalesceLatest(buildSceneWithFreshWorkerRetry),
   buildResult: coalesceLatest((specs: NodeSpec[]) =>
     withWatchdog("heavy", (raw, onProgress) => raw.buildResult(specs, Comlink.proxy(onProgress))),
   ),
