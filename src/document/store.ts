@@ -551,6 +551,14 @@ interface DocState {
    *  them, and selects the new copies. Returns the new top-level ids, in the
    *  same order as `source`. */
   duplicateNodes: (source: SceneNode[], offset: Vec3) => string[];
+  /** Exact in-place duplicate (no offset) of one object node, with `params`
+   *  merged into the copy's own params before it is ever built — atomic, so
+   *  there is no window where the clone briefly exists with the source's
+   *  original values. Built for the Connector's "Copy as Socket/Plug"
+   *  button: position/rotation/scale carry over untouched (the whole point
+   *  — the copy has to sit exactly where the original does), only `fit`
+   *  differs. Returns the new id, or null if `id` is not an object node. */
+  duplicateWithParams: (id: string, params: Record<string, number>) => string | null;
   /** Push/pull: turns an ordinary object or group into an EditNode the first
    *  time it is called for that id (freezing its current definition as
    *  `base`), or appends another op if it already is one.
@@ -915,6 +923,17 @@ export const useDoc = create<DocState>()(
         set((s) => ({ nodes: [...s.nodes, ...clones], selectedIds: clones.map((c) => c.id) }));
         afterBatchedMutation();
         return clones.map((c) => c.id);
+      },
+
+      duplicateWithParams: (id, params) => {
+        const state = get();
+        const source = findNode(state.nodes, id);
+        if (!source || source.type !== "object") return null;
+        const clone = cloneSubtree(source, [0, 0, 0]) as ObjectNode;
+        clone.params = { ...clone.params, ...params };
+        set((s) => ({ nodes: [...s.nodes, clone], selectedIds: [clone.id] }));
+        afterBatchedMutation();
+        return clone.id;
       },
 
       pushPullFace: (id, op, positionDelta) => {

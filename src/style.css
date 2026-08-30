@@ -424,6 +424,9 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 .inspector h2 { margin: 15px 0 6px; color: #75838d; font-size: 10px; font-weight: 750; letter-spacing: .06em; text-transform: uppercase; }
 .h2-row { display: flex; align-items: center; justify-content: space-between; }
 .h2-row h2 { margin: 15px 0 6px; }
+.connector-pair { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 4px; }
+.connector-pair-btn { width: 100%; color: #087a79; border-style: dashed; border-color: #74c9c7; font-weight: 600; }
+.connector-pair-btn:hover { background: #eef8f7; }
 
 /* ---- TinkerCAD-style Solid/Hole Toggle & Color Picker ---- */
 .shape-type-container {

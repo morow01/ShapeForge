@@ -95,6 +95,12 @@ interface Props {
    *  longer find their target face, instead of leaving them to keep
    *  re-failing (and re-showing `error`) on every future rebuild. */
   onPruneDeadOps: () => void;
+  /** Object nodes only: makes an exact in-place copy of the selected node
+   *  (same position/rotation/scale) with `params` merged over its own —
+   *  the Connector's "Copy as Socket/Plug" button, so the copy always sits
+   *  exactly where the original does without the user positioning anything
+   *  by hand. */
+  onDuplicateWithParams?: (params: Record<string, number>) => void;
 }
 
 const AXES = ["X", "Y", "Z"] as const;
@@ -133,6 +139,7 @@ export function Inspector({
   onRename,
   onDelete,
   onPruneDeadOps,
+  onDuplicateWithParams,
 }: Props) {
   const isMulti = selectedCount > 1;
   const group = isGroup(node);
@@ -337,6 +344,7 @@ export function Inspector({
               onResizeConstrained={onResizeConstrained}
               onParam={onParam}
               onTransform={onTransform}
+              onDuplicateWithParams={onDuplicateWithParams}
             />
           )}
         </>
@@ -714,12 +722,14 @@ function ObjectParams({
   onResizeConstrained,
   onParam,
   onTransform,
+  onDuplicateWithParams,
 }: {
   node: Extract<SceneNode, { type: "object" }>;
   resizeConstrained?: boolean;
   onResizeConstrained: (value: boolean) => void;
   onParam: (key: string, value: number) => void;
   onTransform: (patch: { position?: Vec3; rotation?: Vec3; scale?: Vec3 }) => void;
+  onDuplicateWithParams?: (params: Record<string, number>) => void;
 }) {
   const def = PRIMITIVES[node.kind];
   const fields = visibleFields(def, node.params).filter((f) => f.key !== "mode");
@@ -762,6 +772,24 @@ function ObjectParams({
                 : "Set the base and corner angles; the total stays at 180°."}
           </p>
         </>
+      )}
+      {node.kind === "connector" && onDuplicateWithParams && (
+        <div className="connector-pair">
+          <button
+            type="button"
+            className="connector-pair-btn"
+            onClick={() =>
+              onDuplicateWithParams({ fit: node.params.fit === 1 ? 0 : 1 })
+            }
+          >
+            ⧉ Copy as matching {node.params.fit === 1 ? "Plug" : "Socket"}
+          </button>
+          <p className="hint">
+            Makes an exact copy at this same position and rotation — union
+            the Plug into one part, subtract the Socket from the other. Don't
+            reposition either copy, or they will no longer line up.
+          </p>
+        </div>
       )}
       <div className="h2-row">
         <h2>Dimensions</h2>

@@ -235,6 +235,7 @@ export function App() {
     setTransform,
     setPositions,
     duplicateNodes,
+    duplicateWithParams,
     pushPullFace,
     finishEdit,
     setOps,
@@ -2479,6 +2480,7 @@ export function App() {
               onRename={(n) => rename(selected.id, n)}
               onDelete={removeSelected}
               onPruneDeadOps={onPruneDeadOps}
+              onDuplicateWithParams={(params) => duplicateWithParams(selected.id, params)}
             />
           ) : <div className="empty-state small">Select an object to edit its dimensions and position.</div>}
         </section>
