@@ -451,7 +451,6 @@ export function App() {
   // specific tool. A person who wants it clicks the header open.
   const [spacingOpen, setSpacingOpen] = useState(false);
   const [connectorSwapped, setConnectorSwapped] = useState(false);
-  const [connectorShape, setConnectorShape] = useState<0 | 1>(0); // 0 = dovetail, 1 = round pin
   const [error, setError] = useState<string | null>(null);
   const [sceneBusy, setSceneBusy] = useState(false);
   const busy = sceneBusy;
@@ -658,25 +657,20 @@ export function App() {
       (rotation.z / Math.PI) * 180,
     ];
 
-    // Sized off the smaller side of the shared wall so the connector never
-    // overhangs either object's edge — a reasonable starting point, not a
-    // precise fit; every field is still editable afterwards like any other
-    // Connector.
+    // Round pin only — a dovetail can only be assembled by sliding it in
+    // from an open edge (the flare that stops it pulling straight out is
+    // exactly what stops it going in any other way), and a wall's centre,
+    // which is all this tool can place anything at without the user
+    // pointing at a specific edge themselves, is never that. A pin pushes
+    // straight in instead, so it has no such requirement and works
+    // anywhere on a flat wall.
     const wallSize = Math.min(footprint[0], footprint[1]);
     const clampSize = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
-    const sizeParams: Record<string, number> =
-      connectorShape === 0
-        ? {
-            shape: 0,
-            width: clampSize(wallSize * 0.45, 5, 30),
-            height: clampSize(wallSize * 0.18, 3, 8),
-            length: clampSize(wallSize * 0.55, 6, 35),
-          }
-        : {
-            shape: 1,
-            radius: clampSize(wallSize * 0.22, 2.5, 15),
-            length: clampSize(wallSize * 0.55, 6, 35),
-          };
+    const sizeParams: Record<string, number> = {
+      shape: 1,
+      radius: clampSize(wallSize * 0.22, 2.5, 15),
+      length: clampSize(wallSize * 0.55, 6, 35),
+    };
 
     beginHistoryBatch();
 
@@ -702,7 +696,7 @@ export function App() {
     }
 
     endHistoryBatch();
-  }, [connectorSeam, connectorShape, addPrimitive, setTransform, setParam, setHole, selectMany, group]);
+  }, [connectorSeam, addPrimitive, setTransform, setParam, setHole, selectMany, group]);
 
   // Deleting a skipped node should let its id go, not leak it for the rest
   // of the session — otherwise re-importing the same file under a new node
@@ -2603,24 +2597,15 @@ export function App() {
                   <strong>{connectorSeam.socketNode.name}</strong>
                 </div>
               </div>
-              <label className="field">
-                <span className="field-label">Shape</span>
-                <select
-                  className="num"
-                  value={connectorShape}
-                  onChange={(e) => setConnectorShape(Number(e.target.value) as 0 | 1)}
-                >
-                  <option value={0}>Dovetail</option>
-                  <option value={1}>Round pin</option>
-                </select>
-              </label>
               <button className="primary" onClick={addConnectorJoint}>
                 Add connector
               </button>
               <p className="hint">
-                Fuses a plug into {connectorSeam.plugNode.name} and cuts a matching socket into{" "}
+                Fuses a round-pin plug into {connectorSeam.plugNode.name} and cuts a matching socket into{" "}
                 {connectorSeam.socketNode.name}, centred on the wall between them — sized and positioned for
-                you, still editable afterwards like any other Connector.
+                you, still editable afterwards like any other Connector. (Dovetail isn't offered here — it
+                can only be assembled by sliding it in from an open edge, which a wall's centre never is;
+                place one yourself from the Shape library if you want that at an edge you pick.)
               </p>
             </>
           ) : (
