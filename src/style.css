@@ -126,10 +126,11 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 }
 
 .tool-rail-flyout {
-  position: absolute;
-  left: calc(100% + 10px);
-  top: 50%;
-  transform: translateY(-50%);
+  /* Portalled to <body> (see App.tsx) — position/top/left/transform come
+     from an inline style computed off the trigger button, so the tool
+     rail's own overflow-y:auto (needed to scroll a tall tool list) can't
+     clip it: setting overflow on one axis forces the other to clip too,
+     and this menu escapes the rail horizontally. */
   display: flex;
   flex-direction: row;
   gap: 4px;

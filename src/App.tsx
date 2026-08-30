@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import * as THREE from "three";
 import { EXPORT_WATCHDOG_MS, kernel, KernelTimeoutError, WATCHDOG_MS } from "./kernel/client";
 import { Viewport } from "./viewport/Viewport";
@@ -342,6 +343,13 @@ export function App() {
   });
   const [wireframeMenuOpen, setWireframeMenuOpen] = useState(false);
   const wireframeMenuRef = useRef<HTMLDivElement>(null);
+  // The flyout itself is portalled out to <body> (see the render below) so
+  // the tool rail's own overflow-y:auto — needed to scroll a tall tool list
+  // — cannot clip it: setting overflow on only one axis forces the other to
+  // clip too, and this menu escapes the rail horizontally. Its screen
+  // position is computed from the trigger button each time it opens.
+  const wireframeFlyoutRef = useRef<HTMLDivElement>(null);
+  const [wireframeFlyoutPos, setWireframeFlyoutPos] = useState<{ top: number; left: number } | null>(null);
   const cycleWireframe = useCallback(() => {
     setWireframe((curr) => NEXT_WIREFRAME[curr]);
   }, []);
@@ -372,9 +380,24 @@ export function App() {
   }, [addPrimitive, pendingPrimitive, setTransform]);
 
   useEffect(() => {
-    if (!wireframeMenuOpen) return;
+    if (!wireframeMenuOpen) {
+      setWireframeFlyoutPos(null);
+      return;
+    }
+    const button = wireframeMenuRef.current;
+    if (button) {
+      const rect = button.getBoundingClientRect();
+      setWireframeFlyoutPos({ top: rect.top + rect.height / 2, left: rect.right + 10 });
+    }
     const onDocClick = (e: PointerEvent | MouseEvent) => {
-      if (wireframeMenuRef.current && !wireframeMenuRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      // Portalled to <body>, so a click inside the flyout is no longer a
+      // descendant of wireframeMenuRef — it needs its own ref checked too,
+      // or every click on a view-mode button would count as "outside".
+      if (
+        wireframeMenuRef.current && !wireframeMenuRef.current.contains(target) &&
+        wireframeFlyoutRef.current && !wireframeFlyoutRef.current.contains(target)
+      ) {
         setWireframeMenuOpen(false);
       }
     };
@@ -1893,8 +1916,14 @@ export function App() {
           >
             <WireframeIcon mode={wireframe} />
           </button>
-          {wireframeMenuOpen && (
-            <div className="tool-rail-flyout" role="menu" aria-label="View modes">
+          {wireframeMenuOpen && wireframeFlyoutPos && createPortal(
+            <div
+              ref={wireframeFlyoutRef}
+              className="tool-rail-flyout"
+              role="menu"
+              aria-label="View modes"
+              style={{ position: "fixed", top: wireframeFlyoutPos.top, left: wireframeFlyoutPos.left, transform: "translateY(-50%)" }}
+            >
               <button
                 className={wireframe === "off" ? "active" : ""}
                 onClick={() => setWireframe("off")}
@@ -1943,7 +1972,8 @@ export function App() {
                 <span className="flyout-icon"><WireframeIcon mode="transparent" /></span>
                 <span className="flyout-label">Transparent</span>
               </button>
-            </div>
+            </div>,
+            document.body,
           )}
         </div>
         {/* An action, not a mode and not a view toggle — its own group. */}
