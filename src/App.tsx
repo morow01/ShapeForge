@@ -2573,47 +2573,30 @@ export function App() {
           ) : <div className="empty-state small">Select an object to edit its dimensions and position.</div>}
         </section>
 
+        {/* Parked: selecting the wall this is meant to attach to did not work
+         *  as expected and needs a rethink, not a quick patch. Left visible-
+         *  but-disabled rather than removed so the feature is easy to pick
+         *  back up. See connectorSeam/addConnectorJoint above, still intact
+         *  and unused while this stays disabled. */}
         {selectedIds.length === 2 && (
-        <section className="tool-section connector-section">
+        <section className="tool-section connector-section paused" aria-disabled="true">
           <div className="panel-heading compact">
-            <div><h1>Add connector</h1><p>Joins two touching objects with a plug + socket pair</p></div>
+            <div><h1>Add connector</h1><p>Paused for now — coming back to this soon</p></div>
           </div>
-          {connectorSeam ? (
-            <>
-              <div className="spacing-objects">
-                <div>
-                  <span className="field-label">Plug goes on</span>
-                  <strong>{connectorSeam.plugNode.name}</strong>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setConnectorSwapped((v) => !v)}
-                  title="Swap which object gets the plug and which gets the socket"
-                >
-                  Swap
-                </button>
-                <div>
-                  <span className="field-label">Socket goes on</span>
-                  <strong>{connectorSeam.socketNode.name}</strong>
-                </div>
-              </div>
-              <button className="primary" onClick={addConnectorJoint}>
-                Add connector
-              </button>
-              <p className="hint">
-                Fuses a round-pin plug into {connectorSeam.plugNode.name} and cuts a matching socket into{" "}
-                {connectorSeam.socketNode.name}, centred on the wall between them — sized and positioned for
-                you, still editable afterwards like any other Connector. (Dovetail isn't offered here — it
-                can only be assembled by sliding it in from an open edge, which a wall's centre never is;
-                place one yourself from the Shape library if you want that at an edge you pick.)
-              </p>
-            </>
-          ) : (
-            <p className="hint">
-              These two objects don't look like they're touching flush along one axis, so there's no shared
-              wall to put a joint on.
-            </p>
-          )}
+          <div className="spacing-objects">
+            <div>
+              <span className="field-label">Plug goes on</span>
+              <strong>—</strong>
+            </div>
+            <button type="button" disabled>Swap</button>
+            <div>
+              <span className="field-label">Socket goes on</span>
+              <strong>—</strong>
+            </div>
+          </div>
+          <button className="primary" disabled onClick={addConnectorJoint}>
+            Add connector
+          </button>
         </section>
         )}
 
