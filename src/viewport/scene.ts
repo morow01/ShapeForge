@@ -490,6 +490,25 @@ function makeArrow(): THREE.Object3D {
   return group;
 }
 
+/** The 12 edges of a box, as a flat position array (2 endpoints per
+ *  segment) — what LineSegmentsGeometry.setPositions wants, and what
+ *  Box3Helper computes internally but keeps to itself. */
+function boxEdgePositions(box: THREE.Box3): number[] {
+  const { min, max } = box;
+  const corners: Vec3[] = [
+    [min.x, min.y, min.z], [max.x, min.y, min.z], [max.x, max.y, min.z], [min.x, max.y, min.z],
+    [min.x, min.y, max.z], [max.x, min.y, max.z], [max.x, max.y, max.z], [min.x, max.y, max.z],
+  ];
+  const edges: [number, number][] = [
+    [0, 1], [1, 2], [2, 3], [3, 0],
+    [4, 5], [5, 6], [6, 7], [7, 4],
+    [0, 4], [1, 5], [2, 6], [3, 7],
+  ];
+  const positions: number[] = [];
+  for (const [a, b] of edges) positions.push(...corners[a], ...corners[b]);
+  return positions;
+}
+
 function disposeArrow(handle: THREE.Object3D) {
   handle.traverse((child) => {
     const mesh = child as THREE.Mesh;
@@ -539,6 +558,26 @@ export class Scene {
   private resizeHoverIndex = -1;
   private resizeHoverMaterial = new THREE.MeshBasicMaterial({ color: 0xff9f1a, depthTest: false });
   private alignBox = new THREE.Box3Helper(new THREE.Box3(), 0x00a9b7);
+  /** Cage around whatever ISN'T the fixed object, in align mode — the fixed
+   *  one already reads as selected via alignBox hugging it tightly, but that
+   *  left the other selected object with no visible sign it was part of the
+   *  pairing at all (its own ordinary selection tint is easy to miss against
+   *  a similarly-coloured fill). Amber to read as "this one moves," the same
+   *  colour already used for the hover preview ghost.
+   *  A screen-space thick line (LineSegments2), not Box3Helper's plain
+   *  LineBasicMaterial: a 1px line at that same colour turned out to
+   *  disappear at normal zoom against a similarly-lit fill — the same
+   *  low-contrast trap the wire-outline work earlier in this session ran
+   *  into — so this reuses the already-proven-visible pixel-width line
+   *  material selectedEdges/hoverEdgeLine use for exactly that reason. */
+  private alignMovingBoxGeometry = new LineSegmentsGeometry();
+  private alignMovingBoxMaterial = new LineMaterial({
+    color: 0xff9f1a,
+    linewidth: 3,
+    depthTest: false,
+    transparent: true,
+  });
+  private alignMovingBox = new LineSegments2(this.alignMovingBoxGeometry, this.alignMovingBoxMaterial);
   private alignHandles = new THREE.Group();
   private alignHandleMeshes: THREE.Mesh[] = [];
   private alignHoverIndex = -1;
@@ -862,7 +901,14 @@ export class Scene {
     this.gizmo.addEventListener("objectChange", this.onGizmoChange);
     this.scene.add(this.gizmo.getHelper());
     this.scene.add(this.guides.group);
-    this.scene.add(this.resizeBox, this.resizeHandles, this.alignBox, this.alignHandles, this.alignPreviewGroup);
+    this.scene.add(
+      this.resizeBox,
+      this.resizeHandles,
+      this.alignBox,
+      this.alignMovingBox,
+      this.alignHandles,
+      this.alignPreviewGroup,
+    );
     this.scene.add(this.pushPullHandles);
 
     this.addLights();
@@ -1145,6 +1191,10 @@ export class Scene {
     boxMaterial.transparent = true;
     boxMaterial.opacity = 0.8;
     this.alignBox.renderOrder = 24;
+
+    this.alignMovingBox.visible = false;
+    this.alignMovingBoxMaterial.resolution.set(this.host.clientWidth, this.host.clientHeight);
+    this.alignMovingBox.renderOrder = 24;
 
     const geometry = new THREE.SphereGeometry(1, 20, 14);
     for (let axis = 0; axis < 3; axis++) {
@@ -1801,6 +1851,7 @@ export class Scene {
     this.alignBox.visible = visible;
     this.alignHandles.visible = visible;
     if (!visible) {
+      this.alignMovingBox.visible = false;
       if (this.alignHoverIndex >= 0) {
         const handle = this.alignHandleMeshes[this.alignHoverIndex];
         handle.material = handle.userData.baseMaterial as THREE.Material;
@@ -1821,6 +1872,15 @@ export class Scene {
     }
     this.alignBox.box.copy(box);
     this.alignBox.updateMatrixWorld(true);
+
+    if (fixedEntry) {
+      const movingBox = new THREE.Box3();
+      for (const { id, view } of entries) if (id !== fixedEntry.id) movingBox.expandByObject(view.group);
+      this.alignMovingBoxGeometry.setPositions(boxEdgePositions(movingBox));
+      this.alignMovingBox.visible = true;
+    } else {
+      this.alignMovingBox.visible = false;
+    }
 
     const centre = box.getCenter(new THREE.Vector3());
     const offset = Math.max(2, this.worldSnapTolerance(centre) * 3.2);
@@ -4595,6 +4655,7 @@ export class Scene {
     this.renderer.setSize(w, h);
     for (const edge of this.selectedEdges) edge.line.material.resolution.set(w, h);
     this.hoverEdgeLine?.material.resolution.set(w, h);
+    this.alignMovingBoxMaterial.resolution.set(w, h);
     if (this.camera instanceof THREE.PerspectiveCamera) {
       this.camera.aspect = w / h;
     } else {
