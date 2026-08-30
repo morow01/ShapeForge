@@ -87,6 +87,50 @@ export function makePrimitive(spec: ObjectSpec): Shape3D {
         .extrude(p.thickness) as Shape3D;
       break;
     }
+    case "connector": {
+      // Socket (female) is the SAME profile as plug (male), just grown by
+      // `clearance` before it's built — never modelled separately — so the
+      // two can never drift out of fit with each other as the shape is
+      // tuned. Growing width/height (not just width) keeps the gap uniform
+      // all the way up a dovetail's flare (see the derivation this relies
+      // on in the PR notes); growing radius/length the same way for a pin.
+      const isSocket = (p.fit ?? 0) === 1;
+      const clearance = isSocket ? Math.max(p.clearance ?? 0, 0) : 0;
+      if ((p.shape ?? 0) === 0) {
+        // Dovetail: a keystone trapezoid (X = width, Z = height) extruded
+        // along Y (the slide-together direction). Wider at the top than at
+        // the base means it can be slid into a matching socket but not
+        // pulled straight out — the socket's own top-heavy taper is what
+        // actually blocks the pull, plug and socket both need the SAME
+        // angle for their flat sides to stay parallel, so `angle` is never
+        // adjusted for clearance, only width/height are.
+        const width = Math.max(p.width, 0.01) + clearance * 2;
+        const height = Math.max(p.height, 0.01) + clearance;
+        const angle = Math.min(Math.max(p.taperAngle ?? 12, 0), 45);
+        const extra = height * Math.tan((angle * Math.PI) / 180);
+        const len = Math.max(p.length, 0.01) + clearance * 2;
+        s = draw([-width / 2, 0])
+          .lineTo([width / 2, 0])
+          .lineTo([width / 2 + extra, height])
+          .lineTo([-width / 2 - extra, height])
+          .close()
+          .sketchOnPlane("XZ")
+          .extrude(len) as Shape3D;
+      } else {
+        // Round pin: a cylinder that tapers to a point over the last
+        // `chamfer` mm — the same true-point revolve as the cone case
+        // above, just capped by a straight body instead of starting
+        // tapered from the base. Self-centers on the way into a socket
+        // even when the alignment is not perfect yet.
+        const r = Math.max(p.radius, 0.01) + clearance;
+        const len = Math.max(p.length, 0.01) + clearance;
+        const lead = Math.min(Math.max(p.chamfer ?? 0, 0), Math.max(len - 0.05, 0));
+        let pen = draw([0, 0]).lineTo([r, 0]).lineTo([r, len - lead]);
+        pen = pen.lineTo([0, len]);
+        s = pen.close().sketchOnPlane("XZ").revolve([0, 0, 1]) as Shape3D;
+      }
+      break;
+    }
   }
 
   return normalise(s) as Shape3D;

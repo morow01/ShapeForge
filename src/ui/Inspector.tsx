@@ -705,6 +705,7 @@ const DIM_AXES: Partial<Record<PrimitiveKind, Record<string, number[]>>> = {
   sphere: { radius: [0, 1, 2] },
   cone: { bottomRadius: [0, 1], topRadius: [0, 1], height: [2] },
   triangle: { thickness: [2] },
+  connector: { width: [0], length: [1], height: [2], radius: [0, 1] },
 };
 
 function ObjectParams({

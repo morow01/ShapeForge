@@ -1,7 +1,7 @@
 export { TRI_BY_SIDES, TRI_BY_ANGLES, TRI_BY_SIDE_ANGLE } from "../geometry/triangle";
 import { TRI_BY_SIDES, TRI_BY_ANGLES, TRI_BY_SIDE_ANGLE } from "../geometry/triangle";
 
-export type PrimitiveKind = "box" | "cylinder" | "sphere" | "cone" | "triangle";
+export type PrimitiveKind = "box" | "cylinder" | "sphere" | "cone" | "triangle" | "connector";
 
 export interface ParamField {
   key: string;
@@ -132,6 +132,79 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
       angle("angleRight", "Right corner", onlyIn(TRI_BY_ANGLES)),
       angle("angleApex", "Apex corner", onlyIn(TRI_BY_ANGLES)),
       dim("thickness", "Thickness"),
+    ],
+  },
+  connector: {
+    label: "Connector",
+    // Both shapes' params live in one flat dict (same pattern triangle uses
+    // across its three modes) so switching Shape or Fit never loses a value
+    // the other combination had set.
+    defaults: {
+      shape: 0, // 0 = dovetail, 1 = round pin
+      fit: 0, // 0 = plug (male), 1 = socket (female)
+      width: 14,
+      taperAngle: 12,
+      height: 6,
+      radius: 5,
+      chamfer: 1,
+      length: 12,
+      clearance: 0.15,
+    },
+    fields: [
+      {
+        key: "shape",
+        label: "Shape",
+        min: 0,
+        max: 1,
+        step: 1,
+        options: [
+          { value: 0, label: "Dovetail" },
+          { value: 1, label: "Round pin" },
+        ],
+      },
+      {
+        key: "fit",
+        label: "Fit",
+        min: 0,
+        max: 1,
+        step: 1,
+        options: [
+          { value: 0, label: "Plug (male)" },
+          { value: 1, label: "Socket (female)" },
+        ],
+      },
+      { ...dim("width", "Width"), showIf: { key: "shape", oneOf: [0] } },
+      {
+        key: "taperAngle",
+        label: "Taper angle",
+        min: 2,
+        max: 30,
+        step: 1,
+        suffix: "°",
+        noSlider: true,
+        showIf: { key: "shape", oneOf: [0] },
+      },
+      { ...dim("height", "Height"), showIf: { key: "shape", oneOf: [0] } },
+      { ...dim("radius", "Radius"), showIf: { key: "shape", oneOf: [1] } },
+      {
+        key: "chamfer",
+        label: "Tip taper",
+        min: 0,
+        max: 20,
+        step: 0.1,
+        noSlider: true,
+        showIf: { key: "shape", oneOf: [1] },
+      },
+      dim("length", "Length"),
+      {
+        key: "clearance",
+        label: "Clearance",
+        min: 0,
+        max: 2,
+        step: 0.05,
+        noSlider: true,
+        showIf: { key: "fit", oneOf: [1] },
+      },
     ],
   },
 };

@@ -2373,6 +2373,16 @@ export class Scene {
     else if (kind === "cylinder" || kind === "cone") {
       geometry = new THREE.CylinderGeometry(kind === "cone" ? p.topRadius : p.radius, kind === "cone" ? p.bottomRadius : p.radius, p.height, 32);
       geometry.rotateX(Math.PI / 2).translate(0, 0, p.height / 2);
+    } else if (kind === "connector") {
+      // Rough box/cylinder stand-ins, not the real keystone/tapered-tip
+      // profile — good enough for a drag-to-place ghost, and the real
+      // kernel-built mesh replaces it the instant the object is dropped.
+      if ((p.shape ?? 0) === 0) {
+        geometry = new THREE.BoxGeometry(p.width, p.length, p.height).translate(0, 0, p.height / 2);
+      } else {
+        geometry = new THREE.CylinderGeometry(p.radius, p.radius, p.length, 24);
+        geometry.rotateX(Math.PI / 2).translate(0, 0, p.length / 2);
+      }
     } else {
       const x = (p.sideLeft ** 2 + p.base ** 2 - p.sideRight ** 2) / (2 * p.base);
       const y = Math.sqrt(Math.max(0, p.sideLeft ** 2 - x ** 2));

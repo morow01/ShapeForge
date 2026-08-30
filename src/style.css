@@ -270,6 +270,7 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 .shape-sphere { border-radius: 50%; }
 .shape-cone { width: 0; height: 0; background: transparent; border-left: 15px solid transparent; border-right: 15px solid transparent; border-bottom: 29px solid #43b5df; box-shadow: none; }
 .shape-triangle { clip-path: polygon(0 100%, 50% 0, 100% 100%); }
+.shape-connector { clip-path: polygon(32% 100%, 68% 100%, 100% 0, 0 0); }
 .import-btn { width: 100%; margin-top: 9px; color: #087a79; border-style: dashed; border-color: #74c9c7; }
 
 .tree { flex: 1; margin: 0; padding: 0; list-style: none; }
