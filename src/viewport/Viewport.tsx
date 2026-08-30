@@ -12,6 +12,10 @@ interface Props {
   toolMode: ToolMode;
   placementKind: PrimitiveKind | null;
   resizeConstrained: boolean;
+  /** The Exact Spacing panel's "stays fixed" object id, when exactly two
+   *  objects are selected — see Scene.alignFixedId. Null the rest of the
+   *  time, including with any other selection count. */
+  alignFixedId: string | null;
   /** Wireframe display mode: off, clean edges, full tessellated mesh, or xray. */
   wireframe: WireframeMode;
   /** Smart Guides on/off — snapping while dragging. */
@@ -84,6 +88,7 @@ export function Viewport(props: Props) {
     scene.setToolMode(latest.current.toolMode);
     scene.setPlacementPreview(latest.current.placementKind);
     scene.setResizeConstrained(latest.current.resizeConstrained);
+    scene.setAlignFixedId(latest.current.alignFixedId);
     scene.setWireframe(latest.current.wireframe);
     scene.setSnapEnabled(latest.current.snapEnabled);
 
@@ -123,6 +128,10 @@ export function Viewport(props: Props) {
   useEffect(() => {
     sceneRef.current?.setResizeConstrained(resizeConstrained);
   }, [resizeConstrained]);
+
+  useEffect(() => {
+    sceneRef.current?.setAlignFixedId(props.alignFixedId);
+  }, [props.alignFixedId]);
 
   useEffect(() => {
     sceneRef.current?.setWireframe(wireframe);

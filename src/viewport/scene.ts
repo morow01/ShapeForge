@@ -684,6 +684,14 @@ export class Scene {
     | ((id: string, patch: { position?: Vec3; rotation?: Vec3; scale?: Vec3 }) => void)
     | null = null;
   onAlignObjects: ((updates: { id: string; position: Vec3 }[]) => void) | null = null;
+  /** The Exact Spacing panel's "stays fixed" object, when exactly two are
+   *  selected. alignSelection() honours it: with a fixed object designated,
+   *  a clicked align dot targets THAT object's own edge/centre rather than
+   *  the pair's combined bounding box, so it is the one that actually never
+   *  moves — matching what the panel's own label already promises, instead
+   *  of the dot aligning both objects to a shared line that generally sits
+   *  somewhere between them. */
+  private alignFixedId: string | null = null;
   /** Shape Builder: every region and whether it is currently in the shape.
    *  The panel needs the whole list, not a count: a region enclosed inside
    *  another — a sphere's overlap with the box around it — has no visible
@@ -1144,6 +1152,10 @@ export class Scene {
 
   setResizeConstrained(value: boolean) {
     this.resizeConstrained = value;
+  }
+
+  setAlignFixedId(id: string | null) {
+    this.alignFixedId = id;
   }
 
   /** Shares the part's own face geometry — never its own copy, so it stays in
@@ -1852,12 +1864,21 @@ export class Scene {
     if (selected.length < 2) return;
 
     const boxes = selected.map(({ view }) => new THREE.Box3().setFromObject(view.group));
-    const overall = boxes.reduce((all, box) => all.union(box.clone()), new THREE.Box3());
+    // With exactly two selected and one of them designated "stays fixed" in
+    // the Exact Spacing panel, align to THAT object's own edge/centre rather
+    // than the pair's combined box — the combined box generally sits
+    // somewhere between the two, which moved the "fixed" one too and made
+    // the panel's own label a lie. Otherwise (no pairing, or 3+ selected,
+    // where "fixed" has no meaning) keep the original shared-box behaviour.
+    const fixedIndex = selected.length === 2
+      ? selected.findIndex((s) => s.id === this.alignFixedId)
+      : -1;
+    const reference = fixedIndex >= 0 ? boxes[fixedIndex] : boxes.reduce((all, box) => all.union(box.clone()), new THREE.Box3());
     const target = anchor === "min"
-      ? overall.min.getComponent(axis)
+      ? reference.min.getComponent(axis)
       : anchor === "max"
-        ? overall.max.getComponent(axis)
-        : overall.getCenter(new THREE.Vector3()).getComponent(axis);
+        ? reference.max.getComponent(axis)
+        : reference.getCenter(new THREE.Vector3()).getComponent(axis);
 
     const updates: { id: string; position: Vec3 }[] = [];
     selected.forEach(({ id, view, node }, index) => {

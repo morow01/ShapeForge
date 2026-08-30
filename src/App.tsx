@@ -2039,6 +2039,7 @@ export function App() {
           toolMode={toolMode}
           placementKind={pendingPrimitive}
           resizeConstrained={resizeConstrained}
+          alignFixedId={spacingSelection ? spacingSelection.fixedNode.id : null}
           wireframe={wireframe}
           snapEnabled={snapEnabled}
           onSceneReady={(scene) => { sceneRef.current = scene; }}
