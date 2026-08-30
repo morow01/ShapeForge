@@ -558,26 +558,29 @@ export class Scene {
   private resizeHoverIndex = -1;
   private resizeHoverMaterial = new THREE.MeshBasicMaterial({ color: 0xff9f1a, depthTest: false });
   private alignBox = new THREE.Box3Helper(new THREE.Box3(), 0x00a9b7);
-  /** Cage around whatever ISN'T the fixed object, in align mode — the fixed
-   *  one already reads as selected via alignBox hugging it tightly, but that
-   *  left the other selected object with no visible sign it was part of the
-   *  pairing at all (its own ordinary selection tint is easy to miss against
-   *  a similarly-coloured fill). Amber to read as "this one moves," the same
-   *  colour already used for the hover preview ghost.
-   *  A screen-space thick line (LineSegments2), not Box3Helper's plain
-   *  LineBasicMaterial: a 1px line at that same colour turned out to
+  /** One cage per selected object that ISN'T the fixed one (every selected
+   *  object, when there is no fixed one — 3+ selected, where "fixed" has no
+   *  meaning). The fixed object already reads as selected via alignBox
+   *  hugging it tightly, but everything else had no individual sign it was
+   *  part of the pairing at all: its own ordinary selection tint is easy to
+   *  miss against a similarly-lit fill of its own colour, and with 3+
+   *  selected the one shared alignBox cage around their union does not say
+   *  which objects are inside it. Amber to read as "this one moves," the
+   *  same colour already used for the hover preview ghost.
+   *  Pooled LineSegments2 with a real pixel linewidth, not Box3Helper's
+   *  plain LineBasicMaterial: a 1px line at that same colour turned out to
    *  disappear at normal zoom against a similarly-lit fill — the same
    *  low-contrast trap the wire-outline work earlier in this session ran
    *  into — so this reuses the already-proven-visible pixel-width line
    *  material selectedEdges/hoverEdgeLine use for exactly that reason. */
-  private alignMovingBoxGeometry = new LineSegmentsGeometry();
   private alignMovingBoxMaterial = new LineMaterial({
     color: 0xff9f1a,
     linewidth: 3,
     depthTest: false,
     transparent: true,
   });
-  private alignMovingBox = new LineSegments2(this.alignMovingBoxGeometry, this.alignMovingBoxMaterial);
+  private alignMovingBoxGroup = new THREE.Group();
+  private alignMovingBoxes: LineSegments2[] = [];
   private alignHandles = new THREE.Group();
   private alignHandleMeshes: THREE.Mesh[] = [];
   private alignHoverIndex = -1;
@@ -905,7 +908,7 @@ export class Scene {
       this.resizeBox,
       this.resizeHandles,
       this.alignBox,
-      this.alignMovingBox,
+      this.alignMovingBoxGroup,
       this.alignHandles,
       this.alignPreviewGroup,
     );
@@ -1192,9 +1195,7 @@ export class Scene {
     boxMaterial.opacity = 0.8;
     this.alignBox.renderOrder = 24;
 
-    this.alignMovingBox.visible = false;
     this.alignMovingBoxMaterial.resolution.set(this.host.clientWidth, this.host.clientHeight);
-    this.alignMovingBox.renderOrder = 24;
 
     const geometry = new THREE.SphereGeometry(1, 20, 14);
     for (let axis = 0; axis < 3; axis++) {
@@ -1851,7 +1852,7 @@ export class Scene {
     this.alignBox.visible = visible;
     this.alignHandles.visible = visible;
     if (!visible) {
-      this.alignMovingBox.visible = false;
+      this.setAlignMovingBoxes([]);
       if (this.alignHoverIndex >= 0) {
         const handle = this.alignHandleMeshes[this.alignHoverIndex];
         handle.material = handle.userData.baseMaterial as THREE.Material;
@@ -1873,14 +1874,15 @@ export class Scene {
     this.alignBox.box.copy(box);
     this.alignBox.updateMatrixWorld(true);
 
-    if (fixedEntry) {
-      const movingBox = new THREE.Box3();
-      for (const { id, view } of entries) if (id !== fixedEntry.id) movingBox.expandByObject(view.group);
-      this.alignMovingBoxGeometry.setPositions(boxEdgePositions(movingBox));
-      this.alignMovingBox.visible = true;
-    } else {
-      this.alignMovingBox.visible = false;
-    }
+    // One box per object that isn't the fixed one — just the single moving
+    // object when there is a fixed pairing, or every selected object
+    // individually when there isn't (3+ selected, where alignBox's own cage
+    // is the whole union and says nothing about which objects are inside).
+    this.setAlignMovingBoxes(
+      entries
+        .filter((e) => e.id !== fixedEntry?.id)
+        .map((e) => new THREE.Box3().setFromObject(e.view.group)),
+    );
 
     const centre = box.getCenter(new THREE.Vector3());
     const offset = Math.max(2, this.worldSnapTolerance(centre) * 3.2);
@@ -1893,7 +1895,7 @@ export class Scene {
       this.alignHandleMeshes[3 + i].position.set(box.min.x - offset, ys[i], box.min.z);
       this.alignHandleMeshes[6 + i].position.set(box.max.x + offset, box.max.y, zs[i]);
     }
-    const handleSize = Math.max(0.75, this.worldSnapTolerance(centre) * 1.05);
+    const handleSize = Math.max(0.55, this.worldSnapTolerance(centre) * 0.75);
     for (let i = 0; i < this.alignHandleMeshes.length; i++) {
       const handle = this.alignHandleMeshes[i];
       handle.userData.baseScale = handleSize;
@@ -2014,6 +2016,26 @@ export class Scene {
     if (!this.alignPreviewMeshes.length) return;
     for (const mesh of this.alignPreviewMeshes) this.alignPreviewGroup.remove(mesh);
     this.alignPreviewMeshes = [];
+  }
+
+  /** Resizes the amber-outline pool to exactly one box per entry, reusing
+   *  existing LineSegments2 instances (and their GPU buffers) rather than
+   *  rebuilding the pool from scratch on every overlay update. */
+  private setAlignMovingBoxes(boxes: THREE.Box3[]) {
+    while (this.alignMovingBoxes.length < boxes.length) {
+      const line = new LineSegments2(new LineSegmentsGeometry(), this.alignMovingBoxMaterial);
+      line.renderOrder = 24;
+      this.alignMovingBoxGroup.add(line);
+      this.alignMovingBoxes.push(line);
+    }
+    while (this.alignMovingBoxes.length > boxes.length) {
+      const line = this.alignMovingBoxes.pop()!;
+      this.alignMovingBoxGroup.remove(line);
+      line.geometry.dispose();
+    }
+    boxes.forEach((box, i) => {
+      this.alignMovingBoxes[i].geometry.setPositions(boxEdgePositions(box));
+    });
   }
 
   /** TinkerCAD-style: a faint ghost at wherever the hovered dot would
