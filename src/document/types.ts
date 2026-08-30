@@ -46,12 +46,23 @@ const onlyIn = (...modes: number[]) => ({ key: "mode", oneOf: modes });
 export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
   box: {
     label: "Box",
-    defaults: { width: 20, depth: 20, height: 20, fillet: 0 },
+    defaults: { width: 20, depth: 20, height: 20, fillet: 0, filletMode: 0 },
     fields: [
       dim("width", "Width"),
       dim("depth", "Depth"),
       dim("height", "Height"),
       { key: "fillet", label: "Corner radius", min: 0, max: 500, step: 0.5 },
+      {
+        key: "filletMode",
+        label: "Round",
+        min: 0,
+        max: 1,
+        step: 1,
+        options: [
+          { value: 0, label: "Side edges" },
+          { value: 1, label: "Every edge" },
+        ],
+      },
     ],
   },
   cylinder: {

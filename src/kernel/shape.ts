@@ -46,11 +46,18 @@ export function makePrimitive(spec: ObjectSpec): Shape3D {
   switch (spec.kind) {
     case "box": {
       s = makeBaseBox(p.width, p.depth, p.height);
+      const everywhere = (p.filletMode ?? 0) === 1;
       // Clamp so the fillet can never exceed half the smallest side, which
-      // would make OCCT throw instead of returning a shape.
-      const maxR = Math.min(p.width, p.depth) / 2 - 0.01;
+      // would make OCCT throw instead of returning a shape. Rounding every
+      // edge also rounds the top/bottom rims, so height limits it too.
+      const maxR = everywhere
+        ? Math.min(p.width, p.depth, p.height) / 2 - 0.01
+        : Math.min(p.width, p.depth) / 2 - 0.01;
       const r = Math.min(p.fillet ?? 0, maxR);
-      if (r > 0) s = s.fillet(r, (e) => e.inDirection("Z"));
+      // Side edges only (the original behaviour) vs. every edge, including
+      // the top and bottom rims — a fully rounded box, not just a rounded
+      // rectangle extruded straight up.
+      if (r > 0) s = everywhere ? s.fillet(r) : s.fillet(r, (e) => e.inDirection("Z"));
       break;
     }
     case "cylinder":
