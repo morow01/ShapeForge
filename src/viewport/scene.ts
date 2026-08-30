@@ -36,6 +36,15 @@ const DEG = Math.PI / 180;
  *  push/pull arrow's own hover already uses. A colour change alone read as
  *  too subtle to notice; the earlier 1.35x read as too much. */
 const HOVER_GROW = 1.18;
+/** Floor under a handle's world-space size — guards only the degenerate
+ *  case (camera sitting on top of its own target), not a "don't get too
+ *  small" minimum. worldSnapTolerance already converts a fixed on-screen
+ *  size into whatever world size currently maps to it, which is what keeps
+ *  a handle the same number of pixels at any zoom; a real minimum here
+ *  would defeat that the moment zooming in pushed the true size below it,
+ *  and the handle would stop shrinking while the model kept growing around
+ *  it — reported as handles "zooming in too" when the camera zoomed in. */
+const MIN_HANDLE_WORLD = 0.02;
 /** Minimum gap between live push/pull preview rebuilds during a drag — each
  *  one is a real OCCT/manifold call, not free, so this bounds how often a
  *  fast mouse-move can ask for a new one. Short enough to read as live. */
@@ -1599,7 +1608,16 @@ export class Scene {
     this.resizeHandleMeshes[11].position.set(centre.x, max.y, min.z);
     this.resizeHandleMeshes[12].position.set(centre.x, centre.y, min.z);
     this.resizeHandleMeshes[13].position.set(centre.x, centre.y, max.z);
-    const handleSize = Math.max(0.6, this.worldSnapTolerance(centre) * 0.9);
+    // worldSnapTolerance already converts a fixed SCREEN size into whatever
+    // world size currently maps to it — that's what keeps the dot the same
+    // number of pixels at any zoom. A `Math.max(0.6, …)` floor used to sit
+    // here as a "never too small" guard, but a floor is a WORLD-space
+    // minimum: once zoomed in close enough that the true constant-pixel
+    // size drops under it, the dot stops shrinking while everything else on
+    // screen keeps growing, so it visibly balloons the closer the camera
+    // gets. MIN_HANDLE_WORLD only guards the literal-zero case (camera at
+    // the target), not a "keep it visible" floor.
+    const handleSize = Math.max(MIN_HANDLE_WORLD, this.worldSnapTolerance(centre) * 0.9);
     for (let i = 0; i < this.resizeHandleMeshes.length; i++) {
       const handle = this.resizeHandleMeshes[i];
       handle.userData.baseScale = handleSize;
@@ -1856,7 +1874,9 @@ export class Scene {
       this.alignHandleMeshes[3 + i].position.set(box.min.x - offset, ys[i], box.min.z);
       this.alignHandleMeshes[6 + i].position.set(box.max.x + offset, box.max.y, zs[i]);
     }
-    const handleSize = Math.max(0.55, this.worldSnapTolerance(centre) * 0.75);
+    // See the matching comment in updateResizeOverlay — a world-space floor
+    // here breaks the constant-screen-size these dots are meant to have.
+    const handleSize = Math.max(MIN_HANDLE_WORLD, this.worldSnapTolerance(centre) * 0.75);
     for (let i = 0; i < this.alignHandleMeshes.length; i++) {
       const handle = this.alignHandleMeshes[i];
       handle.userData.baseScale = handleSize;
@@ -2104,7 +2124,7 @@ export class Scene {
     const handle = this.pushPullHandleMeshes[0];
     const at = this.kernelLocalToWorld(view, face.point);
     const normal = this.kernelNormalToWorld(view, face.normal);
-    const scale = Math.max(0.65, this.worldSnapTolerance(at) * 1.15);
+    const scale = Math.max(MIN_HANDLE_WORLD, this.worldSnapTolerance(at) * 1.15);
     handle.position.copy(at).addScaledVector(normal, scale * 0.2);
     handle.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), normal);
     handle.scale.setScalar(scale * (this.pushPullHandleHovered ? 1.18 : 1));
@@ -2438,7 +2458,7 @@ export class Scene {
 
     // This temporary arrow follows the drag even when it started away from the
     // selected face's centre. The normal pooled arrow is restored on release.
-    const scale = Math.max(0.65, this.worldSnapTolerance(at) * 1.15);
+    const scale = Math.max(MIN_HANDLE_WORLD, this.worldSnapTolerance(at) * 1.15);
     const handle = makeArrow();
     handle.position.copy(at).addScaledVector(worldNormal, scale * 0.2);
     handle.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), worldNormal);
