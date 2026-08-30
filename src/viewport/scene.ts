@@ -1784,12 +1784,20 @@ export class Scene {
     this.renderer.domElement.style.cursor = next < 0 ? "" : next < 8 ? "nwse-resize" : "pointer";
   }
 
-  /** Combined multi-selection cage with TinkerCAD-style min/centre/max dots. */
+  /** Cage with TinkerCAD-style min/centre/max dots — around the pair's
+   *  combined extent normally, but around just the Exact Spacing panel's
+   *  fixed object when one is designated. Dots positioned off the combined
+   *  box put "align to this object's own edge" out of reach the moment the
+   *  OTHER object happened to stick out further — there was no dot left
+   *  sitting on the fixed object at all for that axis, only on whichever
+   *  object was currently the extreme. Since a fixed object is exactly what
+   *  alignMoves already targets instead of the union, the dots now show
+   *  where that reference actually is, not the union's own extent. */
   private updateAlignOverlay() {
-    const views = this.selectedIds
-      .map((id) => this.parts.get(id))
-      .filter((view): view is PartView => !!view && view.group.visible);
-    const visible = this.toolMode === "align" && views.length >= 2 && !this.showResult;
+    const entries = this.selectedIds
+      .map((id) => ({ id, view: this.parts.get(id) }))
+      .filter((item): item is { id: string; view: PartView } => !!item.view && item.view.group.visible);
+    const visible = this.toolMode === "align" && entries.length >= 2 && !this.showResult;
     this.alignBox.visible = visible;
     this.alignHandles.visible = visible;
     if (!visible) {
@@ -1802,10 +1810,14 @@ export class Scene {
       return;
     }
 
-    const box = new THREE.Box3();
-    for (const view of views) {
-      view.group.updateWorldMatrix(true, true);
-      box.expandByObject(view.group);
+    for (const { view } of entries) view.group.updateWorldMatrix(true, true);
+    const fixedEntry = entries.length === 2 ? entries.find((e) => e.id === this.alignFixedId) : undefined;
+    let box: THREE.Box3;
+    if (fixedEntry) {
+      box = new THREE.Box3().setFromObject(fixedEntry.view.group);
+    } else {
+      box = new THREE.Box3();
+      for (const { view } of entries) box.expandByObject(view.group);
     }
     this.alignBox.box.copy(box);
     this.alignBox.updateMatrixWorld(true);
