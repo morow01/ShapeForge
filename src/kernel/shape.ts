@@ -1150,8 +1150,19 @@ function combineShape(
       return combineMesh(op, meshed);
     }
   }
-  // Everything that went into the fuse has to still be in it.
-  if (!unionKeptEverything(result, solids.map((c) => c.solid))) {
+  // Everything that went into the fuse has to still be in it. A dropped
+  // operand is one failure mode and unionKeptEverything catches it by
+  // bounds — but a self-intersecting fuse can keep the full envelope while
+  // folding surface back on itself, which bounds cannot see at all: the
+  // result still reaches every edge the operands did, it just measures
+  // LESS material than its largest single operand, which a union can never
+  // legitimately do. suspicious() is that second, volume-based check —
+  // reported on a rotated filleted box unioned with a plain box, which
+  // fused into exactly this kind of invalid solid on every attempt (not
+  // intermittently, so retrying the same OCCT call alone never helped) and
+  // surfaced only as "the group vanished, undo and retry" with nothing a
+  // retry could actually fix.
+  if (!unionKeptEverything(result, solids.map((c) => c.solid)) || suspicious("union", result, solids)) {
     const viaMesh = combineMesh("union", meshedAll());
     if (viaMesh) return viaMesh;
   }
