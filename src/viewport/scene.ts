@@ -565,8 +565,10 @@ export class Scene {
    *  part of the pairing at all: its own ordinary selection tint is easy to
    *  miss against a similarly-lit fill of its own colour, and with 3+
    *  selected the one shared alignBox cage around their union does not say
-   *  which objects are inside it. Amber to read as "this one moves," the
-   *  same colour already used for the hover preview ghost.
+   *  which objects are inside it. Same teal as alignBox — a first pass
+   *  tried amber specifically to read as "this one moves," but that made
+   *  the pairing look like two different kinds of selection instead of one:
+   *  every selected object gets the same plain outline colour.
    *  Pooled LineSegments2 with a real pixel linewidth, not Box3Helper's
    *  plain LineBasicMaterial: a 1px line at that same colour turned out to
    *  disappear at normal zoom against a similarly-lit fill — the same
@@ -574,7 +576,7 @@ export class Scene {
    *  into — so this reuses the already-proven-visible pixel-width line
    *  material selectedEdges/hoverEdgeLine use for exactly that reason. */
   private alignMovingBoxMaterial = new LineMaterial({
-    color: 0xff9f1a,
+    color: 0x00a9b7,
     linewidth: 3,
     depthTest: false,
     transparent: true,
