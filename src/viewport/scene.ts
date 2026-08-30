@@ -529,6 +529,8 @@ export class Scene {
   private alignBox = new THREE.Box3Helper(new THREE.Box3(), 0x00a9b7);
   private alignHandles = new THREE.Group();
   private alignHandleMeshes: THREE.Mesh[] = [];
+  private alignHoverIndex = -1;
+  private alignHoverMaterial = new THREE.MeshBasicMaterial({ color: 0x00a9b7, depthTest: false });
   /** One arrow on the explicitly selected planar face — push/pull. */
   private pushPullHandles = new THREE.Group();
   private pushPullHandleMeshes: THREE.Object3D[] = [];
@@ -1131,6 +1133,7 @@ export class Scene {
         );
         handle.userData.alignAxis = axis;
         handle.userData.alignAnchor = anchor;
+        handle.userData.baseMaterial = handle.material;
         handle.renderOrder = 25;
         this.alignHandles.add(handle);
         this.alignHandleMeshes.push(handle);
@@ -1760,7 +1763,14 @@ export class Scene {
     const visible = this.toolMode === "align" && views.length >= 2 && !this.showResult;
     this.alignBox.visible = visible;
     this.alignHandles.visible = visible;
-    if (!visible) return;
+    if (!visible) {
+      if (this.alignHoverIndex >= 0) {
+        const handle = this.alignHandleMeshes[this.alignHoverIndex];
+        handle.material = handle.userData.baseMaterial as THREE.Material;
+        this.alignHoverIndex = -1;
+      }
+      return;
+    }
 
     const box = new THREE.Box3();
     for (const view of views) {
@@ -1782,7 +1792,44 @@ export class Scene {
       this.alignHandleMeshes[6 + i].position.set(box.max.x + offset, box.max.y, zs[i]);
     }
     const handleSize = Math.max(0.75, this.worldSnapTolerance(centre) * 1.05);
-    for (const handle of this.alignHandleMeshes) handle.scale.setScalar(handleSize);
+    for (let i = 0; i < this.alignHandleMeshes.length; i++) {
+      const handle = this.alignHandleMeshes[i];
+      handle.userData.baseScale = handleSize;
+      handle.scale.setScalar(handleSize * (i === this.alignHoverIndex ? 1.35 : 1));
+    }
+  }
+
+  /** Same nearest-on-screen hover as the resize corners (updateResizeHover):
+   *  highlights whichever align dot the pointer is closest to, without
+   *  requiring a pixel-perfect hit on a handle rendered at world scale. */
+  private updateAlignHover(e: PointerEvent) {
+    let next = -1;
+    if (this.alignHandles.visible) {
+      const rect = this.renderer.domElement.getBoundingClientRect();
+      let nearest = 16;
+      for (let i = 0; i < this.alignHandleMeshes.length; i++) {
+        const p = this.alignHandleMeshes[i].position.clone().project(this.camera);
+        const x = rect.left + ((p.x + 1) / 2) * rect.width;
+        const y = rect.top + ((1 - p.y) / 2) * rect.height;
+        const distance = Math.hypot(e.clientX - x, e.clientY - y);
+        if (distance < nearest) { nearest = distance; next = i; }
+      }
+    }
+    if (next === this.alignHoverIndex) return;
+    if (this.alignHoverIndex >= 0) {
+      const old = this.alignHandleMeshes[this.alignHoverIndex];
+      old.material = old.userData.baseMaterial as THREE.Material;
+      old.scale.setScalar(old.userData.baseScale ?? 1);
+    }
+    this.alignHoverIndex = next;
+    if (next >= 0) {
+      const handle = this.alignHandleMeshes[next];
+      handle.material = this.alignHoverMaterial;
+      handle.scale.setScalar((handle.userData.baseScale ?? 1) * 1.35);
+    }
+    if (this.alignHandles.visible) {
+      this.renderer.domElement.style.cursor = next < 0 ? "" : "pointer";
+    }
   }
 
   private beginAlign(e: PointerEvent): boolean {
@@ -3923,6 +3970,7 @@ export class Scene {
     if (!g) {
       this.updateFaceHover(e);
       this.updateResizeHover(e);
+      this.updateAlignHover(e);
       return;
     }
 
