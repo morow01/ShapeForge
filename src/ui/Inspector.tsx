@@ -363,7 +363,7 @@ export function Inspector({
                 return (
                   <Field
                     key={label}
-                    field={{ key: label, label, min: 0.1, max: maxVal, step: 0.5 }}
+                    field={{ key: label, label, min: 0.1, max: maxVal, step: 0.5, noSlider: true }}
                     value={currentVal}
                     onChange={(v) => {
                       if (!Number.isFinite(v) || v <= 0) return;
@@ -388,7 +388,7 @@ export function Inspector({
                 return (
                   <Field
                     key={label}
-                    field={{ key: label, label, min: 0.1, max: maxVal, step: 0.5 }}
+                    field={{ key: label, label, min: 0.1, max: maxVal, step: 0.5, noSlider: true }}
                     value={currentVal}
                     onChange={(v) => {
                       if (!Number.isFinite(v) || v <= 0) return;
@@ -972,23 +972,30 @@ function Field({
           </button>
         )}
       </div>
-      <div className="field-row">
+      <div className={`field-row${field.noSlider ? " no-slider" : ""}`}>
         {/* A slider sweep and a typing session are each one undo step, not one
-            per pixel or per keystroke. */}
-        <input
-          type="range"
-          min={field.min}
-          max={field.max}
-          step={field.step}
-          value={value}
-          disabled={disabled}
-          title={disabled ? "Constrained by the other 2 locked angles (sum is 180°)" : undefined}
-          onPointerDown={beginHistoryBatch}
-          onPointerUp={endHistoryBatch}
-          onKeyDown={beginHistoryBatch}
-          onKeyUp={endHistoryBatch}
-          onChange={(e) => onChange(Number(e.target.value))}
-        />
+            per pixel or per keystroke. Skipped entirely for a precise
+            structural dimension (width, radius, thickness, …) — see
+            ParamField.noSlider's own doc comment for why a drag-to-
+            approximate control actively fights typing the exact value a
+            print needs, unlike a proportional/aesthetic field like corner
+            radius, which keeps it. */}
+        {!field.noSlider && (
+          <input
+            type="range"
+            min={field.min}
+            max={field.max}
+            step={field.step}
+            value={value}
+            disabled={disabled}
+            title={disabled ? "Constrained by the other 2 locked angles (sum is 180°)" : undefined}
+            onPointerDown={beginHistoryBatch}
+            onPointerUp={endHistoryBatch}
+            onKeyDown={beginHistoryBatch}
+            onKeyUp={endHistoryBatch}
+            onChange={(e) => onChange(Number(e.target.value))}
+          />
+        )}
         <input
           className="num"
           type="number"

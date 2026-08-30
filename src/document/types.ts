@@ -15,6 +15,16 @@ export interface ParamField {
   showIf?: { key: string; oneOf: number[] };
   /** Appended to the numeric input label, e.g. "°". */
   suffix?: string;
+  /** True hides the range slider, leaving just the number field. Set on
+   *  precise structural dimensions (width, radius, thickness, …) — a
+   *  drag-to-approximate slider actively fights typing an exact value a
+   *  print needs to fit something, and a 1000mm-range track makes every
+   *  pixel of drag worth several millimetres besides. Left on (the
+   *  default) for a proportional/aesthetic parameter like corner radius or
+   *  a triangle's angles, where dragging to see the shape update live is
+   *  actually the point and being a fraction of a unit off rarely matters
+   *  the way a structural dimension does. */
+  noSlider?: boolean;
 }
 
 export interface PrimitiveDef {
@@ -29,6 +39,7 @@ const dim = (key: string, label: string, max = 1000): ParamField => ({
   min: 1,
   max,
   step: 0.5,
+  noSlider: true,
 });
 
 const angle = (key: string, label: string, showIf?: ParamField["showIf"]): ParamField => ({
@@ -79,8 +90,8 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
     label: "Cone",
     defaults: { bottomRadius: 10, topRadius: 0, height: 20 },
     fields: [
-      { key: "bottomRadius", label: "Bottom radius", min: 0, max: 1000, step: 0.5 },
-      { key: "topRadius", label: "Top radius", min: 0, max: 1000, step: 0.5 },
+      { key: "bottomRadius", label: "Bottom radius", min: 0, max: 1000, step: 0.5, noSlider: true },
+      { key: "topRadius", label: "Top radius", min: 0, max: 1000, step: 0.5, noSlider: true },
       dim("height", "Height"),
     ],
   },

@@ -648,6 +648,7 @@ select.num { height: 31px; }
 .field-row input[type="range"] { flex: 1; min-width: 0; accent-color: #00a7a5; }
 .field-row input[type="range"]:disabled, .field-row .num:disabled { opacity: 0.6; cursor: not-allowed; background: #f0f4f7; }
 .field-row .num { width: 68px; flex: none; }
+.field-row.no-slider .num { width: auto; flex: 1; }
 
 .triangle-corner-badge {
   position: absolute;
