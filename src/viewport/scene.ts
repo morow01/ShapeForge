@@ -422,7 +422,12 @@ function syncKernelGeometry(mesh: KernelMesh, previous: ThreeGeometry[] = []): T
   faces.computeBoundingBox();
 
   const lines = new THREE.BufferGeometry();
-  lines.setAttribute("position", new THREE.BufferAttribute(new Float32Array(), 3));
+  const linePositions =
+    mesh.edges.lines instanceof Float32Array
+      ? mesh.edges.lines
+      : Float32Array.from(mesh.edges.lines);
+  lines.setAttribute("position", new THREE.BufferAttribute(linePositions, 3));
+  for (const group of mesh.edges.edgeGroups) lines.addGroup(group.start, group.count, 0);
   return [{ faces, lines }];
 }
 
@@ -1423,6 +1428,17 @@ export class Scene {
           ? MATERIALS.wireSelected
           : MATERIALS.wire;
       view.wire.material = [wireBase, MATERIALS.edgeHighlight];
+      // A crease line sits exactly on the surface it borders. For an OCCT
+      // part its edge tessellation comes from an independent pass over the
+      // analytic curve, so it rarely lands on the exact same float as the
+      // face mesh and depth-tests past it by accident. A manifold-tessellated
+      // part's edge is built from the very same vertices as its faces —
+      // truly coincident — and at equal depth, WHICHEVER of the two draws
+      // second simply overwrites the other; the tie is otherwise decided by
+      // material/object id, not by which one a person would want on top.
+      // Ordering the wire strictly after its own mesh, every time, makes
+      // "the line wins" the rule instead of an accident of the OCCT case.
+      view.wire.renderOrder = view.mesh.renderOrder + 1;
 
       const hasActiveResult = this.showResult && !!this.resultView;
       view.occluder.visible = (isEdgesOnly || isMesh) && !hasActiveResult;

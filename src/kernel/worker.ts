@@ -168,6 +168,7 @@ function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdg
     return { normal, plane: normal[0] * raw.vertices[ia] + normal[1] * raw.vertices[ia + 1] + normal[2] * raw.vertices[ia + 2] };
   });
   const byEdge = new Map<string, number[]>();
+  const edgeEndpoints = new Map<string, [number, number]>();
   const positionKey = (vertex: number) => {
     const i = vertex * 3;
     // Manifold may duplicate a vertex for normals/material runs even though
@@ -185,7 +186,32 @@ function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdg
       const list = byEdge.get(key) ?? [];
       list.push(triangle);
       byEdge.set(key, list);
+      if (!edgeEndpoints.has(key)) edgeEndpoints.set(key, [a, b]);
     }
+  }
+
+  // A wire outline for the viewport: real feature edges only, the same way
+  // an OCCT B-Rep's silhouette shows just its actual edges, not every
+  // triangle seam. An edge is drawn where it bounds only one triangle (the
+  // mesh's own open boundary) or where its two triangles' normals disagree
+  // by more than CREASE_ANGLE — the identical test used below to decide
+  // where two facets share one smoothed vertex, so a fillet that stays
+  // smooth-shaded also stays edge-free, and only a genuine crease (a box's
+  // corners, a fillet's tangent line into a flat face) gets a line.
+  const edgeLines: number[] = [];
+  const edgeGroups: { start: number; count: number; edgeId: number }[] = [];
+  for (const [key, triangles] of byEdge) {
+    const isCrease = triangles.length !== 2 || (() => {
+      const n0 = descriptions[triangles[0]].normal;
+      const n1 = descriptions[triangles[1]].normal;
+      return n0[0] * n1[0] + n0[1] * n1[1] + n0[2] * n1[2] < CREASE_COSINE;
+    })();
+    if (!isCrease) continue;
+    const [a, b] = edgeEndpoints.get(key)!;
+    const start = edgeLines.length / 3;
+    edgeLines.push(raw.vertices[a * 3], raw.vertices[a * 3 + 1], raw.vertices[a * 3 + 2]);
+    edgeLines.push(raw.vertices[b * 3], raw.vertices[b * 3 + 1], raw.vertices[b * 3 + 2]);
+    edgeGroups.push({ start, count: 2, edgeId: edgeGroups.length });
   }
   // Manifold hands back one normal per FACET. On a flat face that is right;
   // on anything curved it means every triangle is shaded as its own little
@@ -268,7 +294,7 @@ function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdg
       normals: Float32Array.from(smoothNormals),
       faceGroups,
     },
-    edges: { lines: [], edgeGroups: [] },
+    edges: { lines: Float32Array.from(edgeLines), edgeGroups },
   };
 }
 
