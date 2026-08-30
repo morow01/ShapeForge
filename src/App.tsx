@@ -51,7 +51,7 @@ import {
   localMeshBounds,
   mergeBinarySTLs,
 } from "./export/stl";
-import { positionWithReferenceGap } from "./snapping/spacing";
+import { findTouchingSeam, positionWithReferenceGap } from "./snapping/spacing";
 import type { SnapAnchor, SnapAxis } from "./snapping/snap";
 
 /** Only the fields the kernel cares about — so renaming or collapsing a node
@@ -450,6 +450,8 @@ export function App() {
   // time that selection is for checking size/position, not for this one
   // specific tool. A person who wants it clicks the header open.
   const [spacingOpen, setSpacingOpen] = useState(false);
+  const [connectorSwapped, setConnectorSwapped] = useState(false);
+  const [connectorShape, setConnectorShape] = useState<0 | 1>(0); // 0 = dovetail, 1 = round pin
   const [error, setError] = useState<string | null>(null);
   const [sceneBusy, setSceneBusy] = useState(false);
   const busy = sceneBusy;
@@ -609,6 +611,98 @@ export function App() {
   }, [nodes, parts, selectedIds, spacingSwapped]);
 
   useEffect(() => setSpacingSwapped(false), [selectedIds[0], selectedIds[1]]);
+
+  // Only offers this between two TOP-LEVEL objects: meshBounds reads
+  // position/rotation/scale as world-space, which is only true at the root —
+  // a node nested in a group stores those relative to it (see liftToWorld's
+  // own doc comment). `nodes.find` (not the recursive findNode) is what
+  // enforces that restriction here.
+  const connectorSeam = useMemo(() => {
+    if (selectedIds.length !== 2) return null;
+    const aId = selectedIds[connectorSwapped ? 1 : 0];
+    const bId = selectedIds[connectorSwapped ? 0 : 1];
+    const plugNode = nodes.find((n) => n.id === aId);
+    const socketNode = nodes.find((n) => n.id === bId);
+    const plugPart = parts.find((p) => p.id === aId);
+    const socketPart = parts.find((p) => p.id === bId);
+    if (!plugNode || !socketNode || !plugPart || !socketPart) return null;
+    const seam = findTouchingSeam(plugNode, plugPart.mesh, socketNode, socketPart.mesh);
+    return seam ? { plugNode, socketNode, seam } : null;
+  }, [nodes, parts, selectedIds, connectorSwapped]);
+
+  useEffect(() => setConnectorSwapped(false), [selectedIds[0], selectedIds[1]]);
+
+  // Builds a Plug + Socket pair centred on the shared wall between two
+  // touching objects and fuses each straight into its own part — a Group
+  // (union) around [plugNode, plug] and another around [socketNode, socket]
+  // (the socket held as isHole so that union actually subtracts it). Both
+  // connectors get the exact same position and rotation, the same trick
+  // "Copy as matching Socket/Plug" already relies on to keep a pair aligned,
+  // just computed from the wall instead of copied from an existing node.
+  const addConnectorJoint = useCallback(() => {
+    if (!connectorSeam) return;
+    const { plugNode, socketNode, seam } = connectorSeam;
+    const { point, normal, footprint } = seam;
+
+    // Same face-normal-to-rotation convention placePrimitive uses when a
+    // shape is dropped onto a clicked face: local +Z lands on `normal`, so
+    // the connector sits flush on the plug side and protrudes toward the
+    // socket side.
+    const rotation = new THREE.Euler().setFromQuaternion(
+      new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), new THREE.Vector3(...normal)),
+      "XYZ",
+    );
+    const rotationDeg: Vec3 = [
+      (rotation.x / Math.PI) * 180,
+      (rotation.y / Math.PI) * 180,
+      (rotation.z / Math.PI) * 180,
+    ];
+
+    // Sized off the smaller side of the shared wall so the connector never
+    // overhangs either object's edge — a reasonable starting point, not a
+    // precise fit; every field is still editable afterwards like any other
+    // Connector.
+    const wallSize = Math.min(footprint[0], footprint[1]);
+    const clampSize = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+    const sizeParams: Record<string, number> =
+      connectorShape === 0
+        ? {
+            shape: 0,
+            width: clampSize(wallSize * 0.45, 5, 30),
+            height: clampSize(wallSize * 0.18, 3, 8),
+            length: clampSize(wallSize * 0.55, 6, 35),
+          }
+        : {
+            shape: 1,
+            radius: clampSize(wallSize * 0.22, 2.5, 15),
+            length: clampSize(wallSize * 0.55, 6, 35),
+          };
+
+    beginHistoryBatch();
+
+    addPrimitive("connector");
+    const plugConnId = useDoc.getState().selectedIds[0];
+    if (plugConnId) {
+      setTransform(plugConnId, { position: point, rotation: rotationDeg });
+      for (const [k, v] of Object.entries(sizeParams)) setParam(plugConnId, k, v);
+      setParam(plugConnId, "fit", 0);
+      selectMany([plugNode.id, plugConnId], false);
+      group();
+    }
+
+    addPrimitive("connector");
+    const socketConnId = useDoc.getState().selectedIds[0];
+    if (socketConnId) {
+      setTransform(socketConnId, { position: point, rotation: rotationDeg });
+      for (const [k, v] of Object.entries(sizeParams)) setParam(socketConnId, k, v);
+      setParam(socketConnId, "fit", 1);
+      setHole(socketConnId, true);
+      selectMany([socketNode.id, socketConnId], false);
+      group();
+    }
+
+    endHistoryBatch();
+  }, [connectorSeam, connectorShape, addPrimitive, setTransform, setParam, setHole, selectMany, group]);
 
   // Deleting a skipped node should let its id go, not leak it for the rest
   // of the session — otherwise re-importing the same file under a new node
@@ -2484,6 +2578,59 @@ export function App() {
             />
           ) : <div className="empty-state small">Select an object to edit its dimensions and position.</div>}
         </section>
+
+        {selectedIds.length === 2 && (
+        <section className="tool-section connector-section">
+          <div className="panel-heading compact">
+            <div><h1>Add connector</h1><p>Joins two touching objects with a plug + socket pair</p></div>
+          </div>
+          {connectorSeam ? (
+            <>
+              <div className="spacing-objects">
+                <div>
+                  <span className="field-label">Plug goes on</span>
+                  <strong>{connectorSeam.plugNode.name}</strong>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setConnectorSwapped((v) => !v)}
+                  title="Swap which object gets the plug and which gets the socket"
+                >
+                  Swap
+                </button>
+                <div>
+                  <span className="field-label">Socket goes on</span>
+                  <strong>{connectorSeam.socketNode.name}</strong>
+                </div>
+              </div>
+              <label className="field">
+                <span className="field-label">Shape</span>
+                <select
+                  className="num"
+                  value={connectorShape}
+                  onChange={(e) => setConnectorShape(Number(e.target.value) as 0 | 1)}
+                >
+                  <option value={0}>Dovetail</option>
+                  <option value={1}>Round pin</option>
+                </select>
+              </label>
+              <button className="primary" onClick={addConnectorJoint}>
+                Add connector
+              </button>
+              <p className="hint">
+                Fuses a plug into {connectorSeam.plugNode.name} and cuts a matching socket into{" "}
+                {connectorSeam.socketNode.name}, centred on the wall between them — sized and positioned for
+                you, still editable afterwards like any other Connector.
+              </p>
+            </>
+          ) : (
+            <p className="hint">
+              These two objects don't look like they're touching flush along one axis, so there's no shared
+              wall to put a joint on.
+            </p>
+          )}
+        </section>
+        )}
 
         {selectedIds.length === 2 && (
         <section className="tool-section spacing-section">

@@ -772,7 +772,7 @@ export const useDoc = create<DocState>()(
         set({ projects: listProjects() });
       },
 
-      addPrimitive: (kind) =>
+      addPrimitive: (kind) => {
         set((s) => {
           const def = PRIMITIVES[kind];
           // Count the whole tree, not just the roots, so a part nested in a
@@ -794,7 +794,9 @@ export const useDoc = create<DocState>()(
             isHole: false,
           };
           return { nodes: [...s.nodes, node], selectedIds: [node.id] };
-        }),
+        });
+        afterBatchedMutation();
+      },
 
       addImport: (blobId, fileName, byteSize, svg, position) =>
         set((s) => {
@@ -1068,8 +1070,10 @@ export const useDoc = create<DocState>()(
         afterBatchedMutation();
       },
 
-      setHole: (id, isHole) =>
-        set((s) => ({ nodes: updateNode(s.nodes, id, (n) => ({ ...n, isHole })) })),
+      setHole: (id, isHole) => {
+        set((s) => ({ nodes: updateNode(s.nodes, id, (n) => ({ ...n, isHole })) }));
+        afterBatchedMutation();
+      },
 
       setColor: (id, color) => {
         set((s) => ({
@@ -1122,7 +1126,7 @@ export const useDoc = create<DocState>()(
        * node was. Children keep their world transforms; the group starts at the
        * origin so grouping never moves anything.
        */
-      group: (centres) =>
+      group: (centres) => {
         set((s) => {
           if (s.selectedIds.length < 2) return {};
           const ids = new Set(s.selectedIds);
@@ -1154,7 +1158,9 @@ export const useDoc = create<DocState>()(
           const nodes = [...remaining];
           nodes.splice(Math.min(at, nodes.length), 0, node);
           return { nodes, selectedIds: [node.id] };
-        }),
+        });
+        afterBatchedMutation();
+      },
 
       /** Dissolves selected groups, lifting their children into their place. */
       ungroup: (centres) =>
