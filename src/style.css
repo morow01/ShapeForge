@@ -55,6 +55,62 @@ body { overflow: hidden; font-size: 13px; }
 .toolbar-spacer { flex: 1; }
 .view-tools { min-width: 0; }
 
+.topbar-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  min-height: 34px;
+  padding: 0;
+  color: #334155;
+  background: #fff;
+  border: 1px solid #cfd7dd;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background .12s, border-color .12s, color .12s, box-shadow .12s;
+  flex-shrink: 0;
+}
+.topbar-icon-btn:hover:not(:disabled) {
+  color: #0f172a;
+  background: #f1f5f9;
+  border-color: #94a3b8;
+}
+.topbar-icon-btn:focus-visible {
+  outline: 2px solid #29b7b5;
+  outline-offset: 1px;
+}
+.topbar-icon-btn:disabled {
+  opacity: .35;
+  cursor: default;
+}
+.topbar-icon-btn.on {
+  color: #00807e;
+  background: #e6f7f7;
+  border-color: #00a7a5;
+}
+.topbar-icon-btn .topbar-icon {
+  width: 22px;
+  height: 22px;
+  display: block;
+}
+
+.topbar-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 4px 12px;
+  font-weight: 600;
+  font-size: 13px;
+}
+.topbar-btn .topbar-icon {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
+
 button {
   min-height: 31px;
   padding: 5px 10px;
@@ -87,6 +143,52 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 .workspace { grid-column: 3; grid-row: 2; position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 .viewport { position: absolute; inset: 0; overflow: hidden; }
 .viewport canvas { display: block; }
+
+/* ---- NavCube Controls & Home Button ---- */
+.navcube-controls {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  width: 160px;
+  height: 160px;
+  pointer-events: none;
+  z-index: 6;
+}
+.navcube-btn {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+  color: #52616c;
+  background: #ffffff;
+  border: 1px solid #cfd7dd;
+  border-radius: 6px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+  cursor: pointer;
+  pointer-events: auto;
+  transition: all 0.15s ease;
+}
+.navcube-btn:hover {
+  color: #00807e;
+  background: #f0fdfc;
+  border-color: #55c5c3;
+  box-shadow: 0 2px 8px rgba(0, 128, 126, 0.16);
+  transform: scale(1.06);
+}
+.navcube-btn:active {
+  transform: scale(0.95);
+}
+.navcube-btn .navcube-icon {
+  width: 17px;
+  height: 17px;
+  display: block;
+}
 .scale-hint {
   position: absolute; top: 16px; left: 50%; transform: translateX(-50%);
   display: none; align-items: center; gap: 5px;
@@ -264,14 +366,51 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 .tool-section { padding: 16px; border-bottom: 1px solid #e0e6ea; }
 .shape-library { background: #f8fafb; }
 .shape-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }
-.shape-card { display: flex; flex-direction: column; align-items: center; gap: 5px; min-height: 70px; padding: 9px 5px 7px; color: #4c5b66; background: #fff; font-size: 10px; }
-.shape-card.paused { opacity: 0.4; filter: grayscale(1); cursor: not-allowed; }
-.shape-icon { position: relative; display: block; width: 29px; height: 29px; background: #43b5df; box-shadow: inset -5px -5px 0 rgb(0 83 124 / 12%); }
-.shape-cylinder { border-radius: 50% / 24%; }
-.shape-sphere { border-radius: 50%; }
-.shape-cone { width: 0; height: 0; background: transparent; border-left: 15px solid transparent; border-right: 15px solid transparent; border-bottom: 29px solid #43b5df; box-shadow: none; }
-.shape-triangle { clip-path: polygon(0 100%, 50% 0, 100% 100%); }
-.shape-connector { clip-path: polygon(32% 100%, 68% 100%, 100% 0, 0 0); }
+.shape-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 72px;
+  padding: 8px 4px 6px;
+  color: #4c5b66;
+  background: #fff;
+  border: 1px solid #d8e1e6;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.shape-card:hover:not(:disabled) {
+  border-color: #00a7a5;
+  background: #f0fdfc;
+  color: #007a78;
+  box-shadow: 0 2px 8px rgba(0, 167, 165, 0.15);
+  transform: translateY(-1px);
+}
+.shape-card.active {
+  border-color: #00a7a5;
+  background: #e6f8f7;
+  color: #006866;
+  box-shadow: 0 0 0 2px rgba(0, 167, 165, 0.25);
+}
+.shape-card.paused {
+  opacity: 0.4;
+  filter: grayscale(1);
+  cursor: not-allowed;
+}
+.shape-icon-svg {
+  display: block;
+  width: 32px;
+  height: 32px;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.08));
+  transition: transform 0.15s ease;
+}
+.shape-card:hover:not(:disabled) .shape-icon-svg {
+  transform: scale(1.06);
+}
 .import-btn { width: 100%; margin-top: 9px; color: #087a79; border-style: dashed; border-color: #74c9c7; }
 
 .tree { flex: 1; margin: 0; padding: 0; list-style: none; }
@@ -306,6 +445,38 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
    a group's boolean badge and a broken-edit warning are never the thing that
    quietly fades away. */
 .tree li.row-hidden .dot, .tree li.row-hidden .label { opacity: .4; }
+.row-rename-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  min-height: 18px;
+  padding: 0;
+  color: #9aa7ae;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  opacity: 0;
+  cursor: pointer;
+  transition: opacity 0.12s ease, color 0.12s ease, background-color 0.12s ease;
+}
+.tree li:hover .row-rename-btn,
+.tree li.sel .row-rename-btn {
+  opacity: 0.7;
+}
+.row-rename-btn:hover {
+  opacity: 1 !important;
+  color: #0f172a;
+  background: rgb(0 0 0 / 7%);
+}
+.row-rename-icon {
+  display: block;
+  width: 12px;
+  height: 12px;
+}
+
 /* Present on every row, not just on hover: visibility is state the user
    should be able to read at rest, the same way the twisty always is. */
 .visibility {
@@ -797,10 +968,18 @@ select.num { height: 31px; }
   white-space: nowrap;
 }
 .project-title-edit-icon {
-  font-size: 11px;
-  opacity: 0.5;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 13px;
+  height: 13px;
+  color: #64748b;
+  opacity: 0.65;
+  transition: opacity 0.15s ease, color 0.15s ease;
+  flex-shrink: 0;
 }
 .project-title-btn:hover .project-title-edit-icon {
+  color: #0f172a;
   opacity: 1;
 }
 .project-title-input {
@@ -915,6 +1094,9 @@ select.num { height: 31px; }
   font-size: 15px;
   font-weight: 800;
 }
+.export-ready-notice.downgraded { border-color: #f5d99b; }
+.export-ready-notice.downgraded .export-ready-icon { background: #fdf1d6; color: #9a6a10; }
+.export-ready-notice.downgraded .export-ready-copy span { color: #9a6a10; }
 .export-ready-copy {
   min-width: 0;
   flex: 1;

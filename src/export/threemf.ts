@@ -47,26 +47,44 @@ export function buildThreeMF(objects: ThreeMFObject[]): Blob {
     .join("");
 
   const bodies = printable.map((object, index) => {
-    const vertices: string[] = [];
-    for (let i = 0; i + 2 < object.vertices.length; i += 3) {
-      // 3MF is a text format, so unbounded float precision costs real file
-      // size for detail below any printer's resolution. Six decimals is a
-      // nanometre.
-      vertices.push(
-        `<vertex x="${+object.vertices[i].toFixed(6)}" y="${+object.vertices[i + 1].toFixed(6)}" z="${+object.vertices[i + 2].toFixed(6)}" />`,
-      );
-    }
+    const weldedVertices: string[] = [];
+    const vertexMap = new Map<string, number>();
+
+    const getWeldedIndex = (x: number, y: number, z: number): number => {
+      // Key with 5 decimal places (~0.01 micron precision) to weld coincident seam points
+      const key = `${Math.round(x * 100000)},${Math.round(y * 100000)},${Math.round(z * 100000)}`;
+      let vIdx = vertexMap.get(key);
+      if (vIdx === undefined) {
+        vIdx = weldedVertices.length;
+        weldedVertices.push(
+          `<vertex x="${+x.toFixed(6)}" y="${+y.toFixed(6)}" z="${+z.toFixed(6)}" />`,
+        );
+        vertexMap.set(key, vIdx);
+      }
+      return vIdx;
+    };
+
     const triangles: string[] = [];
     for (let i = 0; i + 2 < object.triangles.length; i += 3) {
-      triangles.push(
-        `<triangle v1="${object.triangles[i]}" v2="${object.triangles[i + 1]}" v3="${object.triangles[i + 2]}" />`,
-      );
+      const i0 = object.triangles[i] * 3;
+      const i1 = object.triangles[i + 1] * 3;
+      const i2 = object.triangles[i + 2] * 3;
+
+      const v1 = getWeldedIndex(object.vertices[i0], object.vertices[i0 + 1], object.vertices[i0 + 2]);
+      const v2 = getWeldedIndex(object.vertices[i1], object.vertices[i1 + 1], object.vertices[i1 + 2]);
+      const v3 = getWeldedIndex(object.vertices[i2], object.vertices[i2 + 1], object.vertices[i2 + 2]);
+
+      // Skip degenerate triangles where vertices collapsed
+      if (v1 !== v2 && v2 !== v3 && v1 !== v3) {
+        triangles.push(`<triangle v1="${v1}" v2="${v2}" v3="${v3}" />`);
+      }
     }
+
     // Object ids start at 2: id 1 is the base-materials group, and 3MF ids
     // share one namespace across resources.
     return (
       `<object id="${index + 2}" type="model" name="${xmlText(object.name)}" pid="1" pindex="${index}">` +
-      `<mesh><vertices>${vertices.join("")}</vertices><triangles>${triangles.join("")}</triangles></mesh>` +
+      `<mesh><vertices>${weldedVertices.join("")}</vertices><triangles>${triangles.join("")}</triangles></mesh>` +
       `</object>`
     );
   });

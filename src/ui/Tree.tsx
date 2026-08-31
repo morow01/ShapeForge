@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { isGroup } from "../document/types";
 import { resolveNodeColor, resolveNodeTransparent } from "../document/tree";
 import { beginHistoryBatch, endHistoryBatch } from "../document/store";
-import { EyeIcon, EyeOffIcon } from "./icons";
+import { EyeIcon, EyeOffIcon, PencilIcon } from "./icons";
 import type { SceneNode } from "../document/types";
 
 interface Props {
@@ -165,6 +165,19 @@ function Row({ node, depth, selectedIds, invalid, onSelect, onToggleCollapsed, o
           <span className="label" onDoubleClick={() => startEditing()}>
             {node.name}
           </span>
+        )}
+        {!editing && (
+          <button
+            className="row-rename-btn"
+            onClick={(e) => {
+              e.stopPropagation();
+              startEditing();
+            }}
+            title="Rename object"
+            aria-label="Rename object"
+          >
+            <PencilIcon className="row-rename-icon" />
+          </button>
         )}
         {group && <span className="op">{node.op[0].toUpperCase()}</span>}
         {bad && <span className="warn">!</span>}

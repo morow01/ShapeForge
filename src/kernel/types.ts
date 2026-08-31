@@ -1,4 +1,5 @@
 import type { BooleanOp, EditOp, PrimitiveKind, Vec3 } from "../document/types";
+import type { SvgCommand } from "../svg/parse";
 
 /** Typed arrays keep large imported scans compact while structured-cloning
  *  efficiently across the worker boundary. Replicad's own meshes use arrays. */
@@ -36,6 +37,9 @@ export interface ObjectSpec extends SpecBase {
   type: "object";
   kind: PrimitiveKind;
   params: Record<string, number>;
+  text?: string;
+  fontName?: string;
+  textPaths?: SvgCommand[][];
 }
 
 export interface GroupSpec extends SpecBase {

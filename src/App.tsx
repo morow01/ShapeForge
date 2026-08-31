@@ -1,17 +1,38 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import * as THREE from "three";
-import { EXPORT_WATCHDOG_MS, kernel, KernelTimeoutError, WATCHDOG_MS } from "./kernel/client";
+import { EXPORT_MESHES_WATCHDOG_MS, EXPORT_WATCHDOG_MS, kernel, KernelTimeoutError, WATCHDOG_MS } from "./kernel/client";
 import { Viewport } from "./viewport/Viewport";
 import { Inspector } from "./ui/Inspector";
 import { Tree } from "./ui/Tree";
-import { DropIcon, MagnetIcon, ShapeBuilderIcon, SolidCubeIcon, TransparencyIcon, WireframeIcon, ZoomToFitIcon } from "./ui/icons";
 import { ProjectsModal } from "./ui/ProjectsModal";
+import {
+  DropIcon,
+  ExportIcon,
+  GroupIcon,
+  MagnetIcon,
+  NewDesignIcon,
+  ObjectsIcon,
+  OrthographicIcon,
+  PencilIcon,
+  PerspectiveIcon,
+  PrimitiveShapeIcon,
+  ProjectsIcon,
+  RedoIcon,
+  SaveFileIcon,
+  ShapeBuilderIcon,
+  SolidCubeIcon,
+  TransparencyIcon,
+  UndoIcon,
+  UngroupIcon,
+  WireframeIcon,
+  ZoomToFitIcon,
+} from "./ui/icons";
 import { buildThreeMF } from "./export/threemf";
 import { SvgImportModal } from "./ui/SvgImportModal";
 import { TextModal } from "./ui/TextModal";
 import type { TextConfig } from "./ui/TextModal";
-import { NO_FONT_LISTING } from "./text/systemFonts";
+import { NO_FONT_LISTING, getCachedTextPaths, resolveTextPaths } from "./text/systemFonts";
 import type { LocalFontData } from "./text/systemFonts";
 import {
   beginHistoryBatch,
@@ -22,7 +43,7 @@ import {
   useTemporal,
 } from "./document/store";
 import { MAX_BUILD_SOURCES, PRIMITIVES, isGroup } from "./document/types";
-import { findNode, parentOf, resolveNodeTransparent, resolveNodeColor } from "./document/tree";
+import { findNode, parentOf, resolveNodeTransparent, resolveNodeColor, walk } from "./document/tree";
 import { putBlob } from "./document/blobStore";
 import { loadCameraState } from "./document/persist";
 import type { GroupNode, PrimitiveKind, SceneNode, Vec3 } from "./document/types";
@@ -111,11 +132,29 @@ const toSpec = (n: SceneNode): NodeSpec => {
       isHole: n.isHole,
     };
   }
+  if (n.kind === "text") {
+    const cachedPaths = getCachedTextPaths(n.fontName, n.text ?? "TEXT", n.params.size ?? 20);
+    return {
+      type: "object",
+      id: n.id,
+      kind: n.kind,
+      params: n.params,
+      text: n.text,
+      fontName: n.fontName,
+      textPaths: cachedPaths,
+      position: n.position,
+      rotation: n.rotation,
+      scale: n.scale,
+      isHole: n.isHole,
+    };
+  }
   return {
     type: "object",
     id: n.id,
     kind: n.kind,
     params: n.params,
+    text: n.text,
+    fontName: n.fontName,
     position: n.position,
     rotation: n.rotation,
     scale: n.scale,
@@ -179,7 +218,7 @@ const shapeOf = (n: SceneNode): unknown => {
   if (n.type === "import") return [n.id, "import", n.blobId, n.svg?.thickness];
   if (n.type === "edit") return [n.id, "edit", shapeOf(n.base), n.ops];
   if (n.type === "build") return [n.id, "build", n.sources.map(shapeOf), n.keep];
-  return [n.id, n.kind, n.params];
+  return [n.id, n.kind, n.params, n.text, n.fontName];
 };
 
 /** Safe to rebuild independently during an export fallback. Primitive-only
@@ -232,6 +271,8 @@ export function App() {
     select,
     selectMany,
     setParam,
+    setText,
+    setFontName,
     setTransform,
     setPositions,
     duplicateNodes,
@@ -274,6 +315,14 @@ export function App() {
   const [readyExportUrl, setReadyExportUrl] = useState<string | null>(null);
   const [exportFileName, setExportFileName] = useState<string>("model.stl");
   const [exportReadyNoticeOpen, setExportReadyNoticeOpen] = useState(false);
+  /** Set when the full-detail export path ran out of time and a lower-
+   *  quality fallback (viewport-resolution meshes, not the chosen Draft/
+   *  Standard/Fine setting) was substituted instead — see the 3MF and STL
+   *  export handlers below. The fallback exists so an export always
+   *  finishes with SOMETHING rather than hanging forever, but it must never
+   *  do that silently: this drives a visible warning alongside the ready
+   *  notice instead of a quietly lower-quality file. */
+  const [exportDowngraded, setExportDowngraded] = useState(false);
   const [fileOperation, setFileOperation] = useState<FileOperation | null>(null);
   const [pendingSvg, setPendingSvg] = useState<{
     file: File;
@@ -281,6 +330,17 @@ export function App() {
   } | null>(null);
   const [textFonts, setTextFonts] = useState<LocalFontData[] | null>(null);
   const [textModalOpen, setTextModalOpen] = useState(false);
+
+  useEffect(() => {
+    if ("queryLocalFonts" in window) {
+      import("./text/systemFonts")
+        .then(({ systemFonts }) => systemFonts())
+        .then((fonts) => {
+          if (fonts && fonts.length) setTextFonts(fonts);
+        })
+        .catch(() => {});
+    }
+  }, []);
   /** Per-node failures, keyed by node id. */
   const [invalid, setInvalid] = useState<Record<string, string>>({});
   // A rare OCCT tessellation failure can succeed on a clean replay of the
@@ -726,6 +786,33 @@ export function App() {
     setTransform(spacingSelection.movingNode.id, { position });
   }, [fixedAnchor, gapAxis, gapDirection, gapMm, movingAnchor, setTransform, spacingSelection]);
 
+  const [textRebuildNonce, setTextRebuildNonce] = useState(0);
+
+  useEffect(() => {
+    let unmounted = false;
+    const promises: Promise<any>[] = [];
+    for (const node of walk(nodes)) {
+      if (node.type === "object" && node.kind === "text") {
+        const text = node.text ?? "TEXT";
+        const size = node.params.size ?? 20;
+        const fontName = node.fontName;
+        if (!getCachedTextPaths(fontName, text, size)) {
+          promises.push(resolveTextPaths(fontName, text, size, textFonts ?? undefined));
+        }
+      }
+    }
+    if (promises.length > 0) {
+      Promise.all(promises).then(() => {
+        if (!unmounted) {
+          setTextRebuildNonce((n) => n + 1);
+        }
+      });
+    }
+    return () => {
+      unmounted = true;
+    };
+  }, [nodes, textFonts]);
+
   // Nodes actually sent to the kernel — skippedIds excludes anything a
   // watchdog timeout already blamed, so it is not retried into another hang.
   const buildableNodes = useMemo(
@@ -735,7 +822,10 @@ export function App() {
 
   // Rebuild only when geometry-defining data changes. Dragging a top-level node
   // changes its position, which the viewport applies itself without the kernel.
-  const shapeKey = useMemo(() => JSON.stringify(buildableNodes.map(shapeOf)), [buildableNodes]);
+  const shapeKey = useMemo(
+    () => JSON.stringify([...buildableNodes.map(shapeOf), textRebuildNonce]),
+    [buildableNodes, textRebuildNonce],
+  );
 
   const sceneRef = useRef<Scene | null>(null);
   // A prepared STL is valid only for the exact document and quality used to
@@ -1162,6 +1252,22 @@ export function App() {
     }
   };
 
+  const requestSystemFonts = async () => {
+    try {
+      const { systemFonts } = await import("./text/systemFonts");
+      const fonts = await systemFonts();
+      if (fonts.length) {
+        setTextFonts(fonts);
+        setError(null);
+      }
+    } catch (e) {
+      const reason = msg(e);
+      if (!reason.includes(NO_FONT_LISTING)) {
+        setError(`Could not access system fonts: ${reason}`);
+      }
+    }
+  };
+
   /** The everywhere-fallback: fonts chosen from disk, kept for the session so
    *  a second piece of text does not mean finding the file again. */
   const useFontFile = async (file: File) => {
@@ -1172,7 +1278,9 @@ export function App() {
         const rest = (previous ?? []).filter((f) => f.postscriptName !== font.postscriptName);
         return [...rest, font];
       });
-      setTextModalOpen(true);
+      if (selected && selected.type === "object" && selected.kind === "text") {
+        setFontName(selected.id, font.fullName || font.family);
+      }
       setError(null);
     } catch (e) {
       setError(`Could not read ${file.name}: ${msg(e)}`);
@@ -1227,6 +1335,7 @@ export function App() {
     setExportStartedAt(Date.now());
     setError(null);
     setExportReadyNoticeOpen(false);
+    setExportDowngraded(false);
     const finishExport = async (blob: Blob) => {
       setReadyExportUrl(URL.createObjectURL(blob));
       setExportReadyNoticeOpen(true);
@@ -1278,7 +1387,27 @@ export function App() {
       if (exportFormat === "3mf") {
         // One object per shape rather than the single fused body an STL gets,
         // each keeping the name and colour it has in the tree.
-        const meshes = await kernel.exportMeshes(currentNodes.map(toSpec), exportQuality);
+        let meshes: { id: string; vertices: number[]; triangles: number[] }[];
+        try {
+          meshes = await kernel.exportMeshes(currentNodes.map(toSpec), exportQuality);
+        } catch (e) {
+          if (!(e instanceof KernelTimeoutError)) throw e;
+          // Graceful fallback for complex scenes or large scanned STLs:
+          // Export using the verified displayed scene meshes already in viewport
+          setExportDowngraded(true);
+          const fallbackItems = currentNodes.map((node) => {
+            const part = parts.find((candidate) => candidate.id === node.id);
+            return part ? { node, mesh: part.mesh } : null;
+          });
+          const completeItems = fallbackItems.filter(
+            (item): item is NonNullable<typeof item> => item !== null,
+          );
+          if (!completeItems.length) throw e;
+          meshes = await kernel.exportDisplayedMeshes(
+            completeItems.map((item) => ({ spec: toSpec(item.node), mesh: item.mesh })),
+          );
+        }
+
         if (!meshes.length) {
           setExporting(false);
           setError("Nothing solid to export — every shape in the selection is a hole.");
@@ -1389,6 +1518,11 @@ export function App() {
         const fallbackBlobs: Blob[] = [];
 
         if (displayedFallbackItems.length) {
+          // Genuinely lower quality than requested (viewport resolution,
+          // not exportQuality) — unlike the refined branch below, there is
+          // no recovery for these, so this is the one place that actually
+          // needs the warning.
+          setExportDowngraded(true);
           fallbackBlobs.push(displayedSceneSTL(displayedFallbackItems));
         }
 
@@ -1403,6 +1537,7 @@ export function App() {
             // Refining primitive-only roots is an improvement, not a reason
             // to lose an otherwise complete export. Retain their verified
             // displayed shells if this optional pass cannot finish.
+            setExportDowngraded(true);
             fallbackBlobs.push(displayedSceneSTL(refinedFallbackItems));
           }
         }
@@ -1726,6 +1861,9 @@ export function App() {
       } else if (!mod && e.key.toLowerCase() === "z") {
         e.preventDefault();
         zoomToSelected();
+      } else if (!mod && (e.key === "Home" || e.key.toLowerCase() === "h")) {
+        e.preventDefault();
+        sceneRef.current?.resetView();
       } else if (!mod && e.key.toLowerCase() === "s") {
         e.preventDefault();
         setSnapEnabled((v) => !v);
@@ -1782,7 +1920,7 @@ export function App() {
   }, [editPending, invalid]);
 
   const progressLabel = exporting
-    ? "Exporting STL"
+    ? `Exporting ${exportFormat.toUpperCase()}`
     : fileOperation?.label ?? (sceneOpening ? "Opening scene" : null);
   /** An unobtrusive "still working" chip for edit rebuilds — corner of the
    *  canvas, nothing covered, no elapsed-time drama. */
@@ -1835,7 +1973,7 @@ export function App() {
               title="Click to rename design"
             >
               <span className="project-title-text">{projectName}</span>
-              <span className="project-title-edit-icon">✏️</span>
+              <PencilIcon className="project-title-edit-icon" />
             </button>
           )}
         </div>
@@ -1843,43 +1981,101 @@ export function App() {
         <div className="toolbar-group project-actions-group">
           <button
             onClick={() => setProjectsModalOpen(true)}
-            className="projects-nav-btn"
+            className="topbar-icon-btn projects-nav-btn"
             title="Open Projects Library (Ctrl+O)"
+            aria-label="Projects Library"
           >
-            📁 Projects
+            <ProjectsIcon className="topbar-icon" />
           </button>
           <button
             onClick={() => {
               const name = prompt("Enter project name:", "Untitled Project");
               if (name !== null) newProject(name);
             }}
+            className="topbar-icon-btn"
             title="New design (Ctrl+Alt+N)"
+            aria-label="New design"
           >
-            ＋ New
+            <NewDesignIcon className="topbar-icon" />
           </button>
         </div>
 
         <div className="toolbar-group">
-          <button onClick={() => undo()} disabled={!canUndo} title="Undo (Ctrl+Z)">↶ Undo</button>
-          <button onClick={() => redo()} disabled={!canRedo} title="Redo (Ctrl+Shift+Z)">↷ Redo</button>
+          <button
+            className="topbar-icon-btn"
+            onClick={() => undo()}
+            disabled={!canUndo}
+            title="Undo (Ctrl+Z)"
+            aria-label="Undo"
+          >
+            <UndoIcon className="topbar-icon" />
+          </button>
+          <button
+            className="topbar-icon-btn"
+            onClick={() => redo()}
+            disabled={!canRedo}
+            title="Redo (Ctrl+Shift+Z)"
+            aria-label="Redo"
+          >
+            <RedoIcon className="topbar-icon" />
+          </button>
         </div>
         <div className="toolbar-group">
-          <button onClick={() => groupSelected()} disabled={!canGroup || treeChangeBusy} title="Ctrl+G">Group</button>
-          <button onClick={() => ungroupSelected()} disabled={!canUngroup || treeChangeBusy} title="Ctrl+Shift+G">Ungroup</button>
+          <button
+            className={`topbar-icon-btn ${canUngroup ? "on" : ""}`}
+            onClick={() => {
+              if (canUngroup) ungroupSelected();
+              else if (canGroup) groupSelected();
+            }}
+            disabled={(!canGroup && !canUngroup) || treeChangeBusy}
+            title={
+              canUngroup
+                ? "Ungroup (Ctrl+Shift+G)"
+                : canGroup
+                ? "Group (Ctrl+G)"
+                : "Group (Ctrl+G) — Select 2 or more objects"
+            }
+            aria-label={canUngroup ? "Ungroup" : "Group"}
+          >
+            {canUngroup ? (
+              <UngroupIcon className="topbar-icon" />
+            ) : (
+              <GroupIcon className="topbar-icon" />
+            )}
+          </button>
         </div>
         <div className="toolbar-group view-tools">
           <button
-            className={objectsPanelOpen ? "on" : ""}
+            className={`topbar-icon-btn ${objectsPanelOpen ? "on" : ""}`}
             onClick={() => setObjectsPanelOpen((v) => !v)}
-            title={objectsPanelOpen ? "Hide the Objects panel" : "Show the Objects panel"}
+            title={objectsPanelOpen ? "Hide Objects panel" : "Show Objects panel"}
             aria-pressed={objectsPanelOpen}
+            aria-label="Toggle Objects panel"
           >
-            Objects
+            <ObjectsIcon className="topbar-icon" />
           </button>
-          <button className={cameraMode === "perspective" ? "on" : ""} onClick={() => setCameraMode("perspective")}>Perspective</button>
-          <button className={cameraMode === "orthographic" ? "on" : ""} onClick={() => setCameraMode("orthographic")}>Ortho</button>
           <button
-            className={`snap-toggle ${snapEnabled ? "on" : ""}`}
+            className="topbar-icon-btn"
+            onClick={() => setCameraMode((m) => (m === "perspective" ? "orthographic" : "perspective"))}
+            title={
+              cameraMode === "perspective"
+                ? "Perspective View (Click to switch to Orthographic)"
+                : "Orthographic View (Click to switch to Perspective)"
+            }
+            aria-label={
+              cameraMode === "perspective"
+                ? "Perspective View"
+                : "Orthographic View"
+            }
+          >
+            {cameraMode === "perspective" ? (
+              <PerspectiveIcon className="topbar-icon" />
+            ) : (
+              <OrthographicIcon className="topbar-icon" />
+            )}
+          </button>
+          <button
+            className={`topbar-icon-btn snap-toggle ${snapEnabled ? "on" : ""}`}
             onClick={() => setSnapEnabled((v) => !v)}
             title={
               snapEnabled
@@ -1887,9 +2083,9 @@ export function App() {
                 : "Smart Guides off — drags go exactly where the pointer goes (S)"
             }
             aria-pressed={snapEnabled}
+            aria-label="Toggle Smart Guides Snapping"
           >
-            <MagnetIcon className="snap-icon" />
-            Snap
+            <MagnetIcon className="topbar-icon snap-icon" />
           </button>
         </div>
         <div className="toolbar-spacer" />
@@ -1901,17 +2097,18 @@ export function App() {
               : buildBusy
                 ? "Finding regions…"
                 : readyExportUrl
-                  ? "STL ready"
+                  ? `${exportFileName.split(".").pop()?.toUpperCase() ?? "Export"} ready`
                   : busy
                     ? "Building…"
                     : "Ready"}
         </span>
         <button
-          className="export-project-btn"
+          className="topbar-icon-btn export-project-btn"
           onClick={exportCurrentProject}
           title="Save project file (.shapeforge) to computer (Ctrl+S)"
+          aria-label="Save project file"
         >
-          💾 Save File
+          <SaveFileIcon className="topbar-icon" />
         </button>
         <label className="export-quality" title={EXPORT_QUALITY_HINT[exportQuality]}>
           <span>Quality</span>
@@ -1940,7 +2137,7 @@ export function App() {
           </select>
         </label>
         <button
-          className="export-btn"
+          className="export-btn topbar-btn"
           onClick={exportSTL}
           disabled={exporting}
           title={
@@ -1948,25 +2145,37 @@ export function App() {
               ? `Export ${selectedIds.length} selected object${selectedIds.length > 1 ? "s" : ""} to ${exportFormat.toUpperCase()}`
               : `Export entire scene to ${exportFormat.toUpperCase()}`
           }
+          aria-label="Export"
         >
-          {exporting
-            ? "Exporting…"
-            : readyExportUrl
-            ? `Download ${exportFormat.toUpperCase()}`
-            : selectedIds.length === 1
-            ? "Export Selected"
-            : selectedIds.length > 1
-            ? `Export Selected (${selectedIds.length})`
-            : `Export ${exportFormat.toUpperCase()}`}
+          <ExportIcon className="topbar-icon" />
+          <span>
+            {exporting
+              ? "Exporting…"
+              : readyExportUrl
+              ? `Download`
+              : "Export"}
+          </span>
         </button>
       </header>
 
       {readyExportUrl && exportReadyNoticeOpen && (
-        <div className="export-ready-notice" role="status" aria-live="polite">
-          <div className="export-ready-icon" aria-hidden="true">✓</div>
+        <div
+          className={`export-ready-notice${exportDowngraded ? " downgraded" : ""}`}
+          role="status"
+          aria-live="polite"
+        >
+          <div className="export-ready-icon" aria-hidden="true">{exportDowngraded ? "!" : "✓"}</div>
           <div className="export-ready-copy">
             <strong>Your {exportFormat.toUpperCase()} is ready ({exportFileName})</strong>
-            <span>You can download it now.</span>
+            {exportDowngraded ? (
+              <span>
+                Part of this scene took too long to finish at {exportQuality[0].toUpperCase()}
+                {exportQuality.slice(1)} quality and fell back to preview resolution instead — try a lower
+                quality, or export fewer objects at once for full detail.
+              </span>
+            ) : (
+              <span>You can download it now.</span>
+            )}
           </div>
           <button className="export-ready-download" onClick={downloadReadySTL}>
             Download
@@ -2462,13 +2671,16 @@ export function App() {
                 <span />
               </div>
               <small>
-                {exporting && progressElapsed >= Math.round(EXPORT_WATCHDOG_MS / 1000)
-                  ? "Switching to the complete visible-mesh fallback…"
-                  : progressElapsed >= 8
-                  ? exporting
-                    ? `High-detail export gets ${Math.round(EXPORT_WATCHDOG_MS / 1000)}s before the complete fallback.`
-                    : `Complex models can take up to ${Math.round(WATCHDOG_MS / 60_000)} min.`
-                  : "Preparing geometry…"}
+                {(() => {
+                  const exportWatchdogMs = exportFormat === "3mf" ? EXPORT_MESHES_WATCHDOG_MS : EXPORT_WATCHDOG_MS;
+                  return exporting && progressElapsed >= Math.round(exportWatchdogMs / 1000)
+                    ? "Switching to the complete visible-mesh fallback…"
+                    : progressElapsed >= 8
+                    ? exporting
+                      ? `High-detail export gets ${Math.round(exportWatchdogMs / 1000)}s before the complete fallback.`
+                      : `Complex models can take up to ${Math.round(WATCHDOG_MS / 60_000)} min.`
+                    : "Preparing geometry…";
+                })()}
               </small>
             </div>
           )}
@@ -2507,7 +2719,7 @@ export function App() {
                     select(null);
                   }}
                 >
-                  <span className={`shape-icon shape-${kind}`} />
+                  <PrimitiveShapeIcon kind={kind} className="shape-icon-svg" />
                   <span>{PRIMITIVES[kind].label}</span>
                 </button>
               );
@@ -2582,6 +2794,11 @@ export function App() {
               onDelete={removeSelected}
               onPruneDeadOps={onPruneDeadOps}
               onDuplicateWithParams={(params) => duplicateWithParams(selected.id, params)}
+              onText={(t) => setText(selected.id, t)}
+              onFontName={(fn) => setFontName(selected.id, fn)}
+              fonts={textFonts}
+              onPickFontFile={() => textFontInputRef.current?.click()}
+              onRequestSystemFonts={requestSystemFonts}
             />
           ) : <div className="empty-state small">Select an object to edit its dimensions and position.</div>}
         </section>

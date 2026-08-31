@@ -5,6 +5,7 @@ import {
   basicFaceExtrusion,
   Vector,
   draw,
+  drawCircle,
   importSTLAsMesh,
   measureVolume,
   MeshShape,
@@ -39,9 +40,9 @@ const isMesh = (s: AnySolid): s is MeshShape => s instanceof MeshShape;
  * with no position or rotation applied. Placement lives on the Three.js side
  * so dragging an object never needs a kernel rebuild.
  */
-export function makePrimitive(spec: ObjectSpec): Shape3D {
+export function makePrimitive(spec: ObjectSpec): AnySolid {
   const p = spec.params;
-  let s: Shape3D;
+  let s: AnySolid;
 
   switch (spec.kind) {
     case "box": {
@@ -85,6 +86,122 @@ export function makePrimitive(spec: ObjectSpec): Shape3D {
         .close()
         .sketchOnPlane("XY")
         .extrude(p.thickness) as Shape3D;
+      break;
+    }
+    case "torus": {
+      const R = Math.max(p.radius, 1);
+      const r = Math.min(Math.max(p.tubeRadius, 0.2), R - 0.05);
+      // Revolve a circular profile centered at (R, 0) in the XZ plane about Z,
+      // then lift by `r` so its base rests flat on local Z = 0.
+      s = drawCircle(r)
+        .translate([R, 0])
+        .sketchOnPlane("XZ")
+        .revolve([0, 0, 1]) as Shape3D;
+      s = s.translate([0, 0, r]);
+      break;
+    }
+    case "pyramid": {
+      const sides = Math.max(3, Math.min(32, Math.round(p.sides ?? 4)));
+      const r = Math.max(p.radius ?? (p.width ? p.width / 2 : 10), 0.1);
+      const h = Math.max(p.height ?? 20, 0.1);
+      const d = r * Math.cos(Math.PI / sides);
+      const size = r * 3;
+
+      let solid = makeBaseBox(size * 2, size * 2, h);
+
+      for (let i = 0; i < sides; i++) {
+        const angleDeg = (i * 360) / sides;
+        const cutter = draw([d, -1])
+          .lineTo([size * 2, -1])
+          .lineTo([size * 2, h + 1])
+          .lineTo([0, h])
+          .close()
+          .sketchOnPlane("XZ", -size)
+          .extrude(size * 2)
+          .rotate(angleDeg, [0, 0, 0], [0, 0, 1]) as Shape3D;
+        solid = solid.cut(cutter) as Shape3D;
+      }
+      s = solid;
+      break;
+    }
+    case "wedge": {
+      const w = Math.max(p.width ?? 20, 0.1);
+      const len = Math.max(p.length ?? 20, 0.1);
+      const h = Math.max(p.height ?? 20, 0.1);
+      // Right triangle profile in YZ plane: base `len` on Z=0, back vertical wall of height `h`,
+      // extruded along X by `w`.
+      s = draw([0, 0])
+        .lineTo([len, 0])
+        .lineTo([len, h])
+        .close()
+        .sketchOnPlane("YZ")
+        .extrude(w) as Shape3D;
+      break;
+    }
+    case "polygonPrism": {
+      const sides = Math.max(3, Math.min(32, Math.round(p.sides ?? 6)));
+      const r = Math.max(p.radius ?? 10, 0.1);
+      const h = Math.max(p.height ?? 20, 0.1);
+      let pen = draw([r * Math.cos(0), r * Math.sin(0)]);
+      for (let i = 1; i < sides; i++) {
+        const a = (i * 2 * Math.PI) / sides;
+        pen = pen.lineTo([r * Math.cos(a), r * Math.sin(a)]);
+      }
+      s = pen.close().sketchOnPlane("XY").extrude(h) as Shape3D;
+      break;
+    }
+    case "hemisphere": {
+      const r = Math.max(p.radius ?? 10, 0.1);
+      const sphere = makeSphere(r);
+      const cutBox = makeBaseBox(r * 4, r * 4, r * 2).translate([0, 0, -r * 2]);
+      s = sphere.cut(cutBox) as Shape3D;
+      break;
+    }
+    case "capsule": {
+      const r = Math.max(p.radius ?? 5, 0.1);
+      const totalH = Math.max(p.height ?? 20, r * 2);
+      const cylinderH = Math.max(totalH - 2 * r, 0.001);
+      const cylinder = makeCylinder(r, cylinderH).translate([0, 0, r]);
+      const bottomSphere = makeSphere(r).translate([0, 0, r]);
+      const topSphere = makeSphere(r).translate([0, 0, r + cylinderH]);
+      s = cylinder.fuse(bottomSphere).fuse(topSphere) as Shape3D;
+      break;
+    }
+    case "tube": {
+      const rOut = Math.max(p.radius ?? 10, 0.1);
+      const wall = Math.min(Math.max(p.wallThickness ?? 2, 0.05), rOut - 0.05);
+      const rIn = Math.max(rOut - wall, 0.01);
+      const h = Math.max(p.height ?? 20, 0.1);
+      const outerCyl = makeCylinder(rOut, h);
+      const innerCyl = makeCylinder(rIn, h + 0.2).translate([0, 0, -0.1]);
+      s = outerCyl.cut(innerCyl) as Shape3D;
+      break;
+    }
+    case "paraboloid": {
+      const R = Math.max(p.radius ?? 10, 0.1);
+      const h = Math.max(p.height ?? 20, 0.1);
+      const steps = 24;
+      let pen = draw([0, 0]).lineTo([R, 0]);
+      for (let i = 1; i <= steps; i++) {
+        const t = i / steps;
+        const r_i = R * (1 - t);
+        const z_i = h * (1 - (r_i / R) ** 2);
+        pen = pen.lineTo([r_i, z_i]);
+      }
+      s = pen.close().sketchOnPlane("XZ").revolve([0, 0, 1]) as Shape3D;
+      break;
+    }
+    case "text": {
+      const thickness = Math.max(p.thickness ?? 4, 0.1);
+      const size = Math.max(p.size ?? 20, 1);
+      if (spec.textPaths && spec.textPaths.length) {
+        const solid = svgMeshSolid(spec.textPaths as any, thickness);
+        if (solid) {
+          s = normalise(solid);
+          break;
+        }
+      }
+      s = makeBaseBox(size * 2.5, size * 0.7, thickness);
       break;
     }
     case "connector": {
@@ -133,14 +250,70 @@ export function makePrimitive(spec: ObjectSpec): Shape3D {
     }
   }
 
-  return normalise(s) as Shape3D;
+  return normalise(s);
+}
+
+export function getSolidBounds(s: AnySolid): [[number, number, number], [number, number, number]] {
+  if (isMesh(s)) {
+    try {
+      const wrapped = (s as any).wrapped;
+      if (wrapped && typeof wrapped.boundingBox === "function") {
+        const box = wrapped.boundingBox();
+        if (box && box.min && box.max) {
+          const min: [number, number, number] = [Number(box.min[0]), Number(box.min[1]), Number(box.min[2])];
+          const max: [number, number, number] = [Number(box.max[0]), Number(box.max[1]), Number(box.max[2])];
+          if (Number.isFinite(min[0]) && Number.isFinite(max[0])) {
+            return [min, max];
+          }
+        }
+      }
+    } catch {}
+
+    try {
+      const b = (s as any).boundingBox?.bounds;
+      if (b && b[0] && b[1]) {
+        const min: [number, number, number] = [Number(b[0][0]), Number(b[0][1]), Number(b[0][2])];
+        const max: [number, number, number] = [Number(b[1][0]), Number(b[1][1]), Number(b[1][2])];
+        if (Number.isFinite(min[0]) && Number.isFinite(max[0])) {
+          return [min, max];
+        }
+      }
+    } catch {}
+
+    const raw = (s as any).mesh ? (s as any).mesh() : (s as any).wrapped?.getMesh?.();
+    const vertices = raw?.vertProperties || raw?.vertices || [];
+    const stride = raw?.numProp || 3;
+    let minX = Infinity, minY = Infinity, minZ = Infinity;
+    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+    for (let i = 0; i < vertices.length; i += stride) {
+      const x = Number(vertices[i]), y = Number(vertices[i + 1]), z = Number(vertices[i + 2]);
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+      if (z < minZ) minZ = z;
+      if (z > maxZ) maxZ = z;
+    }
+    if (!Number.isFinite(minX)) return [[0, 0, 0], [0, 0, 0]];
+    return [[minX, minY, minZ], [maxX, maxY, maxZ]];
+  }
+  const [min, max] = s.boundingBox.bounds;
+  return [min, max];
 }
 
 /** Centres a shape in XY and drops its base to z = 0 — the one origin
  *  convention every local shape shares, primitive or imported. */
 function normalise<T extends AnySolid>(s: T): T {
-  const [min, max] = s.boundingBox.bounds;
-  return s.translate([-(min[0] + max[0]) / 2, -(min[1] + max[1]) / 2, -min[2]]) as T;
+  const [min, max] = getSolidBounds(s);
+  const offset: [number, number, number] = [
+    -(min[0] + max[0]) / 2,
+    -(min[1] + max[1]) / 2,
+    -min[2],
+  ];
+  if (isMesh(s)) {
+    return new MeshShape(s.wrapped.translate(offset)) as T;
+  }
+  return s.translate(offset) as T;
 }
 
 /**
@@ -1363,6 +1536,22 @@ function bakeNonUniformScale(spec: NodeSpec): NodeSpec {
 export function place(s: AnySolid, spec: NodeSpec): AnySolid {
   const [rx, ry, rz] = spec.rotation;
   let out = s;
+  if (isMesh(out)) {
+    const [min, max] = getSolidBounds(out);
+    const center: Vec3 = [
+      (min[0] + max[0]) / 2,
+      (min[1] + max[1]) / 2,
+      (min[2] + max[2]) / 2,
+    ];
+    let wrapped = out.wrapped
+      .translate([-center[0], -center[1], -center[2]])
+      .scale(spec.scale)
+      .translate(center);
+    if (rz) wrapped = wrapped.rotate([0, 0, rz]);
+    if (ry) wrapped = wrapped.rotate([0, ry, 0]);
+    if (rx) wrapped = wrapped.rotate([rx, 0, 0]);
+    return new MeshShape(wrapped.translate(spec.position));
+  }
   if (spec.scale.some((v) => v !== 1)) {
     const [min, max] = out.boundingBox.bounds;
     const center: Vec3 = [
@@ -1374,25 +1563,11 @@ export function place(s: AnySolid, spec: NodeSpec): AnySolid {
     if (Math.abs(sx - sy) < 1e-9 && Math.abs(sx - sz) < 1e-9) {
       out = out.scale(sx, center);
     } else {
-      // Non-uniform scale is manifold-3d only — OCCT cannot express it.
-      // Everything else this function still owes the shape (the rotation
-      // below, the final translate) stays on this SAME raw manifold object
-      // via its own native ops, instead of rewrapping it as a MeshShape and
-      // sending the rotation through MeshShape.rotate()'s OCCT gp_Trsf
-      // bridge. That bridge rebuilds a transform/matrix per axis and was
-      // caught handing back a solid rotated to an entirely wrong place —
-      // nondeterministically, on byte-identical input repeated seconds
-      // apart — which points at the conversion, not the geometry.
-      const mesh = isMesh(out) ? out : out.meshShape();
+      const mesh = out.meshShape();
       let wrapped = mesh.wrapped
         .translate([-center[0], -center[1], -center[2]])
         .scale(spec.scale)
         .translate(center);
-      // Three single-axis calls, Z first — see this function's own doc
-      // comment. manifold's rotate() always applies X-then-Y-then-Z
-      // internally regardless of which components of the one argument it's
-      // given are zero, so reproducing Rx·Ry·Rz means three separate calls
-      // in reverse order, not one call with the array reordered.
       if (rz) wrapped = wrapped.rotate([0, 0, rz]);
       if (ry) wrapped = wrapped.rotate([0, ry, 0]);
       if (rx) wrapped = wrapped.rotate([rx, 0, 0]);

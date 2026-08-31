@@ -70,6 +70,22 @@ export const WATCHDOG_MS = 3 * 60_000;
  * already-rendered mesh fallback. Scene rebuilding still keeps the generous
  * three-minute ceiling above. */
 export const EXPORT_WATCHDOG_MS = 30_000;
+/**
+ * 3MF's high-detail path does strictly more work than STL's for the same
+ * scene: STL fuses everything into one merged body with a single OCCT
+ * boolean, while 3MF re-tessellates EVERY top-level object separately to
+ * keep each one printable on its own — and any object overlapping a Hole
+ * also pays for a full meshShape()+Manifold cut on top of that (see
+ * exportMeshes in worker.ts). Sharing STL's 30s budget meant a scene that
+ * finished as a full-detail STL well within it still blew straight past it
+ * as 3MF, silently landing on the EDIT_QUALITY-vs-Fine fallback (see
+ * exportDisplayedMeshes) every time — the fallback swap that should be rare
+ * was instead the common case for anything past a handful of curved parts.
+ * STL keeps its own tighter budget: its fallback is a surgical per-object
+ * refinement (see the STL export handler in App.tsx), a much smaller quality
+ * loss than 3MF's, so failing fast there is still the right trade.
+ */
+export const EXPORT_MESHES_WATCHDOG_MS = 90_000;
 /** The verified-mesh fallback must not silently start another multi-minute
  * wait after the high-detail path reaches its deadline. */
 export const DISPLAYED_EXPORT_WATCHDOG_MS = 30_000;
@@ -86,6 +102,36 @@ const CURVED_EXPORT_WATCHDOG_MS = 15_000;
 // out (the next click used to find that cache immediately).
 const CACHE_PROBE_MS = 1_500;
 const CACHE_RECOVERY_MS = 2_000;
+
+function probeCached3MF(
+  specs: NodeSpec[],
+  quality: ExportQuality,
+  timeoutMs: number,
+): Promise<{ id: string; vertices: number[]; triangles: number[] }[] | null | undefined> {
+  const probe = sceneCurrent.raw.exportCachedMeshes(specs, quality);
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve(undefined);
+    }, timeoutMs);
+    probe.then(
+      (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(result);
+      },
+      () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(undefined);
+      },
+    );
+  });
+}
 
 function probeCachedSTL(
   specs: NodeSpec[],
@@ -255,14 +301,28 @@ export const kernel = {
   buildResult: coalesceLatest((specs: NodeSpec[]) =>
     withWatchdog("heavy", (raw, onProgress) => raw.buildResult(specs, Comlink.proxy(onProgress))),
   ),
-  /** Per-object meshes for a 3MF export. Same watchdog and same heavy lane as
-   *  exportSTL; no cache probe, because the scene worker only ever caches the
-   *  unioned result and 3MF wants the objects kept apart. */
-  exportMeshes: async (specs: NodeSpec[], quality: ExportQuality) =>
+  /** Per-object meshes for a 3MF export with cache probing and watchdog. */
+  exportMeshes: async (specs: NodeSpec[], quality: ExportQuality) => {
+    const cached = await probeCached3MF(specs, quality, CACHE_PROBE_MS);
+    if (cached) return cached;
+    try {
+      return await withWatchdog(
+        "heavy",
+        (raw, onProgress) => raw.exportMeshes(specs, quality, Comlink.proxy(onProgress)),
+        EXPORT_MESHES_WATCHDOG_MS,
+      );
+    } catch (error) {
+      if (!(error instanceof KernelTimeoutError)) throw error;
+      const recovered = await probeCached3MF(specs, quality, CACHE_RECOVERY_MS);
+      if (recovered) return recovered;
+      throw error;
+    }
+  },
+  exportDisplayedMeshes: (items: DisplayedSceneItem[]) =>
     withWatchdog(
       "heavy",
-      (raw, onProgress) => raw.exportMeshes(specs, quality, Comlink.proxy(onProgress)),
-      EXPORT_WATCHDOG_MS,
+      (raw) => raw.exportDisplayedMeshes(items),
+      DISPLAYED_EXPORT_WATCHDOG_MS,
     ),
   // Not coalesced: an explicit user action (the Export STL button), not an
   // edit-triggered rebuild — every click should produce its own file.

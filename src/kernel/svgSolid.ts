@@ -20,7 +20,7 @@ import type { SvgCommand } from "../svg/parse";
 const CURVE_SAMPLES = 24;
 
 /** Bump when SVG-to-solid semantics change so live worker mesh caches rebuild. */
-export const SVG_IMPORT_REVISION = 4;
+export const SVG_IMPORT_REVISION = 5;
 
 function cubicAt(
   t: number,
@@ -138,6 +138,29 @@ function splitSubpaths(commands: SvgCommand[]): SvgCommand[][] {
   return out;
 }
 
+function polygonBBox(points: [number, number][]): [number, number, number, number] {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const [x, y] of points) {
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+  return [minX, minY, maxX, maxY];
+}
+
+function isPolygonInside(inner: [number, number][], outer: [number, number][]): boolean {
+  if (areaOf(outer) <= areaOf(inner)) return false;
+  const [iMinX, iMinY, iMaxX, iMaxY] = polygonBBox(inner);
+  const [oMinX, oMinY, oMaxX, oMaxY] = polygonBBox(outer);
+  // An interior hole must be completely enclosed within the outer bounding box
+  if (iMinX < oMinX - 1e-3 || iMaxX > oMaxX + 1e-3 || iMinY < oMinY - 1e-3 || iMaxY > oMaxY + 1e-3) {
+    return false;
+  }
+  const inside = interiorPoint(inner);
+  return pointInPolygon(inside, outer);
+}
+
 /**
  * Builds SVG artwork the same way a vector importer does: each source element
  * becomes one 2D region whose contours are wound so that counters read as
@@ -155,42 +178,56 @@ export function svgMeshSolid(paths: SvgCommand[][], thickness: number): MeshShap
       .filter((points) => points.length >= 3 && areaOf(points) > 1e-4);
     if (!polygons.length) continue;
 
-    try {
-      // Illustrator mixes clockwise and counter-clockwise basic shapes, and
-      // parseSvg's Y-axis flip reverses both. Manifold uses winding to decide
-      // whether an extrusion is positive or negative, so normalize every
-      // outer contour counter-clockwise and every nested counter clockwise.
-      const oriented = polygons.map((points, i) => {
-        const inside = interiorPoint(points);
-        const depth = polygons.reduce(
-          (count, other, j) =>
-            count + (j !== i && areaOf(other) > areaOf(points) && pointInPolygon(inside, other) ? 1 : 0),
-          0,
-        );
-        const shouldBePositive = depth % 2 === 0;
-        const isPositive = signedAreaOf(points) > 0;
-        return shouldBePositive === isPositive ? points : points.slice().reverse();
-      });
+    // Calculate containment and nesting depth for each polygon
+    const depths = polygons.map((poly, i) => {
+      return polygons.reduce(
+        (count, other, j) => count + (j !== i && isPolygonInside(poly, other) ? 1 : 0),
+        0,
+      );
+    });
 
-      let region: InstanceType<typeof manifold.CrossSection>;
-      try {
-        region = new manifold.CrossSection(oriented, "NonZero");
-      } catch {
-        region = new manifold.CrossSection(oriented, "EvenOdd");
+    // Group holes under their immediate enclosing outer polygon
+    const outerPolys: { outer: [number, number][]; holes: [number, number][][] }[] = [];
+
+    for (let i = 0; i < polygons.length; i++) {
+      if (depths[i] % 2 === 0) {
+        outerPolys.push({ outer: polygons[i], holes: [] });
       }
-      const extruded = region.extrude(thickness);
-      if (extruded.numTri() > 0) {
-        solids.push(extruded);
-      }
-    } catch {
-      // Fallback: extrude each simple polygon individually so no shape is lost
-      for (const poly of polygons) {
-        try {
-          const simple = new manifold.CrossSection([poly], "EvenOdd");
-          const extruded = simple.extrude(thickness);
-          if (extruded.numTri() > 0) {
-            solids.push(extruded);
+    }
+
+    for (let i = 0; i < polygons.length; i++) {
+      if (depths[i] % 2 === 1) {
+        let bestOuter: { outer: [number, number][]; holes: [number, number][][] } | null = null;
+        let minArea = Infinity;
+
+        for (const entry of outerPolys) {
+          const a = areaOf(entry.outer);
+          if (a > areaOf(polygons[i]) && a < minArea && isPolygonInside(polygons[i], entry.outer)) {
+            minArea = a;
+            bestOuter = entry;
           }
+        }
+
+        if (bestOuter) {
+          bestOuter.holes.push(polygons[i]);
+        }
+      }
+    }
+
+    for (const group of outerPolys) {
+      try {
+        const outerCCW = signedAreaOf(group.outer) > 0 ? group.outer : group.outer.slice().reverse();
+        const holesCW = group.holes.map((h) => (signedAreaOf(h) < 0 ? h : h.slice().reverse()));
+        const section = new manifold.CrossSection([outerCCW, ...holesCW], "NonZero");
+        const extruded = section.extrude(thickness);
+        if (extruded.numTri() > 0) {
+          solids.push(extruded);
+        }
+      } catch {
+        try {
+          const simple = new manifold.CrossSection([group.outer], "EvenOdd");
+          const extruded = simple.extrude(thickness);
+          if (extruded.numTri() > 0) solids.push(extruded);
         } catch {}
       }
     }

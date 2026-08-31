@@ -75,6 +75,66 @@ export function bakeScale(node: ObjectNode): ObjectNode | null {
     } catch {
       return null;
     }
+  } else if (node.kind === "torus" && sx === sy && sy === sz) {
+    height = p.tubeRadius * 2;
+    params = { ...p, radius: p.radius * sx, tubeRadius: p.tubeRadius * sx };
+  } else if (node.kind === "pyramid" && sx === sy) {
+    height = p.height;
+    params = {
+      ...p,
+      radius: p.radius * sx,
+      height: p.height * sz,
+    };
+  } else if (node.kind === "wedge") {
+    height = p.height;
+    params = {
+      ...p,
+      width: p.width * sx,
+      length: p.length * sy,
+      height: p.height * sz,
+    };
+  } else if (node.kind === "polygonPrism" && sx === sy) {
+    height = p.height;
+    params = {
+      ...p,
+      radius: p.radius * sx,
+      height: p.height * sz,
+    };
+  } else if (node.kind === "hemisphere" && sx === sy && sy === sz) {
+    height = p.radius;
+    params = {
+      ...p,
+      radius: p.radius * sx,
+    };
+  } else if (node.kind === "capsule" && sx === sy && sy === sz) {
+    height = p.height;
+    params = {
+      ...p,
+      radius: p.radius * sx,
+      height: p.height * sz,
+    };
+  } else if (node.kind === "tube" && sx === sy) {
+    height = p.height;
+    params = {
+      ...p,
+      radius: p.radius * sx,
+      wallThickness: p.wallThickness * sx,
+      height: p.height * sz,
+    };
+  } else if (node.kind === "paraboloid" && sx === sy) {
+    height = p.height;
+    params = {
+      ...p,
+      radius: p.radius * sx,
+      height: p.height * sz,
+    };
+  } else if (node.kind === "text" && sx === sy) {
+    height = p.thickness;
+    params = {
+      ...p,
+      size: p.size * sx,
+      thickness: p.thickness * sz,
+    };
   } else {
     return null;
   }

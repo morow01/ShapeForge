@@ -17,6 +17,7 @@ import {
   unionKeptEverything,
   hasImport,
   isMesh,
+  getSolidBounds,
   makeLocal,
   makeWorld,
   makePushPullPreviewBase,
@@ -380,7 +381,7 @@ function toMesh(name: string, s: AnySolid, quality: MeshQuality): KernelMesh {
  */
 function meshMatchesSolidBounds(mesh: KernelMesh, solid: AnySolid): boolean {
   try {
-    const [expectedMin, expectedMax] = solid.boundingBox.bounds;
+    const [expectedMin, expectedMax] = getSolidBounds(solid);
     const vertices = mesh.faces.vertices;
     if (!vertices.length) return false;
     const gotMin = [Infinity, Infinity, Infinity];
@@ -565,12 +566,15 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
  * the group's own combined boolean. An import's key is just its blobId, which
  * never changes for a given node — importSTLAsMesh() only ever runs once.
  */
+export const KERNEL_REVISION = 5;
+
 function localKey(spec: NodeSpec): string {
   if (spec.type === "group") {
     return JSON.stringify([
       spec.type,
       spec.op,
       spec.children.map((c) => [localKey(c), c.position, c.rotation, c.scale, c.isHole]),
+      KERNEL_REVISION,
     ]);
   }
   if (spec.type === "import") {
@@ -578,17 +582,19 @@ function localKey(spec: NodeSpec): string {
       spec.type,
       spec.blobId,
       spec.svg ? [spec.svg.thickness, SVG_IMPORT_REVISION] : null,
+      KERNEL_REVISION,
     ]);
   }
-  if (spec.type === "edit") return JSON.stringify([spec.type, localKey(spec.base), spec.ops]);
+  if (spec.type === "edit") return JSON.stringify([spec.type, localKey(spec.base), spec.ops, KERNEL_REVISION]);
   if (spec.type === "build") {
     return JSON.stringify([
       spec.type,
       spec.sources.map((s) => [localKey(s), s.position, s.rotation, s.scale]),
       spec.keep,
+      KERNEL_REVISION,
     ]);
   }
-  return JSON.stringify([spec.type, spec.kind, spec.params]);
+  return JSON.stringify([spec.type, spec.kind, spec.params, spec.text, spec.fontName, spec.textPaths, KERNEL_REVISION]);
 }
 
 /**
@@ -627,8 +633,8 @@ function meshBounds(mesh: KernelMesh): NumericBounds | null {
 }
 
 function solidBoundsOverlap(a: AnySolid, b: AnySolid): boolean {
-  const [aMin, aMax] = a.boundingBox.bounds;
-  const [bMin, bMax] = b.boundingBox.bounds;
+  const [aMin, aMax] = getSolidBounds(a);
+  const [bMin, bMax] = getSolidBounds(b);
   const epsilon = 1e-5;
   return [0, 1, 2].every(
     (axis) => aMax[axis] >= bMin[axis] - epsilon && bMax[axis] >= aMin[axis] - epsilon,
@@ -1016,7 +1022,7 @@ const api = {
       try {
         const solid = await makeWorld(spec, onError);
         if (!solid) continue;
-        const [min, max] = solid.boundingBox.bounds;
+        const [min, max] = getSolidBounds(solid);
         const centre: Vec3 = [
           (min[0] + max[0]) / 2,
           (min[1] + max[1]) / 2,
@@ -1065,6 +1071,81 @@ const api = {
     return cacheServes(key, quality)
       ? blobSTLOf(resultSolidCache!.solid, EXPORT_PRESETS[quality])
       : null;
+  },
+
+  /** Fast 3MF path used on the interactive worker: if all objects are cached,
+   * extracts their meshes directly without rebuilding from scratch. */
+  async exportCachedMeshes(
+    specs: NodeSpec[],
+    quality: ExportQuality,
+  ): Promise<{ id: string; vertices: number[]; triangles: number[] }[] | null> {
+    await init();
+    const holes = specs.filter((s) => s.isHole);
+    const solids = specs.filter((s) => !s.isHole);
+    const result: { id: string; vertices: number[]; triangles: number[] }[] = [];
+
+    for (const spec of solids) {
+      const cached = meshCache.get(spec.id);
+      if (!cached || !cached.solid) return null;
+      let solid: AnySolid = place(cached.solid, spec);
+      if (holes.length > 0) {
+        for (const hole of holes) {
+          const holeCached = meshCache.get(hole.id);
+          if (!holeCached || !holeCached.solid) return null;
+          const holeSolid = place(holeCached.solid, hole);
+          if (solidBoundsOverlap(solid, holeSolid)) {
+            const cutter = isMesh(holeSolid)
+              ? holeSolid
+              : (holeSolid as Shape3D).meshShape(EXPORT_PRESETS[quality]);
+            const target = isMesh(solid)
+              ? solid
+              : (solid as Shape3D).meshShape(EXPORT_PRESETS[quality]);
+            try {
+              solid = (target as MeshShape).cut((cutter as MeshShape).clone());
+            } catch {}
+          }
+        }
+      }
+      const mesh = isMesh(solid) ? solid.mesh() : (solid as Shape3D).mesh(EXPORT_PRESETS[quality]);
+      result.push({
+        id: spec.id,
+        vertices: Array.from(mesh.vertices),
+        triangles: Array.from(mesh.triangles),
+      });
+    }
+    return result;
+  },
+
+  /** Fallback for 3MF timeout: converts displayed scene items into per-object
+   * meshes with holes drilled. */
+  async exportDisplayedMeshes(
+    items: DisplayedSceneItem[],
+  ): Promise<{ id: string; vertices: number[]; triangles: number[] }[]> {
+    await init();
+    const solids = items.filter(({ spec }) => !spec.isHole);
+    const holes = items.filter(({ spec }) => spec.isHole);
+    const out: { id: string; vertices: number[]; triangles: number[] }[] = [];
+
+    for (const { spec, mesh } of solids) {
+      let solid: AnySolid = place(meshShapeFromDisplayed(mesh), spec);
+      for (const hole of holes) {
+        const holeSolid = place(meshShapeFromDisplayed(hole.mesh), hole.spec);
+        if (solidBoundsOverlap(solid, holeSolid)) {
+          const cut = combine("subtract", [
+            { solid, isHole: false },
+            { solid: holeSolid, isHole: false },
+          ]);
+          if (cut) solid = cut;
+        }
+      }
+      const raw = isMesh(solid) ? solid.mesh() : (solid as Shape3D).mesh(EXPORT_PRESETS.standard);
+      out.push({
+        id: spec.id,
+        vertices: Array.from(raw.vertices),
+        triangles: Array.from(raw.triangles),
+      });
+    }
+    return out;
   },
 
   /** Complete-scene timeout fallback for the subset touched by top-level
@@ -1234,26 +1315,24 @@ const api = {
     for (const ready of readyMeshes) out.push(ready);
     for (const item of evaluated) {
       if (item.isHole) continue;
-      // Mesh first, then cut on manifold: the same order exportSTL uses, and
-      // for the same reason — OCCT's default tessellation turns one sphere
-      // into six figures of triangles.
-      let solid: AnySolid = isMesh(item.solid)
-        ? item.solid
-        : (item.solid as Shape3D).meshShape(EXPORT_PRESETS[quality]);
-      for (const hole of holes) {
-        const cutter = isMesh(hole.solid)
-          ? hole.solid
-          : (hole.solid as Shape3D).meshShape(EXPORT_PRESETS[quality]);
-        // Only where they actually meet, so a hole meant for one object cannot
-        // quietly bite into another.
-        const a = boundsOf(solid);
-        const b = boundsOf(cutter);
-        if (!a || !b) continue;
-        const apart = [0, 1, 2].some((i) => a.min[i] > b.max[i] || b.min[i] > a.max[i]);
-        if (apart) continue;
-        try {
-          solid = (solid as MeshShape).cut((cutter as MeshShape).clone());
-        } catch { /* leave the solid whole rather than losing it */ }
+      let solid: AnySolid = item.solid;
+      if (holes.length > 0) {
+        for (const hole of holes) {
+          const a = boundsOf(solid);
+          const b = boundsOf(hole.solid);
+          if (!a || !b) continue;
+          const apart = [0, 1, 2].some((i) => a.min[i] > b.max[i] || b.min[i] > a.max[i]);
+          if (apart) continue;
+          const cutter = isMesh(hole.solid)
+            ? hole.solid
+            : (hole.solid as Shape3D).meshShape(EXPORT_PRESETS[quality]);
+          const target = isMesh(solid)
+            ? solid
+            : (solid as Shape3D).meshShape(EXPORT_PRESETS[quality]);
+          try {
+            solid = (target as MeshShape).cut((cutter as MeshShape).clone());
+          } catch { /* leave the solid whole rather than losing it */ }
+        }
       }
       const mesh = isMesh(solid) ? solid.mesh() : (solid as Shape3D).mesh(EXPORT_PRESETS[quality]);
       out.push({

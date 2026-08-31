@@ -17,6 +17,7 @@ import {
 } from "../geometry/triangle";
 import type { TriangleSolution } from "../geometry/triangle";
 import type { BooleanOp, ParamField, PrimitiveKind, SceneNode, Vec3 } from "../document/types";
+import type { LocalFontData } from "../text/systemFonts";
 
 /**
  * The largest corner radius a box can actually take: half its smallest side.
@@ -101,6 +102,11 @@ interface Props {
    *  exactly where the original does without the user positioning anything
    *  by hand. */
   onDuplicateWithParams?: (params: Record<string, number>) => void;
+  onText?: (text: string) => void;
+  onFontName?: (fontName: string) => void;
+  fonts?: LocalFontData[] | null;
+  onPickFontFile?: () => void;
+  onRequestSystemFonts?: () => void;
 }
 
 const AXES = ["X", "Y", "Z"] as const;
@@ -140,6 +146,11 @@ export function Inspector({
   onDelete,
   onPruneDeadOps,
   onDuplicateWithParams,
+  onText,
+  onFontName,
+  fonts,
+  onPickFontFile,
+  onRequestSystemFonts,
 }: Props) {
   const isMulti = selectedCount > 1;
   const group = isGroup(node);
@@ -345,6 +356,11 @@ export function Inspector({
               onParam={onParam}
               onTransform={onTransform}
               onDuplicateWithParams={onDuplicateWithParams}
+              onText={onText}
+              onFontName={onFontName}
+              fonts={fonts}
+              onPickFontFile={onPickFontFile}
+              onRequestSystemFonts={onRequestSystemFonts}
             />
           )}
         </>
@@ -713,6 +729,15 @@ const DIM_AXES: Partial<Record<PrimitiveKind, Record<string, number[]>>> = {
   sphere: { radius: [0, 1, 2] },
   cone: { bottomRadius: [0, 1], topRadius: [0, 1], height: [2] },
   triangle: { thickness: [2] },
+  torus: { radius: [0, 1], tubeRadius: [0, 1, 2] },
+  pyramid: { radius: [0, 1], height: [2] },
+  wedge: { width: [0], length: [1], height: [2] },
+  polygonPrism: { radius: [0, 1], height: [2] },
+  hemisphere: { radius: [0, 1, 2] },
+  capsule: { radius: [0, 1], height: [2] },
+  tube: { radius: [0, 1], height: [2] },
+  paraboloid: { radius: [0, 1], height: [2] },
+  text: { size: [0, 1] },
   connector: { width: [0], length: [1], height: [2], radius: [0, 1] },
 };
 
@@ -723,6 +748,11 @@ function ObjectParams({
   onParam,
   onTransform,
   onDuplicateWithParams,
+  onText,
+  onFontName,
+  fonts,
+  onPickFontFile,
+  onRequestSystemFonts,
 }: {
   node: Extract<SceneNode, { type: "object" }>;
   resizeConstrained?: boolean;
@@ -730,6 +760,11 @@ function ObjectParams({
   onParam: (key: string, value: number) => void;
   onTransform: (patch: { position?: Vec3; rotation?: Vec3; scale?: Vec3 }) => void;
   onDuplicateWithParams?: (params: Record<string, number>) => void;
+  onText?: (text: string) => void;
+  onFontName?: (fontName: string) => void;
+  fonts?: LocalFontData[] | null;
+  onPickFontFile?: () => void;
+  onRequestSystemFonts?: () => void;
 }) {
   const def = PRIMITIVES[node.kind];
   const fields = visibleFields(def, node.params).filter((f) => f.key !== "mode");
@@ -746,6 +781,50 @@ function ObjectParams({
 
   return (
     <>
+      {node.kind === "text" && (
+        <div className="text-inspector-block" style={{ display: "flex", flexDirection: "column", gap: "8px", marginBottom: "8px" }}>
+          <h2>Text & Font</h2>
+          <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+            <span className="field-label">Text</span>
+            <input
+              className="name"
+              style={{ width: "100%", boxSizing: "border-box" }}
+              type="text"
+              value={node.text ?? "TEXT"}
+              onFocus={beginHistoryBatch}
+              onBlur={endHistoryBatch}
+              onChange={(e) => onText?.(e.target.value)}
+              placeholder="Enter text…"
+              aria-label="3D text string"
+            />
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+            <span className="field-label">Font</span>
+            <select
+              className="num"
+              style={{ width: "100%", boxSizing: "border-box", textAlign: "left", padding: "6px 8px" }}
+              value={node.fontName ?? "Default"}
+              onFocus={() => onRequestSystemFonts?.()}
+              onClick={() => onRequestSystemFonts?.()}
+              onChange={(e) => {
+                if (e.target.value === "__pick_file__") {
+                  onPickFontFile?.();
+                } else {
+                  onFontName?.(e.target.value);
+                }
+              }}
+            >
+              <option value="Default">Default (Roboto Bold)</option>
+              {fonts && fonts.map((f, i) => (
+                <option key={`${f.postscriptName}-${i}`} value={f.fullName || f.family}>
+                  {f.fullName || f.family}
+                </option>
+              ))}
+              <option value="__pick_file__">+ Load font file (.ttf, .otf)…</option>
+            </select>
+          </div>
+        </div>
+      )}
       {node.kind === "triangle" && (
         <>
           <h2>Triangle definition</h2>

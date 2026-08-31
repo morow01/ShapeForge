@@ -3,6 +3,7 @@ import { Scene } from "./scene";
 import type { CameraMode, ToolMode, WireframeMode } from "./scene";
 import type { PreviewBuild, ScenePart } from "../kernel/types";
 import type { PrimitiveKind, SceneNode, Vec3 } from "../document/types";
+import { HomeIcon } from "../ui/icons";
 
 interface Props {
   parts: ScenePart[];
@@ -141,5 +142,18 @@ export function Viewport(props: Props) {
     sceneRef.current?.setSnapEnabled(snapEnabled);
   }, [snapEnabled]);
 
-  return <div className="viewport" ref={hostRef} />;
+  return (
+    <div className="viewport" ref={hostRef}>
+      <div className="navcube-controls">
+        <button
+          className="navcube-btn navcube-home-btn"
+          onClick={() => sceneRef.current?.resetView()}
+          title="Reset to default view (Home)"
+          aria-label="Reset to default view"
+        >
+          <HomeIcon className="navcube-icon" />
+        </button>
+      </div>
+    </div>
+  );
 }

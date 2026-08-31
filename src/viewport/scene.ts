@@ -855,7 +855,7 @@ export class Scene {
 
     const savedCam = loadCameraState();
     const mode = savedCam?.mode ?? "perspective";
-    const pos = savedCam?.position ?? [70, -70, 55];
+    const pos = savedCam?.position ?? [150, -150, 115];
     const tgt = savedCam?.target ?? [0, 0, 0];
     const posVec = new THREE.Vector3(...pos);
     const tgtVec = new THREE.Vector3(...tgt);
@@ -2373,6 +2373,111 @@ export class Scene {
     else if (kind === "cylinder" || kind === "cone") {
       geometry = new THREE.CylinderGeometry(kind === "cone" ? p.topRadius : p.radius, kind === "cone" ? p.bottomRadius : p.radius, p.height, 32);
       geometry.rotateX(Math.PI / 2).translate(0, 0, p.height / 2);
+    } else if (kind === "torus") {
+      geometry = new THREE.TorusGeometry(p.radius, p.tubeRadius, 24, 48).translate(0, 0, p.tubeRadius);
+    } else if (kind === "pyramid") {
+      const sides = p.sides ?? 4;
+      geometry = new THREE.ConeGeometry(p.radius ?? 10, p.height, sides);
+      geometry.rotateY(Math.PI / sides);
+      geometry.rotateX(Math.PI / 2).translate(0, 0, p.height / 2);
+    } else if (kind === "wedge") {
+      const w = p.width / 2;
+      const l = p.length / 2;
+      const h = p.height;
+      const v0 = [-w, -l, 0], v1 = [w, -l, 0], v2 = [w, l, 0], v3 = [-w, l, 0];
+      const v4 = [-w, l, h], v5 = [w, l, h];
+      const positions = new Float32Array([
+        // Bottom:
+        ...v0, ...v3, ...v2,  ...v0, ...v2, ...v1,
+        // Back:
+        ...v2, ...v3, ...v4,  ...v2, ...v4, ...v5,
+        // Sloped ramp:
+        ...v0, ...v1, ...v5,  ...v0, ...v5, ...v4,
+        // Left side:
+        ...v0, ...v4, ...v3,
+        // Right side:
+        ...v1, ...v2, ...v5,
+      ]);
+      geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+      geometry.computeVertexNormals();
+    } else if (kind === "polygonPrism") {
+      const sides = Math.max(3, Math.min(32, Math.round(p.sides ?? 6)));
+      geometry = new THREE.CylinderGeometry(p.radius, p.radius, p.height, sides);
+      geometry.rotateX(Math.PI / 2).translate(0, 0, p.height / 2);
+    } else if (kind === "hemisphere") {
+      geometry = new THREE.SphereGeometry(p.radius, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2);
+      geometry.rotateX(Math.PI / 2);
+    } else if (kind === "capsule") {
+      const r = p.radius ?? 5;
+      const totalH = p.height ?? 20;
+      const cylinderH = Math.max(totalH - 2 * r, 0.001);
+      geometry = new THREE.CapsuleGeometry(r, cylinderH, 16, 32);
+      geometry.rotateX(Math.PI / 2).translate(0, 0, totalH / 2);
+    } else if (kind === "tube") {
+      const rOut = Math.max(p.radius ?? 10, 0.1);
+      const wall = Math.min(Math.max(p.wallThickness ?? 2, 0.05), rOut - 0.05);
+      const rIn = Math.max(rOut - wall, 0.01);
+      const h = p.height ?? 20;
+      const shape = new THREE.Shape();
+      shape.absarc(0, 0, rOut, 0, Math.PI * 2, false);
+      const hole = new THREE.Path();
+      hole.absarc(0, 0, rIn, 0, Math.PI * 2, true);
+      shape.holes.push(hole);
+      geometry = new THREE.ExtrudeGeometry(shape, { depth: h, bevelEnabled: false, curveSegments: 32 });
+    } else if (kind === "paraboloid") {
+      const R = p.radius ?? 10;
+      const h = p.height ?? 20;
+      const rings = 16;
+      const segs = 32;
+      const positions: number[] = [];
+
+      // 1. Bottom flat base disk (Z = 0):
+      for (let k = 0; k < segs; k++) {
+        const a1 = (k * 2 * Math.PI) / segs;
+        const a2 = ((k + 1) * 2 * Math.PI) / segs;
+        positions.push(
+          0, 0, 0,
+          R * Math.cos(a2), R * Math.sin(a2), 0,
+          R * Math.cos(a1), R * Math.sin(a1), 0,
+        );
+      }
+
+      // 2. Parabolic dome surface from rim (Z=0, r=R) to apex (Z=h, r=0):
+      for (let j = 0; j < rings; j++) {
+        const t1 = j / rings;
+        const t2 = (j + 1) / rings;
+        const r1 = R * (1 - t1);
+        const z1 = h * (1 - (r1 / R) ** 2);
+        const r2 = R * (1 - t2);
+        const z2 = h * (1 - (r2 / R) ** 2);
+
+        for (let k = 0; k < segs; k++) {
+          const a1 = (k * 2 * Math.PI) / segs;
+          const a2 = ((k + 1) * 2 * Math.PI) / segs;
+          const cos1 = Math.cos(a1), sin1 = Math.sin(a1);
+          const cos2 = Math.cos(a2), sin2 = Math.sin(a2);
+
+          const p1 = [r1 * cos1, r1 * sin1, z1];
+          const p2 = [r1 * cos2, r1 * sin2, z1];
+          const p3 = [r2 * cos2, r2 * sin2, z2];
+          const p4 = [r2 * cos1, r2 * sin1, z2];
+
+          if (j === rings - 1) {
+            positions.push(...p1, ...p2, ...p3);
+          } else {
+            positions.push(...p1, ...p2, ...p3, ...p1, ...p3, ...p4);
+          }
+        }
+      }
+
+      geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(Float32Array.from(positions), 3));
+      geometry.computeVertexNormals();
+    } else if (kind === "text") {
+      const size = p.size ?? 20;
+      const thickness = p.thickness ?? 4;
+      geometry = new THREE.BoxGeometry(size * 2.5, size * 0.7, thickness).translate(0, 0, thickness / 2);
     } else if (kind === "connector") {
       // Rough box/cylinder stand-ins, not the real keystone/tapered-tip
       // profile — good enough for a drag-to-place ghost, and the real
@@ -2390,7 +2495,7 @@ export class Scene {
       geometry = new THREE.ExtrudeGeometry(shape, { depth: p.thickness, bevelEnabled: false });
     }
     this.placementPreview = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
-      color: 0x25b7bd, transparent: true, opacity: 0.42, depthWrite: false, roughness: 0.45,
+      color: 0x25b7bd, transparent: true, opacity: 0.42, depthWrite: false, roughness: 0.45, side: THREE.DoubleSide,
     }));
     this.placementPreview.renderOrder = 20;
     this.placementPreview.visible = false;
@@ -3636,6 +3741,49 @@ export class Scene {
       const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
       this.camera.position.lerpVectors(startPos, endPos, eased);
       this.controls.target.lerpVectors(startTarget, center, eased);
+      this.controls.update();
+
+      if (t < 1) {
+        this.navAnimFrame = requestAnimationFrame(step);
+      } else {
+        this.saveCameraNow();
+      }
+    };
+    step();
+  }
+
+  /** Resets camera position, target, and zoom to the default comfortable TinkerCAD home view. */
+  resetView() {
+    cancelAnimationFrame(this.navAnimFrame);
+    const startPos = this.camera.position.clone();
+    const startTarget = this.controls.target.clone();
+
+    // Classic ISO 3D view: 45° corner azimuth with 35° isometric elevation
+    const defaultTarget = new THREE.Vector3(0, 0, 0);
+    const defaultPos = new THREE.Vector3(150, -150, 115);
+
+    if (this.camera instanceof THREE.OrthographicCamera) {
+      const halfH = 105;
+      const halfW = halfH * Math.max(this.aspect(), 0.1);
+      this.camera.left = -halfW;
+      this.camera.right = halfW;
+      this.camera.top = halfH;
+      this.camera.bottom = -halfH;
+      this.camera.zoom = 1;
+      this.camera.updateProjectionMatrix();
+    } else if (this.camera instanceof THREE.PerspectiveCamera) {
+      this.camera.zoom = 1;
+      this.camera.updateProjectionMatrix();
+    }
+
+    const duration = 350;
+    const startTime = performance.now();
+
+    const step = () => {
+      const t = Math.min(1, (performance.now() - startTime) / duration);
+      const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+      this.camera.position.lerpVectors(startPos, defaultPos, eased);
+      this.controls.target.lerpVectors(startTarget, defaultTarget, eased);
       this.controls.update();
 
       if (t < 1) {

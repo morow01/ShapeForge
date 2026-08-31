@@ -1,7 +1,22 @@
 export { TRI_BY_SIDES, TRI_BY_ANGLES, TRI_BY_SIDE_ANGLE } from "../geometry/triangle";
 import { TRI_BY_SIDES, TRI_BY_ANGLES, TRI_BY_SIDE_ANGLE } from "../geometry/triangle";
 
-export type PrimitiveKind = "box" | "cylinder" | "sphere" | "cone" | "triangle" | "connector";
+export type PrimitiveKind =
+  | "box"
+  | "cylinder"
+  | "sphere"
+  | "cone"
+  | "triangle"
+  | "torus"
+  | "pyramid"
+  | "wedge"
+  | "polygonPrism"
+  | "hemisphere"
+  | "capsule"
+  | "tube"
+  | "paraboloid"
+  | "text"
+  | "connector";
 
 export interface ParamField {
   key: string;
@@ -132,6 +147,73 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
       angle("angleRight", "Right corner", onlyIn(TRI_BY_ANGLES)),
       angle("angleApex", "Apex corner", onlyIn(TRI_BY_ANGLES)),
       dim("thickness", "Thickness"),
+    ],
+  },
+  torus: {
+    label: "Torus",
+    defaults: { radius: 15, tubeRadius: 5 },
+    fields: [
+      dim("radius", "Ring radius"),
+      dim("tubeRadius", "Tube radius"),
+    ],
+  },
+  pyramid: {
+    label: "Pyramid",
+    defaults: { sides: 4, radius: 10, height: 20 },
+    fields: [
+      { key: "sides", label: "Sides", min: 3, max: 32, step: 1 },
+      dim("radius", "Radius"),
+      dim("height", "Height"),
+    ],
+  },
+  wedge: {
+    label: "Wedge",
+    defaults: { width: 20, length: 20, height: 20 },
+    fields: [
+      dim("width", "Width"),
+      dim("length", "Length"),
+      dim("height", "Height"),
+    ],
+  },
+  polygonPrism: {
+    label: "Polygon Prism",
+    defaults: { sides: 6, radius: 10, height: 20 },
+    fields: [
+      { key: "sides", label: "Sides", min: 3, max: 32, step: 1 },
+      dim("radius", "Radius"),
+      dim("height", "Height"),
+    ],
+  },
+  hemisphere: {
+    label: "Dome",
+    defaults: { radius: 10 },
+    fields: [dim("radius", "Radius")],
+  },
+  capsule: {
+    label: "Capsule",
+    defaults: { radius: 5, height: 20 },
+    fields: [dim("radius", "Radius"), dim("height", "Height")],
+  },
+  tube: {
+    label: "Tube",
+    defaults: { radius: 10, wallThickness: 2, height: 20 },
+    fields: [
+      dim("radius", "Outer radius"),
+      { key: "wallThickness", label: "Wall thickness", min: 0.1, max: 1000, step: 0.1, noSlider: true },
+      dim("height", "Height"),
+    ],
+  },
+  paraboloid: {
+    label: "Paraboloid",
+    defaults: { radius: 10, height: 20 },
+    fields: [dim("radius", "Radius"), dim("height", "Height")],
+  },
+  text: {
+    label: "Text",
+    defaults: { size: 20, thickness: 4 },
+    fields: [
+      dim("size", "Height"),
+      { key: "thickness", label: "Thickness", min: 0.1, max: 500, step: 0.5, noSlider: true },
     ],
   },
   connector: {
@@ -311,6 +393,10 @@ export interface ObjectNode extends NodeBase {
   type: "object";
   kind: PrimitiveKind;
   params: Record<string, number>;
+  /** Text content when kind === "text". */
+  text?: string;
+  /** Chosen font family / postscript name when kind === "text". */
+  fontName?: string;
 }
 
 export interface GroupNode extends NodeBase {

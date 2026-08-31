@@ -544,6 +544,8 @@ interface DocState {
   select: (id: string | null, additive?: boolean) => void;
   selectMany: (ids: string[], additive?: boolean) => void;
   setParam: (id: string, key: string, value: number) => void;
+  setText: (id: string, text: string) => void;
+  setFontName: (id: string, fontName: string) => void;
   setTransform: (id: string, patch: { position?: Vec3; rotation?: Vec3; scale?: Vec3 }) => void;
   setPositions: (updates: { id: string; position: Vec3 }[]) => void;
   /** Clones whole subtrees (fresh ids throughout, so a cloned group's
@@ -792,6 +794,7 @@ export const useDoc = create<DocState>()(
             rotation: [0, 0, 0],
             scale: [1, 1, 1],
             isHole: false,
+            ...(kind === "text" ? { text: "TEXT", fontName: "Default" } : {}),
           };
           return { nodes: [...s.nodes, node], selectedIds: [node.id] };
         });
@@ -897,6 +900,20 @@ export const useDoc = create<DocState>()(
             }
             return { ...n, params: nextParams(n, key, value) };
           }),
+        }));
+        afterBatchedMutation();
+      },
+
+      setText: (id, text) => {
+        set((s) => ({
+          nodes: updateNode(s.nodes, id, (n) => (n.type === "object" ? { ...n, text } : n)),
+        }));
+        afterBatchedMutation();
+      },
+
+      setFontName: (id, fontName) => {
+        set((s) => ({
+          nodes: updateNode(s.nodes, id, (n) => (n.type === "object" ? { ...n, fontName } : n)),
         }));
         afterBatchedMutation();
       },
