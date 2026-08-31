@@ -1392,9 +1392,16 @@ export function App() {
           meshes = await kernel.exportMeshes(currentNodes.map(toSpec), exportQuality);
         } catch (e) {
           if (!(e instanceof KernelTimeoutError)) throw e;
-          // Graceful fallback for complex scenes or large scanned STLs:
-          // Export using the verified displayed scene meshes already in viewport
-          setExportDowngraded(true);
+
+          // Surgical fallback: retry ONE top-level solid at a time, each
+          // paired only with the Holes that actually overlap it (worker.ts's
+          // exportMeshes already cuts every solid independently of the
+          // others in the same call, so this reproduces exactly what the
+          // full-scene call would have done for THIS solid — just without
+          // every other object's work competing for the same time budget).
+          // A slow object now degrades on its own instead of dragging the
+          // whole scene down to viewport resolution with it, the same trade
+          // STL's own exportRefinedSTL fallback already makes.
           const fallbackItems = currentNodes.map((node) => {
             const part = parts.find((candidate) => candidate.id === node.id);
             return part ? { node, mesh: part.mesh } : null;
@@ -1403,9 +1410,51 @@ export function App() {
             (item): item is NonNullable<typeof item> => item !== null,
           );
           if (!completeItems.length) throw e;
-          meshes = await kernel.exportDisplayedMeshes(
-            completeItems.map((item) => ({ spec: toSpec(item.node), mesh: item.mesh })),
+
+          const solids = completeItems.filter(({ node }) => !node.isHole);
+          const holes = completeItems.filter(({ node }) => node.isHole);
+          const solidBounds = new Map(
+            solids.map((item) => [item.node.id, displayedMeshBounds(item.mesh, item.node)]),
           );
+          const holeBounds = new Map(
+            holes.map((item) => [item.node.id, displayedMeshBounds(item.mesh, item.node)]),
+          );
+
+          const results: { id: string; vertices: number[]; triangles: number[] }[] = [];
+          let anyDowngraded = false;
+          for (const solid of solids) {
+            const relevantHoles = holes.filter((hole) =>
+              displayedBoundsOverlap(solidBounds.get(solid.node.id)!, holeBounds.get(hole.node.id)!),
+            );
+            let own: { id: string; vertices: number[]; triangles: number[] } | undefined;
+            try {
+              const refined = await kernel.exportMeshesRefine(
+                [solid.node, ...relevantHoles.map((h) => h.node)].map(toSpec),
+                exportQuality,
+              );
+              own = refined.find((m) => m.id === solid.node.id);
+            } catch (err) {
+              if (!(err instanceof KernelTimeoutError)) throw err;
+            }
+            if (own) {
+              results.push(own);
+              continue;
+            }
+            // The per-object retry itself timed out (or — every source in
+            // it turned out to be a hole, which should not happen here —
+            // came back without this solid). Its own overlapping Holes are
+            // NOT cut into this fallback, same acceptable last-resort trade
+            // STL's own double-failure case already makes: keeping the
+            // object in the export, uncut, beats dropping it silently.
+            anyDowngraded = true;
+            results.push({
+              id: solid.node.id,
+              vertices: Array.from(solid.mesh.faces.vertices),
+              triangles: Array.from(solid.mesh.faces.triangles),
+            });
+          }
+          if (anyDowngraded) setExportDowngraded(true);
+          meshes = results;
         }
 
         if (!meshes.length) {

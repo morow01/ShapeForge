@@ -86,6 +86,18 @@ export const EXPORT_WATCHDOG_MS = 30_000;
  * loss than 3MF's, so failing fast there is still the right trade.
  */
 export const EXPORT_MESHES_WATCHDOG_MS = 90_000;
+/**
+ * Budget for retrying ONE top-level solid (plus only the Holes that
+ * actually overlap it) after the full-scene 3MF call above times out — see
+ * exportMeshesRefine and its caller in App.tsx. Exporting every object
+ * together and exporting them one at a time do the same total work either
+ * way, so this is not "extra" time: it is that same 90s budget divided up
+ * so one slow object can no longer force every other object down to
+ * preview quality with it. 20s mirrors STL's own CURVED_EXPORT_WATCHDOG_MS
+ * refine pass, sized a little larger since a solid can carry more than one
+ * overlapping Hole to cut here where STL's refine pass cuts at most one.
+ */
+export const EXPORT_MESH_REFINE_WATCHDOG_MS = 20_000;
 /** The verified-mesh fallback must not silently start another multi-minute
  * wait after the high-detail path reaches its deadline. */
 export const DISPLAYED_EXPORT_WATCHDOG_MS = 30_000;
@@ -318,6 +330,19 @@ export const kernel = {
       throw error;
     }
   },
+  /**
+   * Surgical fallback for a single top-level solid (with only the Holes
+   * that actually overlap it) after the full-scene exportMeshes above times
+   * out — see the 3MF export handler in App.tsx. No cache probe: this is
+   * already the recovery path, and the specs it is called with rarely
+   * matches whatever the interactive scene has cached for a lone object.
+   */
+  exportMeshesRefine: (specs: NodeSpec[], quality: ExportQuality) =>
+    withWatchdog(
+      "heavy",
+      (raw, onProgress) => raw.exportMeshes(specs, quality, Comlink.proxy(onProgress)),
+      EXPORT_MESH_REFINE_WATCHDOG_MS,
+    ),
   exportDisplayedMeshes: (items: DisplayedSceneItem[]) =>
     withWatchdog(
       "heavy",
