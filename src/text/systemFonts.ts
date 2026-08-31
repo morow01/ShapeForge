@@ -147,16 +147,23 @@ const DEFAULT_TEXT_PATHS: SvgCommand[][] = [
   [["M",40.64453125,14.21875],["L",43.564453125,14.21875],["L",43.564453125,0],["L",40.64453125,0],["L",40.64453125,14.21875],["M",36.337890625,14.21875],["L",47.939453125,14.21875],["L",47.939453125,11.923828125],["L",36.337890625,11.923828125],["L",36.337890625,14.21875]],
 ];
 
+export function normalizeFontName(fontName?: string): string {
+  if (!fontName || fontName.trim().toLowerCase() === "default") return "default";
+  return fontName.trim();
+}
+
 const textPathsCache = new Map<string, SvgCommand[][]>([
   ["default:TEXT:20", DEFAULT_TEXT_PATHS],
 ]);
 
 export function getCachedTextPaths(fontName?: string, text = "TEXT", size = 20): SvgCommand[][] | undefined {
-  return textPathsCache.get(`${fontName ?? "default"}:${text}:${size}`);
+  const content = text && text.trim() ? text : "TEXT";
+  return textPathsCache.get(`${normalizeFontName(fontName)}:${content}:${size}`);
 }
 
 export function setCachedTextPaths(fontName: string | undefined, text: string, size: number, paths: SvgCommand[][]): void {
-  textPathsCache.set(`${fontName ?? "default"}:${text}:${size}`, paths);
+  const content = text && text.trim() ? text : "TEXT";
+  textPathsCache.set(`${normalizeFontName(fontName)}:${content}:${size}`, paths);
 }
 
 export async function resolveTextPaths(
@@ -166,12 +173,13 @@ export async function resolveTextPaths(
   fontList?: LocalFontData[],
 ): Promise<SvgCommand[][]> {
   const content = text && text.trim() ? text : "TEXT";
-  const cacheKey = `${fontName ?? "default"}:${content}:${size}`;
+  const normalizedFont = normalizeFontName(fontName);
+  const cacheKey = `${normalizedFont}:${content}:${size}`;
   if (textPathsCache.has(cacheKey)) {
     return textPathsCache.get(cacheKey)!;
   }
   let font: ReturnType<typeof parse> | null = null;
-  if (fontName && fontList) {
+  if (normalizedFont !== "default" && fontList) {
     const found = fontList.find(
       (f) => f.fullName === fontName || f.postscriptName === fontName || f.family === fontName,
     );

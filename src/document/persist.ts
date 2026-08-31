@@ -72,7 +72,16 @@ export function parseNode(raw: unknown): SceneNode | null {
     for (const [k, v] of Object.entries(n.params as Record<string, unknown>)) {
       if (typeof v === "number" && Number.isFinite(v)) params[k] = v;
     }
-    return { ...base, type: "object", kind, params };
+    const text = typeof n.text === "string" ? n.text : undefined;
+    const fontName = typeof n.fontName === "string" ? n.fontName : undefined;
+    return {
+      ...base,
+      type: "object",
+      kind,
+      params,
+      ...(text !== undefined ? { text } : {}),
+      ...(fontName !== undefined ? { fontName } : {}),
+    };
   }
 
   if (n.type === "build") {

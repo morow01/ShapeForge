@@ -523,7 +523,7 @@ interface DocState {
   importProjectData: (data: ProjectData) => string;
   refreshProjectsList: () => void;
 
-  addPrimitive: (kind: PrimitiveKind) => void;
+  addPrimitive: (kind: PrimitiveKind, position?: Vec3, rotation?: Vec3) => void;
   /** Adds a node for a file already written to blobStore — the caller reads
    *  and stores the bytes first (both are async), so this stays a plain
    *  synchronous mutation like every other store action. */
@@ -774,7 +774,7 @@ export const useDoc = create<DocState>()(
         set({ projects: listProjects() });
       },
 
-      addPrimitive: (kind) => {
+      addPrimitive: (kind, position, rotation) => {
         set((s) => {
           const def = PRIMITIVES[kind];
           // Count the whole tree, not just the roots, so a part nested in a
@@ -790,8 +790,8 @@ export const useDoc = create<DocState>()(
             name: `${def.label} ${n}`,
             params: { ...def.defaults },
             // Offset each new part so they do not stack invisibly.
-            position: [s.nodes.length * 6, 0, 0],
-            rotation: [0, 0, 0],
+            position: position ?? [s.nodes.length * 6, 0, 0],
+            rotation: rotation ?? [0, 0, 0],
             scale: [1, 1, 1],
             isHole: false,
             ...(kind === "text" ? { text: "TEXT", fontName: "Default" } : {}),

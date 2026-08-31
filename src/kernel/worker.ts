@@ -844,7 +844,37 @@ const api = {
       if (sameGeometry) {
         geometryCache.delete(key);
         geometryCache.set(key, sameGeometry);
-        const mesh = { ...sameGeometry.mesh, name: spec.id };
+        const mesh: KernelMesh = {
+          name: spec.id,
+          faces: {
+            ...sameGeometry.mesh.faces,
+            vertices: sameGeometry.mesh.faces.vertices instanceof Float32Array
+              ? sameGeometry.mesh.faces.vertices.slice()
+              : Array.isArray(sameGeometry.mesh.faces.vertices)
+              ? [...sameGeometry.mesh.faces.vertices]
+              : sameGeometry.mesh.faces.vertices,
+            triangles: sameGeometry.mesh.faces.triangles instanceof Uint32Array
+              ? sameGeometry.mesh.faces.triangles.slice()
+              : Array.isArray(sameGeometry.mesh.faces.triangles)
+              ? [...sameGeometry.mesh.faces.triangles]
+              : sameGeometry.mesh.faces.triangles,
+            normals: sameGeometry.mesh.faces.normals instanceof Float32Array
+              ? sameGeometry.mesh.faces.normals.slice()
+              : Array.isArray(sameGeometry.mesh.faces.normals)
+              ? [...sameGeometry.mesh.faces.normals]
+              : sameGeometry.mesh.faces.normals,
+            faceGroups: sameGeometry.mesh.faces.faceGroups.map((g) => ({ ...g })),
+          },
+          edges: {
+            ...sameGeometry.mesh.edges,
+            lines: sameGeometry.mesh.edges.lines instanceof Float32Array
+              ? sameGeometry.mesh.edges.lines.slice()
+              : Array.isArray(sameGeometry.mesh.edges.lines)
+              ? [...sameGeometry.mesh.edges.lines]
+              : sameGeometry.mesh.edges.lines,
+            edgeGroups: sameGeometry.mesh.edges.edgeGroups.map((g) => ({ ...g })),
+          },
+        };
         const entry = { key, mesh, faces: sameGeometry.faces, solid: sameGeometry.solid.clone() };
         meshCache.set(spec.id, entry);
         parts.push({ id: spec.id, isHole: spec.isHole, mesh, faces: sameGeometry.faces });

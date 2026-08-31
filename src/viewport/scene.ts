@@ -425,11 +425,11 @@ function syncKernelGeometry(mesh: KernelMesh, previous: ThreeGeometry[] = []): T
   const faces = new THREE.BufferGeometry();
   const vertices =
     mesh.faces.vertices instanceof Float32Array
-      ? mesh.faces.vertices
+      ? mesh.faces.vertices.slice()
       : Float32Array.from(mesh.faces.vertices);
   const triangles =
     mesh.faces.triangles instanceof Uint32Array
-      ? mesh.faces.triangles
+      ? mesh.faces.triangles.slice()
       : Uint32Array.from(mesh.faces.triangles);
   faces.setAttribute("position", new THREE.BufferAttribute(vertices, 3));
   faces.setIndex(new THREE.BufferAttribute(triangles, 1));
@@ -437,7 +437,7 @@ function syncKernelGeometry(mesh: KernelMesh, previous: ThreeGeometry[] = []): T
   if (mesh.faces.normals.length) {
     const normals =
       mesh.faces.normals instanceof Float32Array
-        ? mesh.faces.normals
+        ? mesh.faces.normals.slice()
         : Float32Array.from(mesh.faces.normals);
     faces.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
   } else {
@@ -449,7 +449,7 @@ function syncKernelGeometry(mesh: KernelMesh, previous: ThreeGeometry[] = []): T
   const lines = new THREE.BufferGeometry();
   const linePositions =
     mesh.edges.lines instanceof Float32Array
-      ? mesh.edges.lines
+      ? mesh.edges.lines.slice()
       : Float32Array.from(mesh.edges.lines);
   lines.setAttribute("position", new THREE.BufferAttribute(linePositions, 3));
   for (const group of mesh.edges.edgeGroups) lines.addGroup(group.start, group.count, 0);

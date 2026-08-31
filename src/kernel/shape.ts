@@ -260,9 +260,11 @@ export function getSolidBounds(s: AnySolid): [[number, number, number], [number,
       if (wrapped && typeof wrapped.boundingBox === "function") {
         const box = wrapped.boundingBox();
         if (box && box.min && box.max) {
-          const min: [number, number, number] = [Number(box.min[0]), Number(box.min[1]), Number(box.min[2])];
-          const max: [number, number, number] = [Number(box.max[0]), Number(box.max[1]), Number(box.max[2])];
-          if (Number.isFinite(min[0]) && Number.isFinite(max[0])) {
+          const getVal = (obj: any, idx: number, key: string) => Number(obj[idx] ?? obj[key]);
+          const min: [number, number, number] = [getVal(box.min, 0, "x"), getVal(box.min, 1, "y"), getVal(box.min, 2, "z")];
+          const max: [number, number, number] = [getVal(box.max, 0, "x"), getVal(box.max, 1, "y"), getVal(box.max, 2, "z")];
+          if (Number.isFinite(min[0]) && Number.isFinite(min[1]) && Number.isFinite(min[2]) &&
+              Number.isFinite(max[0]) && Number.isFinite(max[1]) && Number.isFinite(max[2])) {
             return [min, max];
           }
         }
@@ -272,8 +274,8 @@ export function getSolidBounds(s: AnySolid): [[number, number, number], [number,
     try {
       const b = (s as any).boundingBox?.bounds;
       if (b && b[0] && b[1]) {
-        const min: [number, number, number] = [Number(b[0][0]), Number(b[0][1]), Number(b[0][2])];
-        const max: [number, number, number] = [Number(b[1][0]), Number(b[1][1]), Number(b[1][2])];
+        const min: [number, number, number] = [Number(b[0][0] ?? b[0].x), Number(b[0][1] ?? b[0].y), Number(b[0][2] ?? b[0].z)];
+        const max: [number, number, number] = [Number(b[1][0] ?? b[1].x), Number(b[1][1] ?? b[1].y), Number(b[1][2] ?? b[1].z)];
         if (Number.isFinite(min[0]) && Number.isFinite(max[0])) {
           return [min, max];
         }
@@ -345,7 +347,7 @@ async function makeImport(spec: ImportSpec): Promise<AnySolid> {
     const paths = JSON.parse(new TextDecoder().decode(blob)) as SvgCommand[][];
     const solid = svgMeshSolid(paths, Math.max(0.01, spec.svg.thickness));
     if (!solid) throw new Error("No closed outlines in that artwork to build from.");
-    return solid;
+    return normalise(solid);
   }
 
   let cached = importCache.get(spec.blobId);

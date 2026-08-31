@@ -436,15 +436,14 @@ export function App() {
       new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), n),
       "XYZ",
     );
-    addPrimitive(pendingPrimitive);
-    const id = useDoc.getState().selectedIds[0];
-    if (id) setTransform(id, {
-      position: base.toArray() as Vec3,
-      rotation: [rotation.x / Math.PI * 180, rotation.y / Math.PI * 180, rotation.z / Math.PI * 180],
-    });
+    addPrimitive(
+      pendingPrimitive,
+      base.toArray() as Vec3,
+      [rotation.x / Math.PI * 180, rotation.y / Math.PI * 180, rotation.z / Math.PI * 180],
+    );
     setPendingPrimitive(null);
     setToolMode("select");
-  }, [addPrimitive, pendingPrimitive, setTransform]);
+  }, [addPrimitive, pendingPrimitive]);
 
   useEffect(() => {
     if (!wireframeMenuOpen) {
