@@ -33,16 +33,12 @@ export function bakeScale(node: ObjectNode): ObjectNode | null {
   let params: Record<string, number>;
   let height: number;
   if (node.kind === "box") {
-    // Round edges would turn elliptical; rebuilding at the new size would not
-    // reproduce them.
-    if ((p.fillet ?? 0) > 0 && !(sx === sy && sy === sz)) return null;
     height = p.height;
     params = {
       ...p,
-      width: p.width * sx,
-      depth: p.depth * sy,
-      height: p.height * sz,
-      fillet: (p.fillet ?? 0) * (sx === sy && sy === sz ? sx : 1),
+      width: Math.round(p.width * sx * 100) / 100,
+      depth: Math.round(p.depth * sy * 100) / 100,
+      height: Math.round(p.height * sz * 100) / 100,
     };
   } else if (node.kind === "cylinder" && sx === sy) {
     height = p.height;

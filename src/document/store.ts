@@ -968,7 +968,15 @@ export const useDoc = create<DocState>()(
 
       setTransform: (id, patch) => {
         set((s) => ({
-          nodes: updateNode(s.nodes, id, (n) => (sameTransform(n, patch) ? n : { ...n, ...patch })),
+          nodes: updateNode(s.nodes, id, (n) => {
+            if (sameTransform(n, patch)) return n;
+            const updated = { ...n, ...patch };
+            if (updated.type === "object" && patch.scale) {
+              const baked = bakeScale(updated);
+              if (baked) return baked;
+            }
+            return updated;
+          }),
         }));
         afterBatchedMutation();
       },
