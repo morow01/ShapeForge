@@ -18,6 +18,7 @@ import type { Face, Shape3D } from "replicad";
 import { InvalidShapeError, solveTriangle, solveScaledTriangle } from "../geometry/triangle";
 import { getBlob } from "../document/blobStore";
 import { svgMeshSolid } from "./svgSolid";
+import { makeThreadedRodSolid, makeThreadedNutSolid } from "./threads";
 import type { SvgCommand } from "../svg/parse";
 import type { EditOp, OffsetExtrudeOp, PushPullOp, ResizeFaceOp, ShellOp, Vec3 } from "../document/types";
 import type { BuildSpec, EditSpec, ImportSpec, NodeSpec, ObjectSpec } from "./types";
@@ -168,13 +169,49 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
       break;
     }
     case "tube": {
-      const rOut = Math.max(p.radius ?? 10, 0.1);
-      const wall = Math.min(Math.max(p.wallThickness ?? 2, 0.05), rOut - 0.05);
+      const rOut = Math.max(p.radius ?? 15, 0.1);
+      const wall = Math.min(Math.max(p.wallThickness ?? 3, 0.05), rOut - 0.05);
       const rIn = Math.max(rOut - wall, 0.01);
-      const h = Math.max(p.height ?? 20, 0.1);
-      const outerCyl = makeCylinder(rOut, h);
-      const innerCyl = makeCylinder(rIn, h + 0.2).translate([0, 0, -0.1]);
-      s = outerCyl.cut(innerCyl) as Shape3D;
+      const h = Math.max(p.height ?? 10, 0.1);
+      const sides = Math.max(3, Math.min(64, Math.round(p.sides ?? 32)));
+      const bevel = Math.min(Math.max(p.bevel ?? 0, 0), wall / 2 - 0.01, h / 2 - 0.01);
+
+      let outer: Shape3D;
+      let inner: Shape3D;
+
+      if (sides >= 32) {
+        outer = makeCylinder(rOut, h);
+        inner = makeCylinder(rIn, h + 2).translate([0, 0, -1]);
+      } else {
+        const dTheta = (2 * Math.PI) / sides;
+        const outPts: [number, number][] = [];
+        const inPts: [number, number][] = [];
+        for (let i = 0; i < sides; i++) {
+          const a = i * dTheta;
+          outPts.push([rOut * Math.cos(a), rOut * Math.sin(a)]);
+          inPts.push([rIn * Math.cos(a), rIn * Math.sin(a)]);
+        }
+        let penOut = draw(outPts[0]);
+        let penIn = draw(inPts[0]);
+        for (let i = 1; i < sides; i++) {
+          penOut = penOut.lineTo(outPts[i]);
+          penIn = penIn.lineTo(inPts[i]);
+        }
+        outer = penOut.close().sketchOnPlane("XY").extrude(h) as Shape3D;
+        inner = penIn.close().sketchOnPlane("XY").extrude(h + 2).translate([0, 0, -1]) as Shape3D;
+      }
+
+      let tubeSolid = outer.cut(inner);
+      if (bevel > 0) {
+        try {
+          tubeSolid = tubeSolid.chamfer(bevel, (e) => e.inPlane("XY"));
+        } catch {
+          try {
+            tubeSolid = tubeSolid.fillet(bevel, (e) => e.inPlane("XY"));
+          } catch {}
+        }
+      }
+      s = tubeSolid;
       break;
     }
     case "paraboloid": {
@@ -246,6 +283,125 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
         pen = pen.lineTo([0, len]);
         s = pen.close().sketchOnPlane("XZ").revolve([0, 0, 1]) as Shape3D;
       }
+      break;
+    }
+    case "threadedRod": {
+      s = makeThreadedRodSolid(p);
+      break;
+    }
+    case "threadedNut": {
+      s = makeThreadedNutSolid(p);
+      break;
+    }
+    case "star": {
+      const numPoints = Math.max(3, Math.min(32, Math.round(p.points ?? 5)));
+      const rOut = Math.max(p.outerRadius ?? 15, 0.1);
+      const rIn = Math.max(p.innerRadius ?? 7.5, 0.1);
+      const height = Math.max(p.height ?? 10, 0.1);
+      const style = p.style ?? 0;
+
+      if (style === 0) {
+        // Flat extruded 2D Star Prism
+        const dTheta = Math.PI / numPoints;
+        const pts: [number, number][] = [];
+        for (let i = 0; i < numPoints * 2; i++) {
+          const r = i % 2 === 0 ? rOut : rIn;
+          const a = i * dTheta - Math.PI / 2;
+          pts.push([r * Math.cos(a), r * Math.sin(a)]);
+        }
+        let pen = draw(pts[0]);
+        for (let i = 1; i < pts.length; i++) {
+          pen = pen.lineTo(pts[i]);
+        }
+        s = pen.close().sketchOnPlane("XY").extrude(height) as Shape3D;
+      } else {
+        // Faceted 3D Star (Pyramidal Star with center apex)
+        const manifold = getManifold();
+        const dTheta = Math.PI / numPoints;
+        const verts: number[] = [];
+        const tris: number[] = [];
+
+        // Perimeter base vertices [0 ... 2*numPoints - 1]
+        for (let i = 0; i < numPoints * 2; i++) {
+          const r = i % 2 === 0 ? rOut : rIn;
+          const a = i * dTheta - Math.PI / 2;
+          verts.push(r * Math.cos(a), r * Math.sin(a), 0);
+        }
+
+        const cBot = numPoints * 2;
+        verts.push(0, 0, 0); // Bottom center
+
+        const cTop = numPoints * 2 + 1;
+        verts.push(0, 0, height); // Top apex
+
+        const N = numPoints * 2;
+        for (let i = 0; i < N; i++) {
+          const next = (i + 1) % N;
+          // Top sloping triangular facets
+          tris.push(cTop, i, next);
+          // Bottom flat base fan
+          tris.push(cBot, next, i);
+        }
+
+        const starMesh = new manifold.Mesh({
+          vertProperties: new Float32Array(verts),
+          triVerts: new Uint32Array(tris),
+          numProp: 3,
+        });
+        s = new MeshShape(new manifold.Manifold(starMesh));
+      }
+      break;
+    }
+    case "tray": {
+      const w = Math.max(p.width ?? 60, 2);
+      const d = Math.max(p.depth ?? 30, 2);
+      const h = Math.max(p.height ?? 20, 1);
+      const wall = Math.min(Math.max(p.wallThickness ?? 2, 0.4), Math.min(w, d) / 2 - 0.2);
+      const floor = Math.min(Math.max(p.floorThickness ?? 2, 0.4), h - 0.5);
+      const maxFillet = Math.min(w, d) / 2 - 0.01;
+      const cornerR = Math.min(Math.max(p.cornerRadius ?? 4, 0), maxFillet);
+      const inCornerR = Math.max(0, cornerR - wall);
+      const maxInsideFillet = Math.min((h - floor) / 2 - 0.1, (Math.min(w, d) - wall * 2) / 2 - 0.1);
+      const insideFillet = Math.min(Math.max(p.internalFillet ?? 0, 0), Math.max(0, maxInsideFillet));
+
+      // 1. Outer solid box with corner radius
+      let outer = makeBaseBox(w, d, h);
+      if (cornerR > 0) {
+        outer = outer.fillet(cornerR, (e) => e.inDirection("Z"));
+      }
+
+      // 2. Inner pocket cutter
+      const inW = w - wall * 2;
+      const inD = d - wall * 2;
+      const inH = h - floor + 5;
+
+      let inner = makeBaseBox(inW, inD, inH);
+      if (inCornerR > 0) {
+        inner = inner.fillet(inCornerR, (e) => e.inDirection("Z"));
+      }
+      if (insideFillet > 0) {
+        try {
+          inner = inner.fillet(insideFillet, (e) => e.inPlane("XY", 0));
+        } catch {
+          try {
+            inner = inner.fillet(insideFillet, (e) => e.inPlane("XY"));
+          } catch {}
+        }
+      }
+
+      // 3. Cut inner pocket from outer solid
+      s = outer.cut(inner.translate([0, 0, floor]));
+      break;
+    }
+    case "ellipsoid": {
+      const rx = Math.max(p.radiusX ?? 15, 0.1);
+      const ry = Math.max(p.radiusY ?? 10, 0.1);
+      const rz = Math.max(p.radiusZ ?? 10, 0.1);
+      const density = p.density ?? 1;
+      const divs = density === 0 ? 16 : density === 2 ? 64 : density === 3 ? 128 : 32;
+      const manifold = getManifold();
+      const sphere = manifold.Manifold.sphere(1, divs).scale([rx, ry, rz]);
+      s = new MeshShape(sphere);
       break;
     }
   }
@@ -1857,9 +2013,9 @@ export async function makeLocal(
   // of replacing it with a group that is missing pieces.
   if (!built.complete) return null;
   const kids = built.kids;
-  const result = combine(spec.op, kids);
+  const op: GroupOp = spec.op === "subtract" || spec.op === "intersect" ? spec.op : "union";
+  const result = combine(op, kids);
   if (!result) return result;
-
 
   // Known OCCT weakness: a sphere's seam meridian crossing the other shape's
   // boundary makes the boolean return an invalid solid. Spinning the seam away
@@ -1867,7 +2023,7 @@ export async function makeLocal(
   // there is actually a sphere involved. (suspicious() already short-circuits
   // to false for MeshShape results, so this never fires on the import path.)
   const hasSphere = spec.children.some((c) => c.type === "object" && c.kind === "sphere");
-  const invalid = suspicious(spec.op, result, kids);
+  const invalid = suspicious(op, result, kids);
   // The same seam also has a quieter failure mode that suspicious() cannot
   // catch, because the solid it produces measures perfectly plausibly and
   // only misbehaves when tessellated — see isWatertight. Worth the extra
@@ -1879,16 +2035,16 @@ export async function makeLocal(
     const retryBuild = await build(true);
     if (!retryBuild.complete) return result;
     const retryKids = retryBuild.kids;
-    const retry = combine(spec.op, retryKids);
+    const retry = combine(op, retryKids);
     // A retry has to actually be better, not merely different: when the first
     // attempt was outright invalid any sound solid is an improvement, but when
     // it was specifically cracked, only a watertight one is worth swapping in.
-    if (retry && !suspicious(spec.op, retry, retryKids) && (invalid || isWatertight(retry))) {
+    if (retry && !suspicious(op, retry, retryKids) && (invalid || isWatertight(retry))) {
       return retry;
     }
   }
 
-  if (invalid && spec.op === "union") {
+  if (invalid && op === "union") {
     onError?.(spec.id, "This union produced an invalid solid — try moving or rotating a part.");
   }
   return result;

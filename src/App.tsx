@@ -7,6 +7,7 @@ import { Inspector } from "./ui/Inspector";
 import { Tree } from "./ui/Tree";
 import { ProjectsModal } from "./ui/ProjectsModal";
 import {
+  CombineIcon,
   DropIcon,
   ExportIcon,
   GroupIcon,
@@ -193,10 +194,26 @@ function addSkip(prev: Set<string>, id: string): Set<string> {
   return new Set(prev).add(id);
 }
 
+/** Collects specs for the kernel, flattening assembly groups so their children build independently. */
+function flattenSpecs(nodes: SceneNode[]): NodeSpec[] {
+  const out: NodeSpec[] = [];
+  for (const n of nodes) {
+    if (isGroup(n) && n.op === "assembly") {
+      out.push(...flattenSpecs(n.children.filter((c) => !c.hidden)));
+    } else {
+      out.push(toSpec(n));
+    }
+  }
+  return out;
+}
+
 /** Geometry-defining shape of a node, ignoring its own placement. A group's
  *  shape does depend on where its children sit, so those stay included. */
 const shapeOf = (n: SceneNode): unknown => {
   if (isGroup(n)) {
+    if (n.op === "assembly") {
+      return [n.id, "assembly", n.children.filter((c) => !c.hidden).map(shapeOf)];
+    }
     return [
       n.id,
       "g",
@@ -290,6 +307,7 @@ export function App() {
     toggleHidden,
     rename,
     group,
+    combine,
     ungroup,
     clearAll,
     renameProject,
@@ -865,7 +883,7 @@ export function App() {
     if (meshRecoveryRef.current.shapeKey !== shapeKey) {
       meshRecoveryRef.current = { shapeKey, attempts: 0 };
     }
-    const specs = pruneSkipped(useDoc.getState().nodes, skippedIds).map(toSpec);
+    const specs = flattenSpecs(pruneSkipped(useDoc.getState().nodes, skippedIds));
     if (!specs.length) {
       setParts([]);
       setInvalid((prev) => (skippedIds.size ? prev : {}));
@@ -1839,6 +1857,12 @@ export function App() {
     [group, applyTreeChange],
   );
 
+  const combineSelected = useCallback(
+    (op: "union" | "subtract" | "intersect" = "union") =>
+      applyTreeChange((centres) => combine(op, centres)),
+    [combine, applyTreeChange],
+  );
+
   const dropSelected = useCallback(() => {
     const updates = sceneRef.current?.dropSelected() ?? [];
     if (updates.length) setPositions(updates);
@@ -1871,6 +1895,9 @@ export function App() {
         e.preventDefault();
         if (e.shiftKey) ungroupSelected();
         else groupSelected();
+      } else if (mod && e.shiftKey && e.key.toLowerCase() === "b") {
+        e.preventDefault();
+        combineSelected("union");
       } else if (mod && e.key.toLowerCase() === "z") {
         e.preventDefault();
         if (e.shiftKey) redo();
@@ -2070,26 +2097,31 @@ export function App() {
         </div>
         <div className="toolbar-group">
           <button
-            className={`topbar-icon-btn ${canUngroup ? "on" : ""}`}
-            onClick={() => {
-              if (canUngroup) ungroupSelected();
-              else if (canGroup) groupSelected();
-            }}
-            disabled={(!canGroup && !canUngroup) || treeChangeBusy}
-            title={
-              canUngroup
-                ? "Ungroup (Ctrl+Shift+G)"
-                : canGroup
-                ? "Group (Ctrl+G)"
-                : "Group (Ctrl+G) — Select 2 or more objects"
-            }
-            aria-label={canUngroup ? "Ungroup" : "Group"}
+            className="topbar-icon-btn"
+            onClick={groupSelected}
+            disabled={!canGroup || treeChangeBusy}
+            title={canGroup ? "Group / Assembly (Ctrl+G) — Link objects to move together" : "Group (Ctrl+G) — Select 2 or more objects"}
+            aria-label="Group"
           >
-            {canUngroup ? (
-              <UngroupIcon className="topbar-icon" />
-            ) : (
-              <GroupIcon className="topbar-icon" />
-            )}
+            <GroupIcon className="topbar-icon" />
+          </button>
+          <button
+            className="topbar-icon-btn"
+            onClick={() => combineSelected("union")}
+            disabled={!canGroup || treeChangeBusy}
+            title={canGroup ? "Combine Solid (Ctrl+Shift+B) — Fuse overlapping solids into one" : "Combine — Select 2 or more objects"}
+            aria-label="Combine Solid"
+          >
+            <CombineIcon className="topbar-icon" />
+          </button>
+          <button
+            className={`topbar-icon-btn ${canUngroup ? "on" : ""}`}
+            onClick={ungroupSelected}
+            disabled={!canUngroup || treeChangeBusy}
+            title={canUngroup ? "Ungroup / Separate (Ctrl+Shift+G)" : "Ungroup — Select a group or combined solid"}
+            aria-label="Ungroup"
+          >
+            <UngroupIcon className="topbar-icon" />
           </button>
         </div>
         <div className="toolbar-group view-tools">

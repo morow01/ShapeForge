@@ -325,8 +325,23 @@ export function RedoIcon({ className = "tool-icon" }: { className?: string }) {
   );
 }
 
-/** TinkerCAD-style Group icon: fused square and circle into a single shape */
+/** Assembly / Group icon: bounding frame enclosing multiple parts */
 export function GroupIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <g fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="2" y="2" width="20" height="20" rx="3" strokeDasharray="3 2" opacity=".6" />
+        <rect x="5" y="8" width="7" height="7" rx="1" fill="currentColor" opacity=".18" />
+        <circle cx="15.5" cy="14.5" r="3.5" fill="currentColor" opacity=".18" />
+        <rect x="5" y="8" width="7" height="7" rx="1" />
+        <circle cx="15.5" cy="14.5" r="3.5" />
+      </g>
+    </svg>
+  );
+}
+
+/** Combine / Solid Fusion icon: fused overlapping square and circle */
+export function CombineIcon({ className = "tool-icon" }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
       <g fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -340,7 +355,7 @@ export function GroupIcon({ className = "tool-icon" }: { className?: string }) {
   );
 }
 
-/** TinkerCAD-style Ungroup icon: separated square and circle */
+/** Ungroup / Separate icon: separated square and circle */
 export function UngroupIcon({ className = "tool-icon" }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -821,6 +836,83 @@ export function PrimitiveShapeIcon({
           <path d="M10 7 L22 7 L26 14 L18 14 L18 25 L14 25 L14 14 L6 14 Z" fill="#38a7d5" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
           <path d="M10 7 L14 4 L26 4 L22 7 Z" fill="#78d5f8" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
           <path d="M22 7 L26 4 L30 11 L26 14 Z" fill="#2087b2" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
+        </svg>
+      );
+    case "threadedRod":
+      return (
+        <svg className={className} viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+          {/* Hex Head */}
+          <path d="M16 3 L25 7.5 L16 12 L7 7.5 Z" fill="#78d5f8" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
+          <path d="M7 7.5 L16 12 V16 L7 11.5 Z" fill="#38a7d5" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
+          <path d="M25 7.5 L16 12 V16 L25 11.5 Z" fill="#2087b2" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
+          {/* Threaded Shaft with ridges */}
+          <path d="M10 16 V27 C10 28.5 16 29 16 29 C16 29 22 28.5 22 27 V16 Z" fill="#38a7d5" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
+          <path d="M10 18.5 L22 17M10 21.5 L22 20M10 24.5 L22 23M10 27.5 L22 26" stroke="#78d5f8" strokeWidth="1.2" strokeLinecap="round" />
+        </svg>
+      );
+    case "threadedNut":
+      return (
+        <svg className={className} viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+          {/* Hex Nut Top */}
+          <path d="M16 4 L27 9.5 L27 15 L16 20.5 L5 15 L5 9.5 Z" fill="#78d5f8" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
+          {/* Hex Nut Left/Right Faces */}
+          <path d="M5 15 L16 20.5 V27 L5 21.5 Z" fill="#38a7d5" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
+          <path d="M27 15 L16 20.5 V27 L27 21.5 Z" fill="#2087b2" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
+          {/* Center Hole with Threads */}
+          <ellipse cx="16" cy="12.5" rx="5.5" ry="3" fill="#156485" stroke="#1d7a9f" strokeWidth="1" />
+          <path d="M12 12.5 C12 14 20 14 20 12.5" fill="none" stroke="#78d5f8" strokeWidth="1" />
+        </svg>
+      );
+    case "star":
+      return (
+        <svg className={className} viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+          {/* 3D Extruded Star Icon */}
+          <path
+            d="M16 2.5 L19.5 9.5 L27 10.5 L21.5 15.5 L23 23 L16 19 L9 23 L10.5 15.5 L5 10.5 L12.5 9.5 Z"
+            fill="#78d5f8"
+            stroke="#1d7a9f"
+            strokeWidth="1.2"
+            strokeLinejoin="round"
+          />
+          <path
+            d="M23 23 L16 19 L9 23 L9 26.5 L16 22.5 L23 26.5 Z"
+            fill="#2087b2"
+            stroke="#1d7a9f"
+            strokeWidth="1.2"
+            strokeLinejoin="round"
+          />
+          <path
+            d="M9 23 L10.5 15.5 L5 10.5 L5 14 L10.5 19 L9 26.5 Z"
+            fill="#38a7d5"
+            stroke="#1d7a9f"
+            strokeWidth="1.2"
+            strokeLinejoin="round"
+          />
+        </svg>
+      );
+    case "tray":
+      return (
+        <svg className={className} viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+          {/* Isometric Tray / Organizer Bin */}
+          <path d="M4 11 L16 5 L28 11 L16 17 Z" fill="#78d5f8" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
+          <path d="M7 11.5 L16 7 L25 11.5 L16 16 Z" fill="#156485" stroke="#1d7a9f" strokeWidth="1" strokeLinejoin="round" />
+          <path d="M4 11 L16 17 V25 L4 19 Z" fill="#38a7d5" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
+          <path d="M28 11 L16 17 V25 L28 19 Z" fill="#2087b2" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
+        </svg>
+      );
+    case "ellipsoid":
+      return (
+        <svg className={className} viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+          {/* Isometric 3D Ellipsoid */}
+          <defs>
+            <radialGradient id="ellipsoid-grad" cx="40%" cy="35%" r="60%">
+              <stop offset="0%" stopColor="#78d5f8" />
+              <stop offset="60%" stopColor="#38a7d5" />
+              <stop offset="100%" stopColor="#1d7a9f" />
+            </radialGradient>
+          </defs>
+          <ellipse cx="16" cy="16" rx="13" ry="8" fill="url(#ellipsoid-grad)" stroke="#1d7a9f" strokeWidth="1.2" />
+          <path d="M3 16 C3 19 29 19 29 16" fill="none" stroke="#78d5f8" strokeWidth="1" opacity="0.6" />
         </svg>
       );
   }

@@ -438,7 +438,49 @@ function afterBatchedMutation() {
  * Applies a parameter edit, honouring the couplings a primitive needs.
  * Only the triangle has any: in Angles mode its three corners must sum to 180.
  */
+const METRIC_PRESETS: Record<number, { pitch: number; headSize: number; headHeight: number; nutWidth: number; nutHeight: number }> = {
+  3: { pitch: 0.5, headSize: 5.5, headHeight: 2.0, nutWidth: 5.5, nutHeight: 2.4 },
+  4: { pitch: 0.7, headSize: 7.0, headHeight: 2.8, nutWidth: 7.0, nutHeight: 3.2 },
+  5: { pitch: 0.8, headSize: 8.0, headHeight: 3.5, nutWidth: 8.0, nutHeight: 4.7 },
+  6: { pitch: 1.0, headSize: 10.0, headHeight: 4.0, nutWidth: 10.0, nutHeight: 5.2 },
+  8: { pitch: 1.25, headSize: 13.0, headHeight: 5.5, nutWidth: 13.0, nutHeight: 6.8 },
+  10: { pitch: 1.5, headSize: 16.0, headHeight: 6.5, nutWidth: 16.0, nutHeight: 8.4 },
+  12: { pitch: 1.75, headSize: 18.0, headHeight: 7.5, nutWidth: 18.0, nutHeight: 10.8 },
+  16: { pitch: 2.0, headSize: 24.0, headHeight: 10.0, nutWidth: 24.0, nutHeight: 14.8 },
+  20: { pitch: 2.5, headSize: 30.0, headHeight: 12.5, nutWidth: 30.0, nutHeight: 18.0 },
+};
+
 function nextParams(o: ObjectNode, key: string, value: number): Record<string, number> {
+  if (o.kind === "threadedRod" && key === "preset") {
+    const p = METRIC_PRESETS[value];
+    if (p) {
+      return {
+        ...o.params,
+        preset: value,
+        diameter: value,
+        pitch: p.pitch,
+        headSize: p.headSize,
+        headHeight: p.headHeight,
+      };
+    }
+    return { ...o.params, preset: value };
+  }
+
+  if (o.kind === "threadedNut" && key === "preset") {
+    const p = METRIC_PRESETS[value];
+    if (p) {
+      return {
+        ...o.params,
+        preset: value,
+        diameter: value,
+        pitch: p.pitch,
+        outerWidth: p.nutWidth,
+        height: p.nutHeight,
+      };
+    }
+    return { ...o.params, preset: value };
+  }
+
   if (o.kind !== "triangle") return { ...o.params, [key]: value };
 
   // Entering a new mode: sync all derived sides and angles first so switching
@@ -595,6 +637,8 @@ interface DocState {
    *  ungroup(). Needed when a selection reaches inside a SCALED group, since
    *  the kernel scales about that point and the document holds no bounds. */
   group: (centres?: Record<string, Vec3>) => void;
+  /** Solid CSG Boolean combine: merges volumes into a unified solid ("union", "subtract", "intersect"). */
+  combine: (op?: "union" | "subtract" | "intersect", centres?: Record<string, Vec3>) => void;
   /** `centres` maps a group id to its world bounding-box centre, which only
    *  the viewport knows. Needed to undo a group's scaling, which the kernel
    *  applies about that point; without it a scaled group's children land
@@ -1160,12 +1204,73 @@ export const useDoc = create<DocState>()(
           // terms before joining a group that knows nothing about it.
           const lifted = removed.map((n) => liftToWorld(s.nodes, n, centres));
 
-          const groupCount = s.nodes.filter(isGroup).length + 1;
+          // Calculate center of the grouped children so the group's origin & gizmo sits directly on the objects
+          let minX = Infinity, minY = Infinity, minZ = Infinity;
+          let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+          for (const child of lifted) {
+            minX = Math.min(minX, child.position[0]);
+            maxX = Math.max(maxX, child.position[0]);
+            minY = Math.min(minY, child.position[1]);
+            maxY = Math.max(maxY, child.position[1]);
+            minZ = Math.min(minZ, child.position[2]);
+            maxZ = Math.max(maxZ, child.position[2]);
+          }
+          const groupPos: Vec3 = [
+            Number.isFinite(minX) ? (minX + maxX) / 2 : 0,
+            Number.isFinite(minY) ? (minY + maxY) / 2 : 0,
+            Number.isFinite(minZ) ? (minZ + maxZ) / 2 : 0,
+          ];
+
+          // Store children positions relative to group center
+          const children = lifted.map((child) => ({
+            ...child,
+            position: [
+              child.position[0] - groupPos[0],
+              child.position[1] - groupPos[1],
+              child.position[2] - groupPos[2],
+            ] as Vec3,
+          }));
+
+          const groupCount = s.nodes.filter((n) => isGroup(n) && n.op === "assembly").length + 1;
           const node: GroupNode = {
             type: "group",
             id: nextId(),
             name: `Group ${groupCount}`,
-            op: "union",
+            op: "assembly",
+            children,
+            position: groupPos,
+            rotation: [0, 0, 0],
+            scale: [1, 1, 1],
+            isHole: false,
+          };
+          const nodes = [...remaining];
+          nodes.splice(Math.min(at, nodes.length), 0, node);
+          return { nodes, selectedIds: [node.id] };
+        });
+        afterBatchedMutation();
+      },
+
+      /**
+       * Fuses the selection into a single solid Boolean combine (union, subtract, intersect).
+       */
+      combine: (op = "union", centres) => {
+        set((s) => {
+          if (s.selectedIds.length < 2) return {};
+          const ids = new Set(s.selectedIds);
+          const at = firstRootIndex(s.nodes, ids);
+          const { remaining, removed } = extractNodes(s.nodes, ids);
+          if (removed.length < 2) return {};
+
+          const order = new Map(s.selectedIds.map((id, i) => [id, i]));
+          removed.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+
+          const lifted = removed.map((n) => liftToWorld(s.nodes, n, centres));
+          const combineCount = s.nodes.filter((n) => isGroup(n) && n.op !== "assembly").length + 1;
+          const node: GroupNode = {
+            type: "group",
+            id: nextId(),
+            name: `Combine ${combineCount}`,
+            op,
             children: lifted,
             position: [0, 0, 0],
             rotation: [0, 0, 0],

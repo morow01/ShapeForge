@@ -16,7 +16,12 @@ export type PrimitiveKind =
   | "tube"
   | "paraboloid"
   | "text"
-  | "connector";
+  | "connector"
+  | "threadedRod"
+  | "threadedNut"
+  | "star"
+  | "tray"
+  | "ellipsoid";
 
 export interface ParamField {
   key: string;
@@ -196,11 +201,13 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
   },
   tube: {
     label: "Tube",
-    defaults: { radius: 10, wallThickness: 2, height: 20 },
+    defaults: { radius: 15, wallThickness: 3, height: 10, sides: 32, bevel: 0 },
     fields: [
       dim("radius", "Outer radius"),
       { key: "wallThickness", label: "Wall thickness", min: 0.1, max: 1000, step: 0.1, noSlider: true },
       dim("height", "Height"),
+      { key: "sides", label: "Sides", min: 3, max: 64, step: 1 },
+      { key: "bevel", label: "Bevel / Chamfer", min: 0, max: 50, step: 0.2, noSlider: true, suffix: "mm" },
     ],
   },
   paraboloid: {
@@ -289,6 +296,223 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
       },
     ],
   },
+  threadedRod: {
+    label: "Threaded Rod / Bolt",
+    defaults: {
+      preset: 8,
+      diameter: 8,
+      pitch: 1.25,
+      length: 30,
+      headType: 1,
+      headSize: 13,
+      headHeight: 5.5,
+      chamfer: 1,
+      density: 1,
+    },
+    fields: [
+      {
+        key: "preset",
+        label: "Standard Preset",
+        min: 0,
+        max: 20,
+        step: 1,
+        options: [
+          { value: 0, label: "Custom" },
+          { value: 3, label: "M3 (3mm, 0.5p)" },
+          { value: 4, label: "M4 (4mm, 0.7p)" },
+          { value: 5, label: "M5 (5mm, 0.8p)" },
+          { value: 6, label: "M6 (6mm, 1.0p)" },
+          { value: 8, label: "M8 (8mm, 1.25p)" },
+          { value: 10, label: "M10 (10mm, 1.5p)" },
+          { value: 12, label: "M12 (12mm, 1.75p)" },
+          { value: 16, label: "M16 (16mm, 2.0p)" },
+          { value: 20, label: "M20 (20mm, 2.5p)" },
+        ],
+      },
+      { ...dim("diameter", "Diameter"), min: 2, max: 100, step: 0.5 },
+      { key: "pitch", label: "Pitch", min: 0.2, max: 10, step: 0.05, noSlider: true, suffix: "mm" },
+      { ...dim("length", "Thread Length"), min: 2, max: 500, step: 1 },
+      {
+        key: "headType",
+        label: "Head Style",
+        min: 0,
+        max: 3,
+        step: 1,
+        options: [
+          { value: 0, label: "No Head (Rod / Stud)" },
+          { value: 1, label: "Hex Head (Bolt)" },
+          { value: 2, label: "Socket Cap (Allen)" },
+          { value: 3, label: "Knurled Thumb Screw" },
+        ],
+      },
+      { ...dim("headSize", "Head Width / Dia"), min: 3, max: 200, step: 0.5, showIf: { key: "headType", oneOf: [1, 2, 3] } },
+      { ...dim("headHeight", "Head Thickness"), min: 1, max: 100, step: 0.5, showIf: { key: "headType", oneOf: [1, 2, 3] } },
+      {
+        key: "chamfer",
+        label: "Lead-in Chamfer",
+        min: 0,
+        max: 1,
+        step: 1,
+        options: [
+          { value: 0, label: "Flat end" },
+          { value: 1, label: "Chamfered 45°" },
+        ],
+      },
+      {
+        key: "density",
+        label: "Thread Quality",
+        min: 0,
+        max: 2,
+        step: 1,
+        options: [
+          { value: 0, label: "Draft (Fast / 32)" },
+          { value: 1, label: "Standard (Smooth / 64)" },
+          { value: 2, label: "Ultra (Fine / 96)" },
+        ],
+      },
+    ],
+  },
+  threadedNut: {
+    label: "Threaded Nut",
+    defaults: {
+      preset: 8,
+      diameter: 8,
+      pitch: 1.25,
+      height: 6.5,
+      outerWidth: 13,
+      shape: 0,
+      clearance: 0.2,
+      density: 1,
+    },
+    fields: [
+      {
+        key: "preset",
+        label: "Standard Preset",
+        min: 0,
+        max: 20,
+        step: 1,
+        options: [
+          { value: 0, label: "Custom" },
+          { value: 3, label: "M3 (3mm, 0.5p)" },
+          { value: 4, label: "M4 (4mm, 0.7p)" },
+          { value: 5, label: "M5 (5mm, 0.8p)" },
+          { value: 6, label: "M6 (6mm, 1.0p)" },
+          { value: 8, label: "M8 (8mm, 1.25p)" },
+          { value: 10, label: "M10 (10mm, 1.5p)" },
+          { value: 12, label: "M12 (12mm, 1.75p)" },
+          { value: 16, label: "M16 (16mm, 2.0p)" },
+          { value: 20, label: "M20 (20mm, 2.5p)" },
+        ],
+      },
+      { ...dim("diameter", "Thread Diameter"), min: 2, max: 100, step: 0.5 },
+      { key: "pitch", label: "Pitch", min: 0.2, max: 10, step: 0.05, noSlider: true, suffix: "mm" },
+      { ...dim("height", "Nut Thickness"), min: 1, max: 100, step: 0.5 },
+      { ...dim("outerWidth", "Outer Width / Dia"), min: 3, max: 200, step: 0.5 },
+      {
+        key: "shape",
+        label: "Nut Shape",
+        min: 0,
+        max: 2,
+        step: 1,
+        options: [
+          { value: 0, label: "Hexagonal" },
+          { value: 1, label: "Square" },
+          { value: 2, label: "Knurled Thumb Nut" },
+        ],
+      },
+      {
+        key: "clearance",
+        label: "3D-Print Clearance",
+        min: 0,
+        max: 1,
+        step: 0.05,
+        noSlider: true,
+        suffix: "mm",
+      },
+      {
+        key: "density",
+        label: "Thread Quality",
+        min: 0,
+        max: 2,
+        step: 1,
+        options: [
+          { value: 0, label: "Draft (Fast / 32)" },
+          { value: 1, label: "Standard (Smooth / 64)" },
+          { value: 2, label: "Ultra (Fine / 96)" },
+        ],
+      },
+    ],
+  },
+  star: {
+    label: "Star",
+    defaults: {
+      points: 5,
+      outerRadius: 15,
+      innerRadius: 7.5,
+      height: 10,
+      style: 0,
+    },
+    fields: [
+      {
+        key: "style",
+        label: "Style",
+        min: 0,
+        max: 1,
+        step: 1,
+        options: [
+          { value: 0, label: "Prism" },
+          { value: 1, label: "Faceted 3D" },
+        ],
+      },
+      { key: "points", label: "Points", min: 3, max: 32, step: 1 },
+      dim("outerRadius", "Outer radius"),
+      dim("innerRadius", "Inner radius"),
+      dim("height", "Height"),
+    ],
+  },
+  tray: {
+    label: "Organizer Bin",
+    defaults: {
+      width: 60,
+      depth: 30,
+      height: 20,
+      cornerRadius: 4,
+      wallThickness: 2,
+      floorThickness: 2,
+      internalFillet: 1.5,
+    },
+    fields: [
+      dim("width", "Width"),
+      dim("depth", "Depth"),
+      dim("height", "Height"),
+      { key: "cornerRadius", label: "Corner Radius", min: 0, max: 200, step: 0.5, noSlider: true, suffix: "mm" },
+      { key: "wallThickness", label: "Wall Thickness", min: 0.4, max: 50, step: 0.2, noSlider: true, suffix: "mm" },
+      { key: "floorThickness", label: "Bottom Thickness", min: 0.4, max: 50, step: 0.2, noSlider: true, suffix: "mm" },
+      { key: "internalFillet", label: "Inside Bottom Curve", min: 0, max: 20, step: 0.5, noSlider: true, suffix: "mm" },
+    ],
+  },
+  ellipsoid: {
+    label: "Ellipsoid",
+    defaults: { radiusX: 15, radiusY: 10, radiusZ: 10, density: 1 },
+    fields: [
+      dim("radiusX", "Radius X"),
+      dim("radiusY", "Radius Y"),
+      dim("radiusZ", "Radius Z"),
+      {
+        key: "density",
+        label: "Mesh Density",
+        min: 0,
+        max: 3,
+        step: 1,
+        options: [
+          { value: 0, label: "Low (Low Poly / 16)" },
+          { value: 1, label: "Medium (Standard / 32)" },
+          { value: 2, label: "High (Smooth / 64)" },
+          { value: 3, label: "Ultra (Fine / 128)" },
+        ],
+      },
+    ],
+  },
 };
 
 /** Fields visible for the current parameter values. */
@@ -300,13 +524,18 @@ export type Vec3 = [number, number, number];
 
 export type CameraMode = "perspective" | "orthographic";
 
-/** How a group combines its children. */
-export type BooleanOp = "union" | "subtract" | "intersect";
+/** How a group organizes or combines its children. */
+export type BooleanOp = "assembly" | "union" | "subtract" | "intersect";
 
-export const BOOLEAN_OPS: { value: BooleanOp; label: string; hint: string }[] = [
-  { value: "union", label: "Union", hint: "Merge children; holes cut the solids" },
+export const COMBINE_OPS: { value: "union" | "subtract" | "intersect"; label: string; hint: string }[] = [
+  { value: "union", label: "Union", hint: "Merge children into a single solid; holes cut the solids" },
   { value: "subtract", label: "Subtract", hint: "First child minus all the rest" },
   { value: "intersect", label: "Intersect", hint: "Keep only the overlapping volume" },
+];
+
+export const BOOLEAN_OPS: { value: BooleanOp; label: string; hint: string }[] = [
+  { value: "assembly", label: "Group (Assembly)", hint: "Link parts without merging geometry or losing colors" },
+  ...COMBINE_OPS,
 ];
 
 export const DEFAULT_OBJECT_COLOR = "#43aede";

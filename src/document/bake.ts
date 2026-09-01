@@ -135,6 +135,22 @@ export function bakeScale(node: ObjectNode): ObjectNode | null {
       size: p.size * sx,
       thickness: p.thickness * sz,
     };
+  } else if (node.kind === "ellipsoid") {
+    height = p.radiusZ * 2;
+    params = {
+      ...p,
+      radiusX: p.radiusX * sx,
+      radiusY: p.radiusY * sy,
+      radiusZ: p.radiusZ * sz,
+    };
+  } else if (node.kind === "tray") {
+    height = p.height;
+    params = {
+      ...p,
+      width: p.width * sx,
+      depth: p.depth * sy,
+      height: p.height * sz,
+    };
   } else {
     return null;
   }

@@ -149,154 +149,52 @@ const EXPORT_QUALITY: MeshQuality = EXPORT_PRESETS.standard;
  *  topology to preserve, so it becomes one single pickable "face" covering
  *  the whole triangle set, and there is no separate edge/wireframe data —
  *  syncGeometries on the Three.js side treats edges as optional. */
-/** Facets meeting at less than this are treated as one smooth surface. Wide
- *  enough to smooth a curved run tessellated at EDIT_QUALITY (whose facets
- *  meet at up to ~23 degrees), narrow enough to leave a box's 90-degree
- *  corners perfectly sharp. */
-const CREASE_COSINE = Math.cos((40 * Math.PI) / 180);
-
 function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdges } {
   const raw = m.mesh();
   const triangleCount = raw.triangles.length / 3;
-  const descriptions = Array.from({ length: triangleCount }, (_, triangle) => {
-    const ia = raw.triangles[triangle * 3] * 3;
-    const ib = raw.triangles[triangle * 3 + 1] * 3;
-    const ic = raw.triangles[triangle * 3 + 2] * 3;
-    const ab = [raw.vertices[ib] - raw.vertices[ia], raw.vertices[ib + 1] - raw.vertices[ia + 1], raw.vertices[ib + 2] - raw.vertices[ia + 2]];
-    const ac = [raw.vertices[ic] - raw.vertices[ia], raw.vertices[ic + 1] - raw.vertices[ia + 1], raw.vertices[ic + 2] - raw.vertices[ia + 2]];
-    const cross = [ab[1] * ac[2] - ab[2] * ac[1], ab[2] * ac[0] - ab[0] * ac[2], ab[0] * ac[1] - ab[1] * ac[0]];
-    const length = Math.hypot(...cross) || 1;
-    const normal = cross.map((value) => value / length);
-    return { normal, plane: normal[0] * raw.vertices[ia] + normal[1] * raw.vertices[ia + 1] + normal[2] * raw.vertices[ia + 2] };
-  });
-  const byEdge = new Map<string, number[]>();
-  const edgeEndpoints = new Map<string, [number, number]>();
-  const positionKey = (vertex: number) => {
-    const i = vertex * 3;
-    // Manifold may duplicate a vertex for normals/material runs even though
-    // it occupies the same geometric point. Quantising removes harmless
-    // floating-point noise while keeping genuinely separate edges apart.
-    return `${Math.round(raw.vertices[i] * 1e5)},${Math.round(raw.vertices[i + 1] * 1e5)},${Math.round(raw.vertices[i + 2] * 1e5)}`;
-  };
-  for (let triangle = 0; triangle < triangleCount; triangle++) {
-    for (let edge = 0; edge < 3; edge++) {
-      const a = raw.triangles[triangle * 3 + edge];
-      const b = raw.triangles[triangle * 3 + (edge + 1) % 3];
-      const ka = positionKey(a);
-      const kb = positionKey(b);
-      const key = ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
-      const list = byEdge.get(key) ?? [];
-      list.push(triangle);
-      byEdge.set(key, list);
-      if (!edgeEndpoints.has(key)) edgeEndpoints.set(key, [a, b]);
-    }
+  const numVerts = raw.vertices.length / 3;
+
+  // Ultra-fast smooth vertex normal accumulation
+  const smoothNormals = new Float32Array(raw.vertices.length);
+  for (let t = 0; t < triangleCount; t++) {
+    const i0 = raw.triangles[t * 3] * 3;
+    const i1 = raw.triangles[t * 3 + 1] * 3;
+    const i2 = raw.triangles[t * 3 + 2] * 3;
+
+    const ax = raw.vertices[i0], ay = raw.vertices[i0 + 1], az = raw.vertices[i0 + 2];
+    const bx = raw.vertices[i1], by = raw.vertices[i1 + 1], bz = raw.vertices[i1 + 2];
+    const cx = raw.vertices[i2], cy = raw.vertices[i2 + 1], cz = raw.vertices[i2 + 2];
+
+    const abx = bx - ax, aby = by - ay, abz = bz - az;
+    const acx = cx - ax, acy = cy - ay, acz = cz - az;
+
+    const nx = aby * acz - abz * acy;
+    const ny = abz * acx - abx * acz;
+    const nz = abx * acy - aby * acx;
+
+    smoothNormals[i0] += nx; smoothNormals[i0 + 1] += ny; smoothNormals[i0 + 2] += nz;
+    smoothNormals[i1] += nx; smoothNormals[i1 + 1] += ny; smoothNormals[i1 + 2] += nz;
+    smoothNormals[i2] += nx; smoothNormals[i2 + 1] += ny; smoothNormals[i2 + 2] += nz;
   }
 
-  // A wire outline for the viewport: real feature edges only, the same way
-  // an OCCT B-Rep's silhouette shows just its actual edges, not every
-  // triangle seam. An edge is drawn where it bounds only one triangle (the
-  // mesh's own open boundary) or where its two triangles' normals disagree
-  // by more than CREASE_ANGLE — the identical test used below to decide
-  // where two facets share one smoothed vertex, so a fillet that stays
-  // smooth-shaded also stays edge-free, and only a genuine crease (a box's
-  // corners, a fillet's tangent line into a flat face) gets a line.
-  const edgeLines: number[] = [];
-  const edgeGroups: { start: number; count: number; edgeId: number }[] = [];
-  for (const [key, triangles] of byEdge) {
-    const isCrease = triangles.length !== 2 || (() => {
-      const n0 = descriptions[triangles[0]].normal;
-      const n1 = descriptions[triangles[1]].normal;
-      return n0[0] * n1[0] + n0[1] * n1[1] + n0[2] * n1[2] < CREASE_COSINE;
-    })();
-    if (!isCrease) continue;
-    const [a, b] = edgeEndpoints.get(key)!;
-    const start = edgeLines.length / 3;
-    edgeLines.push(raw.vertices[a * 3], raw.vertices[a * 3 + 1], raw.vertices[a * 3 + 2]);
-    edgeLines.push(raw.vertices[b * 3], raw.vertices[b * 3 + 1], raw.vertices[b * 3 + 2]);
-    edgeGroups.push({ start, count: 2, edgeId: edgeGroups.length });
-  }
-  // Manifold hands back one normal per FACET. On a flat face that is right;
-  // on anything curved it means every triangle is shaded as its own little
-  // plane, so a sphere that OCCT would have drawn smooth appears as a gem
-  // with visible facets — reported as "why is it so low polygon", when the
-  // triangle count was never the problem (884 triangles, 99% of them
-  // flat-shaded). Rebuild the normals here: average the facet normals meeting
-  // at each point, but only across facets that are within CREASE_ANGLE of one
-  // another, so a box keeps its hard edges and only genuinely curved runs are
-  // smoothed. Points where the two disagree get one vertex per group.
-  const cornersAt = new Map<string, { triangle: number; slot: number }[]>();
-  for (let triangle = 0; triangle < triangleCount; triangle++) {
-    for (let slot = 0; slot < 3; slot++) {
-      const key = positionKey(raw.triangles[triangle * 3 + slot]);
-      const list = cornersAt.get(key) ?? [];
-      list.push({ triangle, slot });
-      cornersAt.set(key, list);
-    }
-  }
-  const smoothVertices: number[] = [];
-  const smoothNormals: number[] = [];
-  const smoothIndex = new Uint32Array(triangleCount * 3);
-  for (const corners of cornersAt.values()) {
-    const at = raw.triangles[corners[0].triangle * 3 + corners[0].slot] * 3;
-    const groups: { sum: number[]; members: { triangle: number; slot: number }[] }[] = [];
-    for (const corner of corners) {
-      const n = descriptions[corner.triangle].normal;
-      let group = groups.find((g) => {
-        const length = Math.hypot(g.sum[0], g.sum[1], g.sum[2]) || 1;
-        return (g.sum[0] * n[0] + g.sum[1] * n[1] + g.sum[2] * n[2]) / length >= CREASE_COSINE;
-      });
-      if (!group) {
-        group = { sum: [0, 0, 0], members: [] };
-        groups.push(group);
-      }
-      group.sum[0] += n[0];
-      group.sum[1] += n[1];
-      group.sum[2] += n[2];
-      group.members.push(corner);
-    }
-    for (const group of groups) {
-      const length = Math.hypot(group.sum[0], group.sum[1], group.sum[2]) || 1;
-      const index = smoothVertices.length / 3;
-      smoothVertices.push(raw.vertices[at], raw.vertices[at + 1], raw.vertices[at + 2]);
-      smoothNormals.push(group.sum[0] / length, group.sum[1] / length, group.sum[2] / length);
-      for (const member of group.members) smoothIndex[member.triangle * 3 + member.slot] = index;
-    }
+  for (let v = 0; v < numVerts; v++) {
+    const i = v * 3;
+    const len = Math.hypot(smoothNormals[i], smoothNormals[i + 1], smoothNormals[i + 2]) || 1;
+    smoothNormals[i] /= len;
+    smoothNormals[i + 1] /= len;
+    smoothNormals[i + 2] /= len;
   }
 
-  const neighbours = Array.from({ length: triangleCount }, () => new Set<number>());
-  for (const list of byEdge.values()) for (const a of list) for (const b of list) if (a !== b) neighbours[a].add(b);
-  const seen = new Uint8Array(triangleCount);
-  const ordered: number[] = [];
-  const faceGroups: { start: number; count: number; faceId: number }[] = [];
-  for (let seed = 0; seed < triangleCount; seed++) {
-    if (seen[seed]) continue;
-    const start = ordered.length;
-    const queue = [seed];
-    seen[seed] = 1;
-    while (queue.length) {
-      const triangle = queue.pop()!;
-      ordered.push(smoothIndex[triangle * 3], smoothIndex[triangle * 3 + 1], smoothIndex[triangle * 3 + 2]);
-      for (const next of neighbours[triangle]) {
-        const a = descriptions[seed];
-        const b = descriptions[next];
-        if (!seen[next] && a.normal[0] * b.normal[0] + a.normal[1] * b.normal[1] + a.normal[2] * b.normal[2] > 0.9999 && Math.abs(a.plane - b.plane) < 1e-4) {
-          seen[next] = 1;
-          queue.push(next);
-        }
-      }
-    }
-    faceGroups.push({ start, count: ordered.length - start, faceId: faceGroups.length });
-  }
+  const faceGroups = [{ start: 0, count: raw.triangles.length, faceId: 0 }];
+
   return {
     faces: {
-      // Same geometry, re-indexed: a point shared by facets that disagree
-      // about their normal now carries one vertex per group.
-      vertices: Float32Array.from(smoothVertices),
-      triangles: Uint32Array.from(ordered),
-      normals: Float32Array.from(smoothNormals),
+      vertices: Float32Array.from(raw.vertices),
+      triangles: Uint32Array.from(raw.triangles),
+      normals: smoothNormals,
       faceGroups,
     },
-    edges: { lines: Float32Array.from(edgeLines), edgeGroups },
+    edges: { lines: new Float32Array(0), edgeGroups: [] },
   };
 }
 

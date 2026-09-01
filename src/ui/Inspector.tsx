@@ -739,6 +739,9 @@ const DIM_AXES: Partial<Record<PrimitiveKind, Record<string, number[]>>> = {
   paraboloid: { radius: [0, 1], height: [2] },
   text: { size: [0, 1] },
   connector: { width: [0], length: [1], height: [2], radius: [0, 1] },
+  star: { outerRadius: [0, 1], height: [2] },
+  tray: { width: [0], depth: [1], height: [2] },
+  ellipsoid: { radiusX: [0], radiusY: [1], radiusZ: [2] },
 };
 
 function ObjectParams({

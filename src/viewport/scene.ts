@@ -7,7 +7,7 @@ import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
 import { clearHighlights, getEdgeIndex, getFaceIndex, highlightInGeometry, syncGeometries } from "replicad-threejs-helper";
 import type { ReplicadMesh, ThreeGeometry } from "replicad-threejs-helper";
 import type { CellPart, FaceInfo, KernelMesh, PreviewBuild, ScenePart } from "../kernel/types";
-import type { CameraMode, PrimitiveKind, SceneNode, Vec3 } from "../document/types";
+import type { CameraMode, GroupNode, PrimitiveKind, SceneNode, Vec3 } from "../document/types";
 import { DEFAULT_OBJECT_COLOR, PRIMITIVES, isGroup } from "../document/types";
 import { findNode, resolveNodeColor, resolveNodeTransparent } from "../document/tree";
 import { loadCameraState, saveCameraState } from "../document/persist";
@@ -711,6 +711,11 @@ export class Scene {
    *  exists, instead of sitting at the origin until some unrelated state
    *  change happens to call setPlacements again. */
   private lastNodes: SceneNode[] = [];
+  /** Hierarchical containers for assembly groups so all children transform together. */
+  private assemblyGroups: Map<string, THREE.Group> = new Map();
+  /** Visual bounding-box center pivots for assembly groups so gizmos sit exactly on the objects. */
+  private assemblyPivots: Map<string, THREE.Object3D> = new Map();
+  private assemblyDragStart: { center: THREE.Vector3; position: Vec3; rotation: Vec3 } | null = null;
   /** In-progress click-and-drag-the-body move, TinkerCAD style — separate
    *  from the gizmo's own arrow-drag. See onPointerDown/onPointerMove. */
   private grab: BodyGrab | null = null;
@@ -724,6 +729,28 @@ export class Scene {
   private navCubeFrame: HTMLDivElement;
   private navDrag: NavDrag | null = null;
   private navAnimFrame = 0;
+
+  private computeAssemblyCenter(gId: string): THREE.Vector3 {
+    const gObj = this.assemblyGroups.get(gId);
+    if (!gObj) return new THREE.Vector3();
+    gObj.updateWorldMatrix(true, true);
+    const box = new THREE.Box3().setFromObject(gObj);
+    return box.isEmpty() ? gObj.position.clone() : box.getCenter(new THREE.Vector3());
+  }
+
+  private findRootOwner(targetId: string): string {
+    const check = (list: SceneNode[]): string | null => {
+      for (const node of list) {
+        if (node.id === targetId) return node.id;
+        if (isGroup(node) && node.op === "assembly") {
+          const found = check(node.children);
+          if (found) return node.id;
+        }
+      }
+      return null;
+    };
+    return check(this.lastNodes) ?? targetId;
+  }
 
   onSelectObject: ((id: string | null, additive: boolean) => void) | null = null;
   /** Marquee release: every id whose screen-space bounds landed fully inside
@@ -1428,29 +1455,80 @@ export class Scene {
   }
 
   private applyPlacements() {
-    for (const o of this.lastNodes) {
-      const view = this.parts.get(o.id);
-      if (!view) continue;
-      // Skip the part being dragged, so the drag is not fighting React state.
-      if (this.gizmo.dragging && this.gizmo.object === view.group) continue;
-      if (this.grab?.active && this.grab.items.some((item) => item.id === o.id)) continue;
-      view.group.rotation.set(o.rotation[0] * DEG, o.rotation[1] * DEG, o.rotation[2] * DEG);
-      view.group.scale.fromArray(o.scale);
-      const rotatedPivot = view.pivot.clone().applyEuler(view.group.rotation);
-      view.group.position.set(
-        o.position[0] + rotatedPivot.x,
-        o.position[1] + rotatedPivot.y,
-        o.position[2] + rotatedPivot.z,
-      );
-      // A push/pull preview is showing a shape the document does not have
-      // yet, and that shape's bounding-box centre has moved. Cancel the
-      // slide it would otherwise impose on the rest of the object, so what
-      // the drag shows is exactly where the committed edit will land.
-      const previewing = this.pushPullDrag ?? this.pushPullPending;
-      if (previewing?.id === o.id) {
-        view.group.position.sub(this.pivotDrift(view, previewing.originalPivot, view.pivot));
+    const activeAssemblyIds = new Set<string>();
+
+    for (const node of this.lastNodes) {
+      if (isGroup(node) && node.op === "assembly") {
+        activeAssemblyIds.add(node.id);
+        let groupObj = this.assemblyGroups.get(node.id);
+        if (!groupObj) {
+          groupObj = new THREE.Group();
+          groupObj.name = `Assembly-${node.id}`;
+          this.scene.add(groupObj);
+          this.assemblyGroups.set(node.id, groupObj);
+        }
+
+        // Only update transform if gizmo isn't actively dragging this group
+        if (!this.gizmo.dragging || this.gizmo.object !== groupObj) {
+          if (!this.grab?.active || !this.grab.items.some((item) => item.id === node.id)) {
+            groupObj.position.set(...node.position);
+            groupObj.rotation.set(node.rotation[0] * DEG, node.rotation[1] * DEG, node.rotation[2] * DEG);
+            groupObj.scale.set(...node.scale);
+          }
+        }
+
+        for (const child of node.children) {
+          const childView = this.parts.get(child.id);
+          if (!childView) continue;
+          if (childView.group.parent !== groupObj) {
+            groupObj.add(childView.group);
+          }
+          childView.group.rotation.set(child.rotation[0] * DEG, child.rotation[1] * DEG, child.rotation[2] * DEG);
+          childView.group.scale.fromArray(child.scale);
+          const rotatedPivot = childView.pivot.clone().applyEuler(childView.group.rotation);
+          childView.group.position.set(
+            child.position[0] + rotatedPivot.x,
+            child.position[1] + rotatedPivot.y,
+            child.position[2] + rotatedPivot.z,
+          );
+          childView.isHole = child.isHole;
+        }
+      } else {
+        const view = this.parts.get(node.id);
+        if (!view) continue;
+        if (view.group.parent !== this.scene) {
+          this.scene.add(view.group);
+        }
+        if (this.gizmo.dragging && this.gizmo.object === view.group) continue;
+        if (this.grab?.active && this.grab.items.some((item) => item.id === node.id)) continue;
+
+        view.group.rotation.set(node.rotation[0] * DEG, node.rotation[1] * DEG, node.rotation[2] * DEG);
+        view.group.scale.fromArray(node.scale);
+        const rotatedPivot = view.pivot.clone().applyEuler(view.group.rotation);
+        view.group.position.set(
+          node.position[0] + rotatedPivot.x,
+          node.position[1] + rotatedPivot.y,
+          node.position[2] + rotatedPivot.z,
+        );
+        const previewing = this.pushPullDrag ?? this.pushPullPending;
+        if (previewing?.id === node.id) {
+          view.group.position.sub(this.pivotDrift(view, previewing.originalPivot, view.pivot));
+        }
+        view.isHole = node.isHole;
       }
-      view.isHole = o.isHole;
+    }
+
+    // Clean up dismantled assembly groups and pivots
+    for (const [id, groupObj] of this.assemblyGroups) {
+      if (!activeAssemblyIds.has(id)) {
+        this.scene.remove(groupObj);
+        this.assemblyGroups.delete(id);
+        const pivot = this.assemblyPivots.get(id);
+        if (pivot) {
+          this.scene.remove(pivot);
+          this.assemblyPivots.delete(id);
+        }
+      }
     }
   }
 
@@ -1458,8 +1536,15 @@ export class Scene {
     for (const [id, view] of this.parts) {
       const isDirectlySelected = this.selectedIds.includes(id);
       const node = findNode(this.lastNodes, id);
+      const isParentGroupSelected = this.selectedIds.some((sId) => {
+        const p = findNode(this.lastNodes, sId);
+        if (!p || !isGroup(p)) return false;
+        const containsChild = (g: GroupNode): boolean =>
+          g.children.some((c) => c.id === id || (isGroup(c) && containsChild(c)));
+        return containsChild(p);
+      });
       const isChildSelected = !!(node && isGroup(node) && node.children.some((c) => this.selectedIds.includes(c.id)));
-      const sel = isDirectlySelected || isChildSelected;
+      const sel = isDirectlySelected || isParentGroupSelected || isChildSelected;
 
       if (node) {
         view.lastColor = resolveNodeColor(node);
@@ -1602,11 +1687,18 @@ export class Scene {
   /** Draws a TinkerCAD-style bounds cage, eight corner handles, and editable
    * world-size readouts around the actively selected object(s). */
   private updateResizeOverlay() {
-    const selectedViews = this.selectedIds
-      .map((id) => this.parts.get(id))
-      .filter((view): view is PartView => !!view && view.group.visible);
+    const selectedObjects: THREE.Object3D[] = [];
+    for (const id of this.selectedIds) {
+      const g = this.assemblyGroups.get(id);
+      if (g) {
+        selectedObjects.push(g);
+      } else {
+        const v = this.parts.get(id);
+        if (v && v.group.visible) selectedObjects.push(v.group);
+      }
+    }
     const visible =
-      this.toolMode === "select" && !this.selectedFace && selectedViews.length > 0 &&
+      this.toolMode === "select" && !this.selectedFace && selectedObjects.length > 0 &&
       !this.showResult;
     this.resizeBox.visible = visible;
     this.resizeHandles.visible = visible;
@@ -1624,9 +1716,9 @@ export class Scene {
     }
 
     const box = new THREE.Box3();
-    for (const view of selectedViews) {
-      view.group.updateWorldMatrix(true, true);
-      box.expandByObject(view.group);
+    for (const obj of selectedObjects) {
+      obj.updateWorldMatrix(true, true);
+      box.expandByObject(obj);
     }
     this.resizeBox.box.copy(box);
     this.resizeBox.updateMatrixWorld(true);
@@ -1820,7 +1912,30 @@ export class Scene {
       for (const pill of this.dimensionPills) pill.style.display = "none";
       return;
     }
-    const axis = handleIndex < 8 ? null : Math.floor((handleIndex - 8) / 2);
+    let axis: number | null = null;
+    if (handleIndex >= 8) {
+      if (this.resizeDrag) {
+        axis = this.resizeDrag.axis;
+      } else {
+        const firstId = this.selectedIds[0];
+        const v = firstId ? this.parts.get(firstId) : null;
+        if (v) {
+          const invQuat = v.group.getWorldQuaternion(new THREE.Quaternion()).invert();
+          const worldDir = new THREE.Vector3(
+            handleIndex === 8 ? -1 : handleIndex === 9 ? 1 : 0,
+            handleIndex === 10 ? -1 : handleIndex === 11 ? 1 : 0,
+            handleIndex === 12 ? -1 : handleIndex === 13 ? 1 : 0,
+          );
+          const localDir = worldDir.applyQuaternion(invQuat);
+          const ax = Math.abs(localDir.x);
+          const ay = Math.abs(localDir.y);
+          const az = Math.abs(localDir.z);
+          axis = (ax >= ay && ax >= az) ? 0 : (ay >= ax && ay >= az) ? 1 : 2;
+        } else {
+          axis = Math.floor((handleIndex - 8) / 2);
+        }
+      }
+    }
     this.dimensionEdges.geometry.setDrawRange(axis === null ? 0 : axis * 10, axis === null ? 30 : 10);
     for (let i = 0; i < this.dimensionPills.length; i++) {
       this.dimensionPills[i].style.display = axis === null || axis === i ? "flex" : "none";
@@ -2415,16 +2530,46 @@ export class Scene {
       geometry = new THREE.CapsuleGeometry(r, cylinderH, 16, 32);
       geometry.rotateX(Math.PI / 2).translate(0, 0, totalH / 2);
     } else if (kind === "tube") {
-      const rOut = Math.max(p.radius ?? 10, 0.1);
-      const wall = Math.min(Math.max(p.wallThickness ?? 2, 0.05), rOut - 0.05);
+      const rOut = Math.max(p.radius ?? 15, 0.1);
+      const wall = Math.min(Math.max(p.wallThickness ?? 3, 0.05), rOut - 0.05);
       const rIn = Math.max(rOut - wall, 0.01);
-      const h = p.height ?? 20;
-      const shape = new THREE.Shape();
-      shape.absarc(0, 0, rOut, 0, Math.PI * 2, false);
-      const hole = new THREE.Path();
-      hole.absarc(0, 0, rIn, 0, Math.PI * 2, true);
-      shape.holes.push(hole);
-      geometry = new THREE.ExtrudeGeometry(shape, { depth: h, bevelEnabled: false, curveSegments: 32 });
+      const h = Math.max(p.height ?? 10, 0.1);
+      const sides = Math.max(3, Math.min(64, Math.round(p.sides ?? 32)));
+
+      const positions: number[] = [];
+      const dTheta = (2 * Math.PI) / sides;
+
+      for (let i = 0; i < sides; i++) {
+        const a0 = i * dTheta;
+        const a1 = (i + 1) * dTheta;
+        const c0 = Math.cos(a0), s0 = Math.sin(a0);
+        const c1 = Math.cos(a1), s1 = Math.sin(a1);
+
+        const out0 = [rOut * c0, rOut * s0];
+        const out1 = [rOut * c1, rOut * s1];
+        const in0 = [rIn * c0, rIn * s0];
+        const in1 = [rIn * c1, rIn * s1];
+
+        // 1. Outer wall (z = 0 to z = h)
+        positions.push(out0[0], out0[1], 0, out1[0], out1[1], 0, out1[0], out1[1], h);
+        positions.push(out0[0], out0[1], 0, out1[0], out1[1], h, out0[0], out0[1], h);
+
+        // 2. Inner wall (z = 0 to z = h, facing inward)
+        positions.push(in0[0], in0[1], 0, in1[0], in1[1], h, in1[0], in1[1], 0);
+        positions.push(in0[0], in0[1], 0, in0[0], in0[1], h, in1[0], in1[1], h);
+
+        // 3. Bottom ring cap at z = 0
+        positions.push(out0[0], out0[1], 0, in0[0], in0[1], 0, out1[0], out1[1], 0);
+        positions.push(out1[0], out1[1], 0, in0[0], in0[1], 0, in1[0], in1[1], 0);
+
+        // 4. Top ring cap at z = h
+        positions.push(out0[0], out0[1], h, out1[0], out1[1], h, in0[0], in0[1], h);
+        positions.push(out1[0], out1[1], h, in1[0], in1[1], h, in0[0], in0[1], h);
+      }
+
+      geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(Float32Array.from(positions), 3));
+      geometry.computeVertexNormals();
     } else if (kind === "paraboloid") {
       const R = p.radius ?? 10;
       const h = p.height ?? 20;
@@ -2488,11 +2633,237 @@ export class Scene {
         geometry = new THREE.CylinderGeometry(p.radius, p.radius, p.length, 24);
         geometry.rotateX(Math.PI / 2).translate(0, 0, p.length / 2);
       }
+    } else if (kind === "threadedRod") {
+      const dia = p.diameter ?? 8;
+      const len = p.length ?? 30;
+      const headType = p.headType ?? 1;
+      const headH = p.headHeight ?? 5.5;
+      const headS = p.headSize ?? 13;
+      const hasHead = headType !== 0;
+      const isHex = headType === 1;
+
+      const positions: number[] = [];
+
+      // 1. Head (if any) at z = [0, headH]
+      let shaftZ0 = 0;
+      if (hasHead) {
+        shaftZ0 = headH;
+        const sides = isHex ? 6 : 24;
+        const rHead = isHex ? headS / Math.sqrt(3) : headS / 2;
+        const pts: [number, number][] = [];
+        for (let i = 0; i < sides; i++) {
+          const a = (i * 2 * Math.PI) / sides + (isHex ? Math.PI / 6 : 0);
+          pts.push([rHead * Math.cos(a), rHead * Math.sin(a)]);
+        }
+        // Head bottom cap at z = 0
+        for (let i = 0; i < sides; i++) {
+          const next = (i + 1) % sides;
+          positions.push(0, 0, 0, pts[next][0], pts[next][1], 0, pts[i][0], pts[i][1], 0);
+        }
+        // Head top cap at z = headH
+        for (let i = 0; i < sides; i++) {
+          const next = (i + 1) % sides;
+          positions.push(0, 0, headH, pts[i][0], pts[i][1], headH, pts[next][0], pts[next][1], headH);
+        }
+        // Head sides
+        for (let i = 0; i < sides; i++) {
+          const next = (i + 1) % sides;
+          const x0 = pts[i][0], y0 = pts[i][1];
+          const x1 = pts[next][0], y1 = pts[next][1];
+          positions.push(x0, y0, 0, x1, y1, 0, x1, y1, headH);
+          positions.push(x0, y0, 0, x1, y1, headH, x0, y0, headH);
+        }
+      }
+
+      // 2. Shaft with ridged threaded rings from z = shaftZ0 to z = shaftZ0 + len
+      const S = 24;
+      const rCrest = dia / 2;
+      const rRoot = (dia / 2) * 0.88;
+      const numRings = Math.max(4, Math.round(len / 2.5));
+      for (let ring = 0; ring < numRings; ring++) {
+        const z0 = shaftZ0 + (ring / numRings) * len;
+        const z1 = shaftZ0 + ((ring + 0.5) / numRings) * len;
+        const z2 = shaftZ0 + ((ring + 1) / numRings) * len;
+
+        for (let i = 0; i < S; i++) {
+          const a0 = (i * 2 * Math.PI) / S;
+          const a1 = ((i + 1) * 2 * Math.PI) / S;
+          const c0 = Math.cos(a0), s0 = Math.sin(a0);
+          const c1 = Math.cos(a1), s1 = Math.sin(a1);
+
+          // Flank to crest
+          positions.push(rRoot * c0, rRoot * s0, z0, rRoot * c1, rRoot * s1, z0, rCrest * c1, rCrest * s1, z1);
+          positions.push(rRoot * c0, rRoot * s0, z0, rCrest * c1, rCrest * s1, z1, rCrest * c0, rCrest * s0, z1);
+
+          // Flank to root
+          positions.push(rCrest * c0, rCrest * s0, z1, rCrest * c1, rCrest * s1, z1, rRoot * c1, rRoot * s1, z2);
+          positions.push(rCrest * c0, rCrest * s0, z1, rRoot * c1, rRoot * s1, z2, rRoot * c0, rRoot * s0, z2);
+        }
+      }
+
+      // Shaft top cap at z = shaftZ0 + len
+      const topZ = shaftZ0 + len;
+      for (let i = 0; i < S; i++) {
+        const a0 = (i * 2 * Math.PI) / S;
+        const a1 = ((i + 1) * 2 * Math.PI) / S;
+        positions.push(0, 0, topZ, rRoot * Math.cos(a0), rRoot * Math.sin(a0), topZ, rRoot * Math.cos(a1), rRoot * Math.sin(a1), topZ);
+      }
+
+      geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(Float32Array.from(positions), 3));
+      geometry.computeVertexNormals();
+    } else if (kind === "threadedNut") {
+      const outerW = p.outerWidth ?? 13;
+      const nutH = p.height ?? 6.5;
+      const dia = p.diameter ?? 8;
+      const isHex = (p.shape ?? 0) === 0;
+      const isSq = (p.shape ?? 0) === 1;
+      const shape = new THREE.Shape();
+      const sides = isHex ? 6 : isSq ? 4 : 32;
+      const rOuter = isHex ? outerW / Math.sqrt(3) : outerW / 2;
+      for (let i = 0; i < sides; i++) {
+        const a = (i * 2 * Math.PI) / sides + (isSq ? Math.PI / 4 : Math.PI / 6);
+        const x = rOuter * Math.cos(a);
+        const y = rOuter * Math.sin(a);
+        if (i === 0) shape.moveTo(x, y);
+        else shape.lineTo(x, y);
+      }
+      shape.closePath();
+      const hole = new THREE.Path();
+      hole.absarc(0, 0, dia / 2, 0, Math.PI * 2, true);
+      shape.holes.push(hole);
+      geometry = new THREE.ExtrudeGeometry(shape, { depth: nutH, bevelEnabled: false, curveSegments: 24 });
+    } else if (kind === "star") {
+      const numPoints = Math.max(3, Math.min(32, Math.round(p.points ?? 5)));
+      const rOut = Math.max(p.outerRadius ?? 15, 0.1);
+      const rIn = Math.max(p.innerRadius ?? 7.5, 0.1);
+      const h = Math.max(p.height ?? 10, 0.1);
+      const N = numPoints * 2;
+      const dTheta = Math.PI / numPoints;
+
+      const positions: number[] = [];
+      const pts: [number, number][] = [];
+      for (let i = 0; i < N; i++) {
+        const r = i % 2 === 0 ? rOut : rIn;
+        const a = i * dTheta - Math.PI / 2;
+        pts.push([r * Math.cos(a), r * Math.sin(a)]);
+      }
+
+      // Bottom cap (facing -Z)
+      for (let i = 0; i < N; i++) {
+        const next = (i + 1) % N;
+        positions.push(0, 0, 0, pts[next][0], pts[next][1], 0, pts[i][0], pts[i][1], 0);
+      }
+      // Top cap (facing +Z)
+      for (let i = 0; i < N; i++) {
+        const next = (i + 1) % N;
+        positions.push(0, 0, h, pts[i][0], pts[i][1], h, pts[next][0], pts[next][1], h);
+      }
+      // Lateral sides
+      for (let i = 0; i < N; i++) {
+        const next = (i + 1) % N;
+        const x0 = pts[i][0], y0 = pts[i][1];
+        const x1 = pts[next][0], y1 = pts[next][1];
+        positions.push(x0, y0, 0, x1, y1, 0, x1, y1, h);
+        positions.push(x0, y0, 0, x1, y1, h, x0, y0, h);
+      }
+
+      geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(Float32Array.from(positions), 3));
+      geometry.computeVertexNormals();
+    } else if (kind === "tray") {
+      const w = Math.max(p.width ?? 60, 2);
+      const d = Math.max(p.depth ?? 30, 2);
+      const h = Math.max(p.height ?? 20, 1);
+      const wall = Math.min(Math.max(p.wallThickness ?? 2, 0.4), Math.min(w, d) / 2 - 0.2);
+      const floor = Math.min(Math.max(p.floorThickness ?? 2, 0.4), h - 0.5);
+      const cr = Math.min(Math.max(p.cornerRadius ?? 4, 0), Math.min(w, d) / 2 - 0.01);
+      const inCr = Math.max(0, cr - wall);
+
+      const segmentsPerCorner = 6;
+      const getRoundedRectPts = (hw: number, hd: number, r: number): [number, number][] => {
+        const pts: [number, number][] = [];
+        const effR = Math.min(r, hw, hd);
+        if (effR <= 0.01) {
+          return [[-hw, -hd], [hw, -hd], [hw, hd], [-hw, hd]];
+        }
+        const centers: [number, number, number][] = [
+          [hw - effR, -hd + effR, -Math.PI / 2],
+          [hw - effR, hd - effR, 0],
+          [-hw + effR, hd - effR, Math.PI / 2],
+          [-hw + effR, -hd + effR, Math.PI],
+        ];
+        for (const [cx, cy, startAngle] of centers) {
+          for (let s = 0; s <= segmentsPerCorner; s++) {
+            const a = startAngle + (s / segmentsPerCorner) * (Math.PI / 2);
+            pts.push([cx + effR * Math.cos(a), cy + effR * Math.sin(a)]);
+          }
+        }
+        return pts;
+      };
+
+      const outerPts = getRoundedRectPts(w / 2, d / 2, cr);
+      const innerPts = getRoundedRectPts(w / 2 - wall, d / 2 - wall, inCr);
+      const numOuter = outerPts.length;
+      const numInner = innerPts.length;
+
+      const positions: number[] = [];
+
+      // 1. Bottom floor solid base at z = 0
+      for (let i = 0; i < numOuter; i++) {
+        const next = (i + 1) % numOuter;
+        positions.push(0, 0, 0, outerPts[next][0], outerPts[next][1], 0, outerPts[i][0], outerPts[i][1], 0);
+      }
+
+      // 2. Outer side walls (z = 0 to z = h)
+      for (let i = 0; i < numOuter; i++) {
+        const next = (i + 1) % numOuter;
+        const x0 = outerPts[i][0], y0 = outerPts[i][1];
+        const x1 = outerPts[next][0], y1 = outerPts[next][1];
+        positions.push(x0, y0, 0, x1, y1, 0, x1, y1, h);
+        positions.push(x0, y0, 0, x1, y1, h, x0, y0, h);
+      }
+
+      // 3. Inner cavity floor at z = floor
+      for (let i = 0; i < numInner; i++) {
+        const next = (i + 1) % numInner;
+        positions.push(0, 0, floor, innerPts[i][0], innerPts[i][1], floor, innerPts[next][0], innerPts[next][1], floor);
+      }
+
+      // 4. Inner side walls (z = floor to z = h, facing inward)
+      for (let i = 0; i < numInner; i++) {
+        const next = (i + 1) % numInner;
+        const x0 = innerPts[i][0], y0 = innerPts[i][1];
+        const x1 = innerPts[next][0], y1 = innerPts[next][1];
+        positions.push(x0, y0, floor, x1, y1, h, x1, y1, floor);
+        positions.push(x0, y0, floor, x0, y0, h, x1, y1, h);
+      }
+
+      // 5. Top rim connecting outer and inner boundary at z = h
+      for (let i = 0; i < numOuter; i++) {
+        const next = (i + 1) % numOuter;
+        const o0 = outerPts[i], o1 = outerPts[next];
+        const inIdx0 = Math.floor((i / numOuter) * numInner);
+        const inIdx1 = Math.floor((next / numOuter) * numInner);
+        const i0 = innerPts[inIdx0], i1 = innerPts[inIdx1];
+        positions.push(o0[0], o0[1], h, i0[0], i0[1], h, o1[0], o1[1], h);
+        positions.push(o1[0], o1[1], h, i0[0], i0[1], h, i1[0], i1[1], h);
+      }
+
+      geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(Float32Array.from(positions), 3));
+      geometry.computeVertexNormals();
+    } else if (kind === "ellipsoid") {
+      const rx = Math.max(p.radiusX ?? 15, 0.1);
+      const ry = Math.max(p.radiusY ?? 10, 0.1);
+      const rz = Math.max(p.radiusZ ?? 10, 0.1);
+      geometry = new THREE.SphereGeometry(1, 32, 20).scale(rx, ry, rz).translate(0, 0, rz);
     } else {
-      const x = (p.sideLeft ** 2 + p.base ** 2 - p.sideRight ** 2) / (2 * p.base);
-      const y = Math.sqrt(Math.max(0, p.sideLeft ** 2 - x ** 2));
-      const shape = new THREE.Shape().moveTo(-p.base / 2, -y / 2).lineTo(p.base / 2, -y / 2).lineTo(x - p.base / 2, y / 2).closePath();
-      geometry = new THREE.ExtrudeGeometry(shape, { depth: p.thickness, bevelEnabled: false });
+      const x = ((p.sideLeft ?? 20) ** 2 + (p.base ?? 20) ** 2 - (p.sideRight ?? 20) ** 2) / (2 * (p.base ?? 20));
+      const y = Math.sqrt(Math.max(0, (p.sideLeft ?? 20) ** 2 - x ** 2));
+      const b = p.base ?? 20;
+      const shape = new THREE.Shape().moveTo(-b / 2, -y / 2).lineTo(b / 2, -y / 2).lineTo(x - b / 2, y / 2).closePath();
+      geometry = new THREE.ExtrudeGeometry(shape, { depth: p.thickness ?? 10, bevelEnabled: false });
     }
     this.placementPreview = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
       color: 0x25b7bd, transparent: true, opacity: 0.42, depthWrite: false, roughness: 0.45, side: THREE.DoubleSide,
@@ -3839,8 +4210,31 @@ export class Scene {
 
   private attachGizmo() {
     const id = this.gizmoTarget();
-    const view = id ? this.parts.get(id) : undefined;
-    if (view && !this.showResult && (this.toolMode === "move" || this.toolMode === "rotate")) {
+    if (!id || this.showResult || (this.toolMode !== "move" && this.toolMode !== "rotate")) {
+      if (this.gizmo.object) this.gizmo.detach();
+      return;
+    }
+
+    if (this.assemblyGroups.has(id)) {
+      let pivotObj = this.assemblyPivots.get(id);
+      if (!pivotObj) {
+        pivotObj = new THREE.Object3D();
+        pivotObj.name = `AssemblyPivot-${id}`;
+        this.scene.add(pivotObj);
+        this.assemblyPivots.set(id, pivotObj);
+      }
+      const center = this.computeAssemblyCenter(id);
+      const node = findNode(this.lastNodes, id);
+      pivotObj.position.copy(center);
+      if (node) {
+        pivotObj.rotation.set(node.rotation[0] * DEG, node.rotation[1] * DEG, node.rotation[2] * DEG);
+      }
+      if (this.gizmo.object !== pivotObj) this.gizmo.attach(pivotObj);
+      return;
+    }
+
+    const view = this.parts.get(id);
+    if (view) {
       if (this.gizmo.object !== view.group) this.gizmo.attach(view.group);
     } else if (this.gizmo.object) {
       this.gizmo.detach();
@@ -3849,7 +4243,23 @@ export class Scene {
 
   private onDraggingChanged = (e: { value: unknown }) => {
     this.controls.enabled = !e.value;
-    if (!e.value) this.guides.clear();
+    if (!e.value) {
+      this.guides.clear();
+      this.assemblyDragStart = null;
+    } else {
+      const id = this.gizmoTarget();
+      if (id && this.assemblyGroups.has(id)) {
+        const node = findNode(this.lastNodes, id);
+        const pivotObj = this.assemblyPivots.get(id);
+        if (pivotObj && node) {
+          this.assemblyDragStart = {
+            center: pivotObj.position.clone(),
+            position: [...node.position],
+            rotation: [...node.rotation],
+          };
+        }
+      }
+    }
     this.onDragChange?.(!!e.value);
   };
 
@@ -3862,6 +4272,27 @@ export class Scene {
     const id = this.gizmoTarget();
     if (!obj || !id) return;
     if (this.gizmo.getMode() === "translate") this.applySmartSnap(id, obj);
+    if (this.assemblyGroups.has(id)) {
+      const start = this.assemblyDragStart;
+      if (start) {
+        const delta = obj.position.clone().sub(start.center);
+        const newPos: Vec3 = [
+          start.position[0] + delta.x,
+          start.position[1] + delta.y,
+          start.position[2] + delta.z,
+        ];
+        const newRot: Vec3 = [
+          obj.rotation.x / DEG,
+          obj.rotation.y / DEG,
+          obj.rotation.z / DEG,
+        ];
+        this.onTransformObject?.(id, {
+          position: newPos,
+          rotation: newRot,
+        });
+      }
+      return;
+    }
     const view = this.parts.get(id);
     const rotatedPivot = view?.pivot.clone().applyEuler(obj.rotation) ?? new THREE.Vector3();
     this.onTransformObject?.(id, {
@@ -4060,8 +4491,8 @@ export class Scene {
     // an arrow. Do not ALSO start a body-drag on top of that.
     if (this.showResult || this.gizmo.dragging) return;
 
-    const id = this.hitTest(e);
-    if (!id) {
+    const hitId = this.hitTest(e);
+    if (!hitId) {
       // Empty space: this might turn out to be a rubber-band select, once the
       // pointer clears the click threshold (see onPointerMove). If it never
       // does, onPointerUp's existing pick()-on-empty-space path (deselect)
@@ -4078,28 +4509,31 @@ export class Scene {
     // the object in place instead of silently changing the gesture into Move.
     if (this.toolMode === "face") return;
 
-    const view = this.parts.get(id);
-    if (!view) return;
+    const targetId = e.altKey ? hitId : this.findRootOwner(hitId);
+    const targetObj = this.assemblyGroups.get(targetId) ?? this.parts.get(targetId)?.group;
+    if (!targetObj) return;
 
-    const planeZ = view.group.position.z;
+    const planeZ = targetObj.position.z;
     const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -planeZ);
     const grabPoint = this.rayPlaneHit(e, plane);
     if (!grabPoint) return;
 
     this.grab = {
-      id,
+      id: targetId,
       downScreen: { x: e.clientX, y: e.clientY },
       active: false,
       plane,
       grabPoint,
-      startPos: view.group.position.clone(),
-      items: (this.selectedIds.includes(id) ? this.selectedIds : [id]).map((gId) => {
+      startPos: targetObj.position.clone(),
+      items: (this.selectedIds.includes(targetId) ? this.selectedIds : [targetId]).map((gId) => {
+        const isAssembly = this.assemblyGroups.has(gId);
+        const obj = this.assemblyGroups.get(gId) ?? this.parts.get(gId)?.group;
         const v = this.parts.get(gId);
         return {
           id: gId,
-          startGroupPos: v?.group.position.clone() ?? new THREE.Vector3(),
-          pivot: v?.pivot.clone() ?? new THREE.Vector3(),
-          rotation: v?.group.rotation.clone() ?? new THREE.Euler(),
+          startGroupPos: obj?.position.clone() ?? new THREE.Vector3(),
+          pivot: isAssembly ? new THREE.Vector3() : (v?.pivot.clone() ?? new THREE.Vector3()),
+          rotation: obj?.rotation.clone() ?? new THREE.Euler(),
         };
       }),
     };
@@ -4484,32 +4918,33 @@ export class Scene {
     // against companions that glided straight past.
     let snap: Vec3 = [0, 0, 0];
     const leadItem = g.items.find((item) => item.id === g.id);
-    const leadView = leadItem && this.parts.get(leadItem.id);
-    if (leadItem && leadView) {
-      leadView.group.position.set(
+    const leadObj = leadItem && (this.assemblyGroups.get(leadItem.id) ?? this.parts.get(leadItem.id)?.group);
+    if (leadItem && leadObj) {
+      leadObj.position.set(
         leadItem.startGroupPos.x + dx,
         leadItem.startGroupPos.y + dy,
         leadItem.startGroupPos.z,
       );
-      leadView.group.updateWorldMatrix(true, true);
-      snap = this.applySmartSnap(g.id, leadView.group);
+      leadObj.updateWorldMatrix(true, true);
+      snap = this.applySmartSnap(g.id, leadObj);
     }
 
     for (const item of g.items) {
-      const itemView = this.parts.get(item.id);
-      if (!itemView) continue;
-      itemView.group.position.set(
+      const obj = this.assemblyGroups.get(item.id) ?? this.parts.get(item.id)?.group;
+      if (!obj) continue;
+      obj.position.set(
         item.startGroupPos.x + dx + snap[0],
         item.startGroupPos.y + dy + snap[1],
         item.startGroupPos.z + snap[2],
       );
-      itemView.group.updateWorldMatrix(true, true);
-      const rotatedPivot = item.pivot.clone().applyEuler(itemView.group.rotation);
+      obj.updateWorldMatrix(true, true);
+      const isAssembly = this.assemblyGroups.has(item.id);
+      const rotatedPivot = isAssembly ? new THREE.Vector3() : item.pivot.clone().applyEuler(obj.rotation);
       this.onTransformObject?.(item.id, {
         position: [
-          itemView.group.position.x - rotatedPivot.x,
-          itemView.group.position.y - rotatedPivot.y,
-          itemView.group.position.z - rotatedPivot.z,
+          obj.position.x - rotatedPivot.x,
+          obj.position.y - rotatedPivot.y,
+          obj.position.z - rotatedPivot.z,
         ],
       });
     }
@@ -4651,18 +5086,47 @@ export class Scene {
     const [centreX, centreY] = project(worldCentre.clone());
     const first = selectedViews[0];
     const quaternion = first.view.group.getWorldQuaternion(new THREE.Quaternion());
+    const invQuat = quaternion.clone().invert();
     const [xPixelX, xPixelY] = project(worldCentre.clone().add(new THREE.Vector3(1, 0, 0).applyQuaternion(quaternion)));
     const [yPixelX, yPixelY] = project(worldCentre.clone().add(new THREE.Vector3(0, 1, 0).applyQuaternion(quaternion)));
-    const cornerSigns: [number, number] | null = nearestIndex < 8
-      ? [nearestIndex >= 4 ? 1 : -1, Math.floor(nearestIndex / 2) % 2 ? 1 : -1]
-      : null;
-    const handleSigns: Vec3 = nearestIndex < 8
-      ? [cornerSigns![0], cornerSigns![1], nearestIndex % 2 ? 1 : -1]
-      : [
-          nearestIndex === 8 ? -1 : nearestIndex === 9 ? 1 : 0,
-          nearestIndex === 10 ? -1 : nearestIndex === 11 ? 1 : 0,
-          nearestIndex === 12 ? -1 : nearestIndex === 13 ? 1 : 0,
-        ];
+
+    let localAxis: 0 | 1 | 2 | null = null;
+    let handleSigns: Vec3 = [0, 0, 0];
+    let cornerSigns: [number, number] | null = null;
+
+    if (nearestIndex < 8) {
+      const worldSignX = nearestIndex >= 4 ? 1 : -1;
+      const worldSignY = Math.floor(nearestIndex / 2) % 2 ? 1 : -1;
+      const worldSignZ = nearestIndex % 2 ? 1 : -1;
+      const localCorner = new THREE.Vector3(worldSignX, worldSignY, worldSignZ).applyQuaternion(invQuat);
+      handleSigns = [
+        Math.sign(localCorner.x) || (worldSignX as 1 | -1),
+        Math.sign(localCorner.y) || (worldSignY as 1 | -1),
+        Math.sign(localCorner.z) || (worldSignZ as 1 | -1),
+      ];
+      cornerSigns = [handleSigns[0], handleSigns[1]];
+    } else {
+      const worldDir = new THREE.Vector3(
+        nearestIndex === 8 ? -1 : nearestIndex === 9 ? 1 : 0,
+        nearestIndex === 10 ? -1 : nearestIndex === 11 ? 1 : 0,
+        nearestIndex === 12 ? -1 : nearestIndex === 13 ? 1 : 0,
+      );
+      const localDir = worldDir.clone().applyQuaternion(invQuat);
+      const ax = Math.abs(localDir.x);
+      const ay = Math.abs(localDir.y);
+      const az = Math.abs(localDir.z);
+      if (ax >= ay && ax >= az) {
+        localAxis = 0;
+        handleSigns[0] = Math.sign(localDir.x) || 1;
+      } else if (ay >= ax && ay >= az) {
+        localAxis = 1;
+        handleSigns[1] = Math.sign(localDir.y) || 1;
+      } else {
+        localAxis = 2;
+        handleSigns[2] = Math.sign(localDir.z) || 1;
+      }
+    }
+
     const targets: ResizeTarget[] = selectedViews.map(({ id, view, node }) => {
       view.mesh.geometry.computeBoundingBox();
       const rawSize = (view.mesh.geometry.boundingBox?.getSize(new THREE.Vector3()) ?? new THREE.Vector3(1, 1, 1)).toArray() as Vec3;
@@ -4689,7 +5153,7 @@ export class Scene {
       id: first.id,
       targets,
       startScale: [...first.node.scale] as Vec3,
-      axis: nearestIndex < 8 ? null : (Math.floor((nearestIndex - 8) / 2) as 0 | 1 | 2),
+      axis: localAxis,
       lockAspectXY,
       centreX,
       centreY,
@@ -4807,7 +5271,9 @@ export class Scene {
 
   private pick(e: PointerEvent, additive: boolean) {
     if (this.showResult) return;
-    this.onSelectObject?.(this.hitTest(e), additive);
+    const hitId = this.hitTest(e);
+    const rootId = hitId && !e.altKey ? this.findRootOwner(hitId) : hitId;
+    this.onSelectObject?.(rootId, additive);
   }
 
   private hitTest(e: { clientX: number; clientY: number }): string | null {

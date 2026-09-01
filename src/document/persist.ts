@@ -23,7 +23,7 @@ interface StoredLegacy {
   nodes: unknown;
 }
 
-const OPS: BooleanOp[] = ["union", "subtract", "intersect"];
+const OPS: BooleanOp[] = ["assembly", "union", "subtract", "intersect"];
 
 const isVec3 = (v: unknown): v is Vec3 =>
   Array.isArray(v) && v.length === 3 && v.every((n) => typeof n === "number" && Number.isFinite(n));
