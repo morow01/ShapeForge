@@ -910,15 +910,11 @@ export const useDoc = create<DocState>()(
             // ellipses. Bake the visible box dimensions first, deliberately
             // without its old radius, then round the already-long box.
             if (
-              n.kind === "box" && key === "fillet" &&
+              (n.kind === "box" || n.kind === "tray") &&
               n.scale.some((component) => Math.abs(component - 1) > 1e-4)
             ) {
-              const unrounded: ObjectNode = {
-                ...n,
-                params: { ...n.params, fillet: 0 },
-              };
-              const baked = bakeScale(unrounded);
-              if (baked && baked !== unrounded) {
+              const baked = bakeScale(n);
+              if (baked && baked !== n) {
                 return {
                   ...baked,
                   params: nextParams(baked, key, value),

@@ -472,25 +472,38 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
       const maxFillet = Math.min(w, d) / 2 - 0.01;
       const cornerR = Math.min(Math.max(p.cornerRadius ?? 4, 0), maxFillet);
       const inCornerR = Math.max(0, cornerR - wall);
-      const maxInsideFillet = Math.min((h - floor) / 2 - 0.1, (Math.min(w, d) - wall * 2) / 2 - 0.1);
+      const maxInsideFillet = Math.min(h - floor - 0.2, (Math.min(w, d) - wall * 2) / 2 - 0.2);
       const insideFillet = Math.min(Math.max(p.internalFillet ?? 0, 0), Math.max(0, maxInsideFillet));
 
-      // 1. Outer solid box with corner radius
-      let outer = makeBaseBox(w, d, h);
-      if (cornerR > 0) {
-        outer = outer.fillet(cornerR, (e) => e.inDirection("Z"));
-      }
+      // 1. Outer solid with uniform corner radius via 2D sketch
+      const outerRect: [number, number][] = [
+        [-w / 2, -d / 2],
+        [w / 2, -d / 2],
+        [w / 2, d / 2],
+        [-w / 2, d / 2],
+      ];
+      const outerPts = roundPolygon2D(outerRect, cornerR, 12);
+      let penOut = draw(outerPts[0]);
+      for (let i = 1; i < outerPts.length; i++) penOut = penOut.lineTo(outerPts[i]);
+      const outer = penOut.close().sketchOnPlane("XY").extrude(h) as Shape3D;
 
-      // 2. Inner pocket cutter
+      // 2. Inner cavity with matching corner radius and uniform walls
       const inW = w - wall * 2;
       const inD = d - wall * 2;
-      const inH = h - floor + 5;
+      const inH = h - floor + 2;
 
-      let inner = makeBaseBox(inW, inD, inH);
-      if (inCornerR > 0) {
-        inner = inner.fillet(inCornerR, (e) => e.inDirection("Z"));
-      }
-      if (insideFillet > 0) {
+      const innerRect: [number, number][] = [
+        [-inW / 2, -inD / 2],
+        [inW / 2, -inD / 2],
+        [inW / 2, inD / 2],
+        [-inW / 2, inD / 2],
+      ];
+      const innerPts = roundPolygon2D(innerRect, inCornerR, 12);
+      let penIn = draw(innerPts[0]);
+      for (let i = 1; i < innerPts.length; i++) penIn = penIn.lineTo(innerPts[i]);
+      let inner = penIn.close().sketchOnPlane("XY").extrude(inH) as Shape3D;
+
+      if (insideFillet > 0.05) {
         try {
           inner = inner.fillet(insideFillet, (e) => e.inPlane("XY", 0));
         } catch {
@@ -1758,6 +1771,14 @@ function bakeNonUniformScale(spec: NodeSpec): NodeSpec {
     } catch {
       return spec;
     }
+  } else if (spec.kind === "tray") {
+    height = p.height;
+    params = {
+      ...p,
+      width: Math.round(p.width * sx * 100) / 100,
+      depth: Math.round(p.depth * sy * 100) / 100,
+      height: Math.round(p.height * sz * 100) / 100,
+    };
   } else {
     return spec;
   }
