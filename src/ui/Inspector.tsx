@@ -977,20 +977,28 @@ function ObjectParams({
               locked={isLocked}
               onToggleLock={onToggleLock}
               lockDisabled={lockDisabled}
-              disabled={isConstrained3rdAngle}
-              dotColorClass={dotColorClass}
               onChange={(v) => {
                 if (!Number.isFinite(v) || v <= 0) return;
-                const nextFactor = Math.max(0.0001, v / base);
-                const isLockedTriangle =
-                  node.kind === "triangle" &&
-                  !!(node.params.lockAngleLeft || node.params.lockAngleRight || node.params.lockAngleApex);
-                const scale = (resizeConstrained || (isLockedTriangle && f.key === "base"))
-                  ? (isLockedTriangle && !resizeConstrained
-                      ? ([nextFactor, nextFactor, node.scale[2]] as Vec3)
-                      : ([nextFactor, nextFactor, nextFactor] as Vec3))
-                  : (node.scale.map((val, at) => (axes.includes(at) ? nextFactor : val)) as Vec3);
-                onTransform({ scale });
+                if (node.kind === "triangle" && (node.params.lockAngleLeft || node.params.lockAngleRight || node.params.lockAngleApex)) {
+                  const nextFactor = Math.max(0.0001, v / base);
+                  const scale = (resizeConstrained || f.key === "base")
+                    ? ([nextFactor, nextFactor, resizeConstrained ? nextFactor : node.scale[2]] as Vec3)
+                    : (node.scale.map((val, at) => (axes.includes(at) ? nextFactor : val)) as Vec3);
+                  onTransform({ scale });
+                  return;
+                }
+                if (resizeConstrained && axesByKey) {
+                  const ratio = v / Math.max(0.001, currentVal);
+                  for (const k of Object.keys(axesByKey)) {
+                    if (k !== f.key && node.params[k] !== undefined) {
+                      onParam(k, round(node.params[k] * ratio));
+                    }
+                  }
+                }
+                onParam(f.key, v);
+                if (node.scale.some((s) => Math.abs(s - 1) > 1e-4)) {
+                  onTransform({ scale: [1, 1, 1] });
+                }
               }}
             />
           ),
