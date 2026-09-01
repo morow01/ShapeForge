@@ -1748,7 +1748,6 @@ function bakeNonUniformScale(spec: NodeSpec): NodeSpec {
   let params: Record<string, number>;
   let height: number;
   if (spec.kind === "box") {
-    if ((p.fillet ?? 0) > 0) return spec;
     height = p.height;
     params = { ...p, width: p.width * sx, depth: p.depth * sy, height: p.height * sz };
   } else if (spec.kind === "cylinder" && sx === sy) {
