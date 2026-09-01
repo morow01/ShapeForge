@@ -44,7 +44,8 @@ import {
   useTemporal,
 } from "./document/store";
 import { MAX_BUILD_SOURCES, PRIMITIVES, isGroup } from "./document/types";
-import { findNode, parentOf, resolveNodeTransparent, resolveNodeColor, walk } from "./document/tree";
+import { findNode, parentOf, resolveNodeTransparent, resolveNodeColor, updateNode, walk } from "./document/tree";
+import { bakeScale } from "./document/bake";
 import { putBlob } from "./document/blobStore";
 import { loadCameraState } from "./document/persist";
 import type { GroupNode, PrimitiveKind, SceneNode, Vec3 } from "./document/types";
@@ -1100,7 +1101,28 @@ export function App() {
   // A gizmo drag emits a change every frame; collapse the whole drag into one
   // undo step so undo jumps back to where the drag started.
   const onDragChange = useCallback(
-    (dragging: boolean) => (dragging ? beginHistoryBatch() : endHistoryBatch()),
+    (dragging: boolean) => {
+      if (dragging) {
+        beginHistoryBatch();
+      } else {
+        const state = useDoc.getState();
+        for (const id of state.selectedIds) {
+          const node = findNode(state.nodes, id);
+          if (
+            node?.type === "object" &&
+            node.scale.some((s) => Math.abs(s - 1) > 1e-4)
+          ) {
+            const baked = bakeScale(node);
+            if (baked) {
+              useDoc.setState((s) => ({
+                nodes: updateNode(s.nodes, id, () => baked),
+              }));
+            }
+          }
+        }
+        endHistoryBatch();
+      }
+    },
     [],
   );
 
