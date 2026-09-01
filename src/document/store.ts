@@ -490,6 +490,15 @@ function nextParams(o: ObjectNode, key: string, value: number): Record<string, n
 
   if (o.kind !== "triangle") return { ...o.params, [key]: value };
 
+  // Corner radii, tessellation, visibility and thickness do not redefine the
+  // triangle's 2D construction. Re-solving the sides for every slider tick
+  // rounded the stored dimensions repeatedly, which made Right and Apex
+  // radius edits visibly walk the object across the workplane.
+  const constructionKeys = new Set([
+    "mode", "base", "sideLeft", "sideRight", "angleLeft", "angleRight", "angleApex",
+  ]);
+  if (!constructionKeys.has(key)) return { ...o.params, [key]: value };
+
   // Entering a new mode: sync all derived sides and angles first so switching
   // modes preserves the current triangle shape.
   if (key === "mode") {
@@ -902,6 +911,12 @@ export const useDoc = create<DocState>()(
       setParam: (id, key, value) => {
         set((s) => ({
           nodes: updateNode(s.nodes, id, (n) => {
+            if (n.type === "edit" && n.base.type === "object") {
+              const next = nextParams(n.base, key, value);
+              if (!stickyParams[n.base.kind]) stickyParams[n.base.kind] = {};
+              stickyParams[n.base.kind]![key] = next[key] ?? value;
+              return { ...n, base: { ...n.base, params: next } };
+            }
             if (n.type !== "object") return n;
             // Corner radius is a real millimetre value, not something that
             // should be stretched by the resize handles. A long box is often
@@ -1119,7 +1134,24 @@ export const useDoc = create<DocState>()(
 
       setOps: (id, ops) => {
         set((s) => ({
-          nodes: updateNode(s.nodes, id, (n) => (n.type === "edit" ? { ...n, ops } : n)),
+          nodes: updateNode(s.nodes, id, (n) => {
+            if (n.type !== "edit") return n;
+            if (ops.length > 0) return { ...n, ops };
+            // Removing the final broken edit should restore the original
+            // parametric primitive rather than leave an empty Edit wrapper
+            // whose Inspector can only offer Scale.
+            return {
+              ...n.base,
+              id: n.id,
+              name: n.name,
+              position: n.position,
+              rotation: n.rotation,
+              scale: n.scale,
+              isHole: n.isHole,
+              color: n.color ?? n.base.color,
+              transparent: n.transparent ?? n.base.transparent,
+            };
+          }),
         }));
         afterBatchedMutation();
       },

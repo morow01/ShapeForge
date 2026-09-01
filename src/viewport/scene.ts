@@ -17,6 +17,8 @@ import type { Bounds3, SnapTarget } from "../snapping/snap";
 import { SmartGuides } from "./guides";
 import { CUBE_MARGIN_PX, CUBE_PX, NavCube } from "./navcube";
 import { findApex, solveScaledTriangle } from "../geometry/triangle";
+import { displayStep, formatLength, toMillimetres } from "../measurement";
+import type { DisplayUnit } from "../measurement";
 
 export type { CameraMode } from "../document/types";
 export type ToolMode = "select" | "face" | "edge" | "place" | "move" | "rotate" | "align" | "build";
@@ -50,6 +52,7 @@ const MIN_HANDLE_WORLD = 0.02;
  *  one is a real OCCT/manifold call, not free, so this bounds how often a
  *  fast mouse-move can ask for a new one. Short enough to read as live. */
 const PUSH_PULL_PREVIEW_MS = 120;
+const PUSH_PULL_HANDLE_SCALE = 1.7;
 
 /**
  * One colour per axis, indexed X, Y, Z, shared by every measurement readout
@@ -189,6 +192,7 @@ interface ResizeDrag {
   cornerSigns: [number, number] | null;
   basisX: [number, number];
   basisY: [number, number];
+  basisZ: [number, number];
   startPosition: Vec3;
   startGroupPosition: THREE.Vector3;
   rawSize: Vec3;
@@ -485,16 +489,26 @@ function meshCentre(mesh: KernelMesh): THREE.Vector3 | null {
 
 function makeArrow(): THREE.Object3D {
   const material = new THREE.MeshBasicMaterial({ color: 0x2457ff, depthTest: false });
-  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.14, 1.15, 12), material);
-  shaft.position.y = 0.575;
-  const head = new THREE.Mesh(new THREE.ConeGeometry(0.36, 0.65, 16), material);
-  head.position.y = 1.45;
+  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 1.3, 12), material);
+  shaft.position.y = 0.65;
+  const head = new THREE.Mesh(new THREE.ConeGeometry(0.48, 0.85, 16), material);
+  head.position.y = 1.72;
   // When a face points nearly at the camera, its normal-direction arrow is
   // foreshortened to a dot. This round grab target remains clearly visible
   // and clickable from that head-on view while still travelling on the same
   // push/pull axis.
-  const grab = new THREE.Mesh(new THREE.SphereGeometry(0.29, 16, 12), material);
-  grab.position.y = 1.14;
+  // Large but invisible: the old blue grab sphere covered most of the cone
+  // from oblique views, making the control read as a blob pointing the wrong
+  // way. Raycasting still sees this transparent mesh, so the arrow becomes
+  // easier to grab without compromising its silhouette.
+  const grabMaterial = new THREE.MeshBasicMaterial({
+    transparent: true,
+    opacity: 0,
+    depthWrite: false,
+    depthTest: false,
+  });
+  const grab = new THREE.Mesh(new THREE.SphereGeometry(0.62, 16, 12), grabMaterial);
+  grab.position.y = 1.45;
   const group = new THREE.Group();
   group.add(shaft, head, grab);
   group.renderOrder = 26;
@@ -641,6 +655,9 @@ export class Scene {
   /** The positioned wrapper around each dimension input — the input itself no
    *  longer carries the layout, since it now sits beside an axis badge. */
   private dimensionPills: HTMLDivElement[] = [];
+  /** A click (without a drag) on a resize handle pins its relevant dimension
+   *  input open for direct Tinkercad-style numeric entry. */
+  private dimensionPinnedHandleIndex = -1;
   /** Three dimension shafts plus four arrowhead strokes per axis. */
   private dimensionEdges = new THREE.LineSegments(
     new THREE.BufferGeometry()
@@ -652,12 +669,12 @@ export class Scene {
    *  current move began — TinkerCAD's offset display. */
   private moveInputs: HTMLInputElement[] = [];
   private movePills: HTMLDivElement[] = [];
-  /** The L-shaped leader drawn on the build plate from the move's start
-   *  point to where the object is now, one leg per axis. */
-  private moveGuide = new THREE.Line(
+  /** Independent X/Y dimension legs on the build plate. Both terminate at
+   *  the moved object, so their values never drift into empty space. */
+  private moveGuide = new THREE.LineSegments(
     new THREE.BufferGeometry().setAttribute(
       "position",
-      new THREE.BufferAttribute(new Float32Array(9), 3),
+      new THREE.BufferAttribute(new Float32Array(12), 3),
     ),
     // depthTest stays ON, unlike the selection overlays: this leader lies on
     // the build plate, so letting the object occlude the stretch that runs
@@ -682,6 +699,16 @@ export class Scene {
   private guides = new SmartGuides();
 
   private parts = new Map<string, PartView>();
+  private displayUnit: DisplayUnit = "mm";
+  private decimalPlaces = 1;
+  /**
+   * A resize release folds a primitive's temporary display scale into its
+   * real parameters.  The document update reaches the viewport before the
+   * asynchronously rebuilt mesh does.  Keep the already-correct dragged
+   * transform on screen during that short gap; otherwise the old mesh is
+   * briefly drawn at unit scale and flashes back to its original size.
+   */
+  private pendingScaleBake = new Set<string>();
   private resultView: PartView | null = null;
   private showResult = false;
   /** Wireframe display mode: off, clean edges, full tessellated mesh, or xray. */
@@ -804,7 +831,7 @@ export class Scene {
    *  so a whole-body edit driven by a face — Hollow — knows what it applies
    *  to. `point` is the same anchor push/pull stores, and it lies ON the
    *  face, which is what a FaceFinder needs to re-find it after a rebuild. */
-  onSelectFace: ((id: string | null, point: Vec3 | null, normal: Vec3 | null, size: number) => void) | null = null;
+  onSelectFace: ((id: string | null, point: Vec3 | null, normal: Vec3 | null, size: number, edges: Vec3[]) => void) | null = null;
   onPlaceSurface: ((point: Vec3, normal: Vec3) => void) | null = null;
 
   constructor(host: HTMLElement) {
@@ -848,14 +875,14 @@ export class Scene {
 
     this.pushPullLabelEl = document.createElement("input");
     this.pushPullLabelEl.type = "number";
+    this.pushPullLabelEl.className = "push-pull-measure";
     this.pushPullLabelEl.step = "0.5";
     this.pushPullLabelEl.title = "Push/pull distance in millimetres";
     this.pushPullLabelEl.setAttribute("aria-label", "Push/pull distance in millimetres");
-    this.pushPullLabelEl.style.cssText =
-      "position:absolute;display:none;z-index:30;width:70px;transform:translate(-50%,-50%);" +
-      "padding:5px 6px;border:2px solid #2457ff;border-radius:10px;background:white;" +
-      "color:#25313b;font:600 12px system-ui,sans-serif;text-align:center;" +
-      "box-shadow:0 2px 7px rgba(0,0,0,.14);";
+    this.pushPullLabelEl.style.display = "none";
+    this.pushPullLabelEl.addEventListener("input", () => {
+      this.pushPullLabelEl.style.width = `${Math.max(4.2, this.pushPullLabelEl.value.length + 1.6)}ch`;
+    });
     this.pushPullLabelEl.addEventListener("focus", () => this.onDragChange?.(true));
     this.pushPullLabelEl.addEventListener("blur", () => this.commitOrAbandonPushPull(true));
     this.pushPullLabelEl.addEventListener("keydown", (event) => {
@@ -919,6 +946,8 @@ export class Scene {
     this.gizmo = new TransformControls(this.camera, this.renderer.domElement);
     this.gizmo.setTranslationSnap(1); // 1 mm
     this.gizmo.setRotationSnap(15 * DEG);
+    this.gizmo.showE = false;
+    this.removeNegativeMoveArrowheads();
     this.gizmo.addEventListener("dragging-changed", this.onDraggingChanged);
     this.gizmo.addEventListener("objectChange", this.onGizmoChange);
     this.scene.add(this.gizmo.getHelper());
@@ -1008,16 +1037,24 @@ export class Scene {
     for (let axis = 0; axis < labels.length; axis++) {
       const name = labels[axis];
       const { pill, input } = this.makeMeasurePill(name[0], AXIS_COLOR[axis], `${name} in millimetres`);
+      pill.classList.add("dimension-pill");
       input.min = "0.01";
       input.step = "0.1";
       this.dimensionPills.push(pill);
       input.addEventListener("focus", () => this.onDragChange?.(true));
-      input.addEventListener("blur", () => {
+      input.addEventListener("blur", (event) => {
         this.applyTypedDimension(input);
         this.onDragChange?.(false);
+        if (!this.dimensionInputs.includes(event.relatedTarget as HTMLInputElement)) {
+          this.dimensionPinnedHandleIndex = -1;
+          this.updateDimensionVisibility(this.resizeHoverIndex);
+        }
       });
       input.addEventListener("keydown", (event) => {
         if (event.key === "Enter") {
+          input.blur();
+        } else if (event.key === "Escape") {
+          this.updateResizeOverlay();
           input.blur();
         }
       });
@@ -1054,6 +1091,9 @@ export class Scene {
     input.type = "number";
     input.title = title;
     input.setAttribute("aria-label", title);
+    input.addEventListener("input", () => {
+      input.style.width = `${Math.max(3.2, input.value.length + 0.6)}ch`;
+    });
     pill.appendChild(input);
     return { pill, input };
   }
@@ -1140,21 +1180,49 @@ export class Scene {
     // Lifted a hair off the object's base so it cannot z-fight the grid when
     // the object is sitting flat on the plate.
     const z = new THREE.Box3().setFromObject(view.group).min.z + 0.02;
-    const from = new THREE.Vector3(readout.startPos.x, readout.startPos.y, z);
-    const elbow = new THREE.Vector3(now.x, readout.startPos.y, z);
     const to = new THREE.Vector3(now.x, now.y, z);
+    const xFrom = new THREE.Vector3(readout.startPos.x, now.y, z);
+    const yFrom = new THREE.Vector3(now.x, readout.startPos.y, z);
     const position = this.moveGuide.geometry.getAttribute("position") as THREE.BufferAttribute;
-    position.setXYZ(0, from.x, from.y, from.z);
-    position.setXYZ(1, elbow.x, elbow.y, elbow.z);
-    position.setXYZ(2, to.x, to.y, to.z);
+    position.setXYZ(0, xFrom.x, xFrom.y, xFrom.z);
+    position.setXYZ(1, to.x, to.y, to.z);
+    position.setXYZ(2, yFrom.x, yFrom.y, yFrom.z);
+    position.setXYZ(3, to.x, to.y, to.z);
     position.needsUpdate = true;
     this.moveGuide.geometry.computeBoundingSphere();
 
     const rect = this.renderer.domElement.getBoundingClientRect();
     const legs = [
-      { value: dx, at: from.clone().lerp(elbow, 0.5), shift: "translate(-50%, 10px)" },
-      { value: dy, at: elbow.clone().lerp(to, 0.5), shift: "translate(10px, -50%)" },
+      { value: dx, from: xFrom, to },
+      { value: dy, from: yFrom, to },
     ];
+    const toScreen = (point: THREE.Vector3) => {
+      const projected = point.clone().project(this.camera);
+      return new THREE.Vector2(
+        ((projected.x + 1) / 2) * rect.width,
+        ((1 - projected.y) / 2) * rect.height,
+      );
+    };
+    const legScreens = legs.map((leg) => ({ from: toScreen(leg.from), to: toScreen(leg.to) }));
+    const labelPositions = legScreens.map(({ from, to: end }) => {
+      const towardStart = from.clone().sub(end);
+      const distance = Math.min(towardStart.length() / 2, 68);
+      return towardStart.lengthSq() > 1e-6
+        ? end.clone().addScaledVector(towardStart.normalize(), distance)
+        : end.clone();
+    });
+    // Short moves still converge at the common object endpoint. Put the two
+    // values into opposite narrow lanes instead of sending either one far
+    // down its measurement line.
+    if (Math.abs(dx) >= 0.005 && Math.abs(dy) >= 0.005 && labelPositions[0].distanceTo(labelPositions[1]) < 96) {
+      const xDir = legScreens[0].to.clone().sub(legScreens[0].from).normalize();
+      const yDir = legScreens[1].to.clone().sub(legScreens[1].from).normalize();
+      labelPositions[0].add(new THREE.Vector2(-xDir.y, xDir.x).multiplyScalar(26));
+      labelPositions[1].add(new THREE.Vector2(yDir.y, -yDir.x).multiplyScalar(26));
+      if (labelPositions[0].distanceTo(labelPositions[1]) < 72) {
+        labelPositions[1].addScaledVector(yDir.clone().negate(), 40);
+      }
+    }
     for (let i = 0; i < this.moveInputs.length; i++) {
       const input = this.moveInputs[i];
       const pill = this.movePills[i];
@@ -1164,12 +1232,27 @@ export class Scene {
         pill.style.display = "none";
         continue;
       }
-      const p = leg.at.project(this.camera);
+      const projectedFrom = leg.from.clone().project(this.camera);
+      const projectedTo = leg.to.clone().project(this.camera);
+      const fromScreen = new THREE.Vector2(
+        ((projectedFrom.x + 1) / 2) * rect.width,
+        ((1 - projectedFrom.y) / 2) * rect.height,
+      );
+      const toScreen = new THREE.Vector2(
+        ((projectedTo.x + 1) / 2) * rect.width,
+        ((1 - projectedTo.y) / 2) * rect.height,
+      );
+      let angle = Math.atan2(toScreen.y - fromScreen.y, toScreen.x - fromScreen.x) / DEG;
+      if (angle > 90) angle -= 180;
+      else if (angle < -90) angle += 180;
       pill.style.display = "flex";
-      if (document.activeElement !== input) input.value = leg.value.toFixed(2);
-      pill.style.left = `${((p.x + 1) / 2) * rect.width}px`;
-      pill.style.top = `${((1 - p.y) / 2) * rect.height}px`;
-      pill.style.transform = leg.shift;
+      if (document.activeElement !== input) {
+        input.value = formatLength(leg.value, this.displayUnit, this.decimalPlaces);
+        input.style.width = `${Math.max(3.2, input.value.length + 0.6)}ch`;
+      }
+      pill.style.left = `${labelPositions[i].x}px`;
+      pill.style.top = `${labelPositions[i].y}px`;
+      pill.style.transform = `translate(-50%, -50%) rotate(${angle}deg)`;
     }
   }
 
@@ -1178,7 +1261,7 @@ export class Scene {
   private applyTypedMove(input: HTMLInputElement) {
     const readout = this.moveReadout;
     const view = readout ? this.parts.get(readout.id) : undefined;
-    const typed = Number(input.value);
+    const typed = toMillimetres(Number(input.value), this.displayUnit);
     if (!readout || !view || !Number.isFinite(typed)) {
       this.updateMoveReadout();
       return;
@@ -1362,6 +1445,9 @@ export class Scene {
       } else {
         this.parts.set(part.id, this.makeView(part.mesh, part.isHole, part.faces, part.id));
       }
+      // This mesh now represents the baked dimensions, so its document
+      // transform can safely replace the held live-drag transform.
+      this.pendingScaleBake.delete(part.id);
     }
 
     for (const [id, view] of [...this.parts]) {
@@ -1378,9 +1464,37 @@ export class Scene {
     this.attachGizmo();
   }
 
+  setMeasurementFormat(unit: DisplayUnit, decimalPlaces: number) {
+    this.displayUnit = unit;
+    this.decimalPlaces = Math.max(0, Math.min(3, decimalPlaces));
+    for (const input of this.dimensionInputs) {
+      input.step = String(displayStep(unit, this.decimalPlaces));
+      input.setAttribute("aria-label", `Dimension in ${unit}`);
+    }
+    for (const input of this.moveInputs) {
+      input.step = String(displayStep(unit, this.decimalPlaces));
+      input.setAttribute("aria-label", `Movement in ${unit}`);
+    }
+    this.pushPullLabelEl.step = String(displayStep(unit, this.decimalPlaces));
+    this.pushPullLabelEl.title = `Push/pull distance in ${unit}`;
+    this.pushPullLabelEl.setAttribute("aria-label", `Push/pull distance in ${unit}`);
+    this.updateResizeOverlay();
+  }
+
   /** Cheap: placement and selection only, no kernel involvement. */
   setPlacements(objects: SceneNode[], selectedIds: string[]) {
     const previous = this.lastNodes;
+    for (const id of selectedIds) {
+      const before = findNode(previous, id);
+      const after = findNode(objects, id);
+      if (
+        before?.type === "object" && after?.type === "object" &&
+        before.scale.some((value) => Math.abs(value - 1) > 1e-4) &&
+        after.scale.every((value) => Math.abs(value - 1) <= 1e-4)
+      ) {
+        this.pendingScaleBake.add(id);
+      }
+    }
     this.lastNodes = objects;
     this.dropDeletedParts(previous, objects);
     this.selectedIds = selectedIds;
@@ -1502,6 +1616,7 @@ export class Scene {
         }
         if (this.gizmo.dragging && this.gizmo.object === view.group) continue;
         if (this.grab?.active && this.grab.items.some((item) => item.id === node.id)) continue;
+        if (this.pendingScaleBake.has(node.id)) continue;
 
         view.group.rotation.set(node.rotation[0] * DEG, node.rotation[1] * DEG, node.rotation[2] * DEG);
         view.group.scale.fromArray(node.scale);
@@ -1768,7 +1883,7 @@ export class Scene {
     // model, and takes its pill off the object with it. The gap is derived
     // from the same screen-space helper the handles size themselves by, so it
     // stays constant on screen at any zoom.
-    const gap = Math.max(1, this.worldSnapTolerance(centre) * 1.6);
+    const gap = Math.max(1, this.worldSnapTolerance(centre) * 2.1);
     const edges: [THREE.Vector3, THREE.Vector3][] = [
       [new THREE.Vector3(min.x, min.y - gap, min.z), new THREE.Vector3(max.x, min.y - gap, min.z)],
       [new THREE.Vector3(max.x + gap, min.y, min.z), new THREE.Vector3(max.x + gap, max.y, min.z)],
@@ -1816,17 +1931,42 @@ export class Scene {
     const singleNode = isSingle ? findNode(this.lastNodes, this.selectedIds[0]) : null;
 
     for (let i = 0; i < this.dimensionInputs.length; i++) {
-      // Sit each pill on the midpoint of the very edge it measures.
-      const p = edges[i][0].clone().lerp(edges[i][1], 0.5).project(this.camera);
+      // Treat the value as part of the dimension line: exactly centred on its
+      // midpoint, with the label's flat background creating a clean break in
+      // the line. The line itself is already stood clear of the resize cage,
+      // so this stays away from handles without looking like a floating card.
+      const projectedA = edges[i][0].clone().project(this.camera);
+      const projectedB = edges[i][1].clone().project(this.camera);
+      const p = projectedA.clone().lerp(projectedB, 0.5);
+      const labelPosition = new THREE.Vector2(
+        ((p.x + 1) / 2) * rect.width,
+        ((1 - p.y) / 2) * rect.height,
+      );
+      const aScreen = new THREE.Vector2(
+        ((projectedA.x + 1) / 2) * rect.width,
+        ((1 - projectedA.y) / 2) * rect.height,
+      );
+      const bScreen = new THREE.Vector2(
+        ((projectedB.x + 1) / 2) * rect.width,
+        ((1 - projectedB.y) / 2) * rect.height,
+      );
+      let labelAngle = Math.atan2(bScreen.y - aScreen.y, bScreen.x - aScreen.x) / DEG;
+      // Dimension text follows the projected measurement line, but is always
+      // read left-to-right/upward rather than being allowed to turn upside
+      // down as the camera passes around the opposite side of the object.
+      if (labelAngle > 90) labelAngle -= 180;
+      else if (labelAngle < -90) labelAngle += 180;
       const input = this.dimensionInputs[i];
-      if (document.activeElement !== input) input.value = values[i].toFixed(2);
+      if (document.activeElement !== input) {
+        input.value = formatLength(values[i], this.displayUnit, this.decimalPlaces);
+        input.style.width = `${Math.max(3.2, input.value.length + 0.6)}ch`;
+      }
       input.dataset.nodeId = singleNode ? singleNode.id : "multi";
       input.dataset.currentSize = String(values[i]);
       const pill = this.dimensionPills[i];
-      pill.style.left = `${((p.x + 1) / 2) * rect.width}px`;
-      pill.style.top = `${((1 - p.y) / 2) * rect.height}px`;
-      pill.style.transform =
-        i === 0 ? "translate(-50%, 12px)" : i === 1 ? "translate(12px, 4px)" : "translate(12px, -50%)";
+      pill.style.left = `${labelPosition.x}px`;
+      pill.style.top = `${labelPosition.y}px`;
+      pill.style.transform = `translate(-50%, -50%) rotate(${labelAngle}deg)`;
     }
 
     // Position corner badges for selected triangle
@@ -1848,15 +1988,10 @@ export class Scene {
           const ay = rawApex.y;
           const thickness = singleNode.params.thickness ?? 5;
 
-          const minX = Math.min(0, b, ax);
-          const maxX = Math.max(0, b, ax);
-          const centerX = (minX + maxX) / 2;
-          const centerY = ay / 2;
-
           const localCorners = [
-            new THREE.Vector3(0 - centerX, -centerY, thickness / 2),
-            new THREE.Vector3(b - centerX, -centerY, thickness / 2),
-            new THREE.Vector3(ax - centerX, ay - centerY, thickness / 2),
+            new THREE.Vector3(0, 0, thickness).sub(view.pivot),
+            new THREE.Vector3(b, 0, thickness).sub(view.pivot),
+            new THREE.Vector3(ax, ay, thickness).sub(view.pivot),
           ];
 
           const lockFlags = [
@@ -1902,7 +2037,10 @@ export class Scene {
         for (const badge of this.cornerBadges) badge.style.display = "none";
       }
     }
-    this.updateDimensionVisibility(this.resizeDrag?.handleIndex ?? this.resizeHoverIndex);
+    this.updateDimensionVisibility(
+      this.resizeDrag?.handleIndex ??
+      (this.dimensionPinnedHandleIndex >= 0 ? this.dimensionPinnedHandleIndex : this.resizeHoverIndex),
+    );
   }
 
   private updateDimensionVisibility(handleIndex: number) {
@@ -1973,7 +2111,10 @@ export class Scene {
       handle.scale.setScalar((handle.userData.baseScale ?? 1) * HOVER_GROW);
     }
     for (const pill of this.dimensionPills) pill.classList.toggle("hover", next >= 0);
-    this.updateDimensionVisibility(this.resizeDrag?.handleIndex ?? next);
+    this.updateDimensionVisibility(
+      this.resizeDrag?.handleIndex ??
+      (this.dimensionPinnedHandleIndex >= 0 ? this.dimensionPinnedHandleIndex : next),
+    );
     this.renderer.domElement.style.cursor = next < 0 ? "" : next < 8 ? "nwse-resize" : "pointer";
   }
 
@@ -2279,7 +2420,7 @@ export class Scene {
     const handle = this.pushPullHandleMeshes[0];
     const at = this.kernelLocalToWorld(view, face.point);
     const normal = this.kernelNormalToWorld(view, face.normal);
-    const scale = Math.max(MIN_HANDLE_WORLD, this.worldSnapTolerance(at) * 1.15);
+    const scale = Math.max(MIN_HANDLE_WORLD, this.worldSnapTolerance(at) * PUSH_PULL_HANDLE_SCALE);
     handle.position.copy(at).addScaledVector(normal, scale * 0.2);
     handle.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), normal);
     handle.scale.setScalar(scale * (this.pushPullHandleHovered ? 1.18 : 1));
@@ -2356,7 +2497,7 @@ export class Scene {
         found.view.pivot.clone(),
         this.worldPerLocalAlong(found.view, face.normal),
         handle.position,
-        "0",
+        0,
       );
     }
     return true;
@@ -2984,7 +3125,7 @@ export class Scene {
 
     // This temporary arrow follows the drag even when it started away from the
     // selected face's centre. The normal pooled arrow is restored on release.
-    const scale = Math.max(MIN_HANDLE_WORLD, this.worldSnapTolerance(at) * 1.15);
+    const scale = Math.max(MIN_HANDLE_WORLD, this.worldSnapTolerance(at) * PUSH_PULL_HANDLE_SCALE);
     const handle = makeArrow();
     handle.position.copy(at).addScaledVector(worldNormal, scale * 0.2);
     handle.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), worldNormal);
@@ -3047,7 +3188,7 @@ export class Scene {
    * of vanishing the instant the mouse comes up (as it used to — a drag and
    * a plain click ending in two different states was the actual complaint).
    */
-  private showPushPullInput(drag: PushPullDrag, initialValue = "0") {
+  private showPushPullInput(drag: PushPullDrag, initialValueMm = 0) {
     this.showPushPullInputForFace(
       drag.id,
       drag.localPoint,
@@ -3057,7 +3198,7 @@ export class Scene {
       drag.originalPivot,
       drag.worldPerLocal,
       drag.handleBasePosition,
-      initialValue,
+      initialValueMm,
     );
   }
 
@@ -3070,7 +3211,7 @@ export class Scene {
     originalPivot: THREE.Vector3,
     worldPerLocal: number,
     labelWorldPosition: THREE.Vector3,
-    initialValue: string,
+    initialValueMm = 0,
   ) {
     this.pushPullPending = {
       id,
@@ -3084,7 +3225,8 @@ export class Scene {
     this.armedFace = { id, localPoint, localNormal, view, worldPerLocal };
     this.pushPullLabelEl.style.display = "block";
     this.positionPushPullLabel(labelWorldPosition, this.kernelNormalToWorld(view, localNormal));
-    this.pushPullLabelEl.value = initialValue;
+    this.pushPullLabelEl.value = formatLength(initialValueMm, this.displayUnit, this.decimalPlaces);
+    this.pushPullLabelEl.style.width = `${Math.max(4.2, this.pushPullLabelEl.value.length + 1.6)}ch`;
     this.pushPullLabelEl.focus();
     this.pushPullLabelEl.select();
   }
@@ -3192,7 +3334,7 @@ export class Scene {
     this.onDragChange?.(false);
     if (!pending) return;
 
-    const distance = Number(this.pushPullLabelEl.value);
+    const distance = toMillimetres(Number(this.pushPullLabelEl.value), this.displayUnit);
     const valid = apply && Number.isFinite(distance) && Math.abs(distance) >= 0.5;
     if (valid) {
       this.disposeGeom(pending.originalGeom);
@@ -3384,7 +3526,7 @@ export class Scene {
   private applyTypedDimension(input: HTMLInputElement) {
     const id = input.dataset.nodeId;
     const current = Number(input.dataset.currentSize);
-    const desired = Number(input.value);
+    const desired = toMillimetres(Number(input.value), this.displayUnit);
     if (!Number.isFinite(current) || current <= 0 || !Number.isFinite(desired) || desired <= 0) {
       this.updateResizeOverlay();
       return;
@@ -4169,6 +4311,36 @@ export class Scene {
 
   // ---- gizmo ------------------------------------------------------------
 
+  /**
+   * Three.js draws a second, detached arrowhead on the negative end of every
+   * translation axis. Keep its generous invisible pickers (so an axis remains
+   * easy to grab from either side), but simplify the visible control to the
+   * conventional three complete positive-axis arrows.
+   */
+  private removeNegativeMoveArrowheads() {
+    const helper = this.gizmo.getHelper();
+    const transformGizmo = helper.children.find(
+      (child) => child.type === "TransformControlsGizmo",
+    );
+    const translateGizmo = transformGizmo?.children[0];
+    if (!translateGizmo) return;
+
+    const negativeArrowheads = translateGizmo.children.filter((handle) => {
+      if (!(handle instanceof THREE.Mesh) || !["X", "Y", "Z"].includes(handle.name)) return false;
+      const geometry = handle.geometry;
+      geometry.computeBoundingBox();
+      const center = geometry.boundingBox?.getCenter(new THREE.Vector3());
+      if (!center) return false;
+      return (
+        (handle.name === "X" && center.x < -0.4) ||
+        (handle.name === "Y" && center.y < -0.4) ||
+        (handle.name === "Z" && center.z < -0.4)
+      );
+    });
+
+    for (const arrowhead of negativeArrowheads) translateGizmo.remove(arrowhead);
+  }
+
   setToolMode(mode: ToolMode) {
     if (mode !== "face") this.armedFace = null;
     const leavingFace = (this.toolMode === "face" || this.toolMode === "place") && mode !== this.toolMode;
@@ -4196,7 +4368,13 @@ export class Scene {
       this.selectedFace = null;
       if (held) clearHighlights(held.mesh.geometry as THREE.BufferGeometry);
     }
-    if (mode === "move" || mode === "rotate") this.gizmo.setMode(mode === "move" ? "translate" : "rotate");
+    if (mode === "move" || mode === "rotate") {
+      this.gizmo.setMode(mode === "move" ? "translate" : "rotate");
+      // Three.js defaults to a very large presentation-sized control. Keep
+      // Move compact enough that it does not cover a medium part; Rotate gets
+      // a touch more room because its circular rings need separation.
+      this.gizmo.setSize(mode === "move" ? 0.7 : 0.82);
+    }
     this.attachGizmo();
     this.updateResizeOverlay();
     this.updateAlignOverlay();
@@ -4485,6 +4663,7 @@ export class Scene {
       return;
     }
     if (this.beginResize(e)) return;
+    this.dimensionPinnedHandleIndex = -1;
 
     // A gizmo-handle drag claims the event first: its own pointerdown
     // listener is registered on this same canvas before this one, so by the
@@ -4703,7 +4882,8 @@ export class Scene {
       // canvas, not this input) — just reflecting the value, same as before
       // this became a real <input>. blur() below only fires from an actual
       // focused edit, so this never races with commitPushPullInput().
-      this.pushPullLabelEl.value = distance.toFixed(1);
+      this.pushPullLabelEl.value = formatLength(distance, this.displayUnit, this.decimalPlaces);
+      this.pushPullLabelEl.style.width = `${Math.max(4.2, this.pushPullLabelEl.value.length + 1.6)}ch`;
 
       // The actual shape, not just the arrow — throttled, since each sample
       // is a real kernel rebuild (see previewLocal's doc comment).
@@ -4782,7 +4962,32 @@ export class Scene {
         }
       } else if (this.resizeDrag.axis !== null) {
         const axis = this.resizeDrag.axis;
-        factors[axis] = Math.max(0.01, ratio);
+        // A face handle changes its axis by an absolute world distance. Using
+        // the radial ratio above makes recovery from a very thin dimension
+        // depend on multiplying that tiny size (1 mm -> 20 mm needs an
+        // enormous 20x radial drag). Projecting pointer travel onto the
+        // selected local axis gives the same mm-per-pixel response whether
+        // the part starts 1 mm or 100 mm thick.
+        const basis = axis === 0
+          ? this.resizeDrag.basisX
+          : axis === 1
+            ? this.resizeDrag.basisY
+            : this.resizeDrag.basisZ;
+        const dx = e.clientX - this.resizeDrag.startX;
+        const dy = e.clientY - this.resizeDrag.startY;
+        const basisLengthSq = basis[0] * basis[0] + basis[1] * basis[1];
+        if (basisLengthSq > 1e-6) {
+          const travelled = (dx * basis[0] + dy * basis[1]) / basisLengthSq;
+          const startLength = Math.max(
+            0.01,
+            this.resizeDrag.rawSize[axis] * this.resizeDrag.startScale[axis],
+          );
+          const nextLength = Math.max(
+            0.01,
+            startLength + travelled * this.resizeDrag.handleSigns[axis],
+          );
+          factors[axis] = nextLength / startLength;
+        }
       } else {
         factors[0] = Math.max(0.01, ratio);
         factors[1] = Math.max(0.01, ratio);
@@ -4983,7 +5188,7 @@ export class Scene {
       if (drag.active) this.onDragChange?.(false); // closes the (empty) drag batch; the edit itself commits separately, below
       const distance = drag.active ? this.pushPullDistance(e, drag) : 0;
       drag.currentDistance = distance;
-      this.showPushPullInput(drag, distance.toFixed(1));
+      this.showPushPullInput(drag, distance);
       // See applyFinalPushPullPreview's own doc comment — this is what stops
       // the shape settling into place a moment after release instead of
       // already being there.
@@ -5003,11 +5208,29 @@ export class Scene {
     }
 
     if (this.resizeDrag) {
+      const drag = this.resizeDrag;
+      const wasClick = Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) <= CLICK_SLOP_PX;
       this.resizeDrag = null;
       this.controls.enabled = true;
       this.gizmo.enabled = true;
       this.onDragChange?.(false);
-      this.updateDimensionVisibility(this.resizeHoverIndex);
+      if (wasClick) {
+        this.dimensionPinnedHandleIndex = drag.handleIndex;
+        this.updateDimensionVisibility(drag.handleIndex);
+        // A side handle unambiguously owns one dimension, so take the user
+        // straight into typing. Corner handles expose all three values and
+        // leave focus alone so the user can choose which one to edit.
+        if (drag.axis !== null) {
+          const input = this.dimensionInputs[drag.axis];
+          requestAnimationFrame(() => {
+            input.focus();
+            input.select();
+          });
+        }
+      } else {
+        this.dimensionPinnedHandleIndex = -1;
+        this.updateDimensionVisibility(this.resizeHoverIndex);
+      }
       this.scaleHintEl.style.display = "none";
       return;
     }
@@ -5090,6 +5313,7 @@ export class Scene {
     const invQuat = quaternion.clone().invert();
     const [xPixelX, xPixelY] = project(worldCentre.clone().add(new THREE.Vector3(1, 0, 0).applyQuaternion(quaternion)));
     const [yPixelX, yPixelY] = project(worldCentre.clone().add(new THREE.Vector3(0, 1, 0).applyQuaternion(quaternion)));
+    const [zPixelX, zPixelY] = project(worldCentre.clone().add(new THREE.Vector3(0, 0, 1).applyQuaternion(quaternion)));
 
     let localAxis: 0 | 1 | 2 | null = null;
     let handleSigns: Vec3 = [0, 0, 0];
@@ -5166,6 +5390,7 @@ export class Scene {
       cornerSigns,
       basisX: [xPixelX - centreX, xPixelY - centreY],
       basisY: [yPixelX - centreX, yPixelY - centreY],
+      basisZ: [zPixelX - centreX, zPixelY - centreY],
       startPosition: [...first.node.position] as Vec3,
       startGroupPosition: first.view.group.position.clone(),
       rawSize,
@@ -5461,6 +5686,7 @@ export class Scene {
       point,
       face?.normal ?? null,
       id && view && face ? this.sizeAcross(view, face.normal) : 0,
+      face?.boundaryEdges ?? [],
     );
   }
 

@@ -14,7 +14,7 @@ import {
   Plane,
   sketchFaceOffset,
 } from "replicad";
-import type { Face, Shape3D } from "replicad";
+import type { Face, Shape3D, Sketch } from "replicad";
 import { InvalidShapeError, solveTriangle, solveScaledTriangle } from "../geometry/triangle";
 import { getBlob } from "../document/blobStore";
 import { svgMeshSolid } from "./svgSolid";
@@ -42,15 +42,23 @@ const isMesh = (s: AnySolid): s is MeshShape => s instanceof MeshShape;
  */
 function roundPolygon2D(
   vertices: [number, number][],
-  cornerRadius: number,
+  cornerRadius: number | number[],
   arcSteps = 8
 ): [number, number][] {
   const n = vertices.length;
-  if (n < 3 || cornerRadius <= 0.01) return vertices;
+  const radii = Array.isArray(cornerRadius)
+    ? vertices.map((_, i) => Math.max(0, cornerRadius[i] ?? 0))
+    : vertices.map(() => Math.max(0, cornerRadius));
+  if (n < 3 || radii.every((radius) => radius <= 0.01)) return vertices;
 
   const result: [number, number][] = [];
 
   for (let i = 0; i < n; i++) {
+    const radius = radii[i];
+    if (radius <= 0.01) {
+      result.push(vertices[i]);
+      continue;
+    }
     const prev = vertices[(i - 1 + n) % n];
     const curr = vertices[i];
     const next = vertices[(i + 1) % n];
@@ -84,7 +92,7 @@ function roundPolygon2D(
 
     const halfAngle = angle / 2;
     const maxD = Math.min(len1, len2) * 0.48;
-    const desiredD = cornerRadius / Math.tan(halfAngle);
+    const desiredD = radius / Math.tan(halfAngle);
     const d = Math.min(desiredD, maxD);
     const rEff = d * Math.tan(halfAngle);
 
@@ -127,6 +135,42 @@ function roundPolygon2D(
   return result;
 }
 
+/** Samples one tangent circular fillet while walking prev -> corner -> next. */
+function roundedCornerPoints(
+  prev: [number, number],
+  corner: [number, number],
+  next: [number, number],
+  radius: number,
+  steps = 24,
+): [number, number][] {
+  if (radius <= 0) return [corner];
+  const ax = prev[0] - corner[0], ay = prev[1] - corner[1];
+  const bx = next[0] - corner[0], by = next[1] - corner[1];
+  const lenA = Math.hypot(ax, ay), lenB = Math.hypot(bx, by);
+  const ux = ax / lenA, uy = ay / lenA, vx = bx / lenB, vy = by / lenB;
+  const angle = Math.acos(Math.max(-1, Math.min(1, ux * vx + uy * vy)));
+  const tangentDistance = Math.min(radius / Math.tan(angle / 2), Math.min(lenA, lenB) * 0.499);
+  const effectiveRadius = tangentDistance * Math.tan(angle / 2);
+  const start: [number, number] = [corner[0] + ux * tangentDistance, corner[1] + uy * tangentDistance];
+  const end: [number, number] = [corner[0] + vx * tangentDistance, corner[1] + vy * tangentDistance];
+  const bisectorX = ux + vx, bisectorY = uy + vy;
+  const bisectorLength = Math.hypot(bisectorX, bisectorY);
+  const centreDistance = effectiveRadius / Math.sin(angle / 2);
+  const centre: [number, number] = [
+    corner[0] + bisectorX / bisectorLength * centreDistance,
+    corner[1] + bisectorY / bisectorLength * centreDistance,
+  ];
+  const startAngle = Math.atan2(start[1] - centre[1], start[0] - centre[0]);
+  let sweep = Math.atan2(end[1] - centre[1], end[0] - centre[0]) - startAngle;
+  const cross = ux * vy - uy * vx;
+  if (cross > 0) while (sweep > 0) sweep -= 2 * Math.PI;
+  else while (sweep < 0) sweep += 2 * Math.PI;
+  return Array.from({ length: steps + 1 }, (_, i) => {
+    const at = startAngle + sweep * i / steps;
+    return [centre[0] + effectiveRadius * Math.cos(at), centre[1] + effectiveRadius * Math.sin(at)];
+  });
+}
+
 /**
  * Builds a primitive in LOCAL space: centred in XY with its base on z = 0,
  * with no position or rotation applied. Placement lives on the Three.js side
@@ -135,6 +179,7 @@ function roundPolygon2D(
 export function makePrimitive(spec: ObjectSpec): AnySolid {
   const p = spec.params;
   let s: AnySolid;
+  let fixedXYCentre: [number, number] | null = null;
 
   switch (spec.kind) {
     case "box": {
@@ -153,28 +198,217 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
       if (r > 0) s = everywhere ? s.fillet(r) : s.fillet(r, (e) => e.inDirection("Z"));
       break;
     }
-    case "cylinder":
-      s = makeCylinder(p.radius, p.height);
+    case "cylinder": {
+      const sides = Math.max(3, Math.min(96, Math.round(p.sides ?? 48)));
+      const legacyPosition = p.filletPosition ?? 2;
+      let topCorner = Math.min(
+        Math.max(p.topFillet ?? (legacyPosition !== 1 ? (p.fillet ?? 0) : 0), 0),
+        Math.max(0, Math.min(p.radius, p.height)),
+      );
+      let bottomCorner = Math.min(
+        Math.max(p.bottomFillet ?? (legacyPosition !== 0 ? (p.fillet ?? 0) : 0), 0),
+        Math.max(0, Math.min(p.radius, p.height)),
+      );
+      const heightBudget = Math.max(0, p.height);
+      if (topCorner + bottomCorner > heightBudget) {
+        const scale = heightBudget / (topCorner + bottomCorner);
+        topCorner *= scale;
+        bottomCorner *= scale;
+      }
+      const polygonSketch = (radius: number, z: number) => {
+        const points: [number, number][] = Array.from({ length: sides }, (_, i) => {
+          const angle = 2 * Math.PI * i / sides;
+          return [radius * Math.cos(angle), radius * Math.sin(angle)];
+        });
+        let pen = draw(points[0]);
+        for (let i = 1; i < points.length; i++) pen = pen.lineTo(points[i]);
+        return pen.close().sketchOnPlane("XY", z) as Sketch;
+      };
+      if (topCorner <= 0 && bottomCorner <= 0) {
+        s = polygonSketch(p.radius, 0).extrude(p.height) as Shape3D;
+      } else {
+        // Build the two quarter-rounds into the axial profile itself. Lofting
+        // matching polygon rings keeps the solid closed at every radius and
+        // avoids OCCT's multi-edge fillet opening a hole in the end face.
+        const axialProfile: [number, number][] = [];
+        const curveSteps = 24;
+        if (bottomCorner > 0) {
+          const centreR = p.radius - bottomCorner;
+          for (let i = 0; i <= curveSteps; i++) {
+            const angle = -Math.PI / 2 + (Math.PI / 2) * i / curveSteps;
+            axialProfile.push([
+              centreR + bottomCorner * Math.cos(angle),
+              bottomCorner + bottomCorner * Math.sin(angle),
+            ]);
+          }
+        } else {
+          axialProfile.push([p.radius, 0]);
+        }
+        if (topCorner > 0) {
+          const centreR = p.radius - topCorner;
+          const centreZ = p.height - topCorner;
+          for (let i = 0; i <= curveSteps; i++) {
+            const angle = (Math.PI / 2) * i / curveSteps;
+            axialProfile.push([
+              centreR + topCorner * Math.cos(angle),
+              centreZ + topCorner * Math.sin(angle),
+            ]);
+          }
+        } else {
+          axialProfile.push([p.radius, p.height]);
+        }
+        const startsAtPoint = axialProfile[0][0] <= 1e-7;
+        const endsAtPoint = axialProfile[axialProfile.length - 1][0] <= 1e-7;
+        const ringProfile = axialProfile.filter(([radius]) => radius > 1e-7);
+        const rings = ringProfile.map(([radius, z]) => polygonSketch(radius, z));
+        s = rings[0].loftWith(rings.slice(1), {
+          ruled: true,
+          ...(startsAtPoint ? { startPoint: [0, 0, axialProfile[0][1]] as [number, number, number] } : {}),
+          ...(endsAtPoint
+            ? { endPoint: [0, 0, axialProfile[axialProfile.length - 1][1]] as [number, number, number] }
+            : {}),
+        }) as Shape3D;
+      }
       break;
+    }
     case "sphere":
       s = makeSphere(p.radius);
       break;
     case "cone": {
       const rb = Math.max(p.bottomRadius, 0);
       const rt = Math.max(p.topRadius, 0);
-      // Revolve a profile in the XZ plane about Z. A zero top radius closes to
-      // a true point rather than a degenerate zero-width face.
-      let pen = draw([0, 0]).lineTo([Math.max(rb, 0.001), 0]);
-      pen = rt > 0 ? pen.lineTo([rt, p.height]).lineTo([0, p.height]) : pen.lineTo([0, p.height]);
-      s = pen.close().sketchOnPlane("XZ").revolve([0, 0, 1]) as Shape3D;
+      // Read the old shared-radius fields as a fallback so designs saved by
+      // the short-lived first version of cone rounding still open correctly.
+      const legacyPosition = p.filletPosition ?? 1;
+      const requestedTop = Math.max(
+        p.topFillet ?? (legacyPosition !== 1 ? (p.fillet ?? 0) : 0),
+        0,
+      );
+      const requestedBottom = Math.max(
+        p.bottomFillet ?? (legacyPosition !== 0 ? (p.fillet ?? 0) : 0),
+        0,
+      );
+      const cornerSteps = Math.max(1, Math.min(64, Math.round(p.cornerSteps ?? 24)));
+      // A pointed cone has a vertex rather than a top edge, so its nose has
+      // to be rounded in the 2D profile before revolution. The half-angle
+      // limit keeps both tangent points on the cone's side and centre line.
+      const slant = Math.hypot(rb, p.height);
+      const radiusDelta = rb - rt;
+      const tipLimit = rt === 0 && rb > 0 && p.height > 0
+        ? p.height * rb / (slant + p.height)
+        : 0;
+      // A profile fillet consumes r / tan(angle / 2) along each adjoining
+      // line. Limit each corner using the real cone angle, then share the
+      // sloped side between the two ends so their tangent arcs cannot overlap.
+      const bottomSlopeFactor = p.height > 0 ? (slant + radiusDelta) / p.height : Infinity;
+      const topSlopeFactor = rt > 0 && p.height > 0 ? (slant - radiusDelta) / p.height : 0;
+      const bottomLimit = bottomSlopeFactor > 0
+        ? Math.min(rb, slant) / bottomSlopeFactor
+        : 0;
+      const topLimit = rt > 0
+        ? (topSlopeFactor > 0 ? Math.min(rt, slant) / topSlopeFactor : 0)
+        : tipLimit;
+      let topCorner = Math.min(requestedTop, Math.max(0, topLimit - 0.01));
+      let bottomCorner = Math.min(requestedBottom, Math.max(0, bottomLimit - 0.01));
+      const topSlopeUse = rt > 0 ? topCorner * topSlopeFactor : topCorner * p.height / rb;
+      const bottomSlopeUse = bottomCorner * bottomSlopeFactor;
+      const slopeBudget = Math.max(0, slant - 0.01);
+      if (topSlopeUse + bottomSlopeUse > slopeBudget) {
+        const scale = slopeBudget / (topSlopeUse + bottomSlopeUse);
+        topCorner *= scale;
+        bottomCorner *= scale;
+      }
+      // Cone UI starts at 8, while Pyramid deliberately reuses this builder
+      // and must be allowed to request a triangular (3-sided) profile.
+      const sides = Math.max(3, Math.min(96, Math.round(p.sides ?? 48)));
+      if (rt === 0 && (topCorner > 0 || bottomCorner > 0)) {
+        // Use a circular cap centred on the revolution axis. It is tangent to
+        // the cone wall and reaches the axis at its pole, avoiding the pinched
+        // centre produced by filleting the wall-to-axis corner directly.
+        const centreZ = topCorner > 0 ? p.height - topCorner * slant / rb : p.height;
+        const lineT = topCorner > 0 ? (rb * rb + p.height * centreZ) / (slant * slant) : 1;
+        const tangent: [number, number] = topCorner > 0
+          ? [rb * (1 - lineT), p.height * lineT]
+          : [0, p.height];
+        const pole: [number, number] = [0, topCorner > 0 ? centreZ + topCorner : p.height];
+        const bottomProfile = bottomCorner > 0
+          ? roundedCornerPoints([0, 0], [rb, 0], tangent, bottomCorner, cornerSteps)
+          : [[rb, 0] as [number, number]];
+        const capStartAngle = topCorner > 0 ? Math.atan2(tangent[1] - centreZ, tangent[0]) : 0;
+        const capProfile: [number, number][] = topCorner > 0
+          ? Array.from({ length: cornerSteps + 1 }, (_, i) => {
+              const angle = capStartAngle + (Math.PI / 2 - capStartAngle) * i / cornerSteps;
+              return [topCorner * Math.cos(angle), centreZ + topCorner * Math.sin(angle)];
+            })
+          : [tangent];
+        const axialProfile = [...bottomProfile, ...capProfile.slice(1)];
+        const polygonSketch = (radius: number, z: number) => {
+          const points: [number, number][] = Array.from({ length: sides }, (_, i) => {
+            const angle = 2 * Math.PI * i / sides;
+            return [radius * Math.cos(angle), radius * Math.sin(angle)];
+          });
+          let pen = draw(points[0]);
+          for (let i = 1; i < points.length; i++) pen = pen.lineTo(points[i]);
+          return pen.close().sketchOnPlane("XY", z) as Sketch;
+        };
+        const ringProfile = axialProfile.filter(([radius]) => radius > 1e-7);
+        const rings = ringProfile.map(([radius, z]) => polygonSketch(radius, z));
+        s = rings[0].loftWith(rings.slice(1), {
+          ruled: true,
+          endPoint: [0, 0, pole[1]],
+        }) as Shape3D;
+      } else {
+        // A regular polygon profile makes Sides part of the real solid. A
+        // linear extrusion profile scales that polygon to the requested top
+        // radius, including all the way to a true point.
+        const profile: [number, number][] = Array.from({ length: sides }, (_, i) => {
+          const angle = 2 * Math.PI * i / sides;
+          return [rb * Math.cos(angle), rb * Math.sin(angle)];
+        });
+        let pen = draw(profile[0]);
+        for (let i = 1; i < profile.length; i++) pen = pen.lineTo(profile[i]);
+        s = pen.close().sketchOnPlane("XY").extrude(p.height, {
+          extrusionProfile: { profile: "linear", endFactor: rb > 0 ? rt / rb : 0 },
+        }) as Shape3D;
+        if (topCorner > 0 || bottomCorner > 0) {
+          s = s.fillet((edge) => {
+            const z = edge.boundingBox.center[2];
+            if (topCorner > 0 && Math.abs(z - p.height) < 1e-5) return topCorner;
+            if (bottomCorner > 0 && Math.abs(z) < 1e-5) return bottomCorner;
+            return null;
+          });
+        }
+      }
       break;
     }
     case "triangle": {
       if (p.thickness <= 0) throw new InvalidShapeError("Thickness must be greater than zero.");
       const { apexPoint } = solveTriangle(p);
-      const fillet = Math.max(p.fillet ?? 0, 0);
+      const legacyFillet = Math.max(p.fillet ?? 0, 0);
+      const cornerRadii = [
+        Math.max(p.leftFillet ?? legacyFillet, 0),
+        Math.max(p.rightFillet ?? legacyFillet, 0),
+        Math.max(p.apexFillet ?? legacyFillet, 0),
+      ];
       const basePts: [number, number][] = [[0, 0], [p.base, 0], [apexPoint.x, apexPoint.y]];
-      const pts = roundPolygon2D(basePts, fillet);
+      // A triangle's document origin belongs to its unrounded construction
+      // triangle. If normalise() instead centres the changing rounded bounds,
+      // an asymmetric Right or Apex radius visibly slides the whole object.
+      const baseXs = basePts.map(([x]) => x);
+      const baseYs = basePts.map(([, y]) => y);
+      fixedXYCentre = [
+        (Math.min(...baseXs) + Math.max(...baseXs)) / 2,
+        (Math.min(...baseYs) + Math.max(...baseYs)) / 2,
+      ];
+      // Triangle corner radii are often viewed edge-on, where the default
+      // eight-segment approximation reads as a visibly faceted arc. Use a
+      // denser profile here so the extrusion stays smooth at normal zoom.
+      const cornerSteps = Math.max(1, Math.min(64, Math.round(p.cornerSteps ?? 32)));
+      const pts = roundPolygon2D(basePts, cornerRadii, cornerSteps);
+      // Keep the rounded profile in the original sharp triangle's coordinate
+      // frame. The viewport already compensates for changing visible bounds;
+      // translating the profile to its new bounding-box centre would move the
+      // untouched edges whenever an asymmetric corner radius changes.
       let pen = draw(pts[0]);
       for (let i = 1; i < pts.length; i++) {
         pen = pen.lineTo(pts[i]);
@@ -198,48 +432,45 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
       const sides = Math.max(3, Math.min(32, Math.round(p.sides ?? 4)));
       const r = Math.max(p.radius ?? (p.width ? p.width / 2 : 10), 0.1);
       const h = Math.max(p.height ?? 20, 0.1);
-      const d = r * Math.cos(Math.PI / sides);
-      const size = r * 3;
-
-      let solid = makeBaseBox(size * 2, size * 2, h);
-
-      for (let i = 0; i < sides; i++) {
-        const angleDeg = (i * 360) / sides;
-        const cutter = draw([d, -1])
-          .lineTo([size * 2, -1])
-          .lineTo([size * 2, h + 1])
-          .lineTo([0, h])
-          .close()
-          .sketchOnPlane("XZ", -size)
-          .extrude(size * 2)
-          .rotate(angleDeg, [0, 0, 0], [0, 0, 1]) as Shape3D;
-        solid = solid.cut(cutter) as Shape3D;
-      }
-      s = solid;
+      // A pyramid is the pointed form of the same polygonal loft used by a
+      // cone. Reusing that profile gives it reliable, independent rounding
+      // at the tip and base instead of trying to fillet several converging
+      // BRep edges at once (which commonly fails at the apex).
+      s = makePrimitive({
+        ...spec,
+        kind: "cone",
+        params: {
+          bottomRadius: r,
+          topRadius: 0,
+          height: h,
+          sides,
+          topFillet: Math.max(p.topFillet ?? 0, 0),
+          bottomFillet: Math.max(p.bottomFillet ?? 0, 0),
+          cornerSteps: Math.max(1, Math.min(64, Math.round(p.cornerSteps ?? 24))),
+        },
+      });
       break;
     }
     case "wedge": {
       const w = Math.max(p.width ?? 20, 0.1);
       const len = Math.max(p.length ?? 20, 0.1);
       const h = Math.max(p.height ?? 20, 0.1);
-      const maxR = Math.min(w, len, h) / 2 - 0.01;
-      const r = Math.min(Math.max(p.fillet ?? 0, 0), maxR);
-      let wedgeSolid = draw([0, 0])
-        .lineTo([len, 0])
-        .lineTo([len, h])
-        .close()
-        .sketchOnPlane("YZ")
-        .extrude(w) as Shape3D;
-      if (r > 0) {
-        try {
-          wedgeSolid = wedgeSolid.fillet(r, (e) => e.inDirection("X"));
-        } catch {
-          try {
-            wedgeSolid = wedgeSolid.fillet(r);
-          } catch {}
-        }
-      }
-      s = wedgeSolid;
+      // Like Triangle, a Wedge's origin belongs to its original sharp
+      // construction profile. Rounding both lower corners removes the Y
+      // extremes, so centring from the rounded bounds would slide the object.
+      fixedXYCentre = [w / 2, len / 2];
+      const legacyFillet = Math.max(p.fillet ?? 0, 0);
+      const topCorner = Math.max(p.topFillet ?? legacyFillet, 0);
+      const bottomCorner = Math.max(p.bottomFillet ?? legacyFillet, 0);
+      const cornerSteps = Math.max(1, Math.min(64, Math.round(p.cornerSteps ?? 24)));
+      const profile = roundPolygon2D(
+        [[0, 0], [len, 0], [len, h]],
+        [bottomCorner, bottomCorner, topCorner],
+        cornerSteps,
+      );
+      let pen = draw(profile[0]);
+      for (let i = 1; i < profile.length; i++) pen = pen.lineTo(profile[i]);
+      s = pen.close().sketchOnPlane("YZ").extrude(w) as Shape3D;
       break;
     }
     case "polygonPrism": {
@@ -530,6 +761,10 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
     }
   }
 
+  if (fixedXYCentre) {
+    const [min] = getSolidBounds(s);
+    return s.translate([-fixedXYCentre[0], -fixedXYCentre[1], -min[2]]);
+  }
   return normalise(s);
 }
 
@@ -1125,9 +1360,17 @@ async function replayEdit(
       }
       try {
         const anchors = op.points?.length ? op.points : [op.point];
+        const faceEdges = op.face ? findFace(solid, op.face.point, op.face.normal)?.edges : undefined;
+        if (op.face && !faceEdges?.length) {
+          onError?.(spec.id, "The selected face border could not be found after rebuilding — select it again.");
+          continue;
+        }
+        const edgeSelector = faceEdges
+          ? (finder: import("replicad").EdgeFinder) => finder.inList(faceEdges.map((edge) => edge.clone()))
+          : edgesAt(anchors);
         const candidate = op.kind === "fillet"
-          ? solid.fillet(op.distance, edgesAt(anchors))
-          : solid.chamfer(op.distance, edgesAt(anchors));
+          ? solid.fillet(op.distance, edgeSelector)
+          : solid.chamfer(op.distance, edgeSelector);
         if (!isOcctValid(candidate) || tessellatesEmpty(candidate) || !isWatertight(candidate)) {
           onError?.(spec.id, `That ${op.kind} would create an invalid shape; the previous shape was kept.`);
         } else {
@@ -1291,9 +1534,14 @@ export async function survivingOps(
   for (const op of spec.ops) {
     if (op.kind === "fillet" || op.kind === "chamfer") {
       const anchors = op.points?.length ? op.points : [op.point];
+      const faceEdges = op.face ? findFace(solid, op.face.point, op.face.normal)?.edges : undefined;
+      if (op.face && !faceEdges?.length) continue;
+      const edgeSelector = faceEdges
+        ? (finder: import("replicad").EdgeFinder) => finder.inList(faceEdges.map((edge) => edge.clone()))
+        : edgesAt(anchors);
       const candidate = settled(() => (op.kind === "fillet"
-        ? solid.fillet(op.distance, edgesAt(anchors))
-        : solid.chamfer(op.distance, edgesAt(anchors))) as Shape3D);
+        ? solid.fillet(op.distance, edgeSelector)
+        : solid.chamfer(op.distance, edgeSelector)) as Shape3D);
       if (candidate) {
         solid = candidate;
         kept.push(op);

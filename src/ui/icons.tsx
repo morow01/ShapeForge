@@ -1,5 +1,20 @@
 import type { PrimitiveKind } from "../document/types";
 
+export function SettingsIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path
+        d="M9.7 2.8h4.6l.55 2.35c.55.22 1.06.52 1.53.88l2.3-.72 2.3 3.98-1.77 1.63c.04.36.06.72.06 1.08s-.02.72-.06 1.08l1.77 1.63-2.3 3.98-2.3-.72c-.47.36-.98.66-1.53.88l-.55 2.35H9.7l-.55-2.35a7.6 7.6 0 0 1-1.53-.88l-2.3.72-2.3-3.98 1.77-1.63A9.4 9.4 0 0 1 4.73 12c0-.36.02-.72.06-1.08L3.02 9.29l2.3-3.98 2.3.72c.47-.36.98-.66 1.53-.88L9.7 2.8Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.55"
+        strokeLinejoin="round"
+      />
+      <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" strokeWidth="1.55" />
+    </svg>
+  );
+}
+
 /**
  * A wireframe cube you can see through: the three dashed lines are the far
  * edges, all running from the back-bottom corner, which in this projection

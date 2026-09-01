@@ -98,8 +98,25 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
   },
   cylinder: {
     label: "Cylinder",
-    defaults: { radius: 10, height: 20 },
-    fields: [dim("radius", "Radius"), dim("height", "Height")],
+    defaults: { radius: 10, height: 20, sides: 48, sideEdges: 0, topFillet: 0, bottomFillet: 0 },
+    fields: [
+      dim("radius", "Radius"),
+      dim("height", "Height"),
+      { key: "sides", label: "Roundness", min: 8, max: 96, step: 1 },
+      {
+        key: "sideEdges",
+        label: "Side lines",
+        min: 0,
+        max: 1,
+        step: 1,
+        options: [
+          { value: 0, label: "Hidden" },
+          { value: 1, label: "Shown" },
+        ],
+      },
+      { key: "topFillet", label: "Top corner radius", min: 0, max: 500, step: 0.5 },
+      { key: "bottomFillet", label: "Bottom corner radius", min: 0, max: 500, step: 0.5 },
+    ],
   },
   sphere: {
     label: "Sphere",
@@ -108,11 +125,28 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
   },
   cone: {
     label: "Cone",
-    defaults: { bottomRadius: 10, topRadius: 0, height: 20 },
+    defaults: {
+      bottomRadius: 10, topRadius: 0, height: 20, sides: 48, sideEdges: 0,
+      topFillet: 0, bottomFillet: 0,
+    },
     fields: [
       { key: "bottomRadius", label: "Bottom radius", min: 0, max: 1000, step: 0.5, noSlider: true },
       { key: "topRadius", label: "Top radius", min: 0, max: 1000, step: 0.5, noSlider: true },
       dim("height", "Height"),
+      { key: "sides", label: "Roundness", min: 8, max: 96, step: 1 },
+      {
+        key: "sideEdges",
+        label: "Side lines",
+        min: 0,
+        max: 1,
+        step: 1,
+        options: [
+          { value: 0, label: "Hidden" },
+          { value: 1, label: "Shown" },
+        ],
+      },
+      { key: "topFillet", label: "Top corner radius", min: 0, max: 500, step: 0.5 },
+      { key: "bottomFillet", label: "Bottom corner radius", min: 0, max: 500, step: 0.5 },
     ],
   },
   triangle: {
@@ -130,7 +164,11 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
       angleRight: 36.87,
       angleApex: 53.13,
       thickness: 5,
-      fillet: 0,
+      leftFillet: 0,
+      rightFillet: 0,
+      apexFillet: 0,
+      cornerSteps: 32,
+      cornerEdges: 0,
     },
     fields: [
       {
@@ -153,7 +191,21 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
       angle("angleRight", "Right corner", onlyIn(TRI_BY_ANGLES)),
       angle("angleApex", "Apex corner", onlyIn(TRI_BY_ANGLES)),
       dim("thickness", "Thickness"),
-      { key: "fillet", label: "Corner radius", min: 0, max: 500, step: 0.5 },
+      { key: "leftFillet", label: "Left corner radius", min: 0, max: 500, step: 0.5 },
+      { key: "rightFillet", label: "Right corner radius", min: 0, max: 500, step: 0.5 },
+      { key: "apexFillet", label: "Apex corner radius", min: 0, max: 500, step: 0.5 },
+      { key: "cornerSteps", label: "Corner steps", min: 1, max: 64, step: 1 },
+      {
+        key: "cornerEdges",
+        label: "Corner lines",
+        min: 0,
+        max: 1,
+        step: 1,
+        options: [
+          { value: 0, label: "Hidden" },
+          { value: 1, label: "Shown" },
+        ],
+      },
     ],
   },
   torus: {
@@ -166,21 +218,47 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
   },
   pyramid: {
     label: "Pyramid",
-    defaults: { sides: 4, radius: 10, height: 20 },
+    defaults: {
+      sides: 4, radius: 10, height: 20, sideEdges: 0,
+      topFillet: 0, bottomFillet: 0, cornerSteps: 24,
+    },
     fields: [
-      { key: "sides", label: "Sides", min: 3, max: 32, step: 1 },
+      { key: "sides", label: "Base sides", min: 3, max: 32, step: 1 },
+      {
+        key: "sideEdges",
+        label: "Side lines",
+        min: 0,
+        max: 1,
+        step: 1,
+        options: [
+          { value: 0, label: "Hidden" },
+          { value: 1, label: "Shown" },
+        ],
+      },
       dim("radius", "Radius"),
       dim("height", "Height"),
+      { key: "topFillet", label: "Top corner radius", min: 0, max: 500, step: 0.5 },
+      { key: "bottomFillet", label: "Bottom corner radius", min: 0, max: 500, step: 0.5 },
+      { key: "cornerSteps", label: "Corner steps", min: 1, max: 64, step: 1 },
     ],
   },
   wedge: {
     label: "Wedge",
-    defaults: { width: 20, length: 20, height: 20, fillet: 0 },
+    defaults: {
+      width: 20, length: 20, height: 20,
+      topFillet: 0, bottomFillet: 0, cornerSteps: 24, cornerEdges: 0,
+    },
     fields: [
       dim("width", "Width"),
       dim("length", "Length"),
       dim("height", "Height"),
-      { key: "fillet", label: "Corner radius", min: 0, max: 500, step: 0.5 },
+      { key: "topFillet", label: "Top corner radius", min: 0, max: 500, step: 0.5 },
+      { key: "bottomFillet", label: "Bottom corner radius", min: 0, max: 500, step: 0.5 },
+      { key: "cornerSteps", label: "Corner steps", min: 1, max: 64, step: 1 },
+      {
+        key: "cornerEdges", label: "Corner lines", min: 0, max: 1, step: 1,
+        options: [{ value: 0, label: "Hidden" }, { value: 1, label: "Shown" }],
+      },
     ],
   },
   polygonPrism: {
@@ -681,6 +759,9 @@ export interface EdgeOp {
   point: Vec3;
   /** One stable interior point per selected edge. */
   points?: Vec3[];
+  /** When created from a face selection, resolve all of that face's true CAD
+   * boundary edges again on every rebuild instead of storing mesh segments. */
+  face?: { point: Vec3; normal: Vec3 };
   distance: number;
 }
 

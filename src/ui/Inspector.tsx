@@ -13,11 +13,14 @@ import {
   TRI_BY_ANGLES,
   TRI_BY_SIDE_ANGLE,
   TRI_BY_SIDES,
+  solveTriangle,
   solveScaledTriangle,
 } from "../geometry/triangle";
 import type { TriangleSolution } from "../geometry/triangle";
 import type { BooleanOp, ParamField, PrimitiveKind, SceneNode, Vec3 } from "../document/types";
 import type { LocalFontData } from "../text/systemFonts";
+import { displayStep, formatLength, fromMillimetres, toMillimetres } from "../measurement";
+import type { DisplayUnit } from "../measurement";
 
 /**
  * The largest corner radius a box can actually take: half its smallest side.
@@ -30,8 +33,97 @@ import type { LocalFontData } from "../text/systemFonts";
 function filletLimit(
   node: { kind?: string; params: Record<string, number>; scale?: Vec3 },
   step: number,
+  fieldKey = "fillet",
 ): number {
   const { width, depth, height, filletMode } = node.params;
+  if (node.kind === "cylinder") {
+    const radius = Math.max(0, node.params.radius ?? 0);
+    const cylinderHeight = Math.max(0, height ?? 0);
+    const otherRadius = fieldKey === "topFillet"
+      ? Math.max(0, node.params.bottomFillet ?? 0)
+      : Math.max(0, node.params.topFillet ?? 0);
+    const limit = Math.min(radius, Math.max(0, cylinderHeight - otherRadius));
+    return Math.max(0, Math.floor((Math.max(0, limit) + 1e-9) / step) * step);
+  }
+  if (node.kind === "cone" || node.kind === "pyramid") {
+    const bottomRadius = Math.max(0, node.params.bottomRadius ?? node.params.radius ?? 0);
+    const topRadius = node.kind === "pyramid" ? 0 : Math.max(0, node.params.topRadius ?? 0);
+    const coneHeight = Math.max(0, height ?? 0);
+    const slant = Math.hypot(bottomRadius, coneHeight);
+    const radiusDelta = bottomRadius - topRadius;
+    const tipLimit = topRadius === 0 && bottomRadius > 0 && coneHeight > 0
+      ? coneHeight * bottomRadius / (slant + coneHeight)
+      : 0;
+    const bottomSlopeFactor = coneHeight > 0 ? (slant + radiusDelta) / coneHeight : Infinity;
+    const topSlopeFactor = topRadius > 0 && coneHeight > 0
+      ? (slant - radiusDelta) / coneHeight
+      : 0;
+    const bottomLimit = bottomSlopeFactor > 0
+      ? Math.min(bottomRadius, slant) / bottomSlopeFactor
+      : 0;
+    const topLimit = topRadius > 0
+      ? (topSlopeFactor > 0 ? Math.min(topRadius, slant) / topSlopeFactor : 0)
+      : tipLimit;
+    const otherTop = Math.max(0, node.params.topFillet ?? 0);
+    const otherBottom = Math.max(0, node.params.bottomFillet ?? 0);
+    const slopeBudget = Math.max(0, slant - 0.01);
+    const limit = fieldKey === "topFillet"
+      ? Math.min(
+          topLimit,
+          (slopeBudget - otherBottom * bottomSlopeFactor) /
+            (topRadius > 0 ? topSlopeFactor : coneHeight / Math.max(bottomRadius, 1e-9)),
+        )
+      : Math.min(
+          bottomLimit,
+          (slopeBudget - otherTop * (topRadius > 0 ? topSlopeFactor : coneHeight / Math.max(bottomRadius, 1e-9))) /
+            bottomSlopeFactor,
+        );
+    return Math.max(0, Math.floor(Math.max(0, limit - 0.01) / step) * step);
+  }
+  if (node.kind === "triangle") {
+    try {
+      const { apexPoint } = solveTriangle(node.params);
+      const vertices: [number, number][] = [[0, 0], [node.params.base, 0], [apexPoint.x, apexPoint.y]];
+      const cornerIndex = fieldKey === "leftFillet" ? 0 : fieldKey === "rightFillet" ? 1 : 2;
+      const prev = vertices[(cornerIndex + 2) % 3];
+      const curr = vertices[cornerIndex];
+      const next = vertices[(cornerIndex + 1) % 3];
+      const ax = prev[0] - curr[0];
+      const ay = prev[1] - curr[1];
+      const bx = next[0] - curr[0];
+      const by = next[1] - curr[1];
+      const lenA = Math.hypot(ax, ay);
+      const lenB = Math.hypot(bx, by);
+      if (!(lenA > 0 && lenB > 0)) return 0;
+      const cosine = Math.max(-1, Math.min(1, (ax * bx + ay * by) / (lenA * lenB)));
+      const limit = Math.min(lenA, lenB) * 0.48 * Math.tan(Math.acos(cosine) / 2);
+      return Math.max(0, Math.floor(Math.max(0, limit - 0.01) / step) * step);
+    } catch {
+      return 0;
+    }
+  }
+  if (node.kind === "wedge") {
+    const length = Math.max(0, node.params.length ?? 0);
+    const wedgeHeight = Math.max(0, node.params.height ?? 0);
+    const vertices: [number, number][] = [[0, 0], [length, 0], [length, wedgeHeight]];
+    const limitAt = (cornerIndex: number) => {
+      const prev = vertices[(cornerIndex + 2) % 3];
+      const curr = vertices[cornerIndex];
+      const next = vertices[(cornerIndex + 1) % 3];
+      const ax = prev[0] - curr[0], ay = prev[1] - curr[1];
+      const bx = next[0] - curr[0], by = next[1] - curr[1];
+      const lenA = Math.hypot(ax, ay), lenB = Math.hypot(bx, by);
+      if (!(lenA > 0 && lenB > 0)) return 0;
+      const cosine = Math.max(-1, Math.min(1, (ax * bx + ay * by) / (lenA * lenB)));
+      return Math.min(lenA, lenB) * 0.48 * Math.tan(Math.acos(cosine) / 2);
+    };
+    const limit = fieldKey === "topFillet" ? limitAt(2) : Math.min(limitAt(0), limitAt(1));
+    return Math.max(0, Math.floor(Math.max(0, limit - 0.01) / step) * step);
+  }
+  // Triangle, Star, Wedge and Polygon Prism have their own profile-based
+  // rounding rules; retain their declared range rather than applying the
+  // Box-specific width/depth calculation below.
+  if (node.kind !== "box") return 500;
   // The fillet's own limit has to track what Width/Depth/Height actually
   // DISPLAY, not the raw params underneath — a uniformly-scaled box (see
   // DIM_AXES: width/depth/height each ride their own scale axis) shows the
@@ -107,6 +199,8 @@ interface Props {
   fonts?: LocalFontData[] | null;
   onPickFontFile?: () => void;
   onRequestSystemFonts?: () => void;
+  displayUnit: DisplayUnit;
+  decimalPlaces: number;
 }
 
 const AXES = ["X", "Y", "Z"] as const;
@@ -151,6 +245,8 @@ export function Inspector({
   fonts,
   onPickFontFile,
   onRequestSystemFonts,
+  displayUnit,
+  decimalPlaces,
 }: Props) {
   const isMulti = selectedCount > 1;
   const group = isGroup(node);
@@ -343,9 +439,28 @@ export function Inspector({
               </p>
             </>
           ) : node.type === "import" ? (
-            <ImportInfo node={node} onSvgThickness={onSvgThickness} />
+            <ImportInfo node={node} onSvgThickness={onSvgThickness} displayUnit={displayUnit} decimalPlaces={decimalPlaces} />
           ) : node.type === "edit" ? (
-            <EditInfo node={node} error={error} onPruneDeadOps={onPruneDeadOps} />
+            <>
+              <EditInfo node={node} error={error} onPruneDeadOps={onPruneDeadOps} />
+              {node.base.type === "object" && (
+                <ObjectParams
+                  node={node.base}
+                  resizeConstrained={resizeConstrained}
+                  onResizeConstrained={onResizeConstrained}
+                  onParam={onParam}
+                  onTransform={onTransform}
+                  onDuplicateWithParams={onDuplicateWithParams}
+                  onText={onText}
+                  onFontName={onFontName}
+                  fonts={fonts}
+                  onPickFontFile={onPickFontFile}
+                  onRequestSystemFonts={onRequestSystemFonts}
+                  displayUnit={displayUnit}
+                  decimalPlaces={decimalPlaces}
+                />
+              )}
+            </>
           ) : node.type === "build" ? (
             <BuildInfo node={node} />
           ) : (
@@ -361,6 +476,8 @@ export function Inspector({
               fonts={fonts}
               onPickFontFile={onPickFontFile}
               onRequestSystemFonts={onRequestSystemFonts}
+              displayUnit={displayUnit}
+              decimalPlaces={decimalPlaces}
             />
           )}
         </>
@@ -389,7 +506,7 @@ export function Inspector({
         return (
           <>
             <div className="h2-row">
-              <h2>{isMulti ? "Size (mm)" : showMm ? "Size (mm)" : "Size"}</h2>
+              <h2>{isMulti ? `Size (${displayUnit})` : showMm ? `Size (${displayUnit})` : "Size"}</h2>
               {showLockHere && (
                 <button
                   type="button"
@@ -412,7 +529,8 @@ export function Inspector({
               // itself.
               <div className="triple">
                 {WDH_LABELS.map((label, i) => {
-                  const currentVal = round(selectionBounds.max[i] - selectionBounds.min[i]);
+                  const currentMm = selectionBounds.max[i] - selectionBounds.min[i];
+                  const currentVal = formatLength(currentMm, displayUnit, decimalPlaces);
                   return (
                     <label key={label}>
                       <span className="field-label">{label}</span>
@@ -420,14 +538,14 @@ export function Inspector({
                         className="num"
                         type="number"
                         min={0.1}
-                        step={0.5}
+                        step={displayStep(displayUnit, decimalPlaces)}
                         value={currentVal}
                         onFocus={beginHistoryBatch}
                         onBlur={endHistoryBatch}
                         onChange={(e) => {
                           const v = Number(e.target.value);
                           if (!Number.isFinite(v) || v <= 0) return;
-                          onResizeSelectionAxis?.(i as 0 | 1 | 2, v);
+                          onResizeSelectionAxis?.(i as 0 | 1 | 2, toMillimetres(v, displayUnit));
                         }}
                       />
                     </label>
@@ -443,7 +561,7 @@ export function Inspector({
               // multi-select Size section do.
               <div className="triple">
                 {WDH_LABELS.map((label, i) => {
-                  const currentVal = round(localSize[i] * node.scale[i]);
+                  const currentVal = formatLength(localSize[i] * node.scale[i], displayUnit, decimalPlaces);
                   return (
                     <label key={label}>
                       <span className="field-label">{label}</span>
@@ -451,14 +569,14 @@ export function Inspector({
                         className="num"
                         type="number"
                         min={0.1}
-                        step={0.5}
+                        step={displayStep(displayUnit, decimalPlaces)}
                         value={currentVal}
                         onFocus={beginHistoryBatch}
                         onBlur={endHistoryBatch}
                         onChange={(e) => {
                           const v = Number(e.target.value);
                           if (!Number.isFinite(v) || v <= 0) return;
-                          const nextFactor = Math.max(0.0001, v / localSize[i]);
+                          const nextFactor = Math.max(0.0001, toMillimetres(v, displayUnit) / localSize[i]);
                           const scale = resizeConstrained
                             ? ([nextFactor, nextFactor, nextFactor] as Vec3)
                             : (node.scale.map((val, at) => (at === i ? nextFactor : val)) as Vec3);
@@ -507,7 +625,7 @@ export function Inspector({
               : "White corners resize width/depth freely; teal middle handles change one axis."}
           </p>
 
-          <h2>Position (mm)</h2>
+          <h2>Position ({displayUnit})</h2>
           <div className="triple">
             {AXES.map((axis, i) => (
               <label key={axis}>
@@ -515,11 +633,11 @@ export function Inspector({
                 <input
                   className="num"
                   type="number"
-                  step={1}
-                  value={round(node.position[i])}
+                  step={displayStep(displayUnit, decimalPlaces)}
+                  value={formatLength(node.position[i], displayUnit, decimalPlaces)}
                   onFocus={beginHistoryBatch}
                   onBlur={endHistoryBatch}
-                  onChange={(e) => setAxis("position", i, Number(e.target.value))}
+                  onChange={(e) => setAxis("position", i, toMillimetres(Number(e.target.value), displayUnit))}
                 />
               </label>
             ))}
@@ -552,7 +670,7 @@ export function Inspector({
         // rigid body (see Scene.moveSelectionAxis) rather than setting any
         // one object's own position field.
         <>
-          <h2>Position (mm)</h2>
+          <h2>Position ({displayUnit})</h2>
           <div className="triple">
             {AXES.map((axis, i) => (
               <label key={axis}>
@@ -560,13 +678,13 @@ export function Inspector({
                 <input
                   className="num"
                   type="number"
-                  step={1}
-                  value={round((selectionBounds.min[i] + selectionBounds.max[i]) / 2)}
+                  step={displayStep(displayUnit, decimalPlaces)}
+                  value={formatLength((selectionBounds.min[i] + selectionBounds.max[i]) / 2, displayUnit, decimalPlaces)}
                   onFocus={beginHistoryBatch}
                   onBlur={endHistoryBatch}
                   onChange={(e) => {
                     const v = Number(e.target.value);
-                    if (Number.isFinite(v)) onMoveSelectionAxis?.(i as 0 | 1 | 2, v);
+                    if (Number.isFinite(v)) onMoveSelectionAxis?.(i as 0 | 1 | 2, toMillimetres(v, displayUnit));
                   }}
                 />
               </label>
@@ -585,12 +703,16 @@ export function Inspector({
 function ImportInfo({
   node,
   onSvgThickness,
+  displayUnit,
+  decimalPlaces,
 }: {
   node: Extract<SceneNode, { type: "import" }>;
   onSvgThickness: (mm: number) => void;
+  displayUnit: DisplayUnit;
+  decimalPlaces: number;
 }) {
   if (node.svg) {
-    const mm = (v: number) => `${v.toFixed(2)} mm`;
+    const shown = (v: number) => `${formatLength(v, displayUnit, decimalPlaces)} ${displayUnit}`;
     return (
       <>
         <h2>Imported artwork</h2>
@@ -599,7 +721,7 @@ function ImportInfo({
           <dd>{node.fileName}</dd>
           <dt>Artboard size</dt>
           <dd>
-            {mm(node.svg.width)} × {mm(node.svg.height)}
+            {shown(node.svg.width)} × {shown(node.svg.height)}
           </dd>
         </dl>
         <div className="field-row">
@@ -608,15 +730,15 @@ function ImportInfo({
             className="num"
             type="number"
             min={0.1}
-            step={0.5}
-            value={node.svg.thickness}
+            step={displayStep(displayUnit, decimalPlaces)}
+            value={formatLength(node.svg.thickness, displayUnit, decimalPlaces)}
             onFocus={beginHistoryBatch}
             onBlur={endHistoryBatch}
             onChange={(e) => {
               const v = Number(e.target.value);
-              if (Number.isFinite(v)) onSvgThickness(v);
+              if (Number.isFinite(v)) onSvgThickness(toMillimetres(v, displayUnit));
             }}
-            aria-label="Extrusion thickness in millimetres"
+            aria-label={`Extrusion thickness in ${displayUnit}`}
           />
         </div>
         <p className="hint">
@@ -686,8 +808,8 @@ function EditInfo({
         <dd>{node.ops.length}</dd>
       </dl>
       <p className="hint">
-        No longer defined by width/height/radius — like an imported file, use Scale to resize it as
-        a whole.
+        Geometry modifiers are replayed after the original shape. Its dimensions remain editable;
+        if a change makes a modifier invalid, the previous valid result is retained.
       </p>
       {error && !error.includes("could not be rebuilt reliably") && (
         <>
@@ -756,6 +878,8 @@ function ObjectParams({
   fonts,
   onPickFontFile,
   onRequestSystemFonts,
+  displayUnit,
+  decimalPlaces,
 }: {
   node: Extract<SceneNode, { type: "object" }>;
   resizeConstrained?: boolean;
@@ -768,6 +892,8 @@ function ObjectParams({
   fonts?: LocalFontData[] | null;
   onPickFontFile?: () => void;
   onRequestSystemFonts?: () => void;
+  displayUnit: DisplayUnit;
+  decimalPlaces: number;
 }) {
   const def = PRIMITIVES[node.kind];
   const fields = visibleFields(def, node.params).filter((f) => f.key !== "mode");
@@ -889,6 +1015,28 @@ function ObjectParams({
       </div>
       {groupDimensionFields(fields.map((f) => {
         let base = node.params[f.key] ?? 0;
+        if ((node.kind === "cylinder" || node.kind === "cone") && f.key === "sides" && node.params.sides == null) {
+          base = 48;
+        }
+        if (node.kind === "triangle" && f.key === "cornerSteps" && node.params.cornerSteps == null) base = 32;
+        if (node.kind === "pyramid" && f.key === "cornerSteps" && node.params.cornerSteps == null) base = 24;
+        if (node.kind === "wedge" && f.key === "cornerSteps" && node.params.cornerSteps == null) base = 24;
+        // Surface the old shared-radius value through the new independent
+        // controls when opening a design saved before the split.
+        if (node.params[f.key] == null && node.params.fillet != null) {
+          if (node.kind === "triangle" && ["leftFillet", "rightFillet", "apexFillet"].includes(f.key)) {
+            base = node.params.fillet;
+          } else if (node.kind === "wedge" && (f.key === "topFillet" || f.key === "bottomFillet")) {
+            base = node.params.fillet;
+          } else if (
+            (node.kind === "cylinder" || node.kind === "cone") &&
+            (f.key === "topFillet" || f.key === "bottomFillet")
+          ) {
+            const legacyPosition = node.params.filletPosition ?? (node.kind === "cylinder" ? 2 : 1);
+            const applies = f.key === "topFillet" ? legacyPosition !== 1 : legacyPosition !== 0;
+            if (applies) base = node.params.fillet;
+          }
+        }
         if (solvedTriangle) {
           if (f.key === "base") base = solvedTriangle.sides.base;
           else if (f.key === "sideLeft") base = solvedTriangle.sides.left;
@@ -915,6 +1063,11 @@ function ObjectParams({
             dotColorClass = "dot-2";
           }
         }
+        if (node.kind === "triangle") {
+          if (f.key === "leftFillet") dotColorClass = "dot-0";
+          else if (f.key === "rightFillet") dotColorClass = "dot-1";
+          else if (f.key === "apexFillet") dotColorClass = "dot-2";
+        }
 
         const isLocked = lockKey ? !!node.params[lockKey] : false;
         const lockedCount =
@@ -938,7 +1091,23 @@ function ObjectParams({
         // the box was, so nearly all of its travel did nothing — reported as
         // "after about 50 the corners cannot be rounded anymore", which is
         // exactly half of a 100mm side.
-        const shown = f.key === "fillet" ? { ...f, max: filletLimit(node, f.step) } : f;
+        const isCornerRadius = [
+          "fillet", "topFillet", "bottomFillet", "leftFillet", "rightFillet", "apexFillet",
+        ].includes(f.key);
+        const physicalCornerMax = isCornerRadius ? filletLimit(node, f.step, f.key) : 0;
+        // Keep a slider's last stop on the same grid as the value shown to the
+        // user. For example, a geometric limit of 0.45 cm with one decimal
+        // place must end at 0.4 cm; otherwise the final sliver of track can
+        // never be reached by its 0.1 cm steps.
+        const visibleCornerStep = displayStep(displayUnit, decimalPlaces);
+        const alignedCornerMax = isCornerRadius
+          ? toMillimetres(
+              Math.floor((fromMillimetres(physicalCornerMax, displayUnit) + 1e-9) / visibleCornerStep) *
+                visibleCornerStep,
+              displayUnit,
+            )
+          : 0;
+        const shown = isCornerRadius ? { ...f, max: alignedCornerMax } : f;
         if (!axes || !uniform || base <= 0) {
           return {
             field: shown,
@@ -954,6 +1123,9 @@ function ObjectParams({
                 disabled={isConstrained3rdAngle}
                 dotColorClass={dotColorClass}
                 onChange={(v) => onParam(f.key, Math.min(v, shown.max))}
+                displayUnit={displayUnit}
+                decimalPlaces={decimalPlaces}
+                isLength={!shown.options && shown.suffix !== "°" && !["sides", "points", "cornerSteps"].includes(shown.key)}
               />
             ),
           };
@@ -1000,6 +1172,9 @@ function ObjectParams({
                   onTransform({ scale: [1, 1, 1] });
                 }
               }}
+              displayUnit={displayUnit}
+              decimalPlaces={decimalPlaces}
+              isLength={!f.options && f.suffix !== "°" && !["sides", "points", "cornerSteps"].includes(f.key)}
             />
           ),
         };
@@ -1132,6 +1307,9 @@ function Field({
   lockDisabled,
   disabled,
   dotColorClass,
+  displayUnit,
+  decimalPlaces,
+  isLength = false,
 }: {
   field: ParamField;
   value: number;
@@ -1142,8 +1320,51 @@ function Field({
   lockDisabled?: boolean;
   disabled?: boolean;
   dotColorClass?: string;
+  displayUnit: DisplayUnit;
+  decimalPlaces: number;
+  isLength?: boolean;
 }) {
   if (field.options) {
+    if (["filletMode", "sideEdges", "cornerEdges"].includes(field.key) && field.options.length === 2) {
+      return (
+        <div className="field">
+          <span className="field-label">{field.label}</span>
+          <div className="binary-choice" role="group" aria-label={field.label}>
+            {field.options.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                className={value === option.value ? "on" : ""}
+                aria-pressed={value === option.value}
+                onClick={() => onChange(option.value)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      );
+    }
+    if (field.key === "filletPosition" && field.options.length === 3) {
+      return (
+        <div className="field">
+          <span className="field-label">{field.label}</span>
+          <div className="binary-choice three" role="group" aria-label={field.label}>
+            {field.options.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                className={value === option.value ? "on" : ""}
+                aria-pressed={value === option.value}
+                onClick={() => onChange(option.value)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      );
+    }
     return (
       <label className="field">
         <span className="field-label">{field.label}</span>
@@ -1158,13 +1379,19 @@ function Field({
     );
   }
 
+  const shownValue = isLength ? fromMillimetres(value, displayUnit) : value;
+  const shownMin = isLength ? fromMillimetres(field.min, displayUnit) : field.min;
+  const shownMax = isLength ? fromMillimetres(field.max, displayUnit) : field.max;
+  const shownStep = isLength ? displayStep(displayUnit, decimalPlaces) : field.step;
+  const commit = (shown: number) => onChange(isLength ? toMillimetres(shown, displayUnit) : shown);
+
   return (
     <div className="field">
       <div className="field-header">
         <span className="field-label">
           {dotColorClass && <span className={`corner-dot ${dotColorClass}`}></span>}
           {field.label}
-          {field.suffix ? ` (${field.suffix})` : ""}
+          {isLength ? ` (${displayUnit})` : field.suffix ? ` (${field.suffix})` : ""}
         </span>
         {lockable && (
           <button
@@ -1198,31 +1425,31 @@ function Field({
         {!field.noSlider && (
           <input
             type="range"
-            min={field.min}
-            max={field.max}
-            step={field.step}
-            value={value}
+            min={shownMin}
+            max={shownMax}
+            step={shownStep}
+            value={shownValue}
             disabled={disabled}
             title={disabled ? "Constrained by the other 2 locked angles (sum is 180°)" : undefined}
             onPointerDown={beginHistoryBatch}
             onPointerUp={endHistoryBatch}
             onKeyDown={beginHistoryBatch}
             onKeyUp={endHistoryBatch}
-            onChange={(e) => onChange(Number(e.target.value))}
+            onChange={(e) => commit(Number(e.target.value))}
           />
         )}
         <input
           className="num"
           type="number"
-          min={field.min}
-          max={field.max}
-          step={field.step}
-          value={value}
+          min={shownMin}
+          max={shownMax}
+          step={shownStep}
+          value={isLength ? shownValue.toFixed(decimalPlaces) : shownValue}
           disabled={disabled}
           title={disabled ? "Constrained by the other 2 locked angles (sum is 180°)" : undefined}
           onFocus={beginHistoryBatch}
           onBlur={endHistoryBatch}
-          onChange={(e) => onChange(Number(e.target.value))}
+          onChange={(e) => commit(Number(e.target.value))}
         />
       </div>
     </div>

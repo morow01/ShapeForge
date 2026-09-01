@@ -270,6 +270,39 @@ function toMesh(name: string, s: AnySolid, quality: MeshQuality): KernelMesh {
   return { name, faces: normalsPerCadFace(s.mesh(quality)), edges: s.meshEdges(quality) };
 }
 
+/** Hide only a polygon-cylinder's vertical facet boundaries while retaining
+ * its top/bottom silhouette and any rounded-rim edges. The faces themselves
+ * are untouched, so Sides still controls the real model and its exports. */
+function withoutExtrusionSideEdges(mesh: KernelMesh, axis = 2): KernelMesh {
+  const source = mesh.edges.lines;
+  const lines: number[] = [];
+  const edgeGroups: MeshedEdges["edgeGroups"] = [];
+  const bounds = meshBounds(mesh);
+  const minAxis = bounds?.min[axis] ?? 0;
+  const maxAxis = bounds?.max[axis] ?? 0;
+
+  for (const group of mesh.edges.edgeGroups) {
+    let groupMin = Infinity;
+    let groupMax = -Infinity;
+    for (let vertex = group.start; vertex < group.start + group.count; vertex++) {
+      const value = source[vertex * 3 + axis];
+      groupMin = Math.min(groupMin, value);
+      groupMax = Math.max(groupMax, value);
+    }
+    const liesOnEnd = groupMax - groupMin < 1e-5;
+    const outerRim = Math.abs(groupMin - minAxis) < 1e-5 || Math.abs(groupMax - maxAxis) < 1e-5;
+    if (!liesOnEnd || !outerRim) continue;
+    const start = lines.length / 3;
+    for (let vertex = group.start; vertex < group.start + group.count; vertex++) {
+      const offset = vertex * 3;
+      lines.push(source[offset], source[offset + 1], source[offset + 2]);
+    }
+    edgeGroups.push({ ...group, start });
+  }
+
+  return { ...mesh, edges: { lines, edgeGroups } };
+}
+
 /**
  * The BRep can report correct bounds and still occasionally tessellate with
  * displaced/stray vertices after repeated boolean rebuilds. The viewport
@@ -390,11 +423,36 @@ function faceInfoOf(mesh: KernelMesh): FaceInfo[] {
       }
     }
 
+    // Reduce the face's tessellation triangles back to its outer boundary.
+    // Internal diagonals occur twice; a real face-border segment occurs once.
+    const boundary = new Map<string, { count: number; midpoint: [number, number, number] }>();
+    const vertexPoint = (index: number): [number, number, number] => [
+      vertices[index * 3], vertices[index * 3 + 1], vertices[index * 3 + 2],
+    ];
+    const pointKey = (point: [number, number, number]) =>
+      point.map((value) => Math.round(value * 1e5)).join(",");
+    for (let offset = group.start; offset + 2 < group.start + group.count; offset += 3) {
+      const ids = [triangles[offset], triangles[offset + 1], triangles[offset + 2]];
+      for (const [aIndex, bIndex] of [[ids[0], ids[1]], [ids[1], ids[2]], [ids[2], ids[0]]]) {
+        const a = vertexPoint(aIndex);
+        const b = vertexPoint(bIndex);
+        const keys = [pointKey(a), pointKey(b)].sort();
+        const key = `${keys[0]}|${keys[1]}`;
+        const existing = boundary.get(key);
+        if (existing) existing.count += 1;
+        else boundary.set(key, {
+          count: 1,
+          midpoint: [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2],
+        });
+      }
+    }
+
     return {
       planar,
       pushPullable,
       point: interiorPoint,
       normal: [nx, ny, nz],
+      boundaryEdges: [...boundary.values()].filter((edge) => edge.count === 1).map((edge) => edge.midpoint),
     };
   });
 }
@@ -804,9 +862,40 @@ const api = {
           // Keep the retries, but spend a time budget rather than a fixed
           // count, and always allow a real second attempt.
           for (let attempt = 0; attempt < 8; attempt++) {
-            solid = await makeLocal(spec, onError, onProgress);
+            try {
+              solid = await makeLocal(spec, onError, onProgress);
+            } catch {
+              // OCCT reports some failed loft/fillet attempts as an opaque
+              // WebAssembly.Exception. Treat that exactly like an invalid
+              // candidate: retry briefly, then retain the last good mesh and
+              // surface the normal recoverable geometry message below.
+              solid = null;
+            }
             if (solid) {
-              const candidate = toMesh(spec.id, solid, EDIT_QUALITY);
+              let candidate = toMesh(spec.id, solid, EDIT_QUALITY);
+              if (
+                spec.type === "object" && (spec.kind === "cylinder" || spec.kind === "cone" || spec.kind === "pyramid") &&
+                (spec.params.sideEdges ?? 0) === 0
+              ) {
+                candidate = withoutExtrusionSideEdges(candidate);
+              }
+              if (
+                spec.type === "object" && spec.kind === "triangle" &&
+                (spec.params.cornerEdges ?? 0) === 0 &&
+                ((spec.params.leftFillet ?? spec.params.fillet ?? 0) > 0 ||
+                  (spec.params.rightFillet ?? spec.params.fillet ?? 0) > 0 ||
+                  (spec.params.apexFillet ?? spec.params.fillet ?? 0) > 0)
+              ) {
+                candidate = withoutExtrusionSideEdges(candidate);
+              }
+              if (
+                spec.type === "object" && spec.kind === "wedge" &&
+                (spec.params.cornerEdges ?? 0) === 0 &&
+                ((spec.params.topFillet ?? spec.params.fillet ?? 0) > 0 ||
+                  (spec.params.bottomFillet ?? spec.params.fillet ?? 0) > 0)
+              ) {
+                candidate = withoutExtrusionSideEdges(candidate, 0);
+              }
               const candidateBounds = meshBounds(candidate);
               if (
                 candidateBounds &&

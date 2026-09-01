@@ -3,6 +3,7 @@ import { Scene } from "./scene";
 import type { CameraMode, ToolMode, WireframeMode } from "./scene";
 import type { PreviewBuild, ScenePart } from "../kernel/types";
 import type { PrimitiveKind, SceneNode, Vec3 } from "../document/types";
+import type { DisplayUnit } from "../measurement";
 import { HomeIcon } from "../ui/icons";
 
 interface Props {
@@ -21,6 +22,8 @@ interface Props {
   wireframe: WireframeMode;
   /** Smart Guides on/off — snapping while dragging. */
   snapEnabled: boolean;
+  displayUnit: DisplayUnit;
+  decimalPlaces: number;
   onSelect: (id: string | null, additive: boolean) => void;
   /** Marquee-select release: every id caught inside the drawn rectangle. */
   onSelectMany: (ids: string[], additive: boolean) => void;
@@ -43,7 +46,7 @@ interface Props {
   ) => Promise<PreviewBuild | null>;
   onDragChange: (dragging: boolean) => void;
   onSelectEdges: (id: string | null, points: Vec3[]) => void;
-  onSelectFace: (id: string | null, point: Vec3 | null, normal: Vec3 | null, size: number) => void;
+  onSelectFace: (id: string | null, point: Vec3 | null, normal: Vec3 | null, size: number, edges: Vec3[]) => void;
   onPlaceSurface: (point: Vec3, normal: Vec3) => void;
   /** Handed the Scene on mount and null on unmount. A keyboard action like
    *  Drop has to call INTO the scene (it needs the built geometry), which the
@@ -79,7 +82,7 @@ export function Viewport(props: Props) {
     scene.onPreviewPushPull = (id, op) => latest.current.onPreviewPushPull(id, op);
     scene.onDragChange = (dragging) => latest.current.onDragChange(dragging);
     scene.onSelectEdges = (id, points) => latest.current.onSelectEdges(id, points);
-    scene.onSelectFace = (id, point, normal, size) => latest.current.onSelectFace(id, point, normal, size);
+    scene.onSelectFace = (id, point, normal, size, edges) => latest.current.onSelectFace(id, point, normal, size, edges);
     scene.onPlaceSurface = (point, normal) => latest.current.onPlaceSurface(point, normal);
     scene.onCellsChanged = (cells) => latest.current.onCellsChanged?.(cells);
 
@@ -92,6 +95,7 @@ export function Viewport(props: Props) {
     scene.setAlignFixedId(latest.current.alignFixedId);
     scene.setWireframe(latest.current.wireframe);
     scene.setSnapEnabled(latest.current.snapEnabled);
+    scene.setMeasurementFormat(latest.current.displayUnit, latest.current.decimalPlaces);
 
     sceneRef.current = scene;
     latest.current.onSceneReady?.(scene);
@@ -141,6 +145,10 @@ export function Viewport(props: Props) {
   useEffect(() => {
     sceneRef.current?.setSnapEnabled(snapEnabled);
   }, [snapEnabled]);
+
+  useEffect(() => {
+    sceneRef.current?.setMeasurementFormat(props.displayUnit, props.decimalPlaces);
+  }, [props.displayUnit, props.decimalPlaces]);
 
   return (
     <div className="viewport" ref={hostRef}>

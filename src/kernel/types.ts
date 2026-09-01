@@ -98,6 +98,8 @@ export interface FaceInfo {
   pushPullable?: boolean;
   point: Vec3;
   normal: Vec3;
+  /** Stable interior anchors for every topological edge around this face. */
+  boundaryEdges?: Vec3[];
 }
 
 export interface ScenePart {

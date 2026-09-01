@@ -40,22 +40,41 @@ export function bakeScale(node: ObjectNode): ObjectNode | null {
       depth: Math.round(p.depth * sy * 100) / 100,
       height: Math.round(p.height * sz * 100) / 100,
     };
-  } else if (node.kind === "cylinder" && sx === sy) {
+  } else if (
+    node.kind === "cylinder" && sx === sy &&
+    (!((p.topFillet ?? 0) > 0 || (p.bottomFillet ?? 0) > 0 || (p.fillet ?? 0) > 0) || sx === sz)
+  ) {
     height = p.height;
-    params = { ...p, radius: p.radius * sx, height: p.height * sz };
+    params = {
+      ...p,
+      radius: p.radius * sx,
+      height: p.height * sz,
+      topFillet: (p.topFillet ?? 0) * sx,
+      bottomFillet: (p.bottomFillet ?? 0) * sx,
+      ...(p.fillet != null ? { fillet: p.fillet * sx } : {}),
+    };
   } else if (node.kind === "sphere" && sx === sy && sy === sz) {
     height = p.radius * 2;
     params = { ...p, radius: p.radius * sx };
-  } else if (node.kind === "cone" && sx === sy) {
+  } else if (
+    node.kind === "cone" && sx === sy &&
+    (!((p.topFillet ?? 0) > 0 || (p.bottomFillet ?? 0) > 0 || (p.fillet ?? 0) > 0) || sx === sz)
+  ) {
     height = p.height;
     params = {
       ...p,
       bottomRadius: p.bottomRadius * sx,
       topRadius: p.topRadius * sx,
       height: p.height * sz,
+      topFillet: (p.topFillet ?? 0) * sx,
+      bottomFillet: (p.bottomFillet ?? 0) * sx,
+      ...(p.fillet != null ? { fillet: p.fillet * sx } : {}),
     };
   } else if (node.kind === "triangle") {
     height = p.thickness;
+    const hasCornerRadius = (p.leftFillet ?? 0) > 0 || (p.rightFillet ?? 0) > 0 ||
+      (p.apexFillet ?? 0) > 0 || (p.fillet ?? 0) > 0;
+    if (hasCornerRadius && sx !== sy) return null;
     try {
       const solved = solveScaledTriangle(p, [sx, sy, 1]);
       params = {
@@ -67,6 +86,10 @@ export function bakeScale(node: ObjectNode): ObjectNode | null {
         angleRight: Math.round(solved.angles.right * 100) / 100,
         angleApex: Math.round(solved.angles.apex * 100) / 100,
         thickness: p.thickness * sz,
+        leftFillet: (p.leftFillet ?? 0) * sx,
+        rightFillet: (p.rightFillet ?? 0) * sx,
+        apexFillet: (p.apexFillet ?? 0) * sx,
+        ...(p.fillet != null ? { fillet: p.fillet * sx } : {}),
       };
     } catch {
       return null;

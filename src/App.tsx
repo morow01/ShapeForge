@@ -21,6 +21,7 @@ import {
   ProjectsIcon,
   RedoIcon,
   SaveFileIcon,
+  SettingsIcon,
   ShapeBuilderIcon,
   SolidCubeIcon,
   TransparencyIcon,
@@ -32,6 +33,8 @@ import {
 import { buildThreeMF } from "./export/threemf";
 import { SvgImportModal } from "./ui/SvgImportModal";
 import { TextModal } from "./ui/TextModal";
+import { SettingsModal } from "./ui/SettingsModal";
+import type { AppearancePreference, DisplayUnit } from "./measurement";
 import type { TextConfig } from "./ui/TextModal";
 import { NO_FONT_LISTING, getCachedTextPaths, resolveTextPaths } from "./text/systemFonts";
 import type { LocalFontData } from "./text/systemFonts";
@@ -252,6 +255,9 @@ const SNAP_KEY = "cad.smartGuides";
 const OBJECTS_PANEL_KEY = "cad.objectsPanelOpen";
 const VIEW_STYLE_KEY = "cad.viewStyle";
 const RESIZE_CONSTRAINED_KEY = "cad.resizeConstrained";
+const DISPLAY_UNIT_KEY = "cad.displayUnit";
+const DECIMAL_PLACES_KEY = "cad.decimalPlaces.v2";
+const APPEARANCE_KEY = "cad.appearance";
 
 /** What each preset costs, so the choice is not guesswork — measured on a
  *  40x30x15 box with a 10mm spherical bowl (see EXPORT_PRESETS in worker.ts). */
@@ -278,6 +284,25 @@ export function App() {
   const projectName = useDoc((s) => s.projectName);
 
   const [projectsModalOpen, setProjectsModalOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [displayUnit, setDisplayUnit] = useState<DisplayUnit>(() => {
+    const saved = localStorage.getItem(DISPLAY_UNIT_KEY);
+    return saved === "cm" || saved === "in" ? saved : "mm";
+  });
+  const [decimalPlaces, setDecimalPlaces] = useState(() => {
+    const raw = localStorage.getItem(DECIMAL_PLACES_KEY);
+    if (raw === null) return 1;
+    const saved = Number(raw);
+    return Number.isInteger(saved) && saved >= 0 && saved <= 3 ? saved : 1;
+  });
+  const [appearance, setAppearance] = useState<AppearancePreference>(() =>
+    localStorage.getItem(APPEARANCE_KEY) === "dark" || localStorage.getItem(APPEARANCE_KEY) === "system"
+      ? localStorage.getItem(APPEARANCE_KEY) as AppearancePreference
+      : "light",
+  );
+  useEffect(() => localStorage.setItem(DISPLAY_UNIT_KEY, displayUnit), [displayUnit]);
+  useEffect(() => localStorage.setItem(DECIMAL_PLACES_KEY, String(decimalPlaces)), [decimalPlaces]);
+  useEffect(() => localStorage.setItem(APPEARANCE_KEY, appearance), [appearance]);
   const [isEditingTitle, setIsEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState(projectName);
   useEffect(() => setTitleDraft(projectName), [projectName]);
@@ -383,7 +408,7 @@ export function App() {
   const [edgeDistance, setEdgeDistance] = useState(2);
   /** The face the Face tool has selected, for Hollow. Held here rather than
    *  read from the scene so the bar re-renders when the selection changes. */
-  const [faceSelection, setFaceSelection] = useState<{ id: string; point: Vec3; normal: Vec3; size: number } | null>(null);
+  const [faceSelection, setFaceSelection] = useState<{ id: string; point: Vec3; normal: Vec3; size: number; edges: Vec3[] } | null>(null);
   /** The node a Hollow was just asked for. A refusal from the kernel only
    *  writes a small marker into the tree, which next to the canvas reads as
    *  the button having done nothing at all — so watch for one and say it out
@@ -405,11 +430,11 @@ export function App() {
    * click spans frames and does. Acting on the remembered face makes the
    * ordering irrelevant.
    */
-  const lastFace = useRef<{ id: string; point: Vec3; normal: Vec3; size: number } | null>(null);
+  const lastFace = useRef<{ id: string; point: Vec3; normal: Vec3; size: number; edges: Vec3[] } | null>(null);
   /** Which of the three things a selected face can do. One field and one
    *  button serve all of them, so the bar stays the width of the edge bar
    *  rather than growing a row of controls. */
-  const [faceOp, setFaceOp] = useState<"push" | "wall" | "resize" | "offset">("push");
+  const [faceOp, setFaceOp] = useState<"push" | "wall" | "resize" | "offset" | "fillet" | "chamfer">("push");
   /** Offset & extrude is the one face operation that needs two numbers: how
    *  far in from the edge, and how far out from there. */
   const [faceHeight, setFaceHeight] = useState(3);
@@ -1890,6 +1915,15 @@ export function App() {
     if (updates.length) setPositions(updates);
   }, [setPositions]);
 
+  const toggleHoleSelected = useCallback(() => {
+    const state = useDoc.getState();
+    if (!state.selectedIds.length) return;
+    const makeHole = !state.selectedIds.every((id) => findNode(state.nodes, id)?.isHole);
+    beginHistoryBatch();
+    for (const id of state.selectedIds) setHole(id, makeHole);
+    endHistoryBatch();
+  }, [setHole]);
+
   // Shortcuts, ignored while typing in an input.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -1958,9 +1992,12 @@ export function App() {
       } else if (!mod && e.key.toLowerCase() === "z") {
         e.preventDefault();
         zoomToSelected();
-      } else if (!mod && (e.key === "Home" || e.key.toLowerCase() === "h")) {
+      } else if (!mod && e.key === "Home") {
         e.preventDefault();
         sceneRef.current?.resetView();
+      } else if (!mod && e.key.toLowerCase() === "h") {
+        e.preventDefault();
+        toggleHoleSelected();
       } else if (!mod && e.key.toLowerCase() === "s") {
         e.preventDefault();
         setSnapEnabled((v) => !v);
@@ -1974,7 +2011,7 @@ export function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [removeSelected, selectMany, undo, redo, group, ungroup, toggleTransparency, dropSelected, ungroupSelected, groupSelected, commitBuild, exportCurrentProject, newProject, cycleWireframe, zoomToSelected]);
+  }, [removeSelected, selectMany, undo, redo, group, ungroup, toggleTransparency, dropSelected, ungroupSelected, groupSelected, commitBuild, exportCurrentProject, newProject, cycleWireframe, zoomToSelected, toggleHoleSelected]);
 
   // The big card is for work the user is WAITING on: opening a file,
   // exporting, the first build of a document. A rebuild triggered by an edit
@@ -2211,6 +2248,14 @@ export function App() {
           aria-label="Save project file"
         >
           <SaveFileIcon className="topbar-icon" />
+        </button>
+        <button
+          className="topbar-icon-btn"
+          onClick={() => setSettingsOpen(true)}
+          title="Settings"
+          aria-label="Settings"
+        >
+          <SettingsIcon className="topbar-icon" />
         </button>
         <label className="export-quality" title={EXPORT_QUALITY_HINT[exportQuality]}>
           <span>Quality</span>
@@ -2515,6 +2560,8 @@ export function App() {
           alignFixedId={spacingSelection ? spacingSelection.fixedNode.id : null}
           wireframe={wireframe}
           snapEnabled={snapEnabled}
+          displayUnit={displayUnit}
+          decimalPlaces={decimalPlaces}
           onSceneReady={(scene) => { sceneRef.current = scene; }}
           onCellsChanged={setBuildCells}
           onSelect={onSelect}
@@ -2525,8 +2572,8 @@ export function App() {
           onPushPull={pushPullFace}
           onPreviewPushPull={onPreviewPushPull}
           onSelectEdges={(id, points) => setEdgeSelection(id && points.length ? { id, points } : null)}
-          onSelectFace={(id, point, normal, size) => {
-            const next = id && point && normal ? { id, point, normal, size } : null;
+          onSelectFace={(id, point, normal, size, edges) => {
+            const next = id && point && normal ? { id, point, normal, size, edges } : null;
             if (next) lastFace.current = next;
             setFaceSelection(next);
           }}
@@ -2548,11 +2595,14 @@ export function App() {
               <option value="wall">Wall</option>
               <option value="resize">Resize face</option>
               <option value="offset">Offset &amp; extrude</option>
+              <option value="fillet">Fillet face border</option>
+              <option value="chamfer">Chamfer face border</option>
             </select>
             <label>
               {faceOp === "wall" ? "Thickness"
                 : faceOp === "resize" ? "Inset / outset"
                 : faceOp === "offset" ? "Inset"
+                : faceOp === "fillet" || faceOp === "chamfer" ? "Size"
                 : "Distance"}
               <input type="number" step="0.5" value={faceValue}
                 onChange={(e) => setFaceValue(Number(e.target.value) || 0)} /> mm
@@ -2571,6 +2621,10 @@ export function App() {
                 ? "Resize the selected face in its own plane: positive grows it, negative insets it"
                 : faceOp === "offset"
                 ? "Inset the face's own outline, then extrude it: positive height raises a rim, negative sinks a pocket"
+                : faceOp === "fillet"
+                ? "Round every edge around the selected face"
+                : faceOp === "chamfer"
+                ? "Bevel every edge around the selected face"
                 : "Move this face out (positive) or in (negative)"}
               // Keep focus where it is: without this the press blurs the
               // push/pull pill, which drops the face selection out from
@@ -2629,7 +2683,36 @@ export function App() {
                   lastFace.current = null;
                   setFaceSelection(null);
                 };
-                if (faceOp === "wall") {
+                if (faceOp === "fillet" || faceOp === "chamfer") {
+                  const distance = Math.max(0.1, Math.abs(faceValue));
+                  const op = {
+                    kind: faceOp,
+                    point: target.point,
+                    face: { point: target.point, normal: target.normal },
+                    distance,
+                  } as const;
+                  const candidate: EditSpec = node?.type === "edit"
+                    ? { ...(toSpec(node) as EditSpec), ops: [...node.ops, op] }
+                    : {
+                        type: "edit",
+                        id: target.id,
+                        base: toSpec(node!),
+                        ops: [op],
+                        position: node!.position,
+                        rotation: node!.rotation,
+                        scale: node!.scale,
+                        isHole: node!.isHole,
+                      };
+                  void kernel.pruneDeadOps(candidate).then((surviving) => {
+                    if (!surviving || surviving.length !== candidate.ops.length) {
+                      setError(`That ${faceOp} cannot be applied to this face border at ${distance} mm.`);
+                      return;
+                    }
+                    setError(null);
+                    finishEdit(target.id, op);
+                    releaseSelection();
+                  }).catch((e) => setError(msg(e)));
+                } else if (faceOp === "wall") {
                   setEditPending(target.id);
                   finishEdit(target.id, {
                     kind: "shell",
@@ -2680,14 +2763,40 @@ export function App() {
               <input type="number" min="0.1" step="0.5" value={edgeDistance}
                 onChange={(e) => setEdgeDistance(Math.max(0.1, Number(e.target.value) || 0.1))} /> mm
             </label>
-            <button disabled={!edgeSelection} onClick={() => {
+            <button disabled={!edgeSelection} onClick={async () => {
               if (!edgeSelection) return;
-              finishEdit(edgeSelection.id, {
+              const op = {
                 kind: edgeKind,
                 point: edgeSelection.points[0],
                 points: edgeSelection.points,
                 distance: edgeDistance,
-              });
+              } as const;
+              const node = findNode(useDoc.getState().nodes, edgeSelection.id);
+              if (!node || node.type === "import") return;
+              const candidate: EditSpec = node.type === "edit"
+                ? { ...(toSpec(node) as EditSpec), ops: [...node.ops, op] }
+                : {
+                    type: "edit",
+                    id: node.id,
+                    base: toSpec(node),
+                    ops: [op],
+                    position: node.position,
+                    rotation: node.rotation,
+                    scale: node.scale,
+                    isHole: node.isHole,
+                  };
+              try {
+                const surviving = await kernel.pruneDeadOps(candidate);
+                if (!surviving || surviving.length !== candidate.ops.length) {
+                  setError(`That ${edgeKind} cannot be applied to the selected Triangle edge at this size.`);
+                  return;
+                }
+              } catch (e) {
+                setError(msg(e));
+                return;
+              }
+              setError(null);
+              finishEdit(edgeSelection.id, op);
               setEdgeSelection(null);
             }}>Apply</button>
           </div>
@@ -2751,7 +2860,7 @@ export function App() {
                 : "Click a flat face, then drag its arrow or type a distance to push/pull · Esc Select · Right-drag orbit"
             : toolMode === "edge"
             ? "Click edges to add or remove them · Choose Fillet or Chamfer, then Apply · Esc Select · Right-drag orbit"
-            : "V Select · F Face · M Move · R Rotate · A Align · Z Zoom · T Transparent · W Wireframe · D Drop · S Snapping · Drag an object to move it · Alt-drag duplicate · Shift-drag straight · Right-drag orbit"}
+            : "V Select · F Face · M Move · R Rotate · A Align · Z Zoom · H Hole · T Transparent · W Wireframe · D Drop · S Snapping · Home Reset view · Drag an object to move it · Alt-drag duplicate · Shift-drag straight · Right-drag orbit"}
         </div>
         {/* One centred stack. The progress card and the slow-file warning
             were each pinned to top: 14px of their own, so whichever drew
@@ -2901,6 +3010,8 @@ export function App() {
               fonts={textFonts}
               onPickFontFile={() => textFontInputRef.current?.click()}
               onRequestSystemFonts={requestSystemFonts}
+              displayUnit={displayUnit}
+              decimalPlaces={decimalPlaces}
             />
           ) : <div className="empty-state small">Select an object to edit its dimensions and position.</div>}
         </section>
@@ -3046,6 +3157,17 @@ export function App() {
           setFileOperation((current) => current ? { ...current, waitingForScene: true } : null);
         }}
         onProjectLoadFailed={() => setFileOperation(null)}
+      />
+
+      <SettingsModal
+        open={settingsOpen}
+        unit={displayUnit}
+        decimals={decimalPlaces}
+        appearance={appearance}
+        onUnit={setDisplayUnit}
+        onDecimals={setDecimalPlaces}
+        onAppearance={setAppearance}
+        onClose={() => setSettingsOpen(false)}
       />
 
       {pendingSvg && (

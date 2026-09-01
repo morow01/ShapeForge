@@ -348,9 +348,125 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
   text-align: center;
 }
 .measure-pill > input:focus { outline: none; }
+/* Size dimensions use the restrained white value cards familiar from
+   Tinkercad. Their coloured measurement lines already identify the axis, so
+   the extra letter and coloured border only add clutter around resize nodes. */
+.measure-pill.dimension-pill {
+  padding: 2px 2px;
+  border: 0;
+  border-radius: 3px;
+  background: #edf2f5;
+  box-shadow: none;
+}
+.measure-pill.dimension-pill > .measure-axis { display: none; }
+.measure-pill.dimension-pill > input {
+  width: 4.6ch;
+  padding: 2px 0;
+  color: #20262b;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.2;
+  appearance: textfield;
+}
+.measure-pill.dimension-pill > input::-webkit-inner-spin-button,
+.measure-pill.dimension-pill > input::-webkit-outer-spin-button {
+  margin: 0;
+  appearance: none;
+}
+.measure-pill.dimension-pill.hover,
+.measure-pill.dimension-pill.hover input {
+  filter: none;
+  background: #edf2f5;
+  font-weight: 400;
+}
+
+.settings-modal {
+  width: min(520px, calc(100vw - 32px));
+  overflow: hidden;
+  border: 1px solid #d8e0e5;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 18px 55px rgb(24 40 50 / 22%);
+}
+.binary-choice {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  padding: 2px;
+  border: 1px solid #cfd9de;
+  border-radius: 8px;
+  background: #eef2f4;
+}
+.binary-choice.three { grid-template-columns: repeat(3, 1fr); }
+.binary-choice button {
+  min-height: 32px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #62717a;
+  font: 500 12px system-ui;
+  cursor: pointer;
+}
+.binary-choice button:hover { color: #26363f; }
+.binary-choice button.on {
+  background: #fff;
+  color: #087f7d;
+  box-shadow: 0 1px 4px rgb(25 47 58 / 13%);
+  font-weight: 650;
+}
+.settings-body { display: grid; padding: 6px 20px 20px; }
+.settings-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 190px;
+  align-items: center;
+  gap: 24px;
+  padding: 16px 0;
+  border-bottom: 1px solid #e8edef;
+}
+.settings-row:last-child { border-bottom: 0; }
+.settings-row span { display: grid; gap: 4px; }
+.settings-row strong { color: #273640; font-size: 13px; }
+.settings-row small { color: #7b8992; font-size: 11px; line-height: 1.35; }
+.settings-row select {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #ced8de;
+  border-radius: 7px;
+  background: #fff;
+  color: #273640;
+  font: inherit;
+}
 /* An offset is a signed distance travelled, not a size — dashed so the two
    can never be read as the same kind of number at a glance. */
 .measure-pill.is-offset { border-style: dashed; }
+.measure-pill.is-offset > input { appearance: textfield; }
+.measure-pill.is-offset > input::-webkit-inner-spin-button,
+.measure-pill.is-offset > input::-webkit-outer-spin-button {
+  margin: 0;
+  appearance: none;
+}
+.push-pull-measure {
+  position: absolute;
+  z-index: 30;
+  width: 3.6ch;
+  padding: 4px 4px;
+  transform: translate(-50%, -50%);
+  border: 0;
+  border-radius: 3px;
+  outline: none;
+  background: #edf2f5;
+  box-shadow: none;
+  color: #20262b;
+  font: 400 13px/1.2 system-ui, sans-serif;
+  text-align: center;
+  appearance: textfield;
+}
+.push-pull-measure:focus { outline: none; }
+.push-pull-measure::-webkit-inner-spin-button,
+.push-pull-measure::-webkit-outer-spin-button {
+  margin: 0;
+  appearance: none;
+}
 .cursor-symbol { transform: rotate(-40deg); font-size: 18px; }
 
 .panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0 3px 14px; }
