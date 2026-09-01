@@ -173,20 +173,22 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
   },
   wedge: {
     label: "Wedge",
-    defaults: { width: 20, length: 20, height: 20 },
+    defaults: { width: 20, length: 20, height: 20, fillet: 0 },
     fields: [
       dim("width", "Width"),
       dim("length", "Length"),
       dim("height", "Height"),
+      { key: "fillet", label: "Corner radius", min: 0, max: 500, step: 0.5 },
     ],
   },
   polygonPrism: {
     label: "Polygon Prism",
-    defaults: { sides: 6, radius: 10, height: 20 },
+    defaults: { sides: 6, radius: 10, height: 20, fillet: 0 },
     fields: [
       { key: "sides", label: "Sides", min: 3, max: 32, step: 1 },
       dim("radius", "Radius"),
       dim("height", "Height"),
+      { key: "fillet", label: "Corner radius", min: 0, max: 500, step: 0.5 },
     ],
   },
   hemisphere: {

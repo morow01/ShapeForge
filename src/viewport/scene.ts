@@ -8,9 +8,10 @@ import { clearHighlights, getEdgeIndex, getFaceIndex, highlightInGeometry, syncG
 import type { ReplicadMesh, ThreeGeometry } from "replicad-threejs-helper";
 import type { CellPart, FaceInfo, KernelMesh, PreviewBuild, ScenePart } from "../kernel/types";
 import type { CameraMode, GroupNode, PrimitiveKind, SceneNode, Vec3 } from "../document/types";
-import { DEFAULT_OBJECT_COLOR, PRIMITIVES, isGroup } from "../document/types";
+import { DEFAULT_OBJECT_COLOR, isGroup } from "../document/types";
 import { findNode, resolveNodeColor, resolveNodeTransparent } from "../document/tree";
 import { loadCameraState, saveCameraState } from "../document/persist";
+import { getEffectiveDefaults } from "../document/store";
 import { snapBounds } from "../snapping/snap";
 import type { Bounds3, SnapTarget } from "../snapping/snap";
 import { SmartGuides } from "./guides";
@@ -2481,7 +2482,7 @@ export class Scene {
       this.placementPreview = null;
     }
     if (!kind) return;
-    const p = PRIMITIVES[kind].defaults;
+    const p = getEffectiveDefaults(kind);
     let geometry: THREE.BufferGeometry;
     if (kind === "box") geometry = new THREE.BoxGeometry(p.width, p.depth, p.height).translate(0, 0, p.height / 2);
     else if (kind === "sphere") geometry = new THREE.SphereGeometry(p.radius, 32, 20).translate(0, 0, p.radius);

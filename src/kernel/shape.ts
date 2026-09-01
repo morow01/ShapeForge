@@ -129,26 +129,48 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
       const w = Math.max(p.width ?? 20, 0.1);
       const len = Math.max(p.length ?? 20, 0.1);
       const h = Math.max(p.height ?? 20, 0.1);
-      // Right triangle profile in YZ plane: base `len` on Z=0, back vertical wall of height `h`,
-      // extruded along X by `w`.
-      s = draw([0, 0])
+      const maxR = Math.min(w, len, h) / 2 - 0.01;
+      const r = Math.min(Math.max(p.fillet ?? 0, 0), maxR);
+      let wedgeSolid = draw([0, 0])
         .lineTo([len, 0])
         .lineTo([len, h])
         .close()
         .sketchOnPlane("YZ")
         .extrude(w) as Shape3D;
+      if (r > 0) {
+        try {
+          wedgeSolid = wedgeSolid.fillet(r, (e) => e.inDirection("X"));
+        } catch {
+          try {
+            wedgeSolid = wedgeSolid.fillet(r);
+          } catch {}
+        }
+      }
+      s = wedgeSolid;
       break;
     }
     case "polygonPrism": {
       const sides = Math.max(3, Math.min(32, Math.round(p.sides ?? 6)));
       const r = Math.max(p.radius ?? 10, 0.1);
       const h = Math.max(p.height ?? 20, 0.1);
+      const maxFillet = (r * Math.sin(Math.PI / sides)) - 0.01;
+      const filletR = Math.min(Math.max(p.fillet ?? 0, 0), maxFillet);
       let pen = draw([r * Math.cos(0), r * Math.sin(0)]);
       for (let i = 1; i < sides; i++) {
         const a = (i * 2 * Math.PI) / sides;
         pen = pen.lineTo([r * Math.cos(a), r * Math.sin(a)]);
       }
-      s = pen.close().sketchOnPlane("XY").extrude(h) as Shape3D;
+      let prism = pen.close().sketchOnPlane("XY").extrude(h) as Shape3D;
+      if (filletR > 0) {
+        try {
+          prism = prism.fillet(filletR, (e) => e.inDirection("Z"));
+        } catch {
+          try {
+            prism = prism.fillet(filletR);
+          } catch {}
+        }
+      }
+      s = prism;
       break;
     }
     case "hemisphere": {

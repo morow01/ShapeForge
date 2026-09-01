@@ -450,6 +450,13 @@ const METRIC_PRESETS: Record<number, { pitch: number; headSize: number; headHeig
   20: { pitch: 2.5, headSize: 30.0, headHeight: 12.5, nutWidth: 30.0, nutHeight: 18.0 },
 };
 
+/** Remembers customized parameters (e.g. corner radius, dimensions) across placements in a session. */
+export const stickyParams: Partial<Record<PrimitiveKind, Record<string, number>>> = {};
+
+export function getEffectiveDefaults(kind: PrimitiveKind): Record<string, number> {
+  return { ...PRIMITIVES[kind].defaults, ...(stickyParams[kind] ?? {}) };
+}
+
 function nextParams(o: ObjectNode, key: string, value: number): Record<string, number> {
   if (o.kind === "threadedRod" && key === "preset") {
     const p = METRIC_PRESETS[value];
@@ -832,7 +839,7 @@ export const useDoc = create<DocState>()(
             id: nextId(),
             kind,
             name: `${def.label} ${n}`,
-            params: { ...def.defaults },
+            params: getEffectiveDefaults(kind),
             // Offset each new part so they do not stack invisibly.
             position: position ?? [s.nodes.length * 6, 0, 0],
             rotation: rotation ?? [0, 0, 0],
@@ -938,11 +945,12 @@ export const useDoc = create<DocState>()(
                 };
                 const updated = nextParams({ ...n, params: bakedParams }, key, value);
                 return { ...n, params: updated, scale: [1, 1, 1] as Vec3 };
-              } catch {
-                return { ...n, params: nextParams(n, key, value) };
-              }
+              } catch {}
             }
-            return { ...n, params: nextParams(n, key, value) };
+            const next = nextParams(n, key, value);
+            if (!stickyParams[n.kind]) stickyParams[n.kind] = {};
+            stickyParams[n.kind]![key] = next[key] ?? value;
+            return { ...n, params: next };
           }),
         }));
         afterBatchedMutation();
