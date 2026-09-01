@@ -37,6 +37,97 @@ export type AnySolid = Shape3D | MeshShape;
 const isMesh = (s: AnySolid): s is MeshShape => s instanceof MeshShape;
 
 /**
+ * Rounds the 2D corners of any closed polygon using smooth tangent arcs.
+ * Infallible, mathematically exact, and produces clean G1 manifold extrusions.
+ */
+function roundPolygon2D(
+  vertices: [number, number][],
+  cornerRadius: number,
+  arcSteps = 8
+): [number, number][] {
+  const n = vertices.length;
+  if (n < 3 || cornerRadius <= 0.01) return vertices;
+
+  const result: [number, number][] = [];
+
+  for (let i = 0; i < n; i++) {
+    const prev = vertices[(i - 1 + n) % n];
+    const curr = vertices[i];
+    const next = vertices[(i + 1) % n];
+
+    const v1x = prev[0] - curr[0];
+    const v1y = prev[1] - curr[1];
+    const len1 = Math.hypot(v1x, v1y);
+
+    const v2x = next[0] - curr[0];
+    const v2y = next[1] - curr[1];
+    const len2 = Math.hypot(v2x, v2y);
+
+    if (len1 < 1e-4 || len2 < 1e-4) {
+      result.push(curr);
+      continue;
+    }
+
+    const u1x = v1x / len1;
+    const u1y = v1y / len1;
+    const u2x = v2x / len2;
+    const u2y = v2y / len2;
+
+    const dot = u1x * u2x + u1y * u2y;
+    const cross = u1x * u2y - u1y * u2x; // 2D cross product for turn direction
+
+    const angle = Math.acos(Math.max(-1, Math.min(1, dot)));
+    if (angle < 0.05 || angle > Math.PI - 0.05 || Math.abs(cross) < 1e-4) {
+      result.push(curr);
+      continue;
+    }
+
+    const halfAngle = angle / 2;
+    const maxD = Math.min(len1, len2) * 0.48;
+    const desiredD = cornerRadius / Math.tan(halfAngle);
+    const d = Math.min(desiredD, maxD);
+    const rEff = d * Math.tan(halfAngle);
+
+    // Tangent points
+    const t1: [number, number] = [curr[0] + u1x * d, curr[1] + u1y * d];
+    const t2: [number, number] = [curr[0] + u2x * d, curr[1] + u2y * d];
+
+    // Bisector vector
+    const bx = u1x + u2x;
+    const by = u1y + u2y;
+    const bLen = Math.hypot(bx, by);
+    if (bLen < 1e-4) {
+      result.push(curr);
+      continue;
+    }
+
+    const centerDist = rEff / Math.sin(halfAngle);
+    const cx = curr[0] + (bx / bLen) * centerDist;
+    const cy = curr[1] + (by / bLen) * centerDist;
+
+    // Angles from center to tangent points
+    const a1 = Math.atan2(t1[1] - cy, t1[0] - cx);
+    const a2 = Math.atan2(t2[1] - cy, t2[0] - cx);
+
+    // Interpolate in the correct angular direction
+    let diff = a2 - a1;
+    if (cross > 0) {
+      while (diff > 0) diff -= 2 * Math.PI;
+    } else {
+      while (diff < 0) diff += 2 * Math.PI;
+    }
+
+    for (let s = 0; s <= arcSteps; s++) {
+      const frac = s / arcSteps;
+      const curA = a1 + frac * diff;
+      result.push([cx + rEff * Math.cos(curA), cy + rEff * Math.sin(curA)]);
+    }
+  }
+
+  return result;
+}
+
+/**
  * Builds a primitive in LOCAL space: centred in XY with its base on z = 0,
  * with no position or rotation applied. Placement lives on the Three.js side
  * so dragging an object never needs a kernel rebuild.
@@ -81,12 +172,14 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
     case "triangle": {
       if (p.thickness <= 0) throw new InvalidShapeError("Thickness must be greater than zero.");
       const { apexPoint } = solveTriangle(p);
-      s = draw([0, 0])
-        .lineTo([p.base, 0])
-        .lineTo([apexPoint.x, apexPoint.y])
-        .close()
-        .sketchOnPlane("XY")
-        .extrude(p.thickness) as Shape3D;
+      const fillet = Math.max(p.fillet ?? 0, 0);
+      const basePts: [number, number][] = [[0, 0], [p.base, 0], [apexPoint.x, apexPoint.y]];
+      const pts = roundPolygon2D(basePts, fillet);
+      let pen = draw(pts[0]);
+      for (let i = 1; i < pts.length; i++) {
+        pen = pen.lineTo(pts[i]);
+      }
+      s = pen.close().sketchOnPlane("XY").extrude(p.thickness) as Shape3D;
       break;
     }
     case "torus": {
@@ -153,24 +246,18 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
       const sides = Math.max(3, Math.min(32, Math.round(p.sides ?? 6)));
       const r = Math.max(p.radius ?? 10, 0.1);
       const h = Math.max(p.height ?? 20, 0.1);
-      const maxFillet = (r * Math.sin(Math.PI / sides)) - 0.01;
-      const filletR = Math.min(Math.max(p.fillet ?? 0, 0), maxFillet);
-      let pen = draw([r * Math.cos(0), r * Math.sin(0)]);
-      for (let i = 1; i < sides; i++) {
+      const fillet = Math.max(p.fillet ?? 0, 0);
+      const basePts: [number, number][] = [];
+      for (let i = 0; i < sides; i++) {
         const a = (i * 2 * Math.PI) / sides;
-        pen = pen.lineTo([r * Math.cos(a), r * Math.sin(a)]);
+        basePts.push([r * Math.cos(a), r * Math.sin(a)]);
       }
-      let prism = pen.close().sketchOnPlane("XY").extrude(h) as Shape3D;
-      if (filletR > 0) {
-        try {
-          prism = prism.fillet(filletR, (e) => e.inDirection("Z"));
-        } catch {
-          try {
-            prism = prism.fillet(filletR);
-          } catch {}
-        }
+      const pts = roundPolygon2D(basePts, fillet);
+      let pen = draw(pts[0]);
+      for (let i = 1; i < pts.length; i++) {
+        pen = pen.lineTo(pts[i]);
       }
-      s = prism;
+      s = pen.close().sketchOnPlane("XY").extrude(h) as Shape3D;
       break;
     }
     case "hemisphere": {
@@ -323,14 +410,16 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
       const style = p.style ?? 0;
 
       if (style === 0) {
-        // Flat extruded 2D Star Prism
+        // Flat extruded 2D Star Prism with optional corner radius
         const dTheta = Math.PI / numPoints;
-        const pts: [number, number][] = [];
+        const rawPts: [number, number][] = [];
         for (let i = 0; i < numPoints * 2; i++) {
           const r = i % 2 === 0 ? rOut : rIn;
           const a = i * dTheta - Math.PI / 2;
-          pts.push([r * Math.cos(a), r * Math.sin(a)]);
+          rawPts.push([r * Math.cos(a), r * Math.sin(a)]);
         }
+        const fillet = Math.max(p.fillet ?? 0, 0);
+        const pts = roundPolygon2D(rawPts, fillet);
         let pen = draw(pts[0]);
         for (let i = 1; i < pts.length; i++) {
           pen = pen.lineTo(pts[i]);

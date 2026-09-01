@@ -130,6 +130,7 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
       angleRight: 36.87,
       angleApex: 53.13,
       thickness: 5,
+      fillet: 0,
     },
     fields: [
       {
@@ -152,6 +153,7 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
       angle("angleRight", "Right corner", onlyIn(TRI_BY_ANGLES)),
       angle("angleApex", "Apex corner", onlyIn(TRI_BY_ANGLES)),
       dim("thickness", "Thickness"),
+      { key: "fillet", label: "Corner radius", min: 0, max: 500, step: 0.5 },
     ],
   },
   torus: {
@@ -453,6 +455,7 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
       innerRadius: 7.5,
       height: 10,
       style: 0,
+      fillet: 0,
     },
     fields: [
       {
@@ -470,6 +473,7 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
       dim("outerRadius", "Outer radius"),
       dim("innerRadius", "Inner radius"),
       dim("height", "Height"),
+      { key: "fillet", label: "Corner radius", min: 0, max: 500, step: 0.5, showIf: { key: "style", oneOf: [0] } },
     ],
   },
   tray: {
