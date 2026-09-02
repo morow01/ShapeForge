@@ -374,6 +374,61 @@ function withNutCornerLines(mesh: KernelMesh, params: Record<string, number>): K
   return { ...mesh, edges: { lines: Float32Array.from(lines), edgeGroups } };
 }
 
+function withThreadedHeadCornerLines(mesh: KernelMesh, params: Record<string, number>): KernelMesh {
+  const headType = Math.round(params.headType ?? 0);
+  const headSize = Math.max(params.headSize ?? 13, 0.1);
+  const diameter = Math.max(params.diameter ?? 8, 0.1);
+  const height = Math.max(params.headHeight ?? 5.5, 0.1);
+  let baseRadii: number[];
+  if (headType === 1) {
+    baseRadii = Array(6).fill(headSize / Math.sqrt(3));
+  } else if (headType === 3) {
+    const count = Math.max(12, Math.min(48, Math.max(16, Math.round(headSize * 1.6)))) * 2;
+    const crest = headSize / 2;
+    const depth = Math.max(0.35, Math.min(1.2, headSize * 0.05));
+    baseRadii = Array.from({ length: count }, (_, index) => index % 2 === 0 ? crest : crest - depth);
+  } else {
+    baseRadii = Array(64).fill(headSize / 2);
+  }
+  const styleFraction = headType === 2 ? 0.25 : 0.15;
+  const maxCorner = Math.max(0, Math.min(
+    height * styleFraction,
+    (headSize - diameter) / 2,
+  ) - 0.01);
+  const top = Math.min(Math.max(params.topFillet ?? 0, 0), maxCorner);
+  const bottom = Math.min(Math.max(params.bottomFillet ?? 0, 0), maxCorner);
+  const steps = Math.max(1, Math.min(32, Math.round(params.cornerSteps ?? 16)));
+  const guideSteps = Math.max(2, Math.min(12, steps));
+  const rings: Array<{ inset: number; z: number }> = [];
+  for (let i = 0; top > 0 && i <= guideSteps; i++) {
+    const angle = Math.PI / 2 * i / guideSteps;
+    rings.push({ inset: top * (1 - Math.sin(angle)), z: top * (1 - Math.cos(angle)) });
+  }
+  for (let i = 0; bottom > 0 && i <= guideSteps; i++) {
+    const angle = Math.PI / 2 * i / guideSteps;
+    rings.push({ inset: bottom * (1 - Math.cos(angle)), z: height - bottom + bottom * Math.sin(angle) });
+  }
+  const lines: number[] = [];
+  const edgeGroups: MeshedEdges["edgeGroups"] = [];
+  let edgeId = 0;
+  const sides = baseRadii.length;
+  for (const ring of rings) {
+    for (let side = 0; side < sides; side++) {
+      const a = side * 2 * Math.PI / sides;
+      const b = (side + 1) * 2 * Math.PI / sides;
+      const radiusA = Math.max(0.05, baseRadii[side] - ring.inset) + 0.01;
+      const radiusB = Math.max(0.05, baseRadii[(side + 1) % sides] - ring.inset) + 0.01;
+      const start = lines.length / 3;
+      lines.push(
+        radiusA * Math.cos(a), radiusA * Math.sin(a), ring.z,
+        radiusB * Math.cos(b), radiusB * Math.sin(b), ring.z,
+      );
+      edgeGroups.push({ start, count: 2, edgeId: edgeId++ });
+    }
+  }
+  return { ...mesh, edges: { lines: Float32Array.from(lines), edgeGroups } };
+}
+
 /** Draw clean height contours from the final tessellated surface. Slicing the
  * finished mesh keeps the guides attached to fillets without exposing every
  * internal triangle (which made the Dome look like a wireframe). */
@@ -1151,6 +1206,14 @@ const api = {
                 (spec.params.cornerEdges ?? 0) === 1
               ) {
                 candidate = withNutCornerLines(candidate, spec.params);
+              }
+              if (
+                spec.type === "object" && spec.kind === "threadedRod" &&
+                Math.round(spec.params.headType ?? 0) >= 1
+              ) {
+                candidate = (spec.params.cornerEdges ?? 0) === 1
+                  ? withThreadedHeadCornerLines(candidate, spec.params)
+                  : { ...candidate, edges: { lines: new Float32Array(0), edgeGroups: [] } };
               }
               if (
                 spec.type === "object" && spec.kind === "paraboloid" &&

@@ -447,6 +447,12 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
       headType: 1,
       headSize: 13,
       headHeight: 5.5,
+      socketSize: 6,
+      socketDepth: 4,
+      topFillet: 0,
+      bottomFillet: 0,
+      cornerSteps: 16,
+      cornerEdges: 0,
       chamfer: 1,
       density: 1,
     },
@@ -470,8 +476,8 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
           { value: 20, label: "M20 (20mm, 2.5p)" },
         ],
       },
-      { ...dim("diameter", "Diameter"), min: 2, max: 100, step: 0.5 },
-      { key: "pitch", label: "Pitch", min: 0.2, max: 10, step: 0.05, noSlider: true, suffix: "mm" },
+      { ...dim("diameter", "Diameter"), min: 2, max: 100, step: 0.5, showIf: { key: "preset", oneOf: [0] } },
+      { key: "pitch", label: "Pitch", min: 0.2, max: 10, step: 0.05, noSlider: true, suffix: "mm", showIf: { key: "preset", oneOf: [0] } },
       { ...dim("length", "Thread Length"), min: 2, max: 500, step: 1 },
       {
         key: "headType",
@@ -488,6 +494,16 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
       },
       { ...dim("headSize", "Head Width / Dia"), min: 3, max: 200, step: 0.5, showIf: { key: "headType", oneOf: [1, 2, 3] } },
       { ...dim("headHeight", "Head Thickness"), min: 1, max: 100, step: 0.5, showIf: { key: "headType", oneOf: [1, 2, 3] } },
+      { ...dim("socketSize", "Allen key size"), min: 0.5, max: 100, step: 0.5, showIf: { key: "headType", oneOf: [2] } },
+      { ...dim("socketDepth", "Allen recess depth"), min: 0.2, max: 100, step: 0.5, showIf: { key: "headType", oneOf: [2] } },
+      { key: "topFillet", label: "Head top corner radius", min: 0, max: 100, step: 0.1, showIf: { key: "headType", oneOf: [1, 2, 3] } },
+      { key: "bottomFillet", label: "Head bottom corner radius", min: 0, max: 100, step: 0.1, showIf: { key: "headType", oneOf: [1, 2, 3] } },
+      { key: "cornerSteps", label: "Corner steps", min: 1, max: 32, step: 1, showIf: { key: "headType", oneOf: [1, 2, 3] } },
+      {
+        key: "cornerEdges", label: "Corner lines", min: 0, max: 1, step: 1,
+        options: [{ value: 0, label: "Hidden" }, { value: 1, label: "Shown" }],
+        showIf: { key: "headType", oneOf: [1, 2, 3] },
+      },
       {
         key: "chamfer",
         label: "Lead-in Chamfer",
@@ -549,8 +565,8 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
           { value: 20, label: "M20 (20mm, 2.5p)" },
         ],
       },
-      { ...dim("diameter", "Thread Diameter"), min: 2, max: 100, step: 0.5 },
-      { key: "pitch", label: "Pitch", min: 0.2, max: 10, step: 0.05, noSlider: true, suffix: "mm" },
+      { ...dim("diameter", "Thread Diameter"), min: 2, max: 100, step: 0.5, showIf: { key: "preset", oneOf: [0] } },
+      { key: "pitch", label: "Pitch", min: 0.2, max: 10, step: 0.05, noSlider: true, suffix: "mm", showIf: { key: "preset", oneOf: [0] } },
       { ...dim("height", "Nut Thickness"), min: 1, max: 100, step: 0.5 },
       { ...dim("outerWidth", "Outer Width / Dia"), min: 3, max: 200, step: 0.5 },
       {
@@ -866,6 +882,9 @@ export interface ShellOp {
   thickness: number;
   /** One point on each face to open. Empty means a fully closed hollow. */
   points: Vec3[];
+  /** Actual outward direction of the selected opening face. Older saved
+   * designs omit this and fall back to locating the nearest bounding side. */
+  normal?: Vec3;
 }
 
 /**

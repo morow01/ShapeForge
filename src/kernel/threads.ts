@@ -1,5 +1,29 @@
 import { MeshShape, getManifold } from "replicad";
 
+// Bolts with different heads commonly share an identical threaded shaft.
+// Keep a small bounded cache so that expensive helical grid is generated once
+// and reused by the immutable Manifold boolean operations.
+const threadSolidCache = new Map<string, any>();
+const MAX_THREAD_CACHE = 12;
+
+const METRIC_COARSE_PITCH: Record<number, number> = {
+  3: 0.5, 4: 0.7, 5: 0.8, 6: 1, 8: 1.25,
+  10: 1.5, 12: 1.75, 16: 2, 20: 2.5,
+};
+
+function threadDimensions(p: Record<string, number>, fallbackDiameter: number, fallbackPitch: number) {
+  const preset = Math.round(p.preset ?? 0);
+  const presetPitch = METRIC_COARSE_PITCH[preset];
+  const diameter = presetPitch ? preset : Math.max(p.diameter ?? fallbackDiameter, 2);
+  const pitch = presetPitch ?? Math.max(p.pitch ?? fallbackPitch, 0.2);
+  // Extremely coarse custom combinations can make adjacent turns cross over
+  // and create a misleading self-intersecting "wormhole" mesh.
+  if (pitch > diameter * 0.4) {
+    throw new Error("Thread pitch is too large for this diameter. Choose a standard preset or reduce the custom pitch.");
+  }
+  return { diameter, pitch };
+}
+
 /**
  * Builds a 100% watertight, non-self-intersecting 2-manifold helical thread solid using a high-density cylindrical grid.
  */
@@ -16,6 +40,13 @@ export function makeThreadSolid(
   const D = Math.max(diameter, 1);
   const P = Math.max(pitch, 0.2);
   const L = Math.max(length, 1);
+  const cacheKey = [D, P, L, isInternal ? 1 : 0, clearance, chamfer ? 1 : 0, density].join(":");
+  const cached = threadSolidCache.get(cacheKey);
+  if (cached) {
+    threadSolidCache.delete(cacheKey);
+    threadSolidCache.set(cacheKey, cached);
+    return cached;
+  }
 
   // ISO Metric profile parameters
   const Htri = (Math.sqrt(3) / 2) * P;
@@ -51,23 +82,22 @@ export function makeThreadSolid(
       let phase = (z / P - j / S) % 1;
       if (phase < 0) phase += 1;
 
-      // Metric trapezoidal profile with smooth Hermite curvature transitions
+      // Metric-style truncated V profile. The former broad Hermite easing
+      // rounded almost the whole pitch and made even Ultra quality resemble a
+      // stack of beads. Straight flanks with short flat roots and crests look
+      // like a real machine thread without adding any triangles.
       let r: number;
-      if (phase < 0.35) {
-        // Flank: Root to Crest
-        const u = phase / 0.35;
-        const s = u * u * (3 - 2 * u);
-        r = rootR + (crestR - rootR) * s;
+      if (phase < 0.15) {
+        r = rootR;
       } else if (phase < 0.45) {
-        // Crest Flat
+        const u = (phase - 0.15) / 0.30;
+        r = rootR + (crestR - rootR) * u;
+      } else if (phase < 0.55) {
         r = crestR;
-      } else if (phase < 0.8) {
-        // Flank: Crest to Root
-        const u = (phase - 0.45) / 0.35;
-        const s = u * u * (3 - 2 * u);
-        r = crestR - (crestR - rootR) * s;
+      } else if (phase < 0.85) {
+        const u = (phase - 0.55) / 0.30;
+        r = crestR - (crestR - rootR) * u;
       } else {
-        // Root Flat
         r = rootR;
       }
 
@@ -125,7 +155,14 @@ export function makeThreadSolid(
     numProp: 3,
   });
 
-  return new manifold.Manifold(rawMesh);
+  const result = new manifold.Manifold(rawMesh);
+  threadSolidCache.set(cacheKey, result);
+  while (threadSolidCache.size > MAX_THREAD_CACHE) {
+    const oldest = threadSolidCache.keys().next().value;
+    if (oldest === undefined) break;
+    threadSolidCache.delete(oldest);
+  }
+  return result;
 }
 
 /**
@@ -197,19 +234,90 @@ function makeKnurledCylinder(
   return new manifold.Manifold(mesh);
 }
 
+function makeRoundedHead(
+  height: number,
+  baseRadii: number[],
+  topCorner: number,
+  bottomCorner: number,
+  steps: number,
+): any {
+  const manifold = getManifold();
+  const sides = baseRadii.length;
+  const rings: Array<{ inset: number; z: number }> = [];
+  if (topCorner > 0) {
+    for (let i = 0; i <= steps; i++) {
+      const angle = Math.PI / 2 * i / steps;
+      rings.push({
+        inset: topCorner * (1 - Math.sin(angle)),
+        z: -height + topCorner * (1 - Math.cos(angle)),
+      });
+    }
+  } else rings.push({ inset: 0, z: -height });
+  if (bottomCorner > 0) {
+    for (let i = 0; i <= steps; i++) {
+      const angle = Math.PI / 2 * i / steps;
+      const ring = {
+        inset: bottomCorner * (1 - Math.cos(angle)),
+        z: -bottomCorner + bottomCorner * Math.sin(angle),
+      };
+      if (Math.abs(rings[rings.length - 1].z - ring.z) > 1e-7) rings.push(ring);
+    }
+  } else if (Math.abs(rings[rings.length - 1].z) > 1e-7) rings.push({ inset: 0, z: 0 });
+
+  const verts: number[] = [];
+  const tris: number[] = [];
+  for (const ring of rings) {
+    for (let side = 0; side < sides; side++) {
+      const angle = side * 2 * Math.PI / sides;
+      const radius = Math.max(0.05, baseRadii[side] - ring.inset);
+      verts.push(radius * Math.cos(angle), radius * Math.sin(angle), ring.z);
+    }
+  }
+  for (let ring = 0; ring + 1 < rings.length; ring++) {
+    for (let side = 0; side < sides; side++) {
+      const next = (side + 1) % sides;
+      const a = ring * sides + side, b = ring * sides + next;
+      const c = (ring + 1) * sides + next, d = (ring + 1) * sides + side;
+      tris.push(a, b, c, a, c, d);
+    }
+  }
+  const bottomCentre = verts.length / 3;
+  verts.push(0, 0, rings[0].z);
+  const topCentre = verts.length / 3;
+  verts.push(0, 0, rings[rings.length - 1].z);
+  for (let side = 0; side < sides; side++) {
+    const next = (side + 1) % sides;
+    tris.push(bottomCentre, next, side);
+    const last = (rings.length - 1) * sides;
+    tris.push(topCentre, last + side, last + next);
+  }
+  return new manifold.Manifold(new manifold.Mesh({
+    vertProperties: new Float32Array(verts),
+    triVerts: new Uint32Array(tris),
+    numProp: 3,
+  }));
+}
+
 /**
  * Builds a complete Threaded Rod / Bolt solid with optional heads.
  */
 export function makeThreadedRodSolid(p: Record<string, number>): MeshShape {
   const manifold = getManifold();
-  const diameter = Math.max(p.diameter ?? 8, 2);
-  const pitch = Math.max(p.pitch ?? 1.25, 0.2);
+  const { diameter, pitch } = threadDimensions(p, 8, 1.25);
   const length = Math.max(p.length ?? 30, 2);
   const headType = p.headType ?? 0;
   const headSize = Math.max(p.headSize ?? 13, diameter + 1);
   const headHeight = Math.max(p.headHeight ?? 5.5, 1);
   const chamfer = (p.chamfer ?? 1) === 1;
   const density = p.density ?? 1;
+  const styleFraction = headType === 2 ? 0.25 : 0.15;
+  const maxCorner = Math.max(0, Math.min(
+    headHeight * styleFraction,
+    (headSize - diameter) / 2,
+  ) - 0.01);
+  const topCorner = Math.min(Math.max(p.topFillet ?? 0, 0), maxCorner);
+  const bottomCorner = Math.min(Math.max(p.bottomFillet ?? 0, 0), maxCorner);
+  const cornerSteps = Math.max(1, Math.min(32, Math.round(p.cornerSteps ?? 16)));
 
   const threadSolid = makeThreadSolid(diameter, pitch, length, false, 0, chamfer, density);
 
@@ -219,27 +327,48 @@ export function makeThreadedRodSolid(p: Record<string, number>): MeshShape {
   }
 
   let headSolid: InstanceType<typeof manifold.Manifold>;
+  let socketCut: InstanceType<typeof manifold.Manifold> | null = null;
 
   if (headType === 1) {
     // Hex Head (Bolt)
     const rVertex = headSize / Math.sqrt(3);
-    headSolid = manifold.Manifold.cylinder(headHeight + 0.05, rVertex, rVertex, 6).translate([0, 0, -headHeight]);
+    headSolid = makeRoundedHead(headHeight, Array(6).fill(rVertex), topCorner, bottomCorner, cornerSteps);
   } else if (headType === 2) {
     // Socket Cap (Allen Head)
-    const cap = manifold.Manifold.cylinder(headHeight + 0.05, headSize / 2, headSize / 2, 48).translate([0, 0, -headHeight]);
-    const hexKeySize = diameter * 0.6;
+    const cap = makeRoundedHead(headHeight, Array(64).fill(headSize / 2), topCorner, bottomCorner, cornerSteps);
+    const hexKeySize = Math.min(Math.max(p.socketSize ?? diameter * 0.6, 0.5), headSize * 0.8);
     const rKey = hexKeySize / Math.sqrt(3);
-    const socketDepth = headHeight * 0.65;
-    const socket = manifold.Manifold.cylinder(socketDepth + 0.1, rKey, rKey, 6).translate([0, 0, -socketDepth]);
-    headSolid = manifold.Manifold.difference(cap, socket);
+    const socketDepth = Math.min(
+      Math.max(p.socketDepth ?? headHeight * 0.65, 0.2),
+      Math.max(0.2, headHeight - 0.2),
+    );
+    // The exposed face of the head is at z = -headHeight; z = 0 is where the
+    // threaded shaft joins it. Start just outside that exposed face and cut
+    // inward, so the result is a visible Allen-key recess rather than a void
+    // buried at the shaft junction.
+    socketCut = manifold.Manifold.cylinder(socketDepth + 0.1, rKey, rKey, 6)
+      .translate([0, 0, -headHeight - 0.05]);
+    headSolid = cap;
   } else {
     // Knurled Thumb Screw Head
     const numKnurls = Math.max(16, Math.round(headSize * 1.6));
-    headSolid = makeKnurledCylinder(headHeight + 0.05, headSize, numKnurls).translate([0, 0, -headHeight]);
+    if (topCorner > 0 || bottomCorner > 0) {
+      const count = Math.max(12, Math.min(48, numKnurls)) * 2;
+      const crest = headSize / 2;
+      const depth = Math.max(0.35, Math.min(1.2, headSize * 0.05));
+      const radii = Array.from({ length: count }, (_, index) => index % 2 === 0 ? crest : crest - depth);
+      headSolid = makeRoundedHead(headHeight, radii, topCorner, bottomCorner, cornerSteps);
+    } else {
+      headSolid = makeKnurledCylinder(headHeight + 0.05, headSize, numKnurls).translate([0, 0, -headHeight]);
+    }
   }
 
   // Union head with thread and shift so local base rests on z = 0
-  const combined = manifold.Manifold.union([headSolid, threadSolid]).translate([0, 0, headHeight]);
+  let combined = manifold.Manifold.union([headSolid, threadSolid]);
+  // Cut the Allen recess after joining. Cutting it from the cap first allowed
+  // the shaft's top cap to fill the opening again during the union.
+  if (socketCut) combined = manifold.Manifold.difference(combined, socketCut);
+  combined = combined.translate([0, 0, headHeight]);
   return new MeshShape(combined);
 }
 
@@ -248,8 +377,7 @@ export function makeThreadedRodSolid(p: Record<string, number>): MeshShape {
  */
 export function makeThreadedNutSolid(p: Record<string, number>): MeshShape {
   const manifold = getManifold();
-  const diameter = Math.max(p.diameter ?? 8, 2);
-  const pitch = Math.max(p.pitch ?? 1.25, 0.2);
+  const { diameter, pitch } = threadDimensions(p, 8, 1.25);
   const height = Math.max(p.height ?? 6.5, 1);
   const outerWidth = Math.max(p.outerWidth ?? 13, diameter + 2);
   const shape = p.shape ?? 0;

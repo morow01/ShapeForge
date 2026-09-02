@@ -149,7 +149,8 @@ function parseOp(raw: unknown): EditOp | null {
   if (o.kind === "shell") {
     if (typeof o.thickness !== "number" || !Number.isFinite(o.thickness) || o.thickness <= 0) return null;
     const points = Array.isArray(o.points) ? o.points.filter(isVec3) : [];
-    return { kind: "shell", thickness: o.thickness, points };
+    const normal = isVec3(o.normal) ? o.normal : undefined;
+    return { kind: "shell", thickness: o.thickness, points, normal };
   }
   if (o.kind === "resizeFace") {
     if (!isVec3(o.point) || !isVec3(o.normal)) return null;

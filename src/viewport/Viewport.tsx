@@ -12,6 +12,8 @@ interface Props {
   selectedIds: string[];
   cameraMode: CameraMode;
   toolMode: ToolMode;
+  /** Only Push/Pull owns the draggable face-normal arrow and its distance pill. */
+  facePushPullEnabled: boolean;
   placementKind: PrimitiveKind | null;
   resizeConstrained: boolean;
   /** The Exact Spacing panel's "stays fixed" object id, when exactly two
@@ -22,6 +24,8 @@ interface Props {
   wireframe: WireframeMode;
   /** Smart Guides on/off — snapping while dragging. */
   snapEnabled: boolean;
+  /** Quantize body dragging to the visible millimetre grid. */
+  gridSnapEnabled: boolean;
   displayUnit: DisplayUnit;
   decimalPlaces: number;
   onSelect: (id: string | null, additive: boolean) => void;
@@ -57,7 +61,7 @@ interface Props {
 }
 
 export function Viewport(props: Props) {
-  const { parts, nodes, selectedIds, cameraMode, toolMode, resizeConstrained, wireframe, snapEnabled } = props;
+  const { parts, nodes, selectedIds, cameraMode, toolMode, resizeConstrained, wireframe, snapEnabled, gridSnapEnabled } = props;
 
   const hostRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<Scene | null>(null);
@@ -90,11 +94,13 @@ export function Viewport(props: Props) {
     scene.setPlacements(latest.current.nodes, latest.current.selectedIds);
     scene.setCameraMode(latest.current.cameraMode);
     scene.setToolMode(latest.current.toolMode);
+    scene.setFacePushPullEnabled(latest.current.facePushPullEnabled);
     scene.setPlacementPreview(latest.current.placementKind);
     scene.setResizeConstrained(latest.current.resizeConstrained);
     scene.setAlignFixedId(latest.current.alignFixedId);
     scene.setWireframe(latest.current.wireframe);
     scene.setSnapEnabled(latest.current.snapEnabled);
+    scene.setGridSnapEnabled(latest.current.gridSnapEnabled);
     scene.setMeasurementFormat(latest.current.displayUnit, latest.current.decimalPlaces);
 
     sceneRef.current = scene;
@@ -127,6 +133,10 @@ export function Viewport(props: Props) {
   }, [toolMode]);
 
   useEffect(() => {
+    sceneRef.current?.setFacePushPullEnabled(props.facePushPullEnabled);
+  }, [props.facePushPullEnabled]);
+
+  useEffect(() => {
     sceneRef.current?.setPlacementPreview(props.placementKind);
   }, [props.placementKind]);
 
@@ -145,6 +155,10 @@ export function Viewport(props: Props) {
   useEffect(() => {
     sceneRef.current?.setSnapEnabled(snapEnabled);
   }, [snapEnabled]);
+
+  useEffect(() => {
+    sceneRef.current?.setGridSnapEnabled(gridSnapEnabled);
+  }, [gridSnapEnabled]);
 
   useEffect(() => {
     sceneRef.current?.setMeasurementFormat(props.displayUnit, props.decimalPlaces);

@@ -438,16 +438,16 @@ function afterBatchedMutation() {
  * Applies a parameter edit, honouring the couplings a primitive needs.
  * Only the triangle has any: in Angles mode its three corners must sum to 180.
  */
-const METRIC_PRESETS: Record<number, { pitch: number; headSize: number; headHeight: number; nutWidth: number; nutHeight: number }> = {
-  3: { pitch: 0.5, headSize: 5.5, headHeight: 2.0, nutWidth: 5.5, nutHeight: 2.4 },
-  4: { pitch: 0.7, headSize: 7.0, headHeight: 2.8, nutWidth: 7.0, nutHeight: 3.2 },
-  5: { pitch: 0.8, headSize: 8.0, headHeight: 3.5, nutWidth: 8.0, nutHeight: 4.7 },
-  6: { pitch: 1.0, headSize: 10.0, headHeight: 4.0, nutWidth: 10.0, nutHeight: 5.2 },
-  8: { pitch: 1.25, headSize: 13.0, headHeight: 5.5, nutWidth: 13.0, nutHeight: 6.8 },
-  10: { pitch: 1.5, headSize: 16.0, headHeight: 6.5, nutWidth: 16.0, nutHeight: 8.4 },
-  12: { pitch: 1.75, headSize: 18.0, headHeight: 7.5, nutWidth: 18.0, nutHeight: 10.8 },
-  16: { pitch: 2.0, headSize: 24.0, headHeight: 10.0, nutWidth: 24.0, nutHeight: 14.8 },
-  20: { pitch: 2.5, headSize: 30.0, headHeight: 12.5, nutWidth: 30.0, nutHeight: 18.0 },
+const METRIC_PRESETS: Record<number, { pitch: number; headSize: number; headHeight: number; socketSize: number; socketDepth: number; nutWidth: number; nutHeight: number }> = {
+  3: { pitch: 0.5, headSize: 5.5, headHeight: 2.0, socketSize: 2.5, socketDepth: 1.3, nutWidth: 5.5, nutHeight: 2.4 },
+  4: { pitch: 0.7, headSize: 7.0, headHeight: 2.8, socketSize: 3, socketDepth: 2, nutWidth: 7.0, nutHeight: 3.2 },
+  5: { pitch: 0.8, headSize: 8.0, headHeight: 3.5, socketSize: 4, socketDepth: 2.5, nutWidth: 8.0, nutHeight: 4.7 },
+  6: { pitch: 1.0, headSize: 10.0, headHeight: 4.0, socketSize: 5, socketDepth: 3, nutWidth: 10.0, nutHeight: 5.2 },
+  8: { pitch: 1.25, headSize: 13.0, headHeight: 5.5, socketSize: 6, socketDepth: 4, nutWidth: 13.0, nutHeight: 6.8 },
+  10: { pitch: 1.5, headSize: 16.0, headHeight: 6.5, socketSize: 8, socketDepth: 5, nutWidth: 16.0, nutHeight: 8.4 },
+  12: { pitch: 1.75, headSize: 18.0, headHeight: 7.5, socketSize: 10, socketDepth: 6, nutWidth: 18.0, nutHeight: 10.8 },
+  16: { pitch: 2.0, headSize: 24.0, headHeight: 10.0, socketSize: 14, socketDepth: 8, nutWidth: 24.0, nutHeight: 14.8 },
+  20: { pitch: 2.5, headSize: 30.0, headHeight: 12.5, socketSize: 17, socketDepth: 10, nutWidth: 30.0, nutHeight: 18.0 },
 };
 
 /** Remembers customized parameters (e.g. corner radius, dimensions) across placements in a session. */
@@ -468,6 +468,8 @@ function nextParams(o: ObjectNode, key: string, value: number): Record<string, n
         pitch: p.pitch,
         headSize: p.headSize,
         headHeight: p.headHeight,
+        socketSize: p.socketSize,
+        socketDepth: p.socketDepth,
       };
     }
     return { ...o.params, preset: value };
@@ -602,6 +604,7 @@ interface DocState {
   select: (id: string | null, additive?: boolean) => void;
   selectMany: (ids: string[], additive?: boolean) => void;
   setParam: (id: string, key: string, value: number) => void;
+  resetParams: (id: string) => void;
   setText: (id: string, text: string) => void;
   setFontName: (id: string, fontName: string) => void;
   setTransform: (id: string, patch: { position?: Vec3; rotation?: Vec3; scale?: Vec3 }) => void;
@@ -965,6 +968,20 @@ export const useDoc = create<DocState>()(
           }),
         }));
         afterBatchedMutation();
+      },
+
+      resetParams: (id) => {
+        set((s) => ({
+          nodes: updateNode(s.nodes, id, (n) => {
+            if (n.type === "edit" && n.base.type === "object") {
+              delete stickyParams[n.base.kind];
+              return { ...n, base: { ...n.base, params: { ...PRIMITIVES[n.base.kind].defaults } } };
+            }
+            if (n.type !== "object") return n;
+            delete stickyParams[n.kind];
+            return { ...n, params: { ...PRIMITIVES[n.kind].defaults } };
+          }),
+        }));
       },
 
       setText: (id, text) => {

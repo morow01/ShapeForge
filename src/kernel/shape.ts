@@ -1165,9 +1165,69 @@ function findFace(solid: Shape3D, point: Vec3, normal: Vec3, tolerance = 0.05): 
  * container wants: a 40mm box with a 2mm wall is still 40mm on the outside.
  */
 function shellSolid(solid: Shape3D, op: ShellOp): Shape3D {
+  // Face anchors come back from the displayed Float32 mesh, while OCCT owns
+  // the original double-precision surface. Exact containsPoint matching can
+  // therefore miss the visibly selected face and make an ordinary hollow
+  // look like a thickness failure. Use the same small modelling tolerance as
+  // edge edits; an interior face point remains far from neighbouring faces.
   const selectFaces = (faces: import("replicad").FaceFinder) =>
-    faces.either(op.points.map((point) => (finder: import("replicad").FaceFinder) => finder.containsPoint(point)));
+    faces.either(op.points.map((point) => (finder: import("replicad").FaceFinder) =>
+      finder.withinDistance(0.02, point),
+    ));
   return solid.shell(op.thickness, selectFaces) as Shape3D;
+}
+
+/** Reliable fallback for a heavily edited Box when OCCT cannot offset its
+ * accumulated topology. The cavity follows the edited solid's current bounds,
+ * leaves `thickness` on five sides, and crosses only the selected opening
+ * side. This intentionally remains an OCCT solid so later face edits continue
+ * to work. */
+function hollowEditedBox(solid: Shape3D, op: ShellOp): Shape3D | null {
+  const [min, max] = solid.boundingBox.bounds;
+  const t = Math.max(0.01, op.thickness);
+  const innerMin: Vec3 = [min[0] + t, min[1] + t, min[2] + t];
+  const innerMax: Vec3 = [max[0] - t, max[1] - t, max[2] - t];
+  if ([0, 1, 2].some((axis) => innerMax[axis] <= innerMin[axis] + 0.01)) return null;
+
+  // The stored point is inside the chosen face. Its nearest bounding plane
+  // identifies which side should be open without relying on a stale face id.
+  const point = op.points[0];
+  let openingAxis = 0;
+  let openingAtMax = false;
+  if (op.normal) {
+    openingAxis = Math.abs(op.normal[1]) > Math.abs(op.normal[openingAxis]) ? 1 : openingAxis;
+    openingAxis = Math.abs(op.normal[2]) > Math.abs(op.normal[openingAxis]) ? 2 : openingAxis;
+    openingAtMax = op.normal[openingAxis] >= 0;
+  } else {
+    let nearest = Infinity;
+    for (let axis = 0; axis < 3; axis++) {
+      const toMin = Math.abs(point[axis] - min[axis]);
+      const toMax = Math.abs(point[axis] - max[axis]);
+      if (toMin < nearest) { nearest = toMin; openingAxis = axis; openingAtMax = false; }
+      if (toMax < nearest) { nearest = toMax; openingAxis = axis; openingAtMax = true; }
+    }
+  }
+
+  const overlap = Math.max(0.1, t * 0.1);
+  if (openingAtMax) innerMax[openingAxis] = max[openingAxis] + overlap;
+  else innerMin[openingAxis] = min[openingAxis] - overlap;
+  const size: Vec3 = [
+    innerMax[0] - innerMin[0],
+    innerMax[1] - innerMin[1],
+    innerMax[2] - innerMin[2],
+  ];
+  const cutter = makeBaseBox(size[0], size[1], size[2]).translate([
+    (innerMin[0] + innerMax[0]) / 2,
+    (innerMin[1] + innerMax[1]) / 2,
+    innerMin[2],
+  ]) as Shape3D;
+  return solid.cut(cutter) as Shape3D;
+}
+
+function isBoxBased(spec: NodeSpec): boolean {
+  if (spec.type === "object") return spec.kind === "box";
+  if (spec.type === "edit") return isBoxBased(spec.base);
+  return false;
 }
 
 /**
@@ -1591,15 +1651,26 @@ async function replayEdit(
         onError?.(spec.id, "That hollow has no opening face left after rebuilding — try redoing it.");
         continue;
       }
-      try {
-        const candidate = shellSolid(solid, op);
-        if (!isOcctValid(candidate) || tessellatesEmpty(candidate) || !isWatertight(candidate)) {
-          onError?.(spec.id, "That wall is too thick for this shape; the previous shape was kept.");
-        } else {
-          solid = candidate;
-        }
-      } catch {
-        onError?.(spec.id, "That wall is too thick for this shape; the previous shape was kept.");
+      let hollow: Shape3D | null = null;
+      for (let attempt = 0; attempt < 3 && !hollow; attempt++) {
+        try {
+          const candidate = shellSolid(solid, op);
+          if (isOcctValid(candidate) && !tessellatesEmpty(candidate) && isWatertight(candidate)) hollow = candidate;
+        } catch { /* OCCT occasionally needs a clean retry for offset surfaces. */ }
+      }
+      if (!hollow && isBoxBased(spec.base)) {
+        try {
+          const candidate = hollowEditedBox(solid, op);
+          if (candidate && isOcctValid(candidate) && !tessellatesEmpty(candidate) && isWatertight(candidate)) hollow = candidate;
+        } catch { /* Keep the original shape if even the bounded cavity fails. */ }
+      }
+      if (hollow) {
+        solid = hollow;
+      } else {
+        onError?.(
+          spec.id,
+          "That wall cannot fit inside this shape. Try a smaller thickness; tightly rounded corners may need a thinner wall. The previous shape was kept.",
+        );
       }
       continue;
     }

@@ -5,9 +5,13 @@ interface Props {
   unit: DisplayUnit;
   decimals: number;
   appearance: AppearancePreference;
+  snapToGrid: boolean;
+  snapToObjects: boolean;
   onUnit: (unit: DisplayUnit) => void;
   onDecimals: (decimals: number) => void;
   onAppearance: (appearance: AppearancePreference) => void;
+  onSnapToGrid: (enabled: boolean) => void;
+  onSnapToObjects: (enabled: boolean) => void;
   onClose: () => void;
 }
 
@@ -16,9 +20,13 @@ export function SettingsModal({
   unit,
   decimals,
   appearance,
+  snapToGrid,
+  snapToObjects,
   onUnit,
   onDecimals,
   onAppearance,
+  onSnapToGrid,
+  onSnapToObjects,
   onClose,
 }: Props) {
   if (!open) return null;
@@ -55,6 +63,20 @@ export function SettingsModal({
               <option value="light">Light</option>
               <option value="dark" disabled>Dark (coming soon)</option>
               <option value="system" disabled>System (coming soon)</option>
+            </select>
+          </label>
+          <label className="settings-row">
+            <span><strong>Snap to grid</strong><small>Moves objects in 1 mm steps while dragging</small></span>
+            <select value={snapToGrid ? "on" : "off"} onChange={(e) => onSnapToGrid(e.target.value === "on")}>
+              <option value="on">On</option>
+              <option value="off">Off</option>
+            </select>
+          </label>
+          <label className="settings-row">
+            <span><strong>Snap to objects</strong><small>Aligns nearby object edges and shows Smart Guides</small></span>
+            <select value={snapToObjects ? "on" : "off"} onChange={(e) => onSnapToObjects(e.target.value === "on")}>
+              <option value="on">On</option>
+              <option value="off">Off</option>
             </select>
           </label>
         </div>

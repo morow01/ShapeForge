@@ -167,6 +167,22 @@ function filletLimit(
     const limit = Math.max(0, Math.min(height / 2, (outerWidth - holeWidth) / 2) - 0.01);
     return Math.max(0, Math.floor((limit + 1e-9) / step) * step);
   }
+  if (node.kind === "threadedRod" && (fieldKey === "topFillet" || fieldKey === "bottomFillet")) {
+    const height = Math.max(0, node.params.headHeight ?? 5.5);
+    const headRadius = Math.max(0, (node.params.headSize ?? 13) / 2);
+    const shaftRadius = Math.max(0, (node.params.diameter ?? 8) / 2);
+    const headType = Math.round(node.params.headType ?? 1);
+    const styleFraction = headType === 2 ? 0.25 : 0.15;
+    const other = fieldKey === "topFillet"
+      ? Math.max(0, node.params.bottomFillet ?? 0)
+      : Math.max(0, node.params.topFillet ?? 0);
+    const limit = Math.max(0, Math.min(
+      height * styleFraction,
+      headRadius - shaftRadius,
+      height - other,
+    ) - 0.01);
+    return Math.max(0, Math.floor((limit + 1e-9) / step) * step);
+  }
   if (node.kind === "paraboloid" && fieldKey === "bottomFillet") {
     const limit = Math.min(
       Math.max(0, node.params.radius ?? 10),
@@ -244,6 +260,7 @@ interface Props {
   onMoveSelectionAxis?: (axis: 0 | 1 | 2, mm: number) => void;
   error: string | null;
   onParam: (key: string, value: number) => void;
+  onResetParams: () => void;
   onTransform: (patch: { position?: Vec3; rotation?: Vec3; scale?: Vec3 }) => void;
   resizeConstrained: boolean;
   onResizeConstrained: (value: boolean) => void;
@@ -299,6 +316,7 @@ export function Inspector({
   onMoveSelectionAxis,
   error,
   onParam,
+  onResetParams,
   onTransform,
   resizeConstrained,
   onResizeConstrained,
@@ -517,6 +535,7 @@ export function Inspector({
               {node.base.type === "object" && (
                 <ObjectParams
                   node={node.base}
+                  onResetParams={onResetParams}
                   resizeConstrained={resizeConstrained}
                   onResizeConstrained={onResizeConstrained}
                   onParam={onParam}
@@ -537,6 +556,7 @@ export function Inspector({
           ) : (
             <ObjectParams
               node={node}
+              onResetParams={onResetParams}
               resizeConstrained={resizeConstrained}
               onResizeConstrained={onResizeConstrained}
               onParam={onParam}
@@ -939,6 +959,7 @@ const DIM_AXES: Partial<Record<PrimitiveKind, Record<string, number[]>>> = {
 
 function ObjectParams({
   node,
+  onResetParams,
   resizeConstrained = false,
   onResizeConstrained,
   onParam,
@@ -953,6 +974,7 @@ function ObjectParams({
   decimalPlaces,
 }: {
   node: Extract<SceneNode, { type: "object" }>;
+  onResetParams: () => void;
   resizeConstrained?: boolean;
   onResizeConstrained: (value: boolean) => void;
   onParam: (key: string, value: number) => void;
@@ -1075,14 +1097,25 @@ function ObjectParams({
       )}
       <div className="h2-row">
         <h2>Dimensions</h2>
-        <button
-          type="button"
-          className={`lock-icon-btn size-lock ${resizeConstrained ? "locked" : ""}`}
-          onClick={() => onResizeConstrained(!resizeConstrained)}
-          title={resizeConstrained ? "Proportions locked — click to resize each dimension independently" : "Click to lock proportions"}
-        >
-          {resizeConstrained ? "🔒" : "🔓"}
-        </button>
+        <div className="h2-actions">
+          <button
+            type="button"
+            className="lock-icon-btn reset-shape-btn"
+            onClick={onResetParams}
+            title="Reset shape settings"
+            aria-label="Reset shape settings"
+          >
+            ↺
+          </button>
+          <button
+            type="button"
+            className={`lock-icon-btn size-lock ${resizeConstrained ? "locked" : ""}`}
+            onClick={() => onResizeConstrained(!resizeConstrained)}
+            title={resizeConstrained ? "Proportions locked — click to resize each dimension independently" : "Click to lock proportions"}
+          >
+            {resizeConstrained ? "🔒" : "🔓"}
+          </button>
+        </div>
       </div>
       {groupDimensionFields(fields.map((f) => {
         let base = node.params[f.key] ?? 0;
@@ -1409,6 +1442,103 @@ function Field({
     "outerFillet", "innerFillet", "cornerRadius", "internalFillet",
     "outerTopFillet", "outerBottomFillet", "innerTopFillet", "innerBottomFillet",
   ].includes(field.key);
+  if (field.key === "chamfer" && field.options?.length === 2) {
+    return (
+      <div className="field">
+        <span className="field-label">{field.label}</span>
+        <div className="binary-choice icon-choice" role="group" aria-label={field.label}>
+          {field.options.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={value === option.value ? "on" : ""}
+              aria-label={option.label}
+              title={option.label}
+              aria-pressed={value === option.value}
+              onClick={() => onChange(option.value)}
+            >
+              <svg viewBox="0 0 44 24" aria-hidden="true">
+                {option.value === 0
+                  ? <path d="M9 4h26v16H9z" />
+                  : <path d="M9 4h18l8 8-8 8H9z" />}
+              </svg>
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+  if (field.key === "density" && field.options?.length === 3) {
+    return (
+      <div className="field">
+        <span className="field-label">{field.label}</span>
+        <div className="binary-choice three icon-choice" role="group" aria-label={field.label}>
+          {field.options.map((option) => {
+            const spokes = option.value === 0 ? 6 : option.value === 1 ? 10 : 16;
+            return (
+              <button
+                key={option.value}
+                type="button"
+                className={value === option.value ? "on" : ""}
+                aria-label={option.label}
+                title={option.label}
+                aria-pressed={value === option.value}
+                onClick={() => onChange(option.value)}
+              >
+                <svg viewBox="0 0 32 32" aria-hidden="true">
+                  <polygon
+                    points={Array.from({ length: spokes }, (_, index) => {
+                      const angle = index * 2 * Math.PI / spokes - Math.PI / 2;
+                      return `${16 + 11 * Math.cos(angle)},${16 + 11 * Math.sin(angle)}`;
+                    }).join(" ")}
+                  />
+                </svg>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+  const isNutShape = field.key === "shape" && field.label === "Nut Shape" && field.options?.length === 3;
+  if (isNutShape) {
+    return (
+      <div className="field">
+        <span className="field-label">{field.label}</span>
+        <div className="binary-choice three icon-choice" role="group" aria-label={field.label}>
+          {field.options!.map((option) => {
+            const sides = option.value === 0 ? 6 : option.value === 1 ? 4 : 18;
+            // A square described by its centre-to-corner radius looks much
+            // smaller than a hexagon using the same radius. Compensate so all
+            // three silhouettes occupy the same visual footprint.
+            const radius = option.value === 1 ? 13.25 : 11;
+            const rotation = option.value === 1 ? Math.PI / 4 : -Math.PI / 2;
+            const points = Array.from({ length: sides }, (_, index) => {
+              const angle = rotation + index * 2 * Math.PI / sides;
+              const r = option.value === 2 && index % 2 ? radius - 2 : radius;
+              return `${16 + r * Math.cos(angle)},${16 + r * Math.sin(angle)}`;
+            }).join(" ");
+            return (
+              <button
+                key={option.value}
+                type="button"
+                className={value === option.value ? "on" : ""}
+                aria-label={option.label}
+                title={option.label}
+                aria-pressed={value === option.value}
+                onClick={() => onChange(option.value)}
+              >
+                <svg viewBox="0 0 32 32" aria-hidden="true">
+                  <polygon points={points} />
+                  <circle cx="16" cy="16" r="4.5" />
+                </svg>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
   if (field.options) {
     if (["filletMode", "sideEdges", "cornerEdges", "surfaceEdges", "edgeSmoothness"].includes(field.key) && field.options.length === 2) {
       return (
@@ -1469,6 +1599,26 @@ function Field({
   const shownMax = isLength ? fromMillimetres(field.max, displayUnit) : field.max;
   const shownStep = isLength ? displayStep(displayUnit, decimalPlaces) : field.step;
   const commit = (shown: number) => onChange(isLength ? toMillimetres(shown, displayUnit) : shown);
+  const formattedValue = isLength ? shownValue.toFixed(decimalPlaces) : String(shownValue);
+  const [draftValue, setDraftValue] = useState(formattedValue);
+  const [editingValue, setEditingValue] = useState(false);
+  useEffect(() => {
+    if (!editingValue) setDraftValue(formattedValue);
+  }, [editingValue, formattedValue]);
+
+  const finishNumericEdit = () => {
+    const parsed = Number(draftValue);
+    if (draftValue.trim() !== "" && Number.isFinite(parsed)) {
+      // A multi-digit value must be treated as one edit. Rebuilding an
+      // expensive threaded primitive after the first digit (typing 15 first
+      // produced a complete 1 mm nut) can leave a long-running, visibly
+      // malformed intermediate result ahead of the intended build.
+      commit(Math.min(shownMax, Math.max(shownMin, parsed)));
+    }
+    else setDraftValue(formattedValue);
+    setEditingValue(false);
+    endHistoryBatch();
+  };
 
   return (
     <div className="field">
@@ -1529,12 +1679,28 @@ function Field({
           min={shownMin}
           max={shownMax}
           step={shownStep}
-          value={isLength ? shownValue.toFixed(decimalPlaces) : shownValue}
+          value={draftValue}
           disabled={disabled}
           title={disabled ? "Constrained by the other 2 locked angles (sum is 180°)" : undefined}
-          onFocus={beginHistoryBatch}
-          onBlur={endHistoryBatch}
-          onChange={(e) => commit(Number(e.target.value))}
+          onFocus={(e) => {
+            beginHistoryBatch();
+            setEditingValue(true);
+            setDraftValue(formattedValue);
+            e.currentTarget.select();
+          }}
+          onBlur={finishNumericEdit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") e.currentTarget.blur();
+            if (e.key === "Escape") {
+              setDraftValue(formattedValue);
+              e.currentTarget.blur();
+            }
+          }}
+          onChange={(e) => {
+            // Keep typing local and commit once on blur/Enter. Range sliders
+            // above still update the shape live while they are dragged.
+            setDraftValue(e.target.value);
+          }}
         />
       </div>
     </div>

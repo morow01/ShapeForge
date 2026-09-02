@@ -691,6 +691,9 @@ export class Scene {
   private resizeDrag: ResizeDrag | null = null;
   private resizeConstrained = true;
   private toolMode: ToolMode = "select";
+  /** The face tool can select faces for several independent operations; only
+   * Push/Pull is allowed to expose or drag the normal-direction arrow. */
+  private facePushPullEnabled = true;
   private raycaster = new THREE.Raycaster();
   private pointer = new THREE.Vector2();
   private downAt: { x: number; y: number } | null = null;
@@ -715,6 +718,8 @@ export class Scene {
   private wireframe: WireframeMode = "off";
   /** Smart Guides. Off means a drag goes exactly where the pointer goes. */
   private snapEnabled = true;
+  /** Independent 1 mm workplane grid snapping. */
+  private gridSnapEnabled = false;
   /** Shape Builder: one view per region of the selection's arrangement, keyed
    *  by cell mask. Empty whenever the tool is not active. */
   private cellViews = new Map<number, { group: THREE.Group; mesh: THREE.Mesh; wire: THREE.LineSegments; kept: boolean }>();
@@ -944,7 +949,9 @@ export class Scene {
     window.addEventListener("beforeunload", this.onBeforeUnload);
 
     this.gizmo = new TransformControls(this.camera, this.renderer.domElement);
-    this.gizmo.setTranslationSnap(1); // 1 mm
+    // Translation snapping follows the user's grid preference. It starts
+    // free and is configured by setGridSnapEnabled after Scene creation.
+    this.gizmo.setTranslationSnap(null);
     this.gizmo.setRotationSnap(15 * DEG);
     this.gizmo.showE = false;
     this.removeNegativeMoveArrowheads();
@@ -2398,7 +2405,7 @@ export class Scene {
     const faceIndex = this.selectedFace?.groupIndex ?? -1;
     const face = faces?.[faceIndex];
     const visible =
-      this.toolMode === "face" && !!view && !!face?.planar && face.pushPullable !== false && this.selectedIds.includes(id ?? "") &&
+      this.toolMode === "face" && this.facePushPullEnabled && !!view && !!face?.planar && face.pushPullable !== false && this.selectedIds.includes(id ?? "") &&
       !this.showResult && view.group.visible;
     this.pushPullHandles.visible = visible;
     if (!visible || !view || !face || !id) {
@@ -2486,7 +2493,9 @@ export class Scene {
     this.onSelectObject?.(partId, false);
     this.restoreSelectedFaceHighlight();
     this.updatePushPullOverlay();
-    const handle = face.planar && face.pushPullable !== false ? this.pushPullHandleMeshes[0] : undefined;
+    const handle = this.facePushPullEnabled && face.planar && face.pushPullable !== false
+      ? this.pushPullHandleMeshes[0]
+      : undefined;
     if (handle) {
       this.showPushPullInputForFace(
         partId,
@@ -3279,8 +3288,14 @@ export class Scene {
    * rebuild from then on reported "could not be found after rebuilding".
    */
   releaseFace() {
+    if (this.pushPullPending) this.commitOrAbandonPushPull(false);
+    else this.pushPullLabelEl.style.display = "none";
+    const held = this.selectedFace ? this.parts.get(this.selectedFace.partId) : undefined;
     this.armedFace = null;
     this.selectedFace = null;
+    if (held) clearHighlights(held.mesh.geometry as THREE.BufferGeometry);
+    this.pushPullHandles.visible = false;
+    this.pushPullHandleHovered = false;
   }
 
   /** Closes the face's typed-distance pill without applying anything, putting
@@ -4136,6 +4151,11 @@ export class Scene {
     if (!v) this.guides.clear();
   }
 
+  setGridSnapEnabled(v: boolean) {
+    this.gridSnapEnabled = v;
+    this.gizmo.setTranslationSnap(v && !this.altDown ? 1 : null);
+  }
+
   setWireframe(v: WireframeMode | boolean) {
     const mode: WireframeMode = typeof v === "boolean" ? (v ? "edges" : "off") : v;
     if (this.wireframe === mode) return;
@@ -4382,6 +4402,16 @@ export class Scene {
     this.updateMoveReadout();
   }
 
+  setFacePushPullEnabled(enabled: boolean) {
+    this.facePushPullEnabled = enabled;
+    if (!enabled) {
+      if (this.pushPullPending) this.commitOrAbandonPushPull(false);
+      else this.pushPullLabelEl.style.display = "none";
+    }
+    this.pushPullHandleHovered = false;
+    this.updatePushPullOverlay();
+  }
+
   /** The gizmo drives one node at a time — the most recently selected. */
   private gizmoTarget(): string | null {
     return this.selectedIds.length ? this.selectedIds[this.selectedIds.length - 1] : null;
@@ -4553,6 +4583,9 @@ export class Scene {
 
   private onModifierChange = (e: KeyboardEvent) => {
     this.altDown = e.altKey;
+    // TransformControls performs its own axis-handle quantization, so its
+    // snap value must also follow the temporary Alt bypass.
+    this.gizmo.setTranslationSnap(this.gridSnapEnabled && !this.altDown ? 1 : null);
     if (this.altDown) this.guides.clear();
     if (this.toolMode === "build") this.updateCellCursor(e.altKey);
   };
@@ -5115,6 +5148,15 @@ export class Scene {
       const dist = Math.hypot(dx, dy);
       dx = Math.cos(angle) * dist;
       dy = Math.sin(angle) * dist;
+    }
+
+    // Grid and object snapping are independent. Grid snapping quantizes the
+    // lead object's origin first; Smart Guides may then align it to a nearby
+    // object's edge. Alt bypasses both for one precise free drag.
+    const leadForGrid = g.items.find((item) => item.id === g.id);
+    if (this.gridSnapEnabled && !this.altDown && leadForGrid) {
+      dx = Math.round(leadForGrid.startGroupPos.x + dx) - leadForGrid.startGroupPos.x;
+      dy = Math.round(leadForGrid.startGroupPos.y + dy) - leadForGrid.startGroupPos.y;
     }
 
     // Snap is resolved once, on the object under the cursor, and the answer

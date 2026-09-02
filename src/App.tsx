@@ -252,6 +252,7 @@ const canRefineExportFallback = (n: SceneNode): boolean =>
 const EXPORT_QUALITY_KEY = "cad.exportQuality";
 const EXPORT_FORMAT_KEY = "cad.exportFormat";
 const SNAP_KEY = "cad.smartGuides";
+const GRID_SNAP_KEY = "cad.gridSnap";
 const OBJECTS_PANEL_KEY = "cad.objectsPanelOpen";
 const VIEW_STYLE_KEY = "cad.viewStyle";
 const RESIZE_CONSTRAINED_KEY = "cad.resizeConstrained";
@@ -314,6 +315,7 @@ export function App() {
     select,
     selectMany,
     setParam,
+    resetParams,
     setText,
     setFontName,
     setTransform,
@@ -431,9 +433,9 @@ export function App() {
    * ordering irrelevant.
    */
   const lastFace = useRef<{ id: string; point: Vec3; normal: Vec3; size: number; edges: Vec3[] } | null>(null);
-  /** Which of the three things a selected face can do. One field and one
-   *  button serve all of them, so the bar stays the width of the edge bar
-   *  rather than growing a row of controls. */
+  /** The face operation is selected directly from the tool rail. The bottom
+   *  bar only configures and applies that one operation; it must never act as
+   *  a second, conflicting tool picker. */
   const [faceOp, setFaceOp] = useState<"push" | "wall" | "resize" | "offset" | "fillet" | "chamfer">("push");
   /** Offset & extrude is the one face operation that needs two numbers: how
    *  far in from the edge, and how far out from there. */
@@ -518,6 +520,9 @@ export function App() {
   // a working preference, not a per-session one.
   const [snapEnabled, setSnapEnabled] = useState(
     () => localStorage.getItem(SNAP_KEY) !== "off",
+  );
+  const [gridSnapEnabled, setGridSnapEnabled] = useState(
+    () => localStorage.getItem(GRID_SNAP_KEY) === "on",
   );
   // The Objects panel is not always wanted — a single object needs it least
   // of all — so it is a toggle, remembered the same way Snap is.
@@ -1001,6 +1006,14 @@ export function App() {
       // Private mode / blocked storage: the choice just won't be remembered.
     }
   }, [snapEnabled]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(GRID_SNAP_KEY, gridSnapEnabled ? "on" : "off");
+    } catch {
+      // Private mode / blocked storage: the choice just won't be remembered.
+    }
+  }, [gridSnapEnabled]);
 
   useEffect(() => {
     try {
@@ -1967,6 +1980,7 @@ export function App() {
       } else if (!mod && e.key.toLowerCase() === "v") {
         setToolMode("select");
       } else if (!mod && e.key.toLowerCase() === "f") {
+        setFaceOp("push");
         setToolMode("face");
       } else if (!mod && e.key.toLowerCase() === "e") {
         setToolMode("edge");
@@ -2218,11 +2232,11 @@ export function App() {
             onClick={() => setSnapEnabled((v) => !v)}
             title={
               snapEnabled
-                ? "Smart Guides on — objects snap to each other while dragging (S). Hold Alt to bypass for one drag."
-                : "Smart Guides off — drags go exactly where the pointer goes (S)"
+                ? "Snap to objects on — Smart Guides appear while dragging (S). Hold Alt to bypass for one drag."
+                : "Snap to objects off (S)"
             }
             aria-pressed={snapEnabled}
-            aria-label="Toggle Smart Guides Snapping"
+            aria-label="Toggle Snap to Objects"
           >
             <MagnetIcon className="topbar-icon snap-icon" />
           </button>
@@ -2345,21 +2359,25 @@ export function App() {
           title="Select and resize (V)"
           aria-label="Select tool"
         ><span className="tool-symbol cursor-symbol">➤</span></button>
-        <button
-          className={toolMode === "face" ? "active" : ""}
-          onClick={() => setToolMode("face")}
-          title="Select a face to push/pull (F)"
-          aria-label="Face tool"
-        >
-          {/* A cube with its top face picked out — the one face lit against
-              two plain ones is what distinguishes "edit a face" from the
-              shape library's solid Box icon. */}
-          <svg className="tool-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-            <path d="M12 3 20 7.4 12 11.8 4 7.4Z" fill="currentColor" />
-            <path d="M4 8.9 11.4 13v7.9L4 16.8Z" fill="currentColor" opacity=".3" />
-            <path d="M20 8.9 12.6 13v7.9L20 16.8Z" fill="currentColor" opacity=".45" />
-          </svg>
-        </button>
+        {([
+          ["push", "↕", "Push/Pull", "Select a face to push or pull (F)"],
+          ["wall", "▣", "Wall", "Hollow a shape through the selected face"],
+          ["resize", "⤢", "Resize Face", "Resize the selected face"],
+          ["offset", "▤", "Offset & Extrude", "Offset and extrude the selected face"],
+          ["fillet", "◜", "Fillet Face Border", "Round the selected face border"],
+          ["chamfer", "◩", "Chamfer Face Border", "Bevel the selected face border"],
+        ] as const).map(([operation, symbol, label, title]) => (
+          <button
+            key={operation}
+            className={toolMode === "face" && faceOp === operation ? "active" : ""}
+            onClick={() => { setFaceOp(operation); setToolMode("face"); }}
+            title={title}
+            aria-label={label}
+          >
+            <span className="tool-symbol face-operation-symbol" aria-hidden="true">{symbol}</span>
+          </button>
+        ))}
+        <span className="tool-rail-sep" />
         <button
           className={toolMode === "edge" ? "active" : ""}
           onClick={() => { setToolMode("edge"); setEdgeSelection(null); }}
@@ -2555,11 +2573,13 @@ export function App() {
           selectedIds={selectedIds}
           cameraMode={cameraMode}
           toolMode={toolMode}
+          facePushPullEnabled={faceOp === "push"}
           placementKind={pendingPrimitive}
           resizeConstrained={resizeConstrained}
           alignFixedId={spacingSelection ? spacingSelection.fixedNode.id : null}
           wireframe={wireframe}
           snapEnabled={snapEnabled}
+          gridSnapEnabled={gridSnapEnabled}
           displayUnit={displayUnit}
           decimalPlaces={decimalPlaces}
           onSceneReady={(scene) => { sceneRef.current = scene; }}
@@ -2589,15 +2609,15 @@ export function App() {
         )}
         {toolMode === "face" && (
           <div className="edge-bar">
-            <strong>{faceSelection ? "Face selected" : "Select a face"}</strong>
-            <select value={faceOp} onChange={(e) => setFaceOp(e.target.value as typeof faceOp)}>
-              <option value="push">Push / pull</option>
-              <option value="wall">Wall</option>
-              <option value="resize">Resize face</option>
-              <option value="offset">Offset &amp; extrude</option>
-              <option value="fillet">Fillet face border</option>
-              <option value="chamfer">Chamfer face border</option>
-            </select>
+            <strong>
+              {faceOp === "push" ? "Push/Pull"
+                : faceOp === "wall" ? "Wall"
+                : faceOp === "resize" ? "Resize Face"
+                : faceOp === "offset" ? "Offset & Extrude"
+                : faceOp === "fillet" ? "Fillet Face Border"
+                : "Chamfer Face Border"}
+            </strong>
+            <span className="face-selection-state">{faceSelection ? "Face selected" : "Select a face"}</span>
             <label>
               {faceOp === "wall" ? "Thickness"
                 : faceOp === "resize" ? "Inset / outset"
@@ -2718,6 +2738,7 @@ export function App() {
                     kind: "shell",
                     thickness: Math.max(0.1, faceValue),
                     points: [target.point],
+                    normal: target.normal,
                   });
                   releaseSelection();
                 } else if (faceOp === "offset") {
@@ -2856,7 +2877,13 @@ export function App() {
             ? faceOp === "wall"
               ? "Select the face to leave open, set a thickness, then Hollow · Esc Select · Right-drag orbit"
               : faceOp === "resize"
-                ? "Select a flat face, then use a positive value to grow its outline or a negative value to inset it · Esc Select · Right-drag orbit"
+              ? "Select a flat face, then use a positive value to grow its outline or a negative value to inset it · Esc Select · Right-drag orbit"
+              : faceOp === "offset"
+                ? "Select a flat face, set its inset and extrusion height, then Apply · Esc Select · Right-drag orbit"
+              : faceOp === "fillet"
+                ? "Select a face, set the border radius, then Apply · Esc Select · Right-drag orbit"
+              : faceOp === "chamfer"
+                ? "Select a face, set the border bevel size, then Apply · Esc Select · Right-drag orbit"
                 : "Click a flat face, then drag its arrow or type a distance to push/pull · Esc Select · Right-drag orbit"
             : toolMode === "edge"
             ? "Click edges to add or remove them · Choose Fillet or Chamfer, then Apply · Esc Select · Right-drag orbit"
@@ -2977,6 +3004,7 @@ export function App() {
               onMoveSelectionAxis={moveSelectionAxis}
               error={invalid[selected.id] ?? null}
               onParam={(k, v) => setParam(selected.id, k, v)}
+              onResetParams={() => resetParams(selected.id)}
               onTransform={(patch) => setTransform(selected.id, patch)}
               resizeConstrained={resizeConstrained}
               onResizeConstrained={setResizeConstrained}
@@ -3164,9 +3192,13 @@ export function App() {
         unit={displayUnit}
         decimals={decimalPlaces}
         appearance={appearance}
+        snapToGrid={gridSnapEnabled}
+        snapToObjects={snapEnabled}
         onUnit={setDisplayUnit}
         onDecimals={setDecimalPlaces}
         onAppearance={setAppearance}
+        onSnapToGrid={setGridSnapEnabled}
+        onSnapToObjects={setSnapEnabled}
         onClose={() => setSettingsOpen(false)}
       />
 
