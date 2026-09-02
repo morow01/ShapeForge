@@ -5,7 +5,6 @@ import {
   basicFaceExtrusion,
   Vector,
   draw,
-  drawCircle,
   importSTLAsMesh,
   measureVolume,
   MeshShape,
@@ -91,7 +90,9 @@ function roundPolygon2D(
     }
 
     const halfAngle = angle / 2;
-    const maxD = Math.min(len1, len2) * 0.48;
+    // Stop just short of the neighbouring vertex. The former 48% guard left
+    // a visible straight spot when a corner slider reached its maximum.
+    const maxD = Math.min(len1, len2) * 0.499;
     const desiredD = radius / Math.tan(halfAngle);
     const d = Math.min(desiredD, maxD);
     const rEff = d * Math.tan(halfAngle);
@@ -419,13 +420,36 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
     case "torus": {
       const R = Math.max(p.radius, 1);
       const r = Math.min(Math.max(p.tubeRadius, 0.2), R - 0.05);
-      // Revolve a circular profile centered at (R, 0) in the XZ plane about Z,
-      // then lift by `r` so its base rests flat on local Z = 0.
-      s = drawCircle(r)
-        .translate([R, 0])
-        .sketchOnPlane("XZ")
-        .revolve([0, 0, 1]) as Shape3D;
-      s = s.translate([0, 0, r]);
+      const ringSteps = Math.max(8, Math.min(64, Math.round(p.ringSteps ?? 48)));
+      const tubeSteps = Math.max(8, Math.min(64, Math.round(p.tubeSteps ?? 32)));
+      const vertices: number[] = [];
+      const triangles: number[] = [];
+      for (let ring = 0; ring < ringSteps; ring++) {
+        const u = ring * 2 * Math.PI / ringSteps;
+        for (let tube = 0; tube < tubeSteps; tube++) {
+          const v = tube * 2 * Math.PI / tubeSteps;
+          const radial = R + r * Math.cos(v);
+          vertices.push(radial * Math.cos(u), radial * Math.sin(u), r + r * Math.sin(v));
+        }
+      }
+      for (let ring = 0; ring < ringSteps; ring++) {
+        const nextRing = (ring + 1) % ringSteps;
+        for (let tube = 0; tube < tubeSteps; tube++) {
+          const nextTube = (tube + 1) % tubeSteps;
+          const a = ring * tubeSteps + tube;
+          const b = nextRing * tubeSteps + tube;
+          const c = nextRing * tubeSteps + nextTube;
+          const d = ring * tubeSteps + nextTube;
+          triangles.push(a, b, c, a, c, d);
+        }
+      }
+      const manifold = getManifold();
+      const torusMesh = new manifold.Mesh({
+        vertProperties: new Float32Array(vertices),
+        triVerts: new Uint32Array(triangles),
+        numProp: 3,
+      });
+      s = new MeshShape(new manifold.Manifold(torusMesh));
       break;
     }
     case "pyramid": {
@@ -478,17 +502,85 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
       const r = Math.max(p.radius ?? 10, 0.1);
       const h = Math.max(p.height ?? 20, 0.1);
       const fillet = Math.max(p.fillet ?? 0, 0);
+      // The lofted rim can safely shrink all the way to the centre. Limiting
+      // this to the polygon inradius left an unavoidable flat cap, especially
+      // visible on polygons with fewer sides.
+      const rimLimit = Math.max(0, Math.min(r, h));
+      let topCorner = Math.min(Math.max(p.topFillet ?? 0, 0), rimLimit);
+      let bottomCorner = Math.min(Math.max(p.bottomFillet ?? 0, 0), rimLimit);
+      if (topCorner + bottomCorner > h) {
+        const scale = h / (topCorner + bottomCorner);
+        topCorner *= scale;
+        bottomCorner *= scale;
+      }
       const basePts: [number, number][] = [];
       for (let i = 0; i < sides; i++) {
         const a = (i * 2 * Math.PI) / sides;
         basePts.push([r * Math.cos(a), r * Math.sin(a)]);
       }
-      const pts = roundPolygon2D(basePts, fillet);
+      const xs = basePts.map(([x]) => x);
+      const ys = basePts.map(([, y]) => y);
+      fixedXYCentre = [
+        (Math.min(...xs) + Math.max(...xs)) / 2,
+        (Math.min(...ys) + Math.max(...ys)) / 2,
+      ];
+      const cornerSteps = Math.max(1, Math.min(64, Math.round(p.cornerSteps ?? 24)));
+      const pts = roundPolygon2D(basePts, fillet, cornerSteps);
       let pen = draw(pts[0]);
       for (let i = 1; i < pts.length; i++) {
         pen = pen.lineTo(pts[i]);
       }
-      s = pen.close().sketchOnPlane("XY").extrude(h) as Shape3D;
+      if (topCorner <= 0 && bottomCorner <= 0) {
+        s = pen.close().sketchOnPlane("XY").extrude(h) as Shape3D;
+      } else {
+        // Applying a BRep fillet to this rim treats every small segment of a
+        // rounded side corner as a separate edge. Their fillet patches can
+        // cross one another and produce the pinched/star-shaped solid. Build
+        // the end rounds as matching profile rings instead, so Side, Top and
+        // Bottom radius remain compatible.
+        const axialSteps = Math.max(4, Math.min(24, cornerSteps));
+        const rings: Array<{ inset: number; z: number }> = [];
+        if (bottomCorner > 0) {
+          for (let i = 0; i <= axialSteps; i++) {
+            const angle = (Math.PI / 2) * i / axialSteps;
+            rings.push({
+              inset: bottomCorner * (1 - Math.sin(angle)),
+              z: bottomCorner * (1 - Math.cos(angle)),
+            });
+          }
+        } else {
+          rings.push({ inset: 0, z: 0 });
+        }
+        if (topCorner > 0) {
+          for (let i = 0; i <= axialSteps; i++) {
+            const angle = (Math.PI / 2) * i / axialSteps;
+            const ring = {
+              inset: topCorner * (1 - Math.cos(angle)),
+              z: h - topCorner + topCorner * Math.sin(angle),
+            };
+            const previous = rings[rings.length - 1];
+            if (!previous || Math.abs(previous.z - ring.z) > 1e-7) rings.push(ring);
+          }
+        } else if (Math.abs(rings[rings.length - 1].z - h) > 1e-7) {
+          rings.push({ inset: 0, z: h });
+        }
+        const startsAtPoint = rings[0].inset >= r - 1e-7;
+        const endsAtPoint = rings[rings.length - 1].inset >= r - 1e-7;
+        const solidRings = rings.filter(({ inset }) => inset < r - 1e-7);
+        const profileSketch = ({ inset, z }: { inset: number; z: number }) => {
+          const scale = (r - inset) / r;
+          const ringPts = pts.map(([x, y]) => [x * scale, y * scale] as [number, number]);
+          let ringPen = draw(ringPts[0]);
+          for (let i = 1; i < ringPts.length; i++) ringPen = ringPen.lineTo(ringPts[i]);
+          return ringPen.close().sketchOnPlane("XY", z) as Sketch;
+        };
+        const sketches = solidRings.map(profileSketch);
+        s = sketches[0].loftWith(sketches.slice(1), {
+          ruled: true,
+          ...(startsAtPoint ? { startPoint: [0, 0, 0] as [number, number, number] } : {}),
+          ...(endsAtPoint ? { endPoint: [0, 0, h] as [number, number, number] } : {}),
+        }) as Shape3D;
+      }
       break;
     }
     case "hemisphere": {
@@ -496,6 +588,14 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
       const sphere = makeSphere(r);
       const cutBox = makeBaseBox(r * 4, r * 4, r * 2).translate([0, 0, -r * 2]);
       s = sphere.cut(cutBox) as Shape3D;
+      const bottomCorner = Math.min(Math.max(p.bottomFillet ?? 0, 0), r * 0.49);
+      if (bottomCorner > 0) {
+        try {
+          s = s.fillet(bottomCorner, (edge) => edge.inPlane("XY", 0));
+        } catch {
+          // Retain the valid unrounded dome if OCCT rejects an extreme value.
+        }
+      }
       break;
     }
     case "capsule": {
@@ -514,7 +614,12 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
       const rIn = Math.max(rOut - wall, 0.01);
       const h = Math.max(p.height ?? 10, 0.1);
       const sides = Math.max(3, Math.min(64, Math.round(p.sides ?? 32)));
-      const bevel = Math.min(Math.max(p.bevel ?? 0, 0), wall / 2 - 0.01, h / 2 - 0.01);
+      const legacyBevel = Math.max(p.bevel ?? 0, 0);
+      const maxRim = Math.max(0, Math.min(wall / 2, h / 2) - 0.01);
+      const outerTop = Math.min(Math.max(p.outerTopFillet ?? legacyBevel, 0), maxRim);
+      const outerBottom = Math.min(Math.max(p.outerBottomFillet ?? legacyBevel, 0), maxRim);
+      const innerTop = Math.min(Math.max(p.innerTopFillet ?? legacyBevel, 0), maxRim);
+      const innerBottom = Math.min(Math.max(p.innerBottomFillet ?? legacyBevel, 0), maxRim);
 
       let outer: Shape3D;
       let inner: Shape3D;
@@ -542,13 +647,24 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
       }
 
       let tubeSolid = outer.cut(inner);
-      if (bevel > 0) {
+      if (outerTop > 0 || outerBottom > 0 || innerTop > 0 || innerBottom > 0) {
         try {
-          tubeSolid = tubeSolid.chamfer(bevel, (e) => e.inPlane("XY"));
+          const splitRadius = (rOut + rIn) / 2;
+          tubeSolid = tubeSolid.fillet((edge) => {
+            const [[minX, minY, minZ], [maxX, maxY, maxZ]] = edge.boundingBox.bounds;
+            if (maxZ - minZ > 1e-5) return null;
+            const extentRadius = Math.max(
+              Math.max(Math.abs(minX), Math.abs(maxX)),
+              Math.max(Math.abs(minY), Math.abs(maxY)),
+            );
+            const outerEdge = extentRadius > splitRadius;
+            const topEdge = Math.abs((minZ + maxZ) / 2 - h) < 1e-5;
+            if (outerEdge) return topEdge ? outerTop || null : outerBottom || null;
+            return topEdge ? innerTop || null : innerBottom || null;
+          });
         } catch {
-          try {
-            tubeSolid = tubeSolid.fillet(bevel, (e) => e.inPlane("XY"));
-          } catch {}
+          // Keep the last valid unrounded tube for combinations rejected by
+          // OCCT; the Inspector limits normal UI input to the safe range.
         }
       }
       s = tubeSolid;
@@ -557,12 +673,29 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
     case "paraboloid": {
       const R = Math.max(p.radius ?? 10, 0.1);
       const h = Math.max(p.height ?? 20, 0.1);
-      const steps = 24;
-      let pen = draw([0, 0]).lineTo([R, 0]);
+      const steps = Math.max(4, Math.min(64, Math.round(p.surfaceSteps ?? 32)));
+      const bottomCorner = Math.min(Math.max(p.bottomFillet ?? 0, 0), R, h - 0.01);
+      const baseRadius = Math.max(0, R - bottomCorner);
+      let pen = draw([0, 0]);
+      // At the maximum radius the bottom closes at the axis, so there is no
+      // flat base segment to add. A centre-to-centre line is zero length and
+      // makes the revolved profile invalid.
+      if (baseRadius > 1e-7) pen = pen.lineTo([baseRadius, 0]);
+      if (bottomCorner > 0) {
+        // i=0 is already the endpoint of the base line above. Starting at 1
+        // avoids a zero-length segment that OCCT rejects during revolve.
+        for (let i = 1; i <= steps; i++) {
+          const angle = -Math.PI / 2 + Math.PI / 2 * i / steps;
+          pen = pen.lineTo([
+            R - bottomCorner + bottomCorner * Math.cos(angle),
+            bottomCorner + bottomCorner * Math.sin(angle),
+          ]);
+        }
+      }
       for (let i = 1; i <= steps; i++) {
         const t = i / steps;
         const r_i = R * (1 - t);
-        const z_i = h * (1 - (r_i / R) ** 2);
+        const z_i = bottomCorner + (h - bottomCorner) * (1 - (r_i / R) ** 2);
         pen = pen.lineTo([r_i, z_i]);
       }
       s = pen.close().sketchOnPlane("XZ").revolve([0, 0, 1]) as Shape3D;
@@ -572,6 +705,9 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
       const thickness = Math.max(p.thickness ?? 4, 0.1);
       const size = Math.max(p.size ?? 20, 1);
       if (spec.textPaths && spec.textPaths.length) {
+        // Text stays a direct extrusion. Saved files from the experimental
+        // rounded-text versions may still contain radius/smoothness params;
+        // deliberately ignore them so those scenes recover and open quickly.
         const solid = svgMeshSolid(spec.textPaths as any, thickness);
         if (solid) {
           s = normalise(solid);
@@ -649,13 +785,68 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
           const a = i * dTheta - Math.PI / 2;
           rawPts.push([r * Math.cos(a), r * Math.sin(a)]);
         }
-        const fillet = Math.max(p.fillet ?? 0, 0);
-        const pts = roundPolygon2D(rawPts, fillet);
-        let pen = draw(pts[0]);
-        for (let i = 1; i < pts.length; i++) {
-          pen = pen.lineTo(pts[i]);
+        const rawXs = rawPts.map(([x]) => x);
+        const rawYs = rawPts.map(([, y]) => y);
+        fixedXYCentre = [
+          (Math.min(...rawXs) + Math.max(...rawXs)) / 2,
+          (Math.min(...rawYs) + Math.max(...rawYs)) / 2,
+        ];
+        const legacyFillet = Math.max(p.fillet ?? 0, 0);
+        const outerFillet = Math.max(p.outerFillet ?? legacyFillet, 0);
+        const innerFillet = Math.max(p.innerFillet ?? legacyFillet, 0);
+        const cornerSteps = Math.max(1, Math.min(64, Math.round(p.cornerSteps ?? 24)));
+        const cornerRadii = rawPts.map((_, i) => i % 2 === 0 ? outerFillet : innerFillet);
+        const pts = roundPolygon2D(rawPts, cornerRadii, cornerSteps);
+        const topCorner = Math.min(Math.max(p.topFillet ?? 0, 0), rOut);
+        const bottomCorner = Math.min(Math.max(p.bottomFillet ?? 0, 0), rOut);
+        // Radial inset and vertical span are separate. A short, wide Star can
+        // still close at the centre, while both end rounds share the available
+        // height instead of one slider disabling the other.
+        const requestedSpan = topCorner + bottomCorner;
+        const spanScale = requestedSpan > height ? height / requestedSpan : 1;
+        const topSpan = topCorner * spanScale;
+        const bottomSpan = bottomCorner * spanScale;
+        const profileSketch = (scale: number, z: number) => {
+          const ringPts = pts.map(([x, y]) => [x * scale, y * scale] as [number, number]);
+          let ringPen = draw(ringPts[0]);
+          for (let i = 1; i < ringPts.length; i++) ringPen = ringPen.lineTo(ringPts[i]);
+          return ringPen.close().sketchOnPlane("XY", z) as Sketch;
+        };
+        if (topCorner <= 0 && bottomCorner <= 0) {
+          s = profileSketch(1, 0).extrude(height) as Shape3D;
+        } else {
+          const axialSteps = Math.max(4, Math.min(24, cornerSteps));
+          const rings: Array<{ scale: number; z: number }> = [];
+          if (bottomCorner > 0) {
+            for (let i = 0; i <= axialSteps; i++) {
+              const angle = Math.PI / 2 * i / axialSteps;
+              rings.push({
+                scale: 1 - bottomCorner * (1 - Math.sin(angle)) / rOut,
+                z: bottomSpan * (1 - Math.cos(angle)),
+              });
+            }
+          } else rings.push({ scale: 1, z: 0 });
+          if (topCorner > 0) {
+            for (let i = 0; i <= axialSteps; i++) {
+              const angle = Math.PI / 2 * i / axialSteps;
+              const ring = {
+                scale: 1 - topCorner * (1 - Math.cos(angle)) / rOut,
+                z: height - topSpan + topSpan * Math.sin(angle),
+              };
+              if (Math.abs(rings[rings.length - 1].z - ring.z) > 1e-7) rings.push(ring);
+            }
+          } else if (Math.abs(rings[rings.length - 1].z - height) > 1e-7) {
+            rings.push({ scale: 1, z: height });
+          }
+          const startsAtPoint = rings[0].scale <= 1e-7;
+          const endsAtPoint = rings[rings.length - 1].scale <= 1e-7;
+          const sketches = rings.filter(({ scale }) => scale > 1e-7).map(({ scale, z }) => profileSketch(scale, z));
+          s = sketches[0].loftWith(sketches.slice(1), {
+            ruled: true,
+            ...(startsAtPoint ? { startPoint: [0, 0, 0] as [number, number, number] } : {}),
+            ...(endsAtPoint ? { endPoint: [0, 0, height] as [number, number, number] } : {}),
+          }) as Shape3D;
         }
-        s = pen.close().sketchOnPlane("XY").extrude(height) as Shape3D;
       } else {
         // Faceted 3D Star (Pyramidal Star with center apex)
         const manifold = getManifold();
@@ -752,8 +943,12 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
       const rx = Math.max(p.radiusX ?? 15, 0.1);
       const ry = Math.max(p.radiusY ?? 10, 0.1);
       const rz = Math.max(p.radiusZ ?? 10, 0.1);
-      const density = p.density ?? 1;
-      const divs = density === 0 ? 16 : density === 2 ? 64 : density === 3 ? 128 : 32;
+      // Older documents stored one of four density presets. New documents use
+      // a direct, predictable surface-step value, while this fallback keeps
+      // those saved shapes looking as they did before.
+      const legacyDensity = p.density ?? 1;
+      const legacySteps = legacyDensity === 0 ? 16 : legacyDensity === 2 ? 64 : legacyDensity === 3 ? 64 : 32;
+      const divs = Math.max(8, Math.min(64, Math.round(p.surfaceSteps ?? legacySteps)));
       const manifold = getManifold();
       const sphere = manifold.Manifold.sphere(1, divs).scale([rx, ry, rz]);
       s = new MeshShape(sphere);

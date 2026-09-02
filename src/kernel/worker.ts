@@ -270,6 +270,33 @@ function toMesh(name: string, s: AnySolid, quality: MeshQuality): KernelMesh {
   return { name, faces: normalsPerCadFace(s.mesh(quality)), edges: s.meshEdges(quality) };
 }
 
+/** An ellipsoid is created through Manifold rather than as an OCCT analytic
+ * surface. Its mesh can contain split vertices, so averaged triangle normals
+ * still reveal polygon bands. The gradient of the ellipsoid equation gives
+ * the exact smooth normal at every vertex, independent of mesh topology. */
+function withEllipsoidNormals(mesh: KernelMesh): KernelMesh {
+  const bounds = meshBounds(mesh);
+  if (!bounds) return mesh;
+  const cx = (bounds.min[0] + bounds.max[0]) / 2;
+  const cy = (bounds.min[1] + bounds.max[1]) / 2;
+  const cz = (bounds.min[2] + bounds.max[2]) / 2;
+  const rx = Math.max((bounds.max[0] - bounds.min[0]) / 2, 1e-9);
+  const ry = Math.max((bounds.max[1] - bounds.min[1]) / 2, 1e-9);
+  const rz = Math.max((bounds.max[2] - bounds.min[2]) / 2, 1e-9);
+  const vertices = mesh.faces.vertices;
+  const normals = new Float32Array(vertices.length);
+  for (let i = 0; i + 2 < vertices.length; i += 3) {
+    const nx = (vertices[i] - cx) / (rx * rx);
+    const ny = (vertices[i + 1] - cy) / (ry * ry);
+    const nz = (vertices[i + 2] - cz) / (rz * rz);
+    const length = Math.hypot(nx, ny, nz) || 1;
+    normals[i] = nx / length;
+    normals[i + 1] = ny / length;
+    normals[i + 2] = nz / length;
+  }
+  return { ...mesh, faces: { ...mesh.faces, normals } };
+}
+
 /** Hide only a polygon-cylinder's vertical facet boundaries while retaining
  * its top/bottom silhouette and any rounded-rim edges. The faces themselves
  * are untouched, so Sides still controls the real model and its exports. */
@@ -301,6 +328,196 @@ function withoutExtrusionSideEdges(mesh: KernelMesh, axis = 2): KernelMesh {
   }
 
   return { ...mesh, edges: { lines, edgeGroups } };
+}
+
+/** Mesh-based threaded nuts do not carry OCCT edge topology. Recreate only
+ * the useful rounded-body guide rings when the user asks to see them, rather
+ * than exposing the thousands of triangle edges belonging to the thread. */
+function withNutCornerLines(mesh: KernelMesh, params: Record<string, number>): KernelMesh {
+  const shape = Math.round(params.shape ?? 0);
+  if (shape !== 0 && shape !== 1) return mesh;
+  const sides = shape === 0 ? 6 : 4;
+  const outerWidth = Math.max(params.outerWidth ?? 13, 0.1);
+  const height = Math.max(params.height ?? 6.5, 0.1);
+  const fullRadius = shape === 0 ? outerWidth / Math.sqrt(3) : outerWidth / Math.sqrt(2);
+  const rotation = shape === 0 ? 0 : Math.PI / 4;
+  const diameter = Math.max(params.diameter ?? 8, 2);
+  const clearance = Math.max(params.clearance ?? 0.2, 0);
+  const maxCorner = Math.max(0, Math.min(height / 2, (outerWidth - diameter - clearance * 2) / 2) - 0.01);
+  const top = Math.min(Math.max(params.topFillet ?? 0, 0), maxCorner);
+  const bottom = Math.min(Math.max(params.bottomFillet ?? 0, 0), maxCorner);
+  const steps = Math.max(1, Math.min(32, Math.round(params.cornerSteps ?? 16)));
+  const rings: Array<{ radius: number; z: number }> = [];
+  for (let i = 0; bottom > 0 && i <= steps; i++) {
+    const angle = Math.PI / 2 * i / steps;
+    rings.push({ radius: fullRadius - bottom * (1 - Math.sin(angle)), z: bottom * (1 - Math.cos(angle)) });
+  }
+  for (let i = 0; top > 0 && i <= steps; i++) {
+    const angle = Math.PI / 2 * i / steps;
+    rings.push({ radius: fullRadius - top * (1 - Math.cos(angle)), z: height - top + top * Math.sin(angle) });
+  }
+  const lines: number[] = [];
+  const edgeGroups: MeshedEdges["edgeGroups"] = [];
+  let edgeId = 0;
+  for (const ring of rings) {
+    for (let side = 0; side < sides; side++) {
+      const a = rotation + side * 2 * Math.PI / sides;
+      const b = rotation + (side + 1) * 2 * Math.PI / sides;
+      const start = lines.length / 3;
+      lines.push(
+        ring.radius * Math.cos(a), ring.radius * Math.sin(a), ring.z,
+        ring.radius * Math.cos(b), ring.radius * Math.sin(b), ring.z,
+      );
+      edgeGroups.push({ start, count: 2, edgeId: edgeId++ });
+    }
+  }
+  return { ...mesh, edges: { lines: Float32Array.from(lines), edgeGroups } };
+}
+
+/** Draw clean height contours from the final tessellated surface. Slicing the
+ * finished mesh keeps the guides attached to fillets without exposing every
+ * internal triangle (which made the Dome look like a wireframe). */
+function withSurfaceContourLines(mesh: KernelMesh, requestedSteps: number): KernelMesh {
+  const vertices = mesh.faces.vertices;
+  const triangles = mesh.faces.triangles;
+  const lines: number[] = [];
+  const edgeGroups: MeshedEdges["edgeGroups"] = [];
+  let edgeId = 0;
+
+  if (!vertices.length || !triangles.length) return mesh;
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  let minZ = Infinity, maxZ = -Infinity;
+  for (let i = 0; i + 2 < vertices.length; i += 3) {
+    minX = Math.min(minX, vertices[i]); maxX = Math.max(maxX, vertices[i]);
+    minY = Math.min(minY, vertices[i + 1]); maxY = Math.max(maxY, vertices[i + 1]);
+    minZ = Math.min(minZ, vertices[i + 2]); maxZ = Math.max(maxZ, vertices[i + 2]);
+  }
+  const centreX = (minX + maxX) / 2;
+  const centreY = (minY + maxY) / 2;
+  const contourCount = Math.max(3, Math.min(12, Math.round(requestedSteps / 4)));
+  const epsilon = Math.max(1e-7, (maxZ - minZ) * 1e-7);
+
+  const addSegment = (a: number[], b: number[]) => {
+    const start = lines.length / 3;
+    for (const point of [a, b]) {
+      const dx = point[0] - centreX;
+      const dy = point[1] - centreY;
+      const radius = Math.hypot(dx, dy);
+      const lift = radius > epsilon ? 0.01 / radius : 0;
+      lines.push(
+        point[0] + dx * lift,
+        point[1] + dy * lift,
+        point[2],
+      );
+    }
+    edgeGroups.push({ start, count: 2, edgeId: edgeId++ });
+  };
+
+  for (let level = 1; level <= contourCount; level++) {
+    const z = minZ + (maxZ - minZ) * level / (contourCount + 1);
+    for (let i = 0; i + 2 < triangles.length; i += 3) {
+      const indices = [triangles[i], triangles[i + 1], triangles[i + 2]];
+      const intersections: number[][] = [];
+      for (let edge = 0; edge < 3; edge++) {
+        const ai = indices[edge] * 3;
+        const bi = indices[(edge + 1) % 3] * 3;
+        const az = vertices[ai + 2], bz = vertices[bi + 2];
+        if (!((az < z && bz >= z) || (bz < z && az >= z))) continue;
+        const t = (z - az) / (bz - az);
+        const point = [
+          vertices[ai] + (vertices[bi] - vertices[ai]) * t,
+          vertices[ai + 1] + (vertices[bi + 1] - vertices[ai + 1]) * t,
+          z,
+        ];
+        if (!intersections.some((other) => Math.hypot(point[0] - other[0], point[1] - other[1]) < epsilon)) {
+          intersections.push(point);
+        }
+      }
+      if (intersections.length === 2) addSegment(intersections[0], intersections[1]);
+    }
+  }
+  return { ...mesh, edges: { lines: Float32Array.from(lines), edgeGroups } };
+}
+
+function withTorusSurfaceLines(mesh: KernelMesh, params: Record<string, number>): KernelMesh {
+  const R = Math.max(params.radius ?? 15, 1);
+  const r = Math.min(Math.max(params.tubeRadius ?? 5, 0.2), R - 0.05);
+  const ringSteps = Math.max(8, Math.min(64, Math.round(params.ringSteps ?? 48)));
+  const tubeSteps = Math.max(8, Math.min(64, Math.round(params.tubeSteps ?? 32)));
+  const ringGuides = Math.max(4, Math.min(12, Math.round(ringSteps / 4)));
+  const tubeGuides = Math.max(4, Math.min(12, Math.round(tubeSteps / 4)));
+  const lines: number[] = [];
+  const edgeGroups: MeshedEdges["edgeGroups"] = [];
+  let edgeId = 0;
+  const point = (u: number, v: number): [number, number, number] => {
+    const lift = 0.01;
+    const radial = R + (r + lift) * Math.cos(v);
+    return [radial * Math.cos(u), radial * Math.sin(u), r + (r + lift) * Math.sin(v)];
+  };
+  const add = (a: [number, number, number], b: [number, number, number]) => {
+    const start = lines.length / 3;
+    lines.push(...a, ...b);
+    edgeGroups.push({ start, count: 2, edgeId: edgeId++ });
+  };
+  for (let guide = 0; guide < tubeGuides; guide++) {
+    const v = guide * 2 * Math.PI / tubeGuides;
+    for (let ring = 0; ring < ringSteps; ring++) {
+      add(point(ring * 2 * Math.PI / ringSteps, v), point((ring + 1) * 2 * Math.PI / ringSteps, v));
+    }
+  }
+  for (let guide = 0; guide < ringGuides; guide++) {
+    const u = guide * 2 * Math.PI / ringGuides;
+    for (let tube = 0; tube < tubeSteps; tube++) {
+      add(point(u, tube * 2 * Math.PI / tubeSteps), point(u, (tube + 1) * 2 * Math.PI / tubeSteps));
+    }
+  }
+  return { ...mesh, edges: { lines: Float32Array.from(lines), edgeGroups } };
+}
+
+function withSphereSurfaceLines(mesh: KernelMesh, params: Record<string, number>): KernelMesh {
+  const radius = Math.max(params.radius ?? 10, 0.1);
+  const steps = Math.max(8, Math.min(64, Math.round(params.surfaceSteps ?? 48)));
+  const guideCount = Math.max(4, Math.min(12, Math.round(steps / 4)));
+  // Guide curves are display-only. They need a denser sampling than a low-poly
+  // sphere; otherwise each straight guide segment cuts back through the
+  // curved surface and appears as a row of disconnected dashes.
+  const samples = Math.max(64, steps * 2);
+  const displayRadius = radius + 0.02;
+  const lines: number[] = [];
+  const edgeGroups: MeshedEdges["edgeGroups"] = [];
+  let edgeId = 0;
+  const point = (longitude: number, latitude: number): [number, number, number] => {
+    const ringRadius = displayRadius * Math.cos(latitude);
+    return [
+      ringRadius * Math.cos(longitude),
+      ringRadius * Math.sin(longitude),
+      radius + displayRadius * Math.sin(latitude),
+    ];
+  };
+  const add = (a: [number, number, number], b: [number, number, number]) => {
+    const start = lines.length / 3;
+    lines.push(...a, ...b);
+    edgeGroups.push({ start, count: 2, edgeId: edgeId++ });
+  };
+
+  for (let guide = 1; guide <= guideCount; guide++) {
+    const latitude = -Math.PI / 2 + Math.PI * guide / (guideCount + 1);
+    for (let sample = 0; sample < samples; sample++) {
+      add(
+        point(sample * 2 * Math.PI / samples, latitude),
+        point((sample + 1) * 2 * Math.PI / samples, latitude),
+      );
+    }
+  }
+  for (let guide = 0; guide < guideCount; guide++) {
+    const longitude = guide * Math.PI / guideCount;
+    for (let sample = 0; sample < samples; sample++) {
+      const latitudeA = -Math.PI / 2 + Math.PI * sample / samples;
+      const latitudeB = -Math.PI / 2 + Math.PI * (sample + 1) / samples;
+      add(point(longitude, latitudeA), point(longitude, latitudeB));
+    }
+  }
+  return { ...mesh, edges: { lines: Float32Array.from(lines), edgeGroups } };
 }
 
 /**
@@ -872,7 +1089,20 @@ const api = {
               solid = null;
             }
             if (solid) {
-              let candidate = toMesh(spec.id, solid, EDIT_QUALITY);
+              const meshQuality = spec.type === "object" &&
+                (spec.kind === "hemisphere" || spec.kind === "capsule" || spec.kind === "sphere")
+                ? {
+                    ...EDIT_QUALITY,
+                    angularTolerance: Math.PI /
+                      Math.max(4, Math.min(64, Math.round(
+                        spec.params.surfaceSteps ?? (spec.kind === "hemisphere" ? 24 : 48),
+                      ))),
+                  }
+                : EDIT_QUALITY;
+              let candidate = toMesh(spec.id, solid, meshQuality);
+              if (spec.type === "object" && spec.kind === "ellipsoid") {
+                candidate = withEllipsoidNormals(candidate);
+              }
               if (
                 spec.type === "object" && (spec.kind === "cylinder" || spec.kind === "cone" || spec.kind === "pyramid") &&
                 (spec.params.sideEdges ?? 0) === 0
@@ -895,6 +1125,103 @@ const api = {
                   (spec.params.bottomFillet ?? spec.params.fillet ?? 0) > 0)
               ) {
                 candidate = withoutExtrusionSideEdges(candidate, 0);
+              }
+              if (
+                spec.type === "object" && spec.kind === "polygonPrism" &&
+                (spec.params.cornerEdges ?? 0) === 0 &&
+                ((spec.params.fillet ?? 0) > 0 ||
+                  (spec.params.topFillet ?? 0) > 0 ||
+                  (spec.params.bottomFillet ?? 0) > 0)
+              ) {
+                candidate = withoutExtrusionSideEdges(candidate);
+              }
+              if (
+                spec.type === "object" && spec.kind === "star" &&
+                (spec.params.style ?? 0) === 0 &&
+                (spec.params.cornerEdges ?? 0) === 0 &&
+                ((spec.params.outerFillet ?? spec.params.fillet ?? 0) > 0 ||
+                  (spec.params.innerFillet ?? spec.params.fillet ?? 0) > 0 ||
+                  (spec.params.topFillet ?? 0) > 0 ||
+                  (spec.params.bottomFillet ?? 0) > 0)
+              ) {
+                candidate = withoutExtrusionSideEdges(candidate);
+              }
+              if (
+                spec.type === "object" && spec.kind === "threadedNut" &&
+                (spec.params.cornerEdges ?? 0) === 1
+              ) {
+                candidate = withNutCornerLines(candidate, spec.params);
+              }
+              if (
+                spec.type === "object" && spec.kind === "paraboloid" &&
+                (spec.params.surfaceEdges ?? 0) === 0
+              ) {
+                candidate = withoutExtrusionSideEdges(candidate);
+              }
+              if (
+                spec.type === "object" && spec.kind === "tube" &&
+                (spec.params.cornerEdges ?? 0) === 0 &&
+                ((spec.params.outerTopFillet ?? spec.params.bevel ?? 0) > 0 ||
+                  (spec.params.outerBottomFillet ?? spec.params.bevel ?? 0) > 0 ||
+                  (spec.params.innerTopFillet ?? spec.params.bevel ?? 0) > 0 ||
+                  (spec.params.innerBottomFillet ?? spec.params.bevel ?? 0) > 0)
+              ) {
+                candidate = withoutExtrusionSideEdges(candidate);
+              }
+              if (
+                spec.type === "object" && spec.kind === "hemisphere" &&
+                (spec.params.surfaceEdges ?? 0) === 0
+              ) {
+                candidate = { ...candidate, edges: { lines: new Float32Array(0), edgeGroups: [] } };
+              } else if (
+                spec.type === "object" && spec.kind === "hemisphere" &&
+                (spec.params.surfaceEdges ?? 0) === 1
+              ) {
+                candidate = withSurfaceContourLines(candidate, spec.params.surfaceSteps ?? 24);
+              }
+              if (
+                spec.type === "object" && spec.kind === "ellipsoid" &&
+                (spec.params.surfaceEdges ?? 0) === 0
+              ) {
+                candidate = { ...candidate, edges: { lines: new Float32Array(0), edgeGroups: [] } };
+              } else if (
+                spec.type === "object" && spec.kind === "ellipsoid" &&
+                (spec.params.surfaceEdges ?? 0) === 1
+              ) {
+                candidate = withSurfaceContourLines(candidate, spec.params.surfaceSteps ?? 48);
+              }
+              if (
+                spec.type === "object" && spec.kind === "capsule" &&
+                (spec.params.surfaceEdges ?? 0) === 0
+              ) {
+                candidate = { ...candidate, edges: { lines: new Float32Array(0), edgeGroups: [] } };
+              } else if (
+                spec.type === "object" && spec.kind === "capsule" &&
+                (spec.params.surfaceEdges ?? 0) === 1
+              ) {
+                candidate = withSurfaceContourLines(candidate, spec.params.surfaceSteps ?? 48);
+              }
+              if (
+                spec.type === "object" && spec.kind === "torus" &&
+                (spec.params.surfaceEdges ?? 0) === 0
+              ) {
+                candidate = { ...candidate, edges: { lines: new Float32Array(0), edgeGroups: [] } };
+              } else if (
+                spec.type === "object" && spec.kind === "torus" &&
+                (spec.params.surfaceEdges ?? 0) === 1
+              ) {
+                candidate = withTorusSurfaceLines(candidate, spec.params);
+              }
+              if (
+                spec.type === "object" && spec.kind === "sphere" &&
+                (spec.params.surfaceEdges ?? 0) === 0
+              ) {
+                candidate = { ...candidate, edges: { lines: new Float32Array(0), edgeGroups: [] } };
+              } else if (
+                spec.type === "object" && spec.kind === "sphere" &&
+                (spec.params.surfaceEdges ?? 0) === 1
+              ) {
+                candidate = withSphereSurfaceLines(candidate, spec.params);
               }
               const candidateBounds = meshBounds(candidate);
               if (

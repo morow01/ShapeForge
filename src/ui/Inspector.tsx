@@ -120,6 +120,77 @@ function filletLimit(
     const limit = fieldKey === "topFillet" ? limitAt(2) : Math.min(limitAt(0), limitAt(1));
     return Math.max(0, Math.floor(Math.max(0, limit - 0.01) / step) * step);
   }
+  if (node.kind === "polygonPrism") {
+    const sides = Math.max(3, Math.min(32, Math.round(node.params.sides ?? 6)));
+    const radius = Math.max(0, node.params.radius ?? 0);
+    if (fieldKey === "topFillet" || fieldKey === "bottomFillet") {
+      const prismHeight = Math.max(0, node.params.height ?? 0);
+      const otherRadius = fieldKey === "topFillet"
+        ? Math.max(0, node.params.bottomFillet ?? 0)
+        : Math.max(0, node.params.topFillet ?? 0);
+      const limit = Math.min(radius, Math.max(0, prismHeight - otherRadius));
+      return Math.max(0, Math.floor(Math.max(0, limit) / step) * step);
+    }
+    const sideLength = 2 * radius * Math.sin(Math.PI / sides);
+    const interiorAngle = Math.PI - (2 * Math.PI / sides);
+    const limit = sideLength * 0.48 * Math.tan(interiorAngle / 2);
+    return Math.max(0, Math.floor(Math.max(0, limit - 0.01) / step) * step);
+  }
+  if (node.kind === "star" && (fieldKey === "outerFillet" || fieldKey === "innerFillet")) {
+    const points = Math.max(3, Math.min(32, Math.round(node.params.points ?? 5)));
+    const outerRadius = Math.max(0.1, node.params.outerRadius ?? 15);
+    const innerRadius = Math.max(0.1, node.params.innerRadius ?? 7.5);
+    const vertices: [number, number][] = Array.from({ length: points * 2 }, (_, i) => {
+      const radius = i % 2 === 0 ? outerRadius : innerRadius;
+      const angle = i * Math.PI / points - Math.PI / 2;
+      return [radius * Math.cos(angle), radius * Math.sin(angle)];
+    });
+    const cornerIndex = fieldKey === "outerFillet" ? 0 : 1;
+    const prev = vertices[(cornerIndex - 1 + vertices.length) % vertices.length];
+    const curr = vertices[cornerIndex];
+    const next = vertices[(cornerIndex + 1) % vertices.length];
+    const ax = prev[0] - curr[0], ay = prev[1] - curr[1];
+    const bx = next[0] - curr[0], by = next[1] - curr[1];
+    const lenA = Math.hypot(ax, ay), lenB = Math.hypot(bx, by);
+    const cosine = Math.max(-1, Math.min(1, (ax * bx + ay * by) / (lenA * lenB)));
+    const limit = Math.min(lenA, lenB) * 0.499 * Math.tan(Math.acos(cosine) / 2);
+    return Math.max(0, Math.floor((Math.max(0, limit) + 1e-9) / step) * step);
+  }
+  if (node.kind === "star" && (fieldKey === "topFillet" || fieldKey === "bottomFillet")) {
+    const outerRadius = Math.max(0, node.params.outerRadius ?? 15);
+    return Math.max(0, Math.floor((outerRadius + 1e-9) / step) * step);
+  }
+  if (node.kind === "threadedNut" && (fieldKey === "topFillet" || fieldKey === "bottomFillet")) {
+    const height = Math.max(0, node.params.height ?? 6.5);
+    const outerWidth = Math.max(0, node.params.outerWidth ?? 13);
+    const holeWidth = Math.max(0, (node.params.diameter ?? 8) + (node.params.clearance ?? 0.2) * 2);
+    const limit = Math.max(0, Math.min(height / 2, (outerWidth - holeWidth) / 2) - 0.01);
+    return Math.max(0, Math.floor((limit + 1e-9) / step) * step);
+  }
+  if (node.kind === "paraboloid" && fieldKey === "bottomFillet") {
+    const limit = Math.min(
+      Math.max(0, node.params.radius ?? 10),
+      Math.max(0, (node.params.height ?? 20) - 0.01),
+    );
+    return Math.max(0, Math.floor((limit + 1e-9) / step) * step);
+  }
+  if (node.kind === "hemisphere" && fieldKey === "bottomFillet") {
+    const limit = Math.max(0, (node.params.radius ?? 10) * 0.49);
+    return Math.max(0, Math.floor((limit + 1e-9) / step) * step);
+  }
+  if (node.kind === "tube" && [
+    "outerTopFillet", "outerBottomFillet", "innerTopFillet", "innerBottomFillet",
+  ].includes(fieldKey)) {
+    const wall = Math.max(0, node.params.wallThickness ?? 3);
+    const height = Math.max(0, node.params.height ?? 10);
+    const limit = Math.max(0, Math.min(wall / 2, height / 2) - 0.01);
+    return Math.max(0, Math.floor((limit + 1e-9) / step) * step);
+  }
+  if (node.kind === "text" && (fieldKey === "topFillet" || fieldKey === "bottomFillet")) {
+    const thickness = Math.max(0, node.params.thickness ?? 4);
+    const limit = thickness / 2;
+    return Math.max(0, Math.floor((limit + 1e-9) / step) * step);
+  }
   // Triangle, Star, Wedge and Polygon Prism have their own profile-based
   // rounding rules; retain their declared range rather than applying the
   // Box-specific width/depth calculation below.
@@ -1021,12 +1092,19 @@ function ObjectParams({
         if (node.kind === "triangle" && f.key === "cornerSteps" && node.params.cornerSteps == null) base = 32;
         if (node.kind === "pyramid" && f.key === "cornerSteps" && node.params.cornerSteps == null) base = 24;
         if (node.kind === "wedge" && f.key === "cornerSteps" && node.params.cornerSteps == null) base = 24;
+        if (node.kind === "polygonPrism" && f.key === "cornerSteps" && node.params.cornerSteps == null) base = 24;
+        if (node.kind === "star" && f.key === "cornerSteps" && node.params.cornerSteps == null) base = 24;
+        if (node.kind === "threadedNut" && f.key === "cornerSteps" && node.params.cornerSteps == null) base = 16;
+        if (node.kind === "paraboloid" && f.key === "surfaceSteps" && node.params.surfaceSteps == null) base = 32;
+        if (node.kind === "hemisphere" && f.key === "surfaceSteps" && node.params.surfaceSteps == null) base = 24;
         // Surface the old shared-radius value through the new independent
         // controls when opening a design saved before the split.
         if (node.params[f.key] == null && node.params.fillet != null) {
           if (node.kind === "triangle" && ["leftFillet", "rightFillet", "apexFillet"].includes(f.key)) {
             base = node.params.fillet;
           } else if (node.kind === "wedge" && (f.key === "topFillet" || f.key === "bottomFillet")) {
+            base = node.params.fillet;
+          } else if (node.kind === "star" && (f.key === "outerFillet" || f.key === "innerFillet")) {
             base = node.params.fillet;
           } else if (
             (node.kind === "cylinder" || node.kind === "cone") &&
@@ -1093,6 +1171,8 @@ function ObjectParams({
         // exactly half of a 100mm side.
         const isCornerRadius = [
           "fillet", "topFillet", "bottomFillet", "leftFillet", "rightFillet", "apexFillet",
+          "outerFillet", "innerFillet",
+          "outerTopFillet", "outerBottomFillet", "innerTopFillet", "innerBottomFillet",
         ].includes(f.key);
         const physicalCornerMax = isCornerRadius ? filletLimit(node, f.step, f.key) : 0;
         // Keep a slider's last stop on the same grid as the value shown to the
@@ -1125,7 +1205,7 @@ function ObjectParams({
                 onChange={(v) => onParam(f.key, Math.min(v, shown.max))}
                 displayUnit={displayUnit}
                 decimalPlaces={decimalPlaces}
-                isLength={!shown.options && shown.suffix !== "°" && !["sides", "points", "cornerSteps"].includes(shown.key)}
+                isLength={!shown.options && shown.suffix !== "°" && !["sides", "points", "cornerSteps", "surfaceSteps"].includes(shown.key)}
               />
             ),
           };
@@ -1174,7 +1254,7 @@ function ObjectParams({
               }}
               displayUnit={displayUnit}
               decimalPlaces={decimalPlaces}
-              isLength={!f.options && f.suffix !== "°" && !["sides", "points", "cornerSteps"].includes(f.key)}
+              isLength={!f.options && f.suffix !== "°" && !["sides", "points", "cornerSteps", "surfaceSteps"].includes(f.key)}
             />
           ),
         };
@@ -1324,8 +1404,13 @@ function Field({
   decimalPlaces: number;
   isLength?: boolean;
 }) {
+  const radiusField = [
+    "fillet", "topFillet", "bottomFillet", "leftFillet", "rightFillet", "apexFillet",
+    "outerFillet", "innerFillet", "cornerRadius", "internalFillet",
+    "outerTopFillet", "outerBottomFillet", "innerTopFillet", "innerBottomFillet",
+  ].includes(field.key);
   if (field.options) {
-    if (["filletMode", "sideEdges", "cornerEdges"].includes(field.key) && field.options.length === 2) {
+    if (["filletMode", "sideEdges", "cornerEdges", "surfaceEdges", "edgeSmoothness"].includes(field.key) && field.options.length === 2) {
       return (
         <div className="field">
           <span className="field-label">{field.label}</span>
@@ -1391,7 +1476,7 @@ function Field({
         <span className="field-label">
           {dotColorClass && <span className={`corner-dot ${dotColorClass}`}></span>}
           {field.label}
-          {isLength ? ` (${displayUnit})` : field.suffix ? ` (${field.suffix})` : ""}
+          {!isLength && !radiusField && field.suffix ? ` (${field.suffix})` : ""}
         </span>
         {lockable && (
           <button

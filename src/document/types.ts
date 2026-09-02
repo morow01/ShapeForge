@@ -120,8 +120,15 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
   },
   sphere: {
     label: "Sphere",
-    defaults: { radius: 10 },
-    fields: [dim("radius", "Radius")],
+    defaults: { radius: 10, surfaceSteps: 48, surfaceEdges: 0 },
+    fields: [
+      dim("radius", "Radius"),
+      { key: "surfaceSteps", label: "Surface steps", min: 8, max: 64, step: 1 },
+      {
+        key: "surfaceEdges", label: "Surface lines", min: 0, max: 1, step: 1,
+        options: [{ value: 0, label: "Hidden" }, { value: 1, label: "Shown" }],
+      },
+    ],
   },
   cone: {
     label: "Cone",
@@ -210,10 +217,16 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
   },
   torus: {
     label: "Torus",
-    defaults: { radius: 15, tubeRadius: 5 },
+    defaults: { radius: 15, tubeRadius: 5, ringSteps: 48, tubeSteps: 32, surfaceEdges: 0 },
     fields: [
       dim("radius", "Ring radius"),
       dim("tubeRadius", "Tube radius"),
+      { key: "ringSteps", label: "Ring steps", min: 8, max: 64, step: 1 },
+      { key: "tubeSteps", label: "Tube steps", min: 8, max: 64, step: 1 },
+      {
+        key: "surfaceEdges", label: "Surface lines", min: 0, max: 1, step: 1,
+        options: [{ value: 0, label: "Hidden" }, { value: 1, label: "Shown" }],
+      },
     ],
   },
   pyramid: {
@@ -263,39 +276,85 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
   },
   polygonPrism: {
     label: "Polygon Prism",
-    defaults: { sides: 6, radius: 10, height: 20, fillet: 0 },
+    defaults: {
+      sides: 6, radius: 10, height: 20, fillet: 0,
+      topFillet: 0, bottomFillet: 0, cornerSteps: 24, cornerEdges: 0,
+    },
     fields: [
-      { key: "sides", label: "Sides", min: 3, max: 32, step: 1 },
+      { key: "sides", label: "Base sides", min: 3, max: 32, step: 1 },
       dim("radius", "Radius"),
       dim("height", "Height"),
-      { key: "fillet", label: "Corner radius", min: 0, max: 500, step: 0.5 },
+      { key: "fillet", label: "Side corner radius", min: 0, max: 500, step: 0.5 },
+      { key: "topFillet", label: "Top corner radius", min: 0, max: 500, step: 0.5 },
+      { key: "bottomFillet", label: "Bottom corner radius", min: 0, max: 500, step: 0.5 },
+      { key: "cornerSteps", label: "Corner steps", min: 1, max: 64, step: 1 },
+      {
+        key: "cornerEdges", label: "Corner lines", min: 0, max: 1, step: 1,
+        options: [{ value: 0, label: "Hidden" }, { value: 1, label: "Shown" }],
+      },
     ],
   },
   hemisphere: {
     label: "Dome",
-    defaults: { radius: 10 },
-    fields: [dim("radius", "Radius")],
+    defaults: { radius: 10, bottomFillet: 0, surfaceSteps: 24, surfaceEdges: 0 },
+    fields: [
+      dim("radius", "Radius"),
+      { key: "bottomFillet", label: "Bottom corner radius", min: 0, max: 500, step: 0.5 },
+      { key: "surfaceSteps", label: "Surface steps", min: 4, max: 64, step: 1 },
+      {
+        key: "surfaceEdges", label: "Corner lines", min: 0, max: 1, step: 1,
+        options: [{ value: 0, label: "Hidden" }, { value: 1, label: "Shown" }],
+      },
+    ],
   },
   capsule: {
     label: "Capsule",
-    defaults: { radius: 5, height: 20 },
-    fields: [dim("radius", "Radius"), dim("height", "Height")],
+    defaults: { radius: 5, height: 20, surfaceSteps: 48, surfaceEdges: 0 },
+    fields: [
+      dim("radius", "Radius"),
+      dim("height", "Height"),
+      { key: "surfaceSteps", label: "Surface steps", min: 8, max: 64, step: 1 },
+      {
+        key: "surfaceEdges", label: "Surface lines", min: 0, max: 1, step: 1,
+        options: [{ value: 0, label: "Hidden" }, { value: 1, label: "Shown" }],
+      },
+    ],
   },
   tube: {
     label: "Tube",
-    defaults: { radius: 15, wallThickness: 3, height: 10, sides: 32, bevel: 0 },
+    defaults: {
+      radius: 15, wallThickness: 3, height: 10, sides: 32, bevel: 0,
+      outerTopFillet: 0, outerBottomFillet: 0, innerTopFillet: 0, innerBottomFillet: 0,
+      cornerEdges: 0,
+    },
     fields: [
       dim("radius", "Outer radius"),
       { key: "wallThickness", label: "Wall thickness", min: 0.1, max: 1000, step: 0.1, noSlider: true },
       dim("height", "Height"),
       { key: "sides", label: "Sides", min: 3, max: 64, step: 1 },
-      { key: "bevel", label: "Bevel / Chamfer", min: 0, max: 50, step: 0.2, noSlider: true, suffix: "mm" },
+      { key: "outerTopFillet", label: "Outer top corner radius", min: 0, max: 100, step: 0.25 },
+      { key: "innerTopFillet", label: "Inner top corner radius", min: 0, max: 100, step: 0.25 },
+      { key: "outerBottomFillet", label: "Outer bottom corner radius", min: 0, max: 100, step: 0.25 },
+      { key: "innerBottomFillet", label: "Inner bottom corner radius", min: 0, max: 100, step: 0.25 },
+      {
+        key: "cornerEdges", label: "Corner lines", min: 0, max: 1, step: 1,
+        options: [{ value: 0, label: "Hidden" }, { value: 1, label: "Shown" }],
+      },
     ],
   },
   paraboloid: {
     label: "Paraboloid",
-    defaults: { radius: 10, height: 20 },
-    fields: [dim("radius", "Radius"), dim("height", "Height")],
+    defaults: { radius: 10, height: 20, bottomFillet: 0, surfaceSteps: 32, surfaceEdges: 0 },
+    fields: [
+      dim("radius", "Radius"),
+      dim("height", "Height"),
+      { key: "bottomFillet", label: "Bottom corner radius", min: 0, max: 500, step: 0.5 },
+      { key: "surfaceSteps", label: "Surface steps", min: 4, max: 64, step: 1 },
+      {
+        key: "surfaceEdges", label: "Corner lines", min: 0, max: 1, step: 1,
+        options: [{ value: 0, label: "Hidden" }, { value: 1, label: "Shown" }],
+      },
+    ],
   },
   text: {
     label: "Text",
@@ -465,6 +524,10 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
       shape: 0,
       clearance: 0.2,
       density: 1,
+      topFillet: 0,
+      bottomFillet: 0,
+      cornerSteps: 16,
+      cornerEdges: 0,
     },
     fields: [
       {
@@ -502,6 +565,14 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
           { value: 2, label: "Knurled Thumb Nut" },
         ],
       },
+      { key: "topFillet", label: "Top corner radius", min: 0, max: 100, step: 0.25, showIf: { key: "shape", oneOf: [0, 1] } },
+      { key: "bottomFillet", label: "Bottom corner radius", min: 0, max: 100, step: 0.25, showIf: { key: "shape", oneOf: [0, 1] } },
+      { key: "cornerSteps", label: "Corner steps", min: 1, max: 32, step: 1, showIf: { key: "shape", oneOf: [0, 1] } },
+      {
+        key: "cornerEdges", label: "Corner lines", min: 0, max: 1, step: 1,
+        options: [{ value: 0, label: "Hidden" }, { value: 1, label: "Shown" }],
+        showIf: { key: "shape", oneOf: [0, 1] },
+      },
       {
         key: "clearance",
         label: "3D-Print Clearance",
@@ -534,6 +605,12 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
       height: 10,
       style: 0,
       fillet: 0,
+      outerFillet: 0,
+      innerFillet: 0,
+      topFillet: 0,
+      bottomFillet: 0,
+      cornerSteps: 24,
+      cornerEdges: 0,
     },
     fields: [
       {
@@ -551,7 +628,16 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
       dim("outerRadius", "Outer radius"),
       dim("innerRadius", "Inner radius"),
       dim("height", "Height"),
-      { key: "fillet", label: "Corner radius", min: 0, max: 500, step: 0.5, showIf: { key: "style", oneOf: [0] } },
+      { key: "outerFillet", label: "Outer point radius", min: 0, max: 500, step: 0.5, showIf: { key: "style", oneOf: [0] } },
+      { key: "innerFillet", label: "Inner corner radius", min: 0, max: 500, step: 0.5, showIf: { key: "style", oneOf: [0] } },
+      { key: "topFillet", label: "Top corner radius", min: 0, max: 500, step: 0.5, showIf: { key: "style", oneOf: [0] } },
+      { key: "bottomFillet", label: "Bottom corner radius", min: 0, max: 500, step: 0.5, showIf: { key: "style", oneOf: [0] } },
+      { key: "cornerSteps", label: "Corner steps", min: 1, max: 64, step: 1, showIf: { key: "style", oneOf: [0] } },
+      {
+        key: "cornerEdges", label: "Corner lines", min: 0, max: 1, step: 1,
+        options: [{ value: 0, label: "Hidden" }, { value: 1, label: "Shown" }],
+        showIf: { key: "style", oneOf: [0] },
+      },
     ],
   },
   tray: {
@@ -577,22 +663,21 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
   },
   ellipsoid: {
     label: "Ellipsoid",
-    defaults: { radiusX: 15, radiusY: 10, radiusZ: 10, density: 1 },
+    defaults: { radiusX: 15, radiusY: 10, radiusZ: 10, surfaceSteps: 48, surfaceEdges: 0 },
     fields: [
       dim("radiusX", "Radius X"),
       dim("radiusY", "Radius Y"),
       dim("radiusZ", "Radius Z"),
+      { key: "surfaceSteps", label: "Surface steps", min: 8, max: 64, step: 1 },
       {
-        key: "density",
-        label: "Mesh Density",
+        key: "surfaceEdges",
+        label: "Surface lines",
         min: 0,
-        max: 3,
+        max: 1,
         step: 1,
         options: [
-          { value: 0, label: "Low (Low Poly / 16)" },
-          { value: 1, label: "Medium (Standard / 32)" },
-          { value: 2, label: "High (Smooth / 64)" },
-          { value: 3, label: "Ultra (Fine / 128)" },
+          { value: 0, label: "Hidden" },
+          { value: 1, label: "Shown" },
         ],
       },
     ],

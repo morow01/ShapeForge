@@ -20,7 +20,7 @@ import type { SvgCommand } from "../svg/parse";
 const CURVE_SAMPLES = 24;
 
 /** Bump when SVG-to-solid semantics change so live worker mesh caches rebuild. */
-export const SVG_IMPORT_REVISION = 5;
+export const SVG_IMPORT_REVISION = 6;
 
 function cubicAt(
   t: number,
@@ -168,9 +168,13 @@ function isPolygonInside(inner: [number, number][], outer: [number, number][]): 
  * the elements are unioned, and only then is the result extruded. This avoids
  * fragile per-counter OCCT face cuts that can lose a cap on glyphs such as D.
  */
-export function svgMeshSolid(paths: SvgCommand[][], thickness: number): MeshShape | null {
+export function svgMeshSolid(
+  paths: SvgCommand[][],
+  thickness: number,
+  rounding?: { top: number; bottom: number; steps: number },
+): MeshShape | null {
   const manifold = getManifold();
-  const solids: InstanceType<typeof manifold.Manifold>[] = [];
+  const sections: InstanceType<typeof manifold.CrossSection>[] = [];
 
   for (const path of paths) {
     const polygons = splitSubpaths(path)
@@ -218,21 +222,77 @@ export function svgMeshSolid(paths: SvgCommand[][], thickness: number): MeshShap
       try {
         const outerCCW = signedAreaOf(group.outer) > 0 ? group.outer : group.outer.slice().reverse();
         const holesCW = group.holes.map((h) => (signedAreaOf(h) < 0 ? h : h.slice().reverse()));
-        const section = new manifold.CrossSection([outerCCW, ...holesCW], "NonZero");
-        const extruded = section.extrude(thickness);
-        if (extruded.numTri() > 0) {
-          solids.push(extruded);
-        }
+        sections.push(new manifold.CrossSection([outerCCW, ...holesCW], "NonZero"));
       } catch {
         try {
-          const simple = new manifold.CrossSection([group.outer], "EvenOdd");
-          const extruded = simple.extrude(thickness);
-          if (extruded.numTri() > 0) solids.push(extruded);
+          sections.push(new manifold.CrossSection([group.outer], "EvenOdd"));
         } catch {}
       }
     }
   }
 
-  if (!solids.length) return null;
-  return new MeshShape(manifold.Manifold.union(solids));
+  if (!sections.length) return null;
+  // Merge the whole word before doing any offsets. The old implementation ran
+  // the safety search and every rounded layer once per glyph, making build time
+  // grow roughly as letters × steps. One combined section keeps it steps-only.
+  const section = manifold.CrossSection.union(sections);
+  const requestedTop = Math.max(0, rounding?.top ?? 0);
+  const requestedBottom = Math.max(0, rounding?.bottom ?? 0);
+  // Keep text rebuilding bounded. Unlike simple primitives, a single word may
+  // contain dozens of contours and thousands of vertices. The UI exposes only
+  // 2 or 3 layers so quality can improve without returning to scene-opening
+  // stalls. More stacked offsets add both cost and distracting contour bands.
+  const steps = Math.max(2, Math.min(3, Math.round(rounding?.steps ?? 2)));
+  const contourCount = section.numContour();
+  const safeInset = (requested: number) => {
+    let low = 0, high = requested;
+    // Three checks are sufficient for a safe preview and keep long words fast.
+    for (let i = 0; i < 3; i++) {
+      const mid = (low + high) / 2;
+      try {
+        const inset = section.offset(-mid, "Round", 2, steps * 4);
+        if (!inset.isEmpty() && inset.numContour() === contourCount) low = mid;
+        else high = mid;
+      } catch {
+        high = mid;
+      }
+    }
+    return low;
+  };
+  const top = safeInset(Math.min(requestedTop, thickness / 2));
+  const bottom = safeInset(Math.min(requestedBottom, thickness / 2));
+  if (top <= 1e-4 && bottom <= 1e-4) return new MeshShape(section.extrude(thickness));
+
+  const pieces: InstanceType<typeof manifold.Manifold>[] = [];
+  const addRoundedEnd = (radius: number, fromTop: boolean) => {
+    if (radius <= 1e-4) return;
+    for (let i = 0; i < steps; i++) {
+      const t0 = i / steps, t1 = (i + 1) / steps;
+      const midAngle = Math.PI / 2 * (t0 + t1) / 2;
+      const inset = fromTop
+        ? radius * (1 - Math.cos(midAngle))
+        : radius * (1 - Math.sin(midAngle));
+      const z0 = fromTop ? thickness - radius + radius * t0 : radius * t0;
+      const z1 = fromTop ? thickness - radius + radius * t1 : radius * t1;
+      const layer = section.offset(-inset, "Round", 2, steps * 4);
+      if (!layer.isEmpty()) pieces.push(layer.extrude(z1 - z0).translate([0, 0, z0]));
+    }
+  };
+  addRoundedEnd(bottom, false);
+  const coreBottom = bottom;
+  const coreTop = thickness - top;
+  if (coreTop > coreBottom + 1e-5) {
+    pieces.push(section.extrude(coreTop - coreBottom).translate([0, 0, coreBottom]));
+  }
+  addRoundedEnd(top, true);
+  if (!pieces.length) return null;
+  let result = manifold.Manifold.union(pieces);
+  if (steps > 2) {
+    // Smooth only the shallow angles between adjacent radius layers; letter
+    // corners and the top/side boundary remain sharp because their angle is
+    // above this threshold. Refinement then evaluates the curved tangent
+    // surface instead of merely shading a three-step staircase.
+    result = result.smoothOut(45, 1).refine(2);
+  }
+  return new MeshShape(result);
 }

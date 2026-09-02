@@ -255,10 +255,74 @@ export function makeThreadedNutSolid(p: Record<string, number>): MeshShape {
   const shape = p.shape ?? 0;
   const clearance = Math.max(p.clearance ?? 0.2, 0);
   const density = p.density ?? 1;
+  const cornerSteps = Math.max(1, Math.min(32, Math.round(p.cornerSteps ?? 16)));
+  const wall = Math.max(0, (outerWidth - (diameter + clearance * 2)) / 2);
+  const maxCorner = Math.max(0, Math.min(height / 2, wall) - 0.01);
+  const topCorner = Math.min(Math.max(p.topFillet ?? 0, 0), maxCorner);
+  const bottomCorner = Math.min(Math.max(p.bottomFillet ?? 0, 0), maxCorner);
 
   let nutBody: InstanceType<typeof manifold.Manifold>;
 
-  if (shape === 0) {
+  if ((shape === 0 || shape === 1) && (topCorner > 0 || bottomCorner > 0)) {
+    const sides = shape === 0 ? 6 : 4;
+    const fullRadius = shape === 0 ? outerWidth / Math.sqrt(3) : outerWidth / Math.sqrt(2);
+    const rotation = shape === 0 ? 0 : Math.PI / 4;
+    const rings: Array<{ radius: number; z: number }> = [];
+    if (bottomCorner > 0) {
+      for (let i = 0; i <= cornerSteps; i++) {
+        const angle = Math.PI / 2 * i / cornerSteps;
+        rings.push({
+          radius: fullRadius - bottomCorner * (1 - Math.sin(angle)),
+          z: bottomCorner * (1 - Math.cos(angle)),
+        });
+      }
+    } else rings.push({ radius: fullRadius, z: 0 });
+    if (topCorner > 0) {
+      for (let i = 0; i <= cornerSteps; i++) {
+        const angle = Math.PI / 2 * i / cornerSteps;
+        const ring = {
+          radius: fullRadius - topCorner * (1 - Math.cos(angle)),
+          z: height - topCorner + topCorner * Math.sin(angle),
+        };
+        if (Math.abs(rings[rings.length - 1].z - ring.z) > 1e-7) rings.push(ring);
+      }
+    } else if (Math.abs(rings[rings.length - 1].z - height) > 1e-7) {
+      rings.push({ radius: fullRadius, z: height });
+    }
+    const verts: number[] = [];
+    for (const ring of rings) {
+      for (let side = 0; side < sides; side++) {
+        const angle = rotation + side * 2 * Math.PI / sides;
+        verts.push(ring.radius * Math.cos(angle), ring.radius * Math.sin(angle), ring.z);
+      }
+    }
+    const bottomCentre = verts.length / 3;
+    verts.push(0, 0, 0);
+    const topCentre = verts.length / 3;
+    verts.push(0, 0, height);
+    const tris: number[] = [];
+    for (let ring = 0; ring < rings.length - 1; ring++) {
+      for (let side = 0; side < sides; side++) {
+        const next = (side + 1) % sides;
+        const a = ring * sides + side;
+        const b = ring * sides + next;
+        const c = (ring + 1) * sides + side;
+        const d = (ring + 1) * sides + next;
+        tris.push(a, b, c, b, d, c);
+      }
+    }
+    const topStart = (rings.length - 1) * sides;
+    for (let side = 0; side < sides; side++) {
+      const next = (side + 1) % sides;
+      tris.push(bottomCentre, next, side);
+      tris.push(topCentre, topStart + side, topStart + next);
+    }
+    nutBody = new manifold.Manifold(new manifold.Mesh({
+      vertProperties: new Float32Array(verts),
+      triVerts: new Uint32Array(tris),
+      numProp: 3,
+    }));
+  } else if (shape === 0) {
     // Hexagonal Nut
     const rVertex = outerWidth / Math.sqrt(3);
     nutBody = manifold.Manifold.cylinder(height, rVertex, rVertex, 6);
