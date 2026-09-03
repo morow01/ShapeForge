@@ -700,6 +700,17 @@ export class Scene {
   private frame = 0;
   private altDown = false;
   private guides = new SmartGuides();
+  private collisionContacts = new THREE.Group();
+  private collisionContactOwnerId: string | null = null;
+  private showSelectedCollisionContacts = true;
+  private collisionContactMaterial = new THREE.MeshBasicMaterial({
+    color: 0xff6b35,
+    transparent: true,
+    opacity: 0.55,
+    depthTest: false,
+    depthWrite: false,
+    side: THREE.DoubleSide,
+  });
 
   private parts = new Map<string, PartView>();
   private displayUnit: DisplayUnit = "mm";
@@ -831,6 +842,8 @@ export class Scene {
   onPreviewPushPull:
     | ((id: string, op: { point: Vec3; normal: Vec3; distance: number }) => Promise<PreviewBuild | null>)
     | null = null;
+  /** Live world-mm distance shown by both Push/Pull numeric controls. */
+  onPushPullDistanceChange: ((distanceMm: number) => void) | null = null;
   onSelectEdges: ((id: string | null, points: Vec3[]) => void) | null = null;
   /** The face currently selected, and the kernel-local point that anchors it,
    *  so a whole-body edit driven by a face — Hollow — knows what it applies
@@ -887,6 +900,8 @@ export class Scene {
     this.pushPullLabelEl.style.display = "none";
     this.pushPullLabelEl.addEventListener("input", () => {
       this.pushPullLabelEl.style.width = `${Math.max(4.2, this.pushPullLabelEl.value.length + 1.6)}ch`;
+      const displayed = Number(this.pushPullLabelEl.value);
+      if (Number.isFinite(displayed)) this.onPushPullDistanceChange?.(toMillimetres(displayed, this.displayUnit));
     });
     this.pushPullLabelEl.addEventListener("focus", () => this.onDragChange?.(true));
     this.pushPullLabelEl.addEventListener("blur", () => this.commitOrAbandonPushPull(true));
@@ -959,6 +974,8 @@ export class Scene {
     this.gizmo.addEventListener("objectChange", this.onGizmoChange);
     this.scene.add(this.gizmo.getHelper());
     this.scene.add(this.guides.group);
+    this.collisionContacts.renderOrder = 28;
+    this.scene.add(this.collisionContacts);
     this.scene.add(
       this.resizeBox,
       this.resizeHandles,
@@ -1449,6 +1466,46 @@ export class Scene {
         existing.occluder.geometry = existing.geom[0].faces;
         existing.isHole = part.isHole;
         existing.faces = part.faces;
+        // A rebuild may return the same topological faces in a different
+        // array order. Keep Push/Pull attached to the face's expected moved
+        // position instead of blindly reusing the old group index, which can
+        // highlight and arm an unrelated neighbouring face after Apply.
+        if (
+          this.selectedFace?.partId === part.id &&
+          this.armedFace?.id === part.id &&
+          part.faces?.length
+        ) {
+          const target = this.armedFace;
+          let bestIndex = -1;
+          let bestDistance = Infinity;
+          for (let i = 0; i < part.faces.length; i++) {
+            const candidate = part.faces[i];
+            if (!candidate.planar || candidate.pushPullable === false) continue;
+            const facing = candidate.normal[0] * target.localNormal[0] +
+              candidate.normal[1] * target.localNormal[1] +
+              candidate.normal[2] * target.localNormal[2];
+            if (facing < 0.9) continue;
+            const distance = Math.hypot(
+              candidate.point[0] - target.localPoint[0],
+              candidate.point[1] - target.localPoint[1],
+              candidate.point[2] - target.localPoint[2],
+            );
+            if (distance < bestDistance) {
+              bestDistance = distance;
+              bestIndex = i;
+            }
+          }
+          if (bestIndex >= 0) {
+            this.selectedFace.groupIndex = bestIndex;
+            this.armedFace = {
+              ...target,
+              localPoint: part.faces[bestIndex].point,
+              localNormal: part.faces[bestIndex].normal,
+              view: existing,
+              worldPerLocal: this.worldPerLocalAlong(existing, part.faces[bestIndex].normal),
+            };
+          }
+        }
       } else {
         this.parts.set(part.id, this.makeView(part.mesh, part.isHole, part.faces, part.id));
       }
@@ -1469,6 +1526,12 @@ export class Scene {
     this.applyPlacements();
     this.applyMaterials();
     this.attachGizmo();
+    // A snap against a recessed face cannot be rediscovered from the whole
+    // object's outer bounds. Keep the already verified real-surface patch
+    // while its owner remains selected instead of replacing it here.
+    if (!this.collisionContactOwnerId || !this.selectedIds.includes(this.collisionContactOwnerId) || !this.collisionContacts.children.length) {
+      this.refreshSelectedCollisionContacts();
+    }
   }
 
   setMeasurementFormat(unit: DisplayUnit, decimalPlaces: number) {
@@ -1505,6 +1568,9 @@ export class Scene {
     this.lastNodes = objects;
     this.dropDeletedParts(previous, objects);
     this.selectedIds = selectedIds;
+    if (this.collisionContactOwnerId && !selectedIds.includes(this.collisionContactOwnerId)) {
+      this.clearCollisionContacts();
+    }
     if (this.selectedFace && !selectedIds.includes(this.selectedFace.partId)) {
       this.selectedFace = null;
     }
@@ -1520,6 +1586,9 @@ export class Scene {
     this.applyPlacements();
     this.applyMaterials();
     this.attachGizmo();
+    if (!this.collisionContactOwnerId || !selectedIds.includes(this.collisionContactOwnerId) || !this.collisionContacts.children.length) {
+      this.refreshSelectedCollisionContacts();
+    }
   }
 
   /**
@@ -2342,6 +2411,28 @@ export class Scene {
       .normalize();
   }
 
+  /** Visual centre of the exact triangle group the user clicked. CAD face
+   * anchors are ideal for replaying an edit, but after earlier modifiers an
+   * interior topology point can lie close to another visible side. Handles
+   * should follow the rendered face, not expose that implementation detail. */
+  private renderedFaceCenter(view: PartView, groupIndex: number, fallback: Vec3): THREE.Vector3 {
+    const geometry = view.mesh.geometry as THREE.BufferGeometry;
+    const group = geometry.groups[groupIndex];
+    const position = geometry.getAttribute("position");
+    if (!group || !position || group.count < 1) return this.kernelLocalToWorld(view, fallback);
+    const index = geometry.getIndex();
+    const centre = new THREE.Vector3();
+    let count = 0;
+    for (let offset = group.start; offset < group.start + group.count; offset++) {
+      const vertex = index ? index.getX(offset) : offset;
+      centre.x += position.getX(vertex);
+      centre.y += position.getY(vertex);
+      centre.z += position.getZ(vertex);
+      count++;
+    }
+    return count ? centre.multiplyScalar(1 / count).applyMatrix4(view.group.matrixWorld) : this.kernelLocalToWorld(view, fallback);
+  }
+
   /**
    * How far a face moves on screen, in world millimetres, per millimetre of
    * push/pull in the kernel's own frame.
@@ -2396,7 +2487,7 @@ export class Scene {
     // geometry previews can reorder face indices, so recalculating from the
     // transient face list here would teleport the arrow elsewhere.
     if (this.pushPullDrag) {
-      this.pushPullHandles.visible = true;
+      this.pushPullHandles.visible = this.facePushPullEnabled;
       return;
     }
     const id = this.selectedFace?.partId ?? null;
@@ -2425,7 +2516,7 @@ export class Scene {
 
     view.group.updateWorldMatrix(true, true);
     const handle = this.pushPullHandleMeshes[0];
-    const at = this.kernelLocalToWorld(view, face.point);
+    const at = this.renderedFaceCenter(view, faceIndex, face.point);
     const normal = this.kernelNormalToWorld(view, face.normal);
     const scale = Math.max(MIN_HANDLE_WORLD, this.worldSnapTolerance(at) * PUSH_PULL_HANDLE_SCALE);
     handle.position.copy(at).addScaledVector(normal, scale * 0.2);
@@ -3052,7 +3143,7 @@ export class Scene {
     const face = faces[handle.userData.faceIndex as number];
     if (!face) return false;
 
-    const at = this.kernelLocalToWorld(view, face.point);
+    const at = this.renderedFaceCenter(view, handle.userData.faceIndex as number, face.point);
     const worldNormal = this.kernelNormalToWorld(view, face.normal);
     const project = (p: THREE.Vector3) => {
       const v = p.clone().project(this.camera);
@@ -3116,7 +3207,7 @@ export class Scene {
 
     const rect = this.renderer.domElement.getBoundingClientRect();
     view.group.updateWorldMatrix(true, true);
-    const at = this.kernelLocalToWorld(view, face.point);
+    const at = this.renderedFaceCenter(view, groupIndex, face.point);
     const worldNormal = this.kernelNormalToWorld(view, face.normal);
     const project = (point: THREE.Vector3) => {
       const projected = point.clone().project(this.camera);
@@ -3222,6 +3313,14 @@ export class Scene {
     labelWorldPosition: THREE.Vector3,
     initialValueMm = 0,
   ) {
+    // This floating editor belongs only to Push/Pull. Face selection is
+    // shared by Wall and the other face tools, so guard here as well as at
+    // the caller against a same-frame toolbar switch followed by a click.
+    if (!this.facePushPullEnabled) {
+      this.pushPullLabelEl.style.display = "none";
+      this.pushPullPending = null;
+      return;
+    }
     this.pushPullPending = {
       id,
       localPoint,
@@ -3353,16 +3452,22 @@ export class Scene {
     const valid = apply && Number.isFinite(distance) && Math.abs(distance) >= 0.5;
     if (valid) {
       this.disposeGeom(pending.originalGeom);
-      if (this.selectedFace?.partId === pending.id) {
-        this.selectedFace = null;
-        clearHighlights(pending.view.mesh.geometry as THREE.BufferGeometry);
-      }
+      const travelled = this.toLocalDistance(distance, pending.worldPerLocal);
+      this.armedFace = {
+        id: pending.id,
+        localPoint: [
+          pending.localPoint[0] + pending.localNormal[0] * travelled,
+          pending.localPoint[1] + pending.localNormal[1] * travelled,
+          pending.localPoint[2] + pending.localNormal[2] * travelled,
+        ],
+        localNormal: pending.localNormal,
+        view: pending.view,
+        worldPerLocal: pending.worldPerLocal,
+      };
       void this.applyPushPull(pending, distance);
     } else {
-      if (this.selectedFace?.partId === pending.id) {
-        this.selectedFace = null;
-      }
       this.restoreGeom(pending.view, pending.originalGeom, pending.originalPivot);
+      this.restoreSelectedFaceHighlight();
     }
   }
 
@@ -3451,32 +3556,6 @@ export class Scene {
       }
       drag.previewInFlight = false;
     })();
-  }
-
-  /**
-   * One extra, un-throttled preview call fired the instant a drag ends, at
-   * the EXACT release distance — not the last throttled sample, which can
-   * legitimately lag a little behind wherever the pointer actually ended up
-   * (see PUSH_PULL_PREVIEW_MS). Without this, the shape kept showing that
-   * slightly-earlier frame — arrow and pill both already at the true final
-   * value — until the real committed rebuild eventually landed a bit later
-   * and visibly snapped/settled into the true position: reported live as
-   * "after a split second... jumps like a little bit extra."
-   *
-   * Guarded by generation, not by `this.pushPullDrag !== drag` (that field
-   * is already null by the time this is called, deliberately, so a NEW drag
-   * can start immediately without waiting on this) — a captured generation
-   * number is invalidated by either a new drag starting or this same drag's
-   * pill actually resolving (commitOrAbandonPushPull) before this settles.
-   */
-  private async applyFinalPushPullPreview(drag: PushPullDrag, distance: number, generation: number) {
-    const preview = await this.onPreviewPushPull?.(drag.id, {
-      point: drag.localPoint,
-      normal: drag.localNormal,
-      distance: this.toLocalDistance(distance, drag.worldPerLocal),
-    });
-    if (!preview || generation !== this.pushPullGeneration) return;
-    this.applyPreviewMesh(drag, preview);
   }
 
   private applyPreviewMesh(drag: PushPullDrag, preview: PreviewBuild) {
@@ -4148,12 +4227,21 @@ export class Scene {
   setSnapEnabled(v: boolean) {
     if (this.snapEnabled === v) return;
     this.snapEnabled = v;
-    if (!v) this.guides.clear();
+    if (!v) {
+      this.guides.clear();
+      this.clearCollisionContacts();
+    }
   }
 
   setGridSnapEnabled(v: boolean) {
     this.gridSnapEnabled = v;
     this.gizmo.setTranslationSnap(v && !this.altDown ? 1 : null);
+  }
+
+  setShowSelectedCollisionContacts(v: boolean) {
+    this.showSelectedCollisionContacts = v;
+    if (v) this.refreshSelectedCollisionContacts();
+    else if (!this.grab?.active) this.clearCollisionContacts();
   }
 
   setWireframe(v: WireframeMode | boolean) {
@@ -4407,6 +4495,11 @@ export class Scene {
     if (!enabled) {
       if (this.pushPullPending) this.commitOrAbandonPushPull(false);
       else this.pushPullLabelEl.style.display = "none";
+      this.pushPullLabelEl.style.display = "none";
+      // A face can remain selected while switching tools. Hide the complete
+      // Push/Pull affordance immediately, including any handle retained by a
+      // stale drag state; Wall only needs the orange face highlight.
+      this.pushPullHandles.visible = false;
     }
     this.pushPullHandleHovered = false;
     this.updatePushPullOverlay();
@@ -4527,6 +4620,7 @@ export class Scene {
     // object freely without giving up snapping for everything after it.
     if (!this.snapEnabled || this.altDown) {
       this.guides.clear();
+      this.clearCollisionContacts();
       return [0, 0, 0];
     }
 
@@ -4542,12 +4636,15 @@ export class Scene {
     const targets: SnapTarget[] = [];
     for (const [targetId, view] of this.parts) {
       if (travelling.has(targetId) || !view.group.visible) continue;
-      targets.push({ id: targetId, bounds: this.boundsOf(view.group) });
+      const surfaces = this.surfaceSnapTargets(targetId, view.group, moving);
+      if (surfaces.length) targets.push(...surfaces);
+      else targets.push({ id: targetId, bounds: this.boundsOf(view.group) });
     }
 
     const result = snapBounds(moving, targets, this.worldSnapTolerance(obj.position));
     if (!result.active.length) {
       this.guides.clear();
+      this.clearCollisionContacts();
       return [0, 0, 0];
     }
 
@@ -4555,8 +4652,274 @@ export class Scene {
     obj.position.y += result.delta[1];
     obj.position.z += result.delta[2];
     obj.updateWorldMatrix(true, true);
-    this.guides.show(result.active, this.boundsOf(obj));
+    const snappedBounds = this.boundsOf(obj);
+    this.guides.show(result.active, snappedBounds);
+    this.showCollisionContacts(id, snappedBounds, result.active);
     return result.delta;
+  }
+
+  /** Produces snap targets from real axis-aligned surface triangles. Concave
+   * and compound shapes can therefore expose recessed faces instead of being
+   * represented by one oversized outer bounding box. */
+  private surfaceSnapTargets(id: string, root: THREE.Object3D, moving: Bounds3): SnapTarget[] {
+    root.updateWorldMatrix(true, true);
+    const targets: SnapTarget[] = [];
+    const points = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+    root.traverse((child) => {
+      if (!(child instanceof THREE.Mesh) || !(child.geometry instanceof THREE.BufferGeometry)) return;
+      const position = child.geometry.getAttribute("position");
+      if (!position) return;
+      const index = child.geometry.getIndex();
+      const count = index ? index.count : position.count;
+      for (let offset = 0; offset + 2 < count; offset += 3) {
+        for (let corner = 0; corner < 3; corner++) {
+          const vertexIndex = index ? index.getX(offset + corner) : offset + corner;
+          points[corner].fromBufferAttribute(position, vertexIndex).applyMatrix4(child.matrixWorld);
+        }
+        for (let axis = 0; axis < 3; axis++) {
+          const coordinates = points.map((point) => point.getComponent(axis));
+          const planeMin = Math.min(...coordinates);
+          const planeMax = Math.max(...coordinates);
+          if (planeMax - planeMin > 0.03) continue;
+          const others = [0, 1, 2].filter((value) => value !== axis);
+          const mins = [0, 0, 0] as [number, number, number];
+          const maxs = [0, 0, 0] as [number, number, number];
+          for (let component = 0; component < 3; component++) {
+            const values = points.map((point) => point.getComponent(component));
+            mins[component] = Math.min(...values);
+            maxs[component] = Math.max(...values);
+          }
+          const overlaps = others.every((component) =>
+            Math.min(moving.max[component], maxs[component]) -
+              Math.max(moving.min[component], mins[component]) > 0.01
+          );
+          if (!overlaps) continue;
+          const plane = (planeMin + planeMax) / 2;
+          mins[axis] = plane;
+          maxs[axis] = plane;
+          targets.push({ id, bounds: { min: mins, max: maxs } });
+          break;
+        }
+      }
+    });
+    return targets;
+  }
+
+  /** Highlights the shared patch only for opposing min/max faces that truly
+   * overlap across both remaining axes. Centre/edge guide alignment is not a
+   * collision and deliberately gets no orange contact surface. */
+  private showCollisionContacts(id: string, moving: Bounds3, snaps: import("../snapping/snap").ActiveSnap[]) {
+    this.clearCollisionContacts();
+    const axisIndex = { x: 0, y: 1, z: 2 } as const;
+    for (const snap of snaps) {
+      const axis = axisIndex[snap.axis];
+      const contacting = (snap.movingAnchor === "min" || snap.movingAnchor === "max") &&
+        (snap.targetAnchor === "min" || snap.targetAnchor === "max");
+      if (!contacting) continue;
+      const others = [0, 1, 2].filter((value) => value !== axis);
+      const lo0 = Math.max(moving.min[others[0]], snap.targetBounds.min[others[0]]);
+      const hi0 = Math.min(moving.max[others[0]], snap.targetBounds.max[others[0]]);
+      const lo1 = Math.max(moving.min[others[1]], snap.targetBounds.min[others[1]]);
+      const hi1 = Math.min(moving.max[others[1]], snap.targetBounds.max[others[1]]);
+      // A real snap can be face-to-face, edge-to-face, or point-to-face.
+      // Zero-width contact has no drawable area, so give it a very slim
+      // visual footprint without pretending the whole bounding box touches.
+      let displayLo0 = lo0;
+      let displayHi0 = hi0;
+      let displayLo1 = lo1;
+      let displayHi1 = hi1;
+      if (displayHi0 - displayLo0 <= 0.01) {
+        const middle = (displayLo0 + displayHi0) / 2;
+        displayLo0 = middle - 0.2;
+        displayHi0 = middle + 0.2;
+      }
+      if (displayHi1 - displayLo1 <= 0.01) {
+        const middle = (displayLo1 + displayHi1) / 2;
+        displayLo1 = middle - 0.2;
+        displayHi1 = middle + 0.2;
+      }
+      const plane = snap.movingAnchor === "min" ? moving.min[axis] : moving.max[axis];
+      const movingTriangles = this.planarContactTriangles(id, axis, plane);
+      const targetTriangles = this.planarContactTriangles(snap.targetId, axis, plane);
+      const vertices: number[] = [];
+      for (const subject of movingTriangles) {
+        for (const clip of targetTriangles) {
+          const polygon = this.clipContactPolygon(subject, clip);
+          for (let i = 1; i + 1 < polygon.length; i++) {
+            for (const [a, b] of [polygon[0], polygon[i], polygon[i + 1]]) {
+              const point = [0, 0, 0];
+              point[axis] = plane;
+              point[others[0]] = a;
+              point[others[1]] = b;
+              vertices.push(point[0], point[1], point[2]);
+            }
+          }
+        }
+      }
+      // Some imported/edited meshes do not preserve a perfectly coplanar
+      // triangle on both sides even though the real target surface produced
+      // the snap. In that case, use that real target surface clipped to the
+      // moving object's footprint—never the target's oversized outer box.
+      if (!vertices.length && targetTriangles.length) {
+        const footprint: [number, number][] = [
+          [displayLo0, displayLo1], [displayHi0, displayLo1],
+          [displayHi0, displayHi1], [displayLo0, displayHi1],
+        ];
+        for (const triangle of targetTriangles) {
+          const polygon = this.clipContactPolygon(triangle, footprint);
+          for (let i = 1; i + 1 < polygon.length; i++) {
+            for (const [a, b] of [polygon[0], polygon[i], polygon[i + 1]]) {
+              const point = [0, 0, 0];
+              point[axis] = plane;
+              point[others[0]] = a;
+              point[others[1]] = b;
+              vertices.push(point[0], point[1], point[2]);
+            }
+          }
+        }
+      }
+      if (!vertices.length) continue;
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
+      const patch = new THREE.Mesh(geometry, this.collisionContactMaterial);
+      patch.renderOrder = 28;
+      patch.frustumCulled = false;
+      this.collisionContacts.add(patch);
+    }
+    if (this.collisionContacts.children.length) this.collisionContactOwnerId = id;
+  }
+
+  /** Actual coplanar mesh triangles at a contact plane, projected to 2D. */
+  private planarContactTriangles(id: string, axis: number, plane: number): [number, number][][] {
+    const root = this.assemblyGroups.get(id) ?? this.parts.get(id)?.group;
+    if (!root) return [];
+    root.updateWorldMatrix(true, true);
+    const others = [0, 1, 2].filter((value) => value !== axis);
+    const triangles: [number, number][][] = [];
+    const points = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+    root.traverse((child) => {
+      if (!(child instanceof THREE.Mesh) || !(child.geometry instanceof THREE.BufferGeometry)) return;
+      const position = child.geometry.getAttribute("position");
+      if (!position) return;
+      const index = child.geometry.getIndex();
+      const count = index ? index.count : position.count;
+      for (let offset = 0; offset + 2 < count; offset += 3) {
+        let coplanar = true;
+        for (let corner = 0; corner < 3; corner++) {
+          const vertexIndex = index ? index.getX(offset + corner) : offset + corner;
+          points[corner].fromBufferAttribute(position, vertexIndex).applyMatrix4(child.matrixWorld);
+          if (Math.abs(points[corner].getComponent(axis) - plane) > 0.03) coplanar = false;
+        }
+        if (!coplanar) continue;
+        triangles.push(points.map((point) => [
+          point.getComponent(others[0]), point.getComponent(others[1]),
+        ] as [number, number]));
+      }
+    });
+    return triangles;
+  }
+
+  /** Intersects one projected triangle with another (Sutherland-Hodgman). */
+  private clipContactPolygon(subject: [number, number][], clip: [number, number][]) {
+    let polygon = subject.map((point) => [...point] as [number, number]);
+    const area = clip.reduce((sum, point, index) => {
+      const next = clip[(index + 1) % clip.length];
+      return sum + point[0] * next[1] - next[0] * point[1];
+    }, 0);
+    const orientation = area >= 0 ? 1 : -1;
+    for (let edge = 0; edge < clip.length && polygon.length; edge++) {
+      const a = clip[edge];
+      const b = clip[(edge + 1) % clip.length];
+      const input = polygon;
+      polygon = [];
+      const side = (point: [number, number]) => orientation * (
+        (b[0] - a[0]) * (point[1] - a[1]) - (b[1] - a[1]) * (point[0] - a[0])
+      );
+      for (let i = 0; i < input.length; i++) {
+        const current = input[i];
+        const previous = input[(i + input.length - 1) % input.length];
+        const currentSide = side(current);
+        const previousSide = side(previous);
+        if ((currentSide >= -1e-6) !== (previousSide >= -1e-6)) {
+          const ratio = previousSide / (previousSide - currentSide);
+          polygon.push([
+            previous[0] + (current[0] - previous[0]) * ratio,
+            previous[1] + (current[1] - previous[1]) * ratio,
+          ]);
+        }
+        if (currentSide >= -1e-6) polygon.push(current);
+      }
+    }
+    return polygon;
+  }
+
+  /** Rebuilds the display-only contact patches from the current scene when an
+   * object is selected. This reads rendered bounds only and never asks the
+   * geometry kernel to rebuild the shape. */
+  private refreshSelectedCollisionContacts() {
+    if (!this.showSelectedCollisionContacts) {
+      this.clearCollisionContacts();
+      return;
+    }
+    if (this.selectedIds.length !== 1) {
+      this.clearCollisionContacts();
+      return;
+    }
+    this.refreshCollisionContactsFor(this.selectedIds[0]);
+  }
+
+  private refreshCollisionContactsFor(id: string) {
+    const selected = this.assemblyGroups.get(id) ?? this.parts.get(id)?.group;
+    if (!selected) {
+      this.clearCollisionContacts();
+      return;
+    }
+    const moving = this.boundsOf(selected);
+    const axes = ["x", "y", "z"] as const;
+    const contacts: import("../snapping/snap").ActiveSnap[] = [];
+    const tolerance = 0.05;
+    for (const [targetId, view] of this.parts) {
+      if (targetId === id || !view.group.visible || selected.getObjectById(view.group.id)) continue;
+      const targetBounds = this.boundsOf(view.group);
+      for (let axis = 0; axis < axes.length; axis++) {
+        if (Math.abs(moving.min[axis] - targetBounds.max[axis]) <= tolerance) {
+          contacts.push({
+            axis: axes[axis], movingAnchor: "min", targetAnchor: "max",
+            value: targetBounds.max[axis], targetId, targetBounds,
+          });
+        }
+        if (Math.abs(moving.max[axis] - targetBounds.min[axis]) <= tolerance) {
+          contacts.push({
+            axis: axes[axis], movingAnchor: "max", targetAnchor: "min",
+            value: targetBounds.min[axis], targetId, targetBounds,
+          });
+        }
+        // A freshly pasted duplicate may sit exactly over its source. Its
+        // corresponding outside faces are min-to-min and max-to-max rather
+        // than opposing, but they are still genuine coincident surfaces.
+        if (Math.abs(moving.min[axis] - targetBounds.min[axis]) <= tolerance) {
+          contacts.push({
+            axis: axes[axis], movingAnchor: "min", targetAnchor: "min",
+            value: targetBounds.min[axis], targetId, targetBounds,
+          });
+        }
+        if (Math.abs(moving.max[axis] - targetBounds.max[axis]) <= tolerance) {
+          contacts.push({
+            axis: axes[axis], movingAnchor: "max", targetAnchor: "max",
+            value: targetBounds.max[axis], targetId, targetBounds,
+          });
+        }
+      }
+    }
+    this.showCollisionContacts(id, moving, contacts);
+  }
+
+  private clearCollisionContacts() {
+    for (const child of [...this.collisionContacts.children]) {
+      this.collisionContacts.remove(child);
+      (child as THREE.Mesh).geometry.dispose();
+    }
+    this.collisionContactOwnerId = null;
   }
 
   private boundsOf(object: THREE.Object3D): Bounds3 {
@@ -4578,7 +4941,10 @@ export class Scene {
     } else {
       worldHeight = (this.camera.top - this.camera.bottom) / this.camera.zoom;
     }
-    return (worldHeight / height) * SNAP_TOLERANCE_PX;
+    // A screen-only radius grows without limit when zooming out: eight
+    // pixels could become tens of millimetres and pull in a distant object.
+    // Keep the visual usability, but never magnetise across more than 2 mm.
+    return Math.min(2, (worldHeight / height) * SNAP_TOLERANCE_PX);
   }
 
   private onModifierChange = (e: KeyboardEvent) => {
@@ -4586,7 +4952,10 @@ export class Scene {
     // TransformControls performs its own axis-handle quantization, so its
     // snap value must also follow the temporary Alt bypass.
     this.gizmo.setTranslationSnap(this.gridSnapEnabled && !this.altDown ? 1 : null);
-    if (this.altDown) this.guides.clear();
+    if (this.altDown) {
+      this.guides.clear();
+      this.clearCollisionContacts();
+    }
     if (this.toolMode === "build") this.updateCellCursor(e.altKey);
   };
 
@@ -4895,6 +5264,10 @@ export class Scene {
     }
     if (this.pushPullDrag) {
       const drag = this.pushPullDrag;
+      if (!this.facePushPullEnabled) {
+        this.pushPullLabelEl.style.display = "none";
+        return;
+      }
       if (!drag.active) {
         if (Math.hypot(e.clientX - drag.downScreen.x, e.clientY - drag.downScreen.y) <= CLICK_SLOP_PX) {
           return;
@@ -4904,6 +5277,7 @@ export class Scene {
       }
       const distance = this.pushPullDistance(e, drag);
       drag.currentDistance = distance;
+      this.onPushPullDistanceChange?.(distance);
       // Immediate feedback: the arrow slides along the face's normal on every
       // frame with no debounce or lag. The mesh rebuild itself is throttled
       // live — every step is a real OCCT boolean — so it updates once, on
@@ -5202,6 +5576,9 @@ export class Scene {
   private onPointerUp = (e: PointerEvent) => {
     const down = this.downAt;
     this.downAt = null;
+    if (!this.showSelectedCollisionContacts || !this.collisionContactOwnerId || !this.selectedIds.includes(this.collisionContactOwnerId)) {
+      this.clearCollisionContacts();
+    }
 
     // The region click was already handled on pointerdown. Selection is
     // resolved here, though, so without this the same click would also pick
@@ -5222,19 +5599,35 @@ export class Scene {
       } else {
         drag.handle.position.copy(drag.handleBasePosition);
       }
-      // Either way — dragged to a distance, or just clicked — this ends in
-      // the SAME place: the pill open and focused with that value, needing
-      // an explicit commit (Enter/blur applies it, Escape abandons it; see
-      // commitPushPullInput) rather than a drag silently applying on
-      // release while only a plain click left anything open to review.
-      if (drag.active) this.onDragChange?.(false); // closes the (empty) drag batch; the edit itself commits separately, below
       const distance = drag.active ? this.pushPullDistance(e, drag) : 0;
       drag.currentDistance = distance;
-      this.showPushPullInput(drag, distance);
-      // See applyFinalPushPullPreview's own doc comment — this is what stops
-      // the shape settling into place a moment after release instead of
-      // already being there.
-      if (drag.active) void this.applyFinalPushPullPreview(drag, distance, this.pushPullGeneration);
+      if (drag.active) {
+        // A drag is a complete gesture: commit on release. Previously it
+        // left a focused pending editor over live preview geometry. Starting
+        // another drag blurred that editor and raced its old rebuild against
+        // the new gesture, which made the second drag appear frozen.
+        this.pushPullGeneration++;
+        this.pushPullPending = null;
+        this.pushPullLabelEl.style.display = "none";
+        this.onDragChange?.(false);
+        this.disposeGeom(drag.originalGeom);
+        const travelled = this.toLocalDistance(distance, drag.worldPerLocal);
+        this.armedFace = {
+          id: drag.id,
+          localPoint: [
+            drag.localPoint[0] + drag.localNormal[0] * travelled,
+            drag.localPoint[1] + drag.localNormal[1] * travelled,
+            drag.localPoint[2] + drag.localNormal[2] * travelled,
+          ],
+          localNormal: drag.localNormal,
+          view: drag.view,
+          worldPerLocal: drag.worldPerLocal,
+        };
+        void this.applyPushPull(drag, distance);
+      } else {
+        // A click, unlike a drag, means the user wants exact numeric entry.
+        this.showPushPullInput(drag, 0);
+      }
       return;
     }
 
@@ -5542,6 +5935,12 @@ export class Scene {
     const hitId = this.hitTest(e);
     const rootId = hitId && !e.altKey ? this.findRootOwner(hitId) : hitId;
     this.onSelectObject?.(rootId, additive);
+    // React records the click selection asynchronously. Refresh from the
+    // object that was actually picked on the following frame, rather than
+    // relying on the previous selectedIds value during this pointer event.
+    if (rootId && !additive && this.showSelectedCollisionContacts) {
+      requestAnimationFrame(() => this.refreshCollisionContactsFor(rootId));
+    }
   }
 
   private hitTest(e: { clientX: number; clientY: number }): string | null {
@@ -5824,6 +6223,8 @@ export class Scene {
     this.saveCameraNow();
     this.controls.dispose();
     this.guides.dispose();
+    this.clearCollisionContacts();
+    this.collisionContactMaterial.dispose();
     this.alignHandleMeshes[0]?.geometry.dispose();
     for (const handle of this.alignHandleMeshes) (handle.material as THREE.Material).dispose();
     for (const handle of this.pushPullHandleMeshes) disposeArrow(handle);

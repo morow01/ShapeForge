@@ -282,6 +282,7 @@ interface Props {
    *  exactly where the original does without the user positioning anything
    *  by hand. */
   onDuplicateWithParams?: (params: Record<string, number>) => void;
+  onCreateMatchingThreadPart?: () => void;
   onText?: (text: string) => void;
   onFontName?: (fontName: string) => void;
   fonts?: LocalFontData[] | null;
@@ -329,6 +330,7 @@ export function Inspector({
   onDelete,
   onPruneDeadOps,
   onDuplicateWithParams,
+  onCreateMatchingThreadPart,
   onText,
   onFontName,
   fonts,
@@ -541,6 +543,7 @@ export function Inspector({
                   onParam={onParam}
                   onTransform={onTransform}
                   onDuplicateWithParams={onDuplicateWithParams}
+                  onCreateMatchingThreadPart={onCreateMatchingThreadPart}
                   onText={onText}
                   onFontName={onFontName}
                   fonts={fonts}
@@ -562,6 +565,7 @@ export function Inspector({
               onParam={onParam}
               onTransform={onTransform}
               onDuplicateWithParams={onDuplicateWithParams}
+              onCreateMatchingThreadPart={onCreateMatchingThreadPart}
               onText={onText}
               onFontName={onFontName}
               fonts={fonts}
@@ -965,6 +969,7 @@ function ObjectParams({
   onParam,
   onTransform,
   onDuplicateWithParams,
+  onCreateMatchingThreadPart,
   onText,
   onFontName,
   fonts,
@@ -980,6 +985,7 @@ function ObjectParams({
   onParam: (key: string, value: number) => void;
   onTransform: (patch: { position?: Vec3; rotation?: Vec3; scale?: Vec3 }) => void;
   onDuplicateWithParams?: (params: Record<string, number>) => void;
+  onCreateMatchingThreadPart?: () => void;
   onText?: (text: string) => void;
   onFontName?: (fontName: string) => void;
   fonts?: LocalFontData[] | null;
@@ -1095,6 +1101,14 @@ function ObjectParams({
           </p>
         </div>
       )}
+      {(node.kind === "threadedRod" || node.kind === "threadedNut") && onCreateMatchingThreadPart && (
+        <div className="connector-pair">
+          <button type="button" className="connector-pair-btn" onClick={onCreateMatchingThreadPart}>
+            ⧉ Create matching {node.kind === "threadedRod" ? "nut" : "bolt"}
+          </button>
+          <p className="hint">Copies the same standard size and pitch automatically.</p>
+        </div>
+      )}
       <div className="h2-row">
         <h2>Dimensions</h2>
         <div className="h2-actions">
@@ -1128,6 +1142,10 @@ function ObjectParams({
         if (node.kind === "polygonPrism" && f.key === "cornerSteps" && node.params.cornerSteps == null) base = 24;
         if (node.kind === "star" && f.key === "cornerSteps" && node.params.cornerSteps == null) base = 24;
         if (node.kind === "threadedNut" && f.key === "cornerSteps" && node.params.cornerSteps == null) base = 16;
+        if (node.kind === "threadedNut" && f.key === "fit" && node.params.fit == null) base = 1;
+        if (node.kind === "threadedNut" && f.key === "clearance" && (node.params.fit ?? 1) < 3) {
+          base = (node.params.fit ?? 1) === 0 ? 0.2 : (node.params.fit ?? 1) === 1 ? 0.3 : 0.4;
+        }
         if (node.kind === "paraboloid" && f.key === "surfaceSteps" && node.params.surfaceSteps == null) base = 32;
         if (node.kind === "hemisphere" && f.key === "surfaceSteps" && node.params.surfaceSteps == null) base = 24;
         // Surface the old shared-radius value through the new independent
@@ -1233,7 +1251,7 @@ function ObjectParams({
                 locked={isLocked}
                 onToggleLock={onToggleLock}
                 lockDisabled={lockDisabled}
-                disabled={isConstrained3rdAngle}
+                disabled={isConstrained3rdAngle || (node.kind === "threadedNut" && f.key === "clearance" && (node.params.fit ?? 1) !== 3)}
                 dotColorClass={dotColorClass}
                 onChange={(v) => onParam(f.key, Math.min(v, shown.max))}
                 displayUnit={displayUnit}
@@ -1539,6 +1557,38 @@ function Field({
       </div>
     );
   }
+  const isPrintFit = field.key === "fit" && field.label === "Print Fit" && field.options?.length === 4;
+  if (isPrintFit) {
+    return (
+      <div className="field">
+        <span className="field-label">{field.label}</span>
+        <div className="binary-choice four icon-choice" role="group" aria-label={field.label}>
+          {field.options!.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={value === option.value ? "on" : ""}
+              aria-label={option.label}
+              title={option.label}
+              aria-pressed={value === option.value}
+              onClick={() => onChange(option.value)}
+            >
+              <svg viewBox="0 0 32 32" aria-hidden="true">
+                {option.value < 3 ? (
+                  <>
+                    <circle cx="16" cy="16" r="5" />
+                    <circle cx="16" cy="16" r={option.value === 0 ? 8 : option.value === 1 ? 10 : 12} />
+                  </>
+                ) : (
+                  <path d="M5 9h22M5 16h22M5 23h22M11 6v6M21 13v6M14 20v6" />
+                )}
+              </svg>
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
   if (field.options) {
     if (["filletMode", "sideEdges", "cornerEdges", "surfaceEdges", "edgeSmoothness"].includes(field.key) && field.options.length === 2) {
       return (
@@ -1665,7 +1715,7 @@ function Field({
             step={shownStep}
             value={shownValue}
             disabled={disabled}
-            title={disabled ? "Constrained by the other 2 locked angles (sum is 180°)" : undefined}
+            title={disabled ? (field.key === "clearance" ? "Choose Custom fit to edit this value" : "Constrained by the other 2 locked angles (sum is 180°)") : undefined}
             onPointerDown={beginHistoryBatch}
             onPointerUp={endHistoryBatch}
             onKeyDown={beginHistoryBatch}
@@ -1681,7 +1731,7 @@ function Field({
           step={shownStep}
           value={draftValue}
           disabled={disabled}
-          title={disabled ? "Constrained by the other 2 locked angles (sum is 180°)" : undefined}
+          title={disabled ? (field.key === "clearance" ? "Choose Custom fit to edit this value" : "Constrained by the other 2 locked angles (sum is 180°)") : undefined}
           onFocus={(e) => {
             beginHistoryBatch();
             setEditingValue(true);

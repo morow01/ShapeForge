@@ -7,11 +7,13 @@ interface Props {
   appearance: AppearancePreference;
   snapToGrid: boolean;
   snapToObjects: boolean;
+  showSelectedCollisionContacts: boolean;
   onUnit: (unit: DisplayUnit) => void;
   onDecimals: (decimals: number) => void;
   onAppearance: (appearance: AppearancePreference) => void;
   onSnapToGrid: (enabled: boolean) => void;
   onSnapToObjects: (enabled: boolean) => void;
+  onShowSelectedCollisionContacts: (enabled: boolean) => void;
   onClose: () => void;
 }
 
@@ -22,11 +24,13 @@ export function SettingsModal({
   appearance,
   snapToGrid,
   snapToObjects,
+  showSelectedCollisionContacts,
   onUnit,
   onDecimals,
   onAppearance,
   onSnapToGrid,
   onSnapToObjects,
+  onShowSelectedCollisionContacts,
   onClose,
 }: Props) {
   if (!open) return null;
@@ -75,6 +79,13 @@ export function SettingsModal({
           <label className="settings-row">
             <span><strong>Snap to objects</strong><small>Aligns nearby object edges and shows Smart Guides</small></span>
             <select value={snapToObjects ? "on" : "off"} onChange={(e) => onSnapToObjects(e.target.value === "on")}>
+              <option value="on">On</option>
+              <option value="off">Off</option>
+            </select>
+          </label>
+          <label className="settings-row">
+            <span><strong>Show selected collisions</strong><small>Keeps touching areas highlighted after selecting an object</small></span>
+            <select value={showSelectedCollisionContacts ? "on" : "off"} onChange={(e) => onShowSelectedCollisionContacts(e.target.value === "on")}>
               <option value="on">On</option>
               <option value="off">Off</option>
             </select>

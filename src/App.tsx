@@ -10,6 +10,7 @@ import {
   CombineIcon,
   DropIcon,
   ExportIcon,
+  FaceModifierIcon,
   GroupIcon,
   MagnetIcon,
   NewDesignIcon,
@@ -34,6 +35,7 @@ import { buildThreeMF } from "./export/threemf";
 import { SvgImportModal } from "./ui/SvgImportModal";
 import { TextModal } from "./ui/TextModal";
 import { SettingsModal } from "./ui/SettingsModal";
+import { displayStep, formatLength, fromMillimetres, toMillimetres } from "./measurement";
 import type { AppearancePreference, DisplayUnit } from "./measurement";
 import type { TextConfig } from "./ui/TextModal";
 import { NO_FONT_LISTING, getCachedTextPaths, resolveTextPaths } from "./text/systemFonts";
@@ -51,7 +53,7 @@ import { findNode, parentOf, resolveNodeTransparent, resolveNodeColor, updateNod
 import { bakeScale } from "./document/bake";
 import { putBlob } from "./document/blobStore";
 import { loadCameraState } from "./document/persist";
-import type { GroupNode, PrimitiveKind, SceneNode, Vec3 } from "./document/types";
+import type { EditOp, GroupNode, PrimitiveKind, SceneNode, ShellOp, Vec3 } from "./document/types";
 import { RETRYABLE_MESH_ERROR } from "./kernel/types";
 import type { EditSpec, ExportQuality, NodeSpec, PreviewBuild, ScenePart } from "./kernel/types";
 import type { CameraMode, Scene, ToolMode, WireframeMode } from "./viewport/scene";
@@ -167,8 +169,6 @@ const toSpec = (n: SceneNode): NodeSpec => {
   };
 };
 
-const DEAD_PUSH_PULL_ERROR = "A pushed/pulled face could not be found after rebuilding";
-
 /** Removes a skipped node from anywhere in the tree, not just the top level —
  *  a timed-out import nested inside a group must actually come out of that
  *  group's children, or the group (still top-level, so not itself excluded)
@@ -253,6 +253,7 @@ const EXPORT_QUALITY_KEY = "cad.exportQuality";
 const EXPORT_FORMAT_KEY = "cad.exportFormat";
 const SNAP_KEY = "cad.smartGuides";
 const GRID_SNAP_KEY = "cad.gridSnap";
+const SELECTED_COLLISIONS_KEY = "cad.showSelectedCollisions";
 const OBJECTS_PANEL_KEY = "cad.objectsPanelOpen";
 const VIEW_STYLE_KEY = "cad.viewStyle";
 const RESIZE_CONSTRAINED_KEY = "cad.resizeConstrained";
@@ -267,6 +268,45 @@ const EXPORT_QUALITY_HINT: Record<ExportQuality, string> = {
   standard: "Standard — faint facets on curved surfaces, exports in a moment.",
   fine: "Fine — smooth curves, but a curved part can take several seconds.",
 };
+
+function SignedMeasurementInput({ valueMm, unit, decimals, onValue, onEnter }: {
+  valueMm: number;
+  unit: DisplayUnit;
+  decimals: number;
+  onValue: (valueMm: number) => void;
+  onEnter: () => void;
+}) {
+  const [draft, setDraft] = useState(() => formatLength(valueMm, unit, decimals));
+  const focused = useRef(false);
+  useEffect(() => {
+    if (!focused.current) setDraft(formatLength(valueMm, unit, decimals));
+  }, [valueMm, unit, decimals]);
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      value={draft}
+      onFocus={() => { focused.current = true; }}
+      onChange={(e) => {
+        const next = e.target.value;
+        setDraft(next);
+        if (["", "-", ".", "-."].includes(next.trim())) return;
+        const parsed = Number(next);
+        if (Number.isFinite(parsed)) onValue(toMillimetres(parsed, unit));
+      }}
+      onBlur={() => {
+        focused.current = false;
+        setDraft(formatLength(valueMm, unit, decimals));
+      }}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          onEnter();
+        }
+      }}
+    />
+  );
+}
 
 type FileOperation = {
   label: string;
@@ -523,6 +563,9 @@ export function App() {
   );
   const [gridSnapEnabled, setGridSnapEnabled] = useState(
     () => localStorage.getItem(GRID_SNAP_KEY) === "on",
+  );
+  const [showSelectedCollisionContacts, setShowSelectedCollisionContacts] = useState(
+    () => localStorage.getItem(SELECTED_COLLISIONS_KEY) !== "off",
   );
   // The Objects panel is not always wanted — a single object needs it least
   // of all — so it is a toggle, remembered the same way Snap is.
@@ -903,6 +946,7 @@ export function App() {
   const buildId = useRef(0);
   const textFontInputRef = useRef<HTMLInputElement>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
+  const faceApplyButtonRef = useRef<HTMLButtonElement>(null);
 
   // A slider fires far more onChange events than there are meaningful
   // rebuilds worth doing — a short debounce coalesces a drag's burst into one
@@ -950,15 +994,15 @@ export function App() {
             }, 120);
           }
 
-          // A failed push/pull op has already been skipped by the kernel, so
-          // leaving it in the document cannot affect the visible shape — it
-          // only makes the same warning reappear on every future rebuild.
+          // An edit whose old face/edge anchor no longer exists has already
+          // been skipped by the kernel. Leaving it in the document cannot
+          // affect the visible shape — it only repeats the warning forever.
           // Verify the edit history has not changed while the repair runs,
           // then permanently retain only the operations the kernel can still
           // resolve. This is the automatic equivalent of the Inspector's
           // existing "Remove broken edit" action.
           for (const issue of res.errors) {
-            if (!issue.message.startsWith(DEAD_PUSH_PULL_ERROR)) continue;
+            if (!issue.message.includes("could not be found after rebuilding")) continue;
             const failed = findNode(useDoc.getState().nodes, issue.id);
             if (!failed || failed.type !== "edit") continue;
             const failedSpec = toSpec(failed) as EditSpec;
@@ -1014,6 +1058,14 @@ export function App() {
       // Private mode / blocked storage: the choice just won't be remembered.
     }
   }, [gridSnapEnabled]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SELECTED_COLLISIONS_KEY, showSelectedCollisionContacts ? "on" : "off");
+    } catch {
+      // Private mode / blocked storage: the choice just won't be remembered.
+    }
+  }, [showSelectedCollisionContacts]);
 
   useEffect(() => {
     try {
@@ -2061,9 +2113,10 @@ export function App() {
     // as "I got error message but it performed the offset anyway". Say which
     // it is, and name the cure, instead of letting it read as "your edit
     // failed".
-    setError(complaint.includes("could not be found after rebuilding")
-      ? `${complaint} This is an earlier edit on that object, not the one you just made — select it and press "Remove broken edit" to clear it.`
-      : complaint);
+    // Stale topology anchors are pruned automatically by the build handler.
+    // Do not flash an alarming failure for the new operation while that
+    // repair completes; the Inspector retains the warning if pruning fails.
+    if (!complaint.includes("could not be found after rebuilding")) setError(complaint);
     setEditPending(null);
   }, [editPending, invalid]);
 
@@ -2360,13 +2413,13 @@ export function App() {
           aria-label="Select tool"
         ><span className="tool-symbol cursor-symbol">➤</span></button>
         {([
-          ["push", "↕", "Push/Pull", "Select a face to push or pull (F)"],
-          ["wall", "▣", "Wall", "Hollow a shape through the selected face"],
-          ["resize", "⤢", "Resize Face", "Resize the selected face"],
-          ["offset", "▤", "Offset & Extrude", "Offset and extrude the selected face"],
-          ["fillet", "◜", "Fillet Face Border", "Round the selected face border"],
-          ["chamfer", "◩", "Chamfer Face Border", "Bevel the selected face border"],
-        ] as const).map(([operation, symbol, label, title]) => (
+          ["push", "Push/Pull", "Select a face to push or pull (F)"],
+          ["wall", "Wall", "Hollow a shape through the selected face"],
+          ["resize", "Resize Face", "Resize the selected face"],
+          ["offset", "Offset & Extrude", "Offset and extrude the selected face"],
+          ["fillet", "Fillet Face Border", "Round the selected face border"],
+          ["chamfer", "Chamfer Face Border", "Bevel the selected face border"],
+        ] as const).map(([operation, label, title]) => (
           <button
             key={operation}
             className={toolMode === "face" && faceOp === operation ? "active" : ""}
@@ -2374,7 +2427,7 @@ export function App() {
             title={title}
             aria-label={label}
           >
-            <span className="tool-symbol face-operation-symbol" aria-hidden="true">{symbol}</span>
+            <FaceModifierIcon kind={operation} />
           </button>
         ))}
         <span className="tool-rail-sep" />
@@ -2580,6 +2633,7 @@ export function App() {
           wireframe={wireframe}
           snapEnabled={snapEnabled}
           gridSnapEnabled={gridSnapEnabled}
+          showSelectedCollisionContacts={showSelectedCollisionContacts}
           displayUnit={displayUnit}
           decimalPlaces={decimalPlaces}
           onSceneReady={(scene) => { sceneRef.current = scene; }}
@@ -2591,6 +2645,7 @@ export function App() {
           onDuplicate={onDuplicate}
           onPushPull={pushPullFace}
           onPreviewPushPull={onPreviewPushPull}
+          onPushPullDistanceChange={setFaceValue}
           onSelectEdges={(id, points) => setEdgeSelection(id && points.length ? { id, points } : null)}
           onSelectFace={(id, point, normal, size, edges) => {
             const next = id && point && normal ? { id, point, normal, size, edges } : null;
@@ -2624,17 +2679,31 @@ export function App() {
                 : faceOp === "offset" ? "Inset"
                 : faceOp === "fillet" || faceOp === "chamfer" ? "Size"
                 : "Distance"}
-              <input type="number" step="0.5" value={faceValue}
-                onChange={(e) => setFaceValue(Number(e.target.value) || 0)} /> mm
+              <SignedMeasurementInput
+                valueMm={faceValue}
+                unit={displayUnit}
+                decimals={decimalPlaces}
+                onValue={(value) => {
+                  setFaceValue(value);
+                }}
+                onEnter={() => faceApplyButtonRef.current?.click()}
+              /> {displayUnit}
             </label>
             {faceOp === "offset" && (
               <label>
                 Height
-                <input type="number" step="0.5" value={faceHeight}
-                  onChange={(e) => setFaceHeight(Number(e.target.value) || 0)} /> mm
+                <input type="number" step={displayStep(displayUnit, decimalPlaces)} value={fromMillimetres(faceHeight, displayUnit)}
+                  onChange={(e) => setFaceHeight(toMillimetres(Number(e.target.value) || 0, displayUnit))}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      faceApplyButtonRef.current?.click();
+                    }
+                  }} /> {displayUnit}
               </label>
             )}
             <button
+              ref={faceApplyButtonRef}
               title={faceOp === "wall"
                 ? "Hollow this object out, leaving a wall of this thickness and opening the selected face"
                 : faceOp === "resize"
@@ -2705,12 +2774,12 @@ export function App() {
                 };
                 if (faceOp === "fillet" || faceOp === "chamfer") {
                   const distance = Math.max(0.1, Math.abs(faceValue));
-                  const op = {
+                  const op: EditOp = {
                     kind: faceOp,
                     point: target.point,
                     face: { point: target.point, normal: target.normal },
                     distance,
-                  } as const;
+                  };
                   const candidate: EditSpec = node?.type === "edit"
                     ? { ...(toSpec(node) as EditSpec), ops: [...node.ops, op] }
                     : {
@@ -2733,14 +2802,42 @@ export function App() {
                     releaseSelection();
                   }).catch((e) => setError(msg(e)));
                 } else if (faceOp === "wall") {
-                  setEditPending(target.id);
-                  finishEdit(target.id, {
+                  const op: ShellOp = {
                     kind: "shell",
                     thickness: Math.max(0.1, faceValue),
                     points: [target.point],
                     normal: target.normal,
-                  });
-                  releaseSelection();
+                  };
+                  const candidate: EditSpec = node?.type === "edit"
+                    ? { ...(toSpec(node) as EditSpec), ops: [...node.ops, op] }
+                    : {
+                        type: "edit",
+                        id: target.id,
+                        base: toSpec(node!),
+                        ops: [op],
+                        position: node!.position,
+                        rotation: node!.rotation,
+                        scale: node!.scale,
+                        isHole: node!.isHole,
+                      };
+                  void kernel.pruneDeadOps(candidate).then((surviving) => {
+                    const latestSurvived = !!surviving?.length &&
+                      JSON.stringify(surviving[surviving.length - 1]) === JSON.stringify(op);
+                    if (!surviving || !latestSurvived) {
+                      setError("That wall cannot be created on this face at the selected thickness.");
+                      return;
+                    }
+                    setError(null);
+                    setEditPending(target.id);
+                    if (node?.type === "edit" && surviving.length < candidate.ops.length) {
+                      // A successful new wall should not keep replaying stale
+                      // edge edits that the same validation proved dead.
+                      setOps(target.id, surviving);
+                    } else {
+                      finishEdit(target.id, op);
+                    }
+                    releaseSelection();
+                  }).catch((e) => setError(msg(e)));
                 } else if (faceOp === "offset") {
                   if (Math.abs(faceHeight) < 0.1) {
                     setError("Type a height of at least 0.1 mm — that is how far the offset face is extruded.");
@@ -3005,6 +3102,22 @@ export function App() {
               error={invalid[selected.id] ?? null}
               onParam={(k, v) => setParam(selected.id, k, v)}
               onResetParams={() => resetParams(selected.id)}
+              onCreateMatchingThreadPart={() => {
+                const source = selected.type === "edit" && selected.base.type === "object" ? selected.base : selected;
+                if (source.type !== "object" || (source.kind !== "threadedRod" && source.kind !== "threadedNut")) return;
+                const target = source.kind === "threadedRod" ? "threadedNut" : "threadedRod";
+                const spacing = Math.max(source.params.headSize ?? 0, source.params.outerWidth ?? 0, source.params.diameter ?? 8) + 10;
+                beginHistoryBatch();
+                addPrimitive(target, [selected.position[0] + spacing, selected.position[1], selected.position[2]], selected.rotation);
+                const newId = useDoc.getState().selectedIds[0];
+                const preset = source.params.preset ?? 0;
+                setParam(newId, "preset", preset);
+                if (preset === 0) {
+                  setParam(newId, "diameter", source.params.diameter ?? 8);
+                  setParam(newId, "pitch", source.params.pitch ?? 1.25);
+                }
+                endHistoryBatch();
+              }}
               onTransform={(patch) => setTransform(selected.id, patch)}
               resizeConstrained={resizeConstrained}
               onResizeConstrained={setResizeConstrained}
@@ -3194,11 +3307,13 @@ export function App() {
         appearance={appearance}
         snapToGrid={gridSnapEnabled}
         snapToObjects={snapEnabled}
+        showSelectedCollisionContacts={showSelectedCollisionContacts}
         onUnit={setDisplayUnit}
         onDecimals={setDecimalPlaces}
         onAppearance={setAppearance}
         onSnapToGrid={setGridSnapEnabled}
         onSnapToObjects={setSnapEnabled}
+        onShowSelectedCollisionContacts={setShowSelectedCollisionContacts}
         onClose={() => setSettingsOpen(false)}
       />
 

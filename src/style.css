@@ -237,6 +237,10 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 .face-operation-symbol { font-size: 22px; font-weight: 600; }
 .text-tool-symbol { font-family: Georgia, serif; font-size: 21px; font-weight: 700; }
 .tool-icon { display: block; width: 21px; height: 21px; }
+.modifier-icon { width: 27px; height: 27px; overflow: visible; }
+.modifier-icon .modifier-accent { color: #079c9a; stroke: currentColor; }
+.tool-rail button:hover .modifier-icon .modifier-accent,
+.tool-rail button.active .modifier-icon .modifier-accent { color: #007b79; }
 
 .tool-rail-item-container {
   position: relative;
@@ -398,6 +402,7 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
   background: #eef2f4;
 }
 .binary-choice.three { grid-template-columns: repeat(3, 1fr); }
+.binary-choice.four { grid-template-columns: repeat(4, 1fr); }
 .binary-choice button {
   min-height: 32px;
   padding: 5px 8px;
@@ -632,7 +637,7 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 .edge-bar { position:absolute; z-index:12; left:50%; bottom:46px; transform:translateX(-50%); display:flex; align-items:center; gap:10px; padding:9px 12px; border:1px solid #ccd8df; border-radius:10px; background:rgba(255,255,255,.96); box-shadow:0 3px 14px rgb(31 50 62 / 18%); font-size:12px; }
 .edge-bar label { display:flex; align-items:center; gap:5px; }
 .face-selection-state { color:#71808a; white-space:nowrap; }
-.edge-bar input { width:58px; }
+.edge-bar input { width:72px; }
 .edge-bar select, .edge-bar input, .edge-bar button { min-height:28px; border:1px solid #b7c7d0; border-radius:6px; background:white; padding:3px 7px; }
 .edge-bar button { color:white; background:#167f91; border-color:#167f91; font-weight:600; }
 .edge-bar button:disabled { opacity:.45; }
@@ -1033,7 +1038,19 @@ select.num { height: 31px; }
 .triangle-corner-badge .corner-lock {
   font-size: 10px;
 }
-.triple { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.triple { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+/* Compact dimension rows reserve two lines for every heading. Long labels
+   can wrap without pushing only their own input downward, while short labels
+   stay aligned with the second line above the shared row of number boxes. */
+.triple .field-header { min-height: 24px; align-items: flex-end; }
+.triple .field-label {
+  line-height: 1.2;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.triple .field { min-width: 0; }
+.triple .field-row,
+.triple .num { min-width: 0; width: 100%; box-sizing: border-box; }
 .triangle-mode { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
 .triangle-mode button { min-height: 42px; padding: 5px; font-size: 9px; line-height: 1.15; }
 .triangle-hint { margin-top: 6px; }

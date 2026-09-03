@@ -381,7 +381,8 @@ export function makeThreadedNutSolid(p: Record<string, number>): MeshShape {
   const height = Math.max(p.height ?? 6.5, 1);
   const outerWidth = Math.max(p.outerWidth ?? 13, diameter + 2);
   const shape = p.shape ?? 0;
-  const clearance = Math.max(p.clearance ?? 0.2, 0);
+  const fitClearance = p.fit === 0 ? 0.2 : p.fit === 1 ? 0.3 : p.fit === 2 ? 0.4 : null;
+  const clearance = Math.max(fitClearance ?? p.clearance ?? 0.2, 0);
   const density = p.density ?? 1;
   const cornerSteps = Math.max(1, Math.min(32, Math.round(p.cornerSteps ?? 16)));
   const wall = Math.max(0, (outerWidth - (diameter + clearance * 2)) / 2);

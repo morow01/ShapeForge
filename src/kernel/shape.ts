@@ -1165,15 +1165,18 @@ function findFace(solid: Shape3D, point: Vec3, normal: Vec3, tolerance = 0.05): 
  * container wants: a 40mm box with a 2mm wall is still 40mm on the outside.
  */
 function shellSolid(solid: Shape3D, op: ShellOp): Shape3D {
-  // Face anchors come back from the displayed Float32 mesh, while OCCT owns
-  // the original double-precision surface. Exact containsPoint matching can
-  // therefore miss the visibly selected face and make an ordinary hollow
-  // look like a thickness failure. Use the same small modelling tolerance as
-  // edge edits; an interior face point remains far from neighbouring faces.
-  const selectFaces = (faces: import("replicad").FaceFinder) =>
-    faces.either(op.points.map((point) => (finder: import("replicad").FaceFinder) =>
-      finder.withinDistance(0.02, point),
-    ));
+  // Resolve the Float32 viewport anchor to an actual OCCT face first, then
+  // feed that face's own double-precision centre back to FaceFinder. Passing
+  // the viewport point directly could select no face on rounded boxes;
+  // OCCT would still return a valid closed offset, so the operation looked
+  // successful but left the selected top in place.
+  const matched = op.normal
+    ? op.points.map((point) => findFace(solid, point, op.normal!, 0.08)).filter((face): face is Face => !!face)
+    : [];
+  if (op.normal && !matched.length) throw new Error("The selected opening face could not be found");
+  const selectFaces = (faces: import("replicad").FaceFinder) => matched.length
+    ? faces.either(matched.map((face) => (finder: import("replicad").FaceFinder) => finder.containsPoint(face.center)))
+    : faces.either(op.points.map((point) => (finder: import("replicad").FaceFinder) => finder.withinDistance(0.02, point)));
   return solid.shell(op.thickness, selectFaces) as Shape3D;
 }
 
@@ -1652,17 +1655,22 @@ async function replayEdit(
         continue;
       }
       let hollow: Shape3D | null = null;
+      // Rounded boxes are a common container workflow, but OCCT can accept
+      // their offset shell and only fail later while producing the display
+      // mesh. Use the bounded cavity first for every box-based edit: it is a
+      // simple, deterministic subtraction and preserves the outer rounded
+      // solid exactly. Generic shapes still use the true offset shell below.
+      if (isBoxBased(spec.base)) {
+        try {
+          const candidate = hollowEditedBox(solid, op);
+          if (candidate && isOcctValid(candidate) && !tessellatesEmpty(candidate) && isWatertight(candidate)) hollow = candidate;
+        } catch { /* Keep the original shape if even the bounded cavity fails. */ }
+      }
       for (let attempt = 0; attempt < 3 && !hollow; attempt++) {
         try {
           const candidate = shellSolid(solid, op);
           if (isOcctValid(candidate) && !tessellatesEmpty(candidate) && isWatertight(candidate)) hollow = candidate;
         } catch { /* OCCT occasionally needs a clean retry for offset surfaces. */ }
-      }
-      if (!hollow && isBoxBased(spec.base)) {
-        try {
-          const candidate = hollowEditedBox(solid, op);
-          if (candidate && isOcctValid(candidate) && !tessellatesEmpty(candidate) && isWatertight(candidate)) hollow = candidate;
-        } catch { /* Keep the original shape if even the bounded cavity fails. */ }
       }
       if (hollow) {
         solid = hollow;
@@ -1815,7 +1823,10 @@ export async function survivingOps(
       continue;
     }
     if (op.kind === "shell") {
-      const candidate = op.points.length ? settled(() => shellSolid(solid, op)) : null;
+      const candidate = op.points.length ? settled(() => {
+        if (isBoxBased(spec.base)) return hollowEditedBox(solid, op) ?? shellSolid(solid, op);
+        return shellSolid(solid, op);
+      }) : null;
       if (candidate) {
         solid = candidate;
         kept.push(op);

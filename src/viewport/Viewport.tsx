@@ -26,6 +26,8 @@ interface Props {
   snapEnabled: boolean;
   /** Quantize body dragging to the visible millimetre grid. */
   gridSnapEnabled: boolean;
+  /** Keep collision contact patches visible while an object is selected. */
+  showSelectedCollisionContacts: boolean;
   displayUnit: DisplayUnit;
   decimalPlaces: number;
   onSelect: (id: string | null, additive: boolean) => void;
@@ -48,6 +50,8 @@ interface Props {
     id: string,
     op: { point: Vec3; normal: Vec3; distance: number },
   ) => Promise<PreviewBuild | null>;
+  /** Mirrors the live arrow/readout distance into the bottom Distance field. */
+  onPushPullDistanceChange: (distanceMm: number) => void;
   onDragChange: (dragging: boolean) => void;
   onSelectEdges: (id: string | null, points: Vec3[]) => void;
   onSelectFace: (id: string | null, point: Vec3 | null, normal: Vec3 | null, size: number, edges: Vec3[]) => void;
@@ -61,7 +65,7 @@ interface Props {
 }
 
 export function Viewport(props: Props) {
-  const { parts, nodes, selectedIds, cameraMode, toolMode, resizeConstrained, wireframe, snapEnabled, gridSnapEnabled } = props;
+  const { parts, nodes, selectedIds, cameraMode, toolMode, resizeConstrained, wireframe, snapEnabled, gridSnapEnabled, showSelectedCollisionContacts } = props;
 
   const hostRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<Scene | null>(null);
@@ -84,6 +88,7 @@ export function Viewport(props: Props) {
     scene.onPushPullFace = (id, op, positionDelta) =>
       latest.current.onPushPull(id, op, positionDelta);
     scene.onPreviewPushPull = (id, op) => latest.current.onPreviewPushPull(id, op);
+    scene.onPushPullDistanceChange = (distance) => latest.current.onPushPullDistanceChange(distance);
     scene.onDragChange = (dragging) => latest.current.onDragChange(dragging);
     scene.onSelectEdges = (id, points) => latest.current.onSelectEdges(id, points);
     scene.onSelectFace = (id, point, normal, size, edges) => latest.current.onSelectFace(id, point, normal, size, edges);
@@ -101,6 +106,7 @@ export function Viewport(props: Props) {
     scene.setWireframe(latest.current.wireframe);
     scene.setSnapEnabled(latest.current.snapEnabled);
     scene.setGridSnapEnabled(latest.current.gridSnapEnabled);
+    scene.setShowSelectedCollisionContacts(latest.current.showSelectedCollisionContacts);
     scene.setMeasurementFormat(latest.current.displayUnit, latest.current.decimalPlaces);
 
     sceneRef.current = scene;
@@ -159,6 +165,10 @@ export function Viewport(props: Props) {
   useEffect(() => {
     sceneRef.current?.setGridSnapEnabled(gridSnapEnabled);
   }, [gridSnapEnabled]);
+
+  useEffect(() => {
+    sceneRef.current?.setShowSelectedCollisionContacts(showSelectedCollisionContacts);
+  }, [showSelectedCollisionContacts]);
 
   useEffect(() => {
     sceneRef.current?.setMeasurementFormat(props.displayUnit, props.decimalPlaces);

@@ -1,5 +1,46 @@
 import type { PrimitiveKind } from "../document/types";
 
+export type FaceModifierKind = "push" | "wall" | "resize" | "offset" | "fillet" | "chamfer";
+
+/** ShapeForge face modifiers: different silhouettes, one restrained line style. */
+export function FaceModifierIcon({ kind, className = "tool-icon modifier-icon" }: {
+  kind: FaceModifierKind;
+  className?: string;
+}) {
+  const body = { fill: "none", stroke: "currentColor", strokeWidth: 1.15, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
+  const accent = { className: "modifier-accent", fill: "none", strokeWidth: 1.35, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
+  let drawing;
+  if (kind === "push") drawing = <>
+    <g {...body}><path d="m5 10 7 3.2 7-3.4v7.5L12 21l-7-3.2Z"/><path d="m5 10 7 3.2 7-3.4"/></g>
+    <g {...accent}><path d="M12 10V3m-2.3 2.4L12 3l2.3 2.4"/><path d="m8 8.2 4 1.8 4-1.9"/></g>
+  </>;
+  else if (kind === "wall") drawing = <>
+    <g {...body}><path d="m4.5 8.5 7.5 3.4 7.5-3.7v8.3L12 20.4l-7.5-3.5Z"/></g>
+    <g {...accent}><path d="m4.5 8.5 7.6-3.8 7.4 3.5-2.2 1.1-5.2-2.4-5.4 2.7Z" fill="currentColor" opacity=".1"/><path d="m6.7 9.6 5.4 2.4 5.2-2.7v5.4L12 17.5l-5.3-2.4Z"/></g>
+  </>;
+  else if (kind === "resize") drawing = <>
+    <g {...body}><path d="M6 7.5h12v9H6Z"/><path d="M8.2 10h7.6v4H8.2Z" opacity=".55"/></g>
+    <g {...accent}><path d="M2.7 12H8m-3.2-2.1L2.7 12l2.1 2.1M21.3 12H16m3.2-2.1 2.1 2.1-2.1 2.1"/></g>
+  </>;
+  else if (kind === "offset") drawing = <>
+    <g {...body}><path d="m4 13 8 4 8-4-8-4Z"/><path d="m4 16.2 8 4 8-4" opacity=".65"/></g>
+    <g {...accent}><path d="m7 8.2 5 2.5 5-2.5-5-2.5Z"/><path d="M12 7V2.8m-1.8 1.8L12 2.8l1.8 1.8"/></g>
+  </>;
+  else if (kind === "fillet") drawing = <>
+    <g {...body}><path d="M5 4v15h15"/><path d="M8 4v7a5 5 0 0 0 5 5h7" strokeDasharray="1.5 2" opacity=".55"/></g>
+    <g {...accent}><path d="M5 19h3a9 9 0 0 0 9-9V4"/><path d="m14.7 6.1 2.3-2 2.1 2.2"/></g>
+  </>;
+  else drawing = <>
+    <g {...body}><path d="M5 4v15h15"/><path d="M8 4v9l6 6h6" strokeDasharray="1.5 2" opacity=".55"/></g>
+    <g {...accent}><path d="M5 19h5l7-7V4"/><path d="m14.7 6.1 2.3-2 2.1 2.2"/></g>
+  </>;
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      {drawing}
+    </svg>
+  );
+}
+
 export function SettingsIcon({ className = "tool-icon" }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
