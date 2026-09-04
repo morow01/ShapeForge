@@ -246,6 +246,24 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
   position: relative;
 }
 
+.drop-tool {
+  width: 43px;
+  height: 39px;
+}
+.tool-rail .drop-tool > .drop-menu-toggle {
+  position: absolute;
+  right: -2px;
+  bottom: 2px;
+  width: 14px;
+  min-width: 14px;
+  height: 18px;
+  min-height: 18px;
+  padding: 0;
+  border-radius: 5px;
+  font-size: 17px;
+  line-height: 1;
+}
+
 .tool-rail-flyout {
   /* Portalled to <body> (see App.tsx) — position/top/left/transform come
      from an inline style computed off the trigger button, so the tool
@@ -318,6 +336,21 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
   font-size: 10px;
   line-height: 1.1;
   letter-spacing: 0.01em;
+}
+
+.drop-direction-flyout {
+  display: grid;
+  grid-template-columns: repeat(3, 58px);
+  gap: 4px;
+}
+.drop-direction-flyout button {
+  width: 58px;
+  min-width: 58px;
+}
+.drop-direction-arrow {
+  font-size: 22px;
+  line-height: 20px;
+  color: #079c9a;
 }
 
 /* Floating measurement readouts in the viewport. --axis carries the colour of
@@ -671,7 +704,7 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 .edge-bar { position:absolute; z-index:12; left:50%; bottom:46px; transform:translateX(-50%); display:flex; align-items:center; gap:10px; padding:9px 12px; border:1px solid #ccd8df; border-radius:10px; background:rgba(255,255,255,.96); box-shadow:0 3px 14px rgb(31 50 62 / 18%); font-size:12px; }
 .edge-bar label { display:flex; align-items:center; gap:5px; }
 .face-selection-state { color:#71808a; white-space:nowrap; }
-.edge-bar input { width:72px; }
+.edge-bar input { width:56px; box-sizing:border-box; }
 .edge-bar select, .edge-bar input, .edge-bar button { min-height:28px; border:1px solid #b7c7d0; border-radius:6px; background:white; padding:3px 7px; }
 .edge-bar button { color:white; background:#167f91; border-color:#167f91; font-weight:600; }
 .edge-bar button:disabled { opacity:.45; }
@@ -679,6 +712,73 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
    .edge-bar button selector, so hovering turned these near-white while the
    text stayed white — unreadable. Darken on hover instead. */
 .edge-bar button:hover:not(:disabled) { color:white; background:#11616f; border-color:#11616f; }
+.edge-selection-summary { display:flex; align-items:center; gap:5px; }
+.edge-bar .edge-clear-selection {
+  position:relative;
+  display:block;
+  flex:0 0 22px;
+  width:22px;
+  min-width:22px;
+  height:22px;
+  min-height:22px;
+  box-sizing:border-box;
+  padding:0;
+  border-radius:50%;
+  color:#667985;
+  background:#eef3f5;
+  border-color:#d1dce1;
+  line-height:1;
+}
+.edge-bar .edge-clear-selection svg {
+  position:absolute;
+  left:50%;
+  top:50%;
+  width:13px;
+  height:13px;
+  display:block;
+  transform:translate(-50%, -50%);
+  fill:none;
+  stroke:currentColor;
+  stroke-width:1.8;
+  stroke-linecap:round;
+}
+.edge-bar .edge-clear-selection:hover {
+  color:#a7353e;
+  background:#fff0f1;
+  border-color:#e8b7bc;
+}
+.edge-kind-buttons {
+  display: flex;
+  gap: 3px;
+  padding: 2px;
+  border: 1px solid #cbd7dd;
+  border-radius: 8px;
+  background: #f4f7f8;
+}
+.edge-bar .edge-kind-buttons button {
+  width: 34px;
+  min-width: 34px;
+  height: 30px;
+  padding: 2px;
+  color: #526774;
+  background: transparent;
+  border-color: transparent;
+}
+.edge-bar .edge-kind-buttons button:hover {
+  color: #087a79;
+  background: #e7f4f3;
+  border-color: transparent;
+}
+.edge-bar .edge-kind-buttons button.active {
+  color: #087a79;
+  background: #fff;
+  border-color: #63c5c2;
+  box-shadow: 0 1px 3px rgb(31 50 62 / 12%);
+}
+.edge-bar .edge-kind-buttons .modifier-icon {
+  width: 23px;
+  height: 23px;
+}
 .canvas-notice, .canvas-error { max-width: 100%; padding: 9px 12px; }
 /* Every top-of-canvas banner shares one column, so a second one pushes the
    first down instead of landing on top of it. */

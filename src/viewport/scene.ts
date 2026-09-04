@@ -23,8 +23,6 @@ import type { DisplayUnit } from "../measurement";
 export type { CameraMode } from "../document/types";
 export type ToolMode = "select" | "face" | "edge" | "place" | "move" | "rotate" | "align" | "build";
 export type WireframeMode = "off" | "outlined" | "edges" | "mesh" | "xray" | "transparent";
-type AlignAxis = 0 | 1 | 2;
-type AlignAnchor = "min" | "center" | "max";
 
 /** How far the pointer may move between down and up and still count as a click
  *  rather than an orbit drag. */
@@ -102,6 +100,13 @@ interface Marquee {
   downScreen: { x: number; y: number };
   active: boolean;
   additive: boolean;
+}
+
+interface AlignPointDrag {
+  sourceId: string;
+  sourcePoint: THREE.Vector3;
+  targetId: string | null;
+  targetPoint: THREE.Vector3 | null;
 }
 
 interface PushPullDrag {
@@ -225,6 +230,13 @@ interface PartView {
    *  blue". */
   lastColor?: string;
   lastTransparent?: boolean;
+}
+
+interface EdgePreviewState {
+  id: string;
+  originalGeom: ThreeGeometry[];
+  originalPivot: THREE.Vector3;
+  originalFaces?: FaceInfo[];
 }
 
 /** Straight down and straight up — the only directions gravity cares about. */
@@ -588,13 +600,18 @@ export class Scene {
   private alignBox = new THREE.Box3Helper(new THREE.Box3(), 0x00a9b7);
   private alignHandles = new THREE.Group();
   private alignHandleMeshes: THREE.Mesh[] = [];
+  private alignHandleGeometry: THREE.SphereGeometry | null = null;
   private alignHoverIndex = -1;
-  private alignHoverMaterial = new THREE.MeshBasicMaterial({ color: 0x00a9b7, depthTest: false });
+  private alignHoverMaterial = new THREE.MeshBasicMaterial({ color: 0xffe04b, depthTest: false });
   /** Faint ghosts of wherever hovering the current align dot would actually
    *  move things — shown instead of a person having to click it to find
    *  out, and cleared the instant the hover moves off. */
   private alignPreviewGroup = new THREE.Group();
   private alignPreviewMeshes: THREE.Mesh[] = [];
+  private alignPointDrag: AlignPointDrag | null = null;
+  private alignDragArrow = new THREE.ArrowHelper(
+    new THREE.Vector3(1, 0, 0), new THREE.Vector3(), 1, 0xff5b13, 0.8, 0.35,
+  );
   /** One arrow on the explicitly selected planar face — push/pull. */
   private pushPullHandles = new THREE.Group();
   private pushPullHandleMeshes: THREE.Object3D[] = [];
@@ -647,6 +664,7 @@ export class Scene {
    * the push/pull arrow; hovering no longer fills the canvas with grips. */
   private selectedFace: { partId: string; groupIndex: number } | null = null;
   private selectedEdges: { partId: string; groupIndex: number; point: Vec3; line: LineSegments2 }[] = [];
+  private edgePreview: EdgePreviewState | null = null;
   private hoverEdgeLine: LineSegments2 | null = null;
   private pushPullHandleHovered = false;
   private dimensionInputs: HTMLInputElement[] = [];
@@ -814,7 +832,6 @@ export class Scene {
    *  moves — matching what the panel's own label already promises, instead
    *  of the dot aligning both objects to a shared line that generally sits
    *  somewhere between them. */
-  private alignFixedId: string | null = null;
   /** Shape Builder: every region and whether it is currently in the shape.
    *  The panel needs the whole list, not a count: a region enclosed inside
    *  another — a sphere's overlap with the box around it — has no visible
@@ -985,6 +1002,7 @@ export class Scene {
       this.alignBox,
       this.alignHandles,
       this.alignPreviewGroup,
+      this.alignDragArrow,
     );
     this.scene.add(this.pushPullHandles);
 
@@ -1324,17 +1342,20 @@ export class Scene {
     this.alignBox.renderOrder = 24;
 
     const geometry = new THREE.SphereGeometry(1, 20, 14);
-    for (let axis = 0; axis < 3; axis++) {
-      for (const anchor of ["min", "center", "max"] as AlignAnchor[]) {
+    this.alignHandleGeometry = geometry;
+    // Two sets of eight corner nodes. The first eight belong to the first
+    // selected object and the second eight to the other object.
+    for (let objectIndex = 0; objectIndex < 2; objectIndex++) {
+      for (let corner = 0; corner < 8; corner++) {
         const handle = new THREE.Mesh(
           geometry,
           new THREE.MeshBasicMaterial({
-            color: anchor === "center" ? 0x222a30 : 0x87939a,
+            color: objectIndex === 0 ? 0xff8a4c : 0x7c68ee,
             depthTest: false,
           }),
         );
-        handle.userData.alignAxis = axis;
-        handle.userData.alignAnchor = anchor;
+        handle.userData.alignObjectIndex = objectIndex;
+        handle.userData.alignCorner = corner;
         handle.userData.baseMaterial = handle.material;
         handle.renderOrder = 25;
         this.alignHandles.add(handle);
@@ -1342,6 +1363,100 @@ export class Scene {
       }
     }
     this.alignHandles.visible = false;
+    this.alignDragArrow.visible = false;
+    (this.alignDragArrow.line.material as THREE.Material).depthTest = false;
+    (this.alignDragArrow.cone.material as THREE.Material).depthTest = false;
+    this.alignDragArrow.line.renderOrder = 26;
+    this.alignDragArrow.cone.renderOrder = 26;
+  }
+
+  private ensureAlignHandleCount(count: number) {
+    const geometry = this.alignHandleGeometry;
+    if (!geometry) return;
+    while (this.alignHandleMeshes.length < count) {
+      const handle = new THREE.Mesh(
+        geometry,
+        new THREE.MeshBasicMaterial({ color: 0xffa066, depthTest: false }),
+      );
+      handle.userData.baseMaterial = handle.material;
+      handle.renderOrder = 25;
+      this.alignHandles.add(handle);
+      this.alignHandleMeshes.push(handle);
+    }
+  }
+
+  /** Real solid vertices from the CAD edge network. Long straight edges and
+   * sampled curves contain many intermediate render points, so retain graph
+   * junctions and genuine direction changes rather than rejecting the whole
+   * object once it happens to contain more than a fixed number of points. */
+  private alignFeaturePoints(view: PartView): THREE.Vector3[] {
+    view.group.updateWorldMatrix(true, true);
+    const position = view.geom[0].lines.getAttribute("position");
+    const vertices = new Map<string, { point: THREE.Vector3; count: number; neighbours: Set<string> }>();
+    const topologyEndpoints = new Set<string>();
+    const keyFor = (point: THREE.Vector3) =>
+      [point.x, point.y, point.z].map((value) => Math.round(value * 100) / 100).join("|");
+    if (position) {
+      for (let index = 0; index + 1 < position.count; index += 2) {
+        const points = [index, index + 1].map((offset) =>
+          new THREE.Vector3().fromBufferAttribute(position, offset).applyMatrix4(view.group.matrixWorld));
+        const keys = points.map(keyFor);
+        for (let endpoint = 0; endpoint < 2; endpoint++) {
+          const key = keys[endpoint];
+          const existing = vertices.get(key);
+          if (existing) existing.count++;
+          else vertices.set(key, { point: points[endpoint], count: 1, neighbours: new Set() });
+          if (keys[0] !== keys[1]) vertices.get(key)!.neighbours.add(keys[1 - endpoint]);
+        }
+      }
+      // Buffer groups mirror Replicad's topological CAD edges. Their first
+      // and last rendered vertices are stable feature points even when the
+      // edge between them is sampled into dozens of curve segments.
+      for (const group of view.geom[0].lines.groups) {
+        if (group.count < 1) continue;
+        const firstIndex = group.start;
+        const lastIndex = Math.min(position.count - 1, group.start + group.count - 1);
+        topologyEndpoints.add(keyFor(
+          new THREE.Vector3().fromBufferAttribute(position, firstIndex).applyMatrix4(view.group.matrixWorld),
+        ));
+        topologyEndpoints.add(keyFor(
+          new THREE.Vector3().fromBufferAttribute(position, lastIndex).applyMatrix4(view.group.matrixWorld),
+        ));
+      }
+    }
+    const graphVertices = [...vertices.values()];
+    const primaryPoints = [...vertices.entries()]
+      .filter(([key, entry]) => topologyEndpoints.has(key) || entry.count >= 3 || entry.neighbours.size !== 2)
+      .map(([, entry]) => entry.point);
+    const featurePoints = graphVertices
+      .filter((entry) => {
+        if (entry.count >= 3 || entry.neighbours.size !== 2) return true;
+        const [firstKey, secondKey] = [...entry.neighbours];
+        const first = vertices.get(firstKey)?.point;
+        const second = vertices.get(secondKey)?.point;
+        if (!first || !second) return true;
+        const a = first.clone().sub(entry.point).normalize();
+        const b = second.clone().sub(entry.point).normalize();
+        // A straight/smooth sample approaches 180 degrees. Keep a point only
+        // when the edge changes direction by more than six degrees.
+        return a.angleTo(b) < Math.PI - THREE.MathUtils.degToRad(6);
+      })
+      .map((entry) => entry.point);
+    if (featurePoints.length >= 4 && featurePoints.length <= 96) return featurePoints;
+    // Detailed booleans can contain hundreds of curve samples. In that case
+    // keep their true edge endpoints/junctions rather than throwing every
+    // feature away and reverting to an eight-corner bounding box.
+    if (primaryPoints.length >= 4 && primaryPoints.length <= 96) return primaryPoints;
+    const box = new THREE.Box3().setFromObject(view.group);
+    const fallback: THREE.Vector3[] = [];
+    for (let corner = 0; corner < 8; corner++) {
+      fallback.push(new THREE.Vector3(
+        corner & 1 ? box.max.x : box.min.x,
+        corner & 2 ? box.max.y : box.min.y,
+        corner & 4 ? box.max.z : box.min.z,
+      ));
+    }
+    return fallback;
   }
 
   private setupScaleHint() {
@@ -1377,8 +1492,9 @@ export class Scene {
     this.resizeConstrained = value;
   }
 
-  setAlignFixedId(id: string | null) {
-    this.alignFixedId = id;
+  setAlignFixedId(_id: string | null) {
+    // Point-to-point Align makes the dragged object the mover and the other
+    // endpoint the fixed reference, so no separate fixed-id state is needed.
   }
 
   /** Shares the part's own face geometry — never its own copy, so it stays in
@@ -1535,6 +1651,40 @@ export class Scene {
     if (!this.collisionContactOwnerId || !this.selectedIds.includes(this.collisionContactOwnerId) || !this.collisionContacts.children.length) {
       this.refreshSelectedCollisionContacts();
     }
+  }
+
+  /** Shows a kernel-built fillet/chamfer without changing the document. */
+  setEdgePreview(id: string | null, preview: PreviewBuild | null) {
+    if (this.edgePreview && (id !== this.edgePreview.id || !preview)) {
+      const saved = this.edgePreview;
+      this.edgePreview = null;
+      const view = this.parts.get(saved.id);
+      if (view) {
+        view.faces = saved.originalFaces;
+        this.restoreGeom(view, saved.originalGeom, saved.originalPivot);
+      } else {
+        this.disposeGeom(saved.originalGeom);
+      }
+    }
+    if (!id || !preview) return;
+    const view = this.parts.get(id);
+    if (!view) return;
+    if (!this.edgePreview) {
+      this.edgePreview = {
+        id,
+        originalGeom: this.cloneGeom(view.geom),
+        originalPivot: view.pivot.clone(),
+        originalFaces: view.faces,
+      };
+    }
+    view.geom = syncKernelGeometry(preview.mesh, view.geom);
+    view.pivot = this.centreGeometry(view.geom);
+    view.mesh.geometry = view.geom[0].faces;
+    view.wire.geometry = view.geom[0].lines;
+    view.occluder.geometry = view.geom[0].faces;
+    view.faces = preview.faces;
+    this.applyPlacements();
+    this.applyMaterials();
   }
 
   setMeasurementFormat(unit: DisplayUnit, decimalPlaces: number) {
@@ -2210,7 +2360,7 @@ export class Scene {
     const entries = this.selectedIds
       .map((id) => ({ id, view: this.parts.get(id) }))
       .filter((item): item is { id: string; view: PartView } => !!item.view && item.view.group.visible);
-    const visible = this.toolMode === "align" && entries.length >= 2 && !this.showResult;
+    const visible = this.toolMode === "align" && entries.length === 2 && !this.showResult;
     this.alignBox.visible = visible;
     this.alignHandles.visible = visible;
     if (!visible) {
@@ -2224,34 +2374,31 @@ export class Scene {
     }
 
     for (const { view } of entries) view.group.updateWorldMatrix(true, true);
-    const fixedEntry = entries.length === 2 ? entries.find((e) => e.id === this.alignFixedId) : undefined;
-    // The dots sit on the actual reference the align math targets — the
-    // fixed object's own edges when there is one, the shared union
-    // otherwise (see alignMoves). The drawn cage is a different question:
-    // it's the selection indicator, so it always covers every selected
-    // object, same as resizeBox does in plain select mode — otherwise the
-    // moving object(s) lose their "you are selected" outline entirely the
-    // moment a fixed object is designated.
     const union = new THREE.Box3();
     for (const { view } of entries) union.expandByObject(view.group);
-    const box = fixedEntry ? new THREE.Box3().setFromObject(fixedEntry.view.group) : union;
     this.alignBox.box.copy(union);
     this.alignBox.updateMatrixWorld(true);
 
-    const centre = box.getCenter(new THREE.Vector3());
-    const offset = Math.max(2, this.worldSnapTolerance(centre) * 3.2);
-    const anchors = (min: number, mid: number, max: number) => [min, mid, max];
-    const xs = anchors(box.min.x, centre.x, box.max.x);
-    const ys = anchors(box.min.y, centre.y, box.max.y);
-    const zs = anchors(box.min.z, centre.z, box.max.z);
-    for (let i = 0; i < 3; i++) {
-      this.alignHandleMeshes[i].position.set(xs[i], box.min.y - offset, box.min.z);
-      this.alignHandleMeshes[3 + i].position.set(box.min.x - offset, ys[i], box.min.z);
-      this.alignHandleMeshes[6 + i].position.set(box.max.x + offset, box.max.y, zs[i]);
+    const featurePoints = entries.map(({ view }) => this.alignFeaturePoints(view));
+    const totalHandles = featurePoints.reduce((sum, points) => sum + points.length, 0);
+    this.ensureAlignHandleCount(totalHandles);
+    let handleIndex = 0;
+    for (let objectIndex = 0; objectIndex < 2; objectIndex++) {
+      for (let pointIndex = 0; pointIndex < featurePoints[objectIndex].length; pointIndex++) {
+        const handle = this.alignHandleMeshes[handleIndex++];
+        handle.visible = true;
+        handle.position.copy(featurePoints[objectIndex][pointIndex]);
+        handle.userData.alignObjectIndex = objectIndex;
+        handle.userData.alignPointIndex = pointIndex;
+        (handle.userData.baseMaterial as THREE.MeshBasicMaterial).color.setHex(
+          objectIndex === 0 ? 0xff8a4c : 0x7c68ee,
+        );
+      }
     }
+    for (; handleIndex < this.alignHandleMeshes.length; handleIndex++) this.alignHandleMeshes[handleIndex].visible = false;
     // See the matching comment in updateResizeOverlay — a world-space floor
     // here breaks the constant-screen-size these dots are meant to have.
-    const handleSize = Math.max(MIN_HANDLE_WORLD, this.worldSnapTolerance(centre) * 0.75);
+    const handleSize = Math.max(MIN_HANDLE_WORLD, this.worldSnapTolerance(union.getCenter(new THREE.Vector3())) * 0.62);
     for (let i = 0; i < this.alignHandleMeshes.length; i++) {
       const handle = this.alignHandleMeshes[i];
       handle.userData.baseScale = handleSize;
@@ -2263,11 +2410,16 @@ export class Scene {
    *  highlights whichever align dot the pointer is closest to, without
    *  requiring a pixel-perfect hit on a handle rendered at world scale. */
   private updateAlignHover(e: PointerEvent) {
+    if (this.alignPointDrag) {
+      this.updateAlignPointDrag(e);
+      return;
+    }
     let next = -1;
     if (this.alignHandles.visible) {
       const rect = this.renderer.domElement.getBoundingClientRect();
       let nearest = 16;
       for (let i = 0; i < this.alignHandleMeshes.length; i++) {
+        if (!this.alignHandleMeshes[i].visible) continue;
         const p = this.alignHandleMeshes[i].position.clone().project(this.camera);
         const x = rect.left + ((p.x + 1) / 2) * rect.width;
         const y = rect.top + ((1 - p.y) / 2) * rect.height;
@@ -2286,9 +2438,6 @@ export class Scene {
       const handle = this.alignHandleMeshes[next];
       handle.material = this.alignHoverMaterial;
       handle.scale.setScalar((handle.userData.baseScale ?? 1) * HOVER_GROW);
-      this.showAlignPreview(handle.userData.alignAxis as AlignAxis, handle.userData.alignAnchor as AlignAnchor);
-    } else {
-      this.clearAlignPreview();
     }
     if (this.alignHandles.visible) {
       this.renderer.domElement.style.cursor = next < 0 ? "" : "pointer";
@@ -2303,68 +2452,105 @@ export class Scene {
     this.raycaster.setFromCamera(this.pointer, this.camera);
     const hit = this.raycaster.intersectObjects(this.alignHandleMeshes, false)[0]?.object as THREE.Mesh | undefined;
     if (!hit) return false;
-    this.alignSelection(hit.userData.alignAxis as AlignAxis, hit.userData.alignAnchor as AlignAnchor);
+    const objectIndex = hit.userData.alignObjectIndex as number;
+    const sourceId = this.selectedIds[objectIndex];
+    if (!sourceId) return false;
+    this.alignPointDrag = {
+      sourceId,
+      sourcePoint: hit.position.clone(),
+      targetId: null,
+      targetPoint: null,
+    };
+    this.controls.enabled = false;
+    this.gizmo.enabled = false;
+    this.alignDragArrow.position.copy(hit.position);
+    this.alignDragArrow.setLength(0.001, 0.001, 0.001);
+    this.alignDragArrow.visible = true;
+    this.onDragChange?.(true);
     e.preventDefault();
     return true;
   }
 
-  /** The move each selected object needs to land on the given align dot —
-   *  shared by alignSelection (which applies it) and showAlignPreview
-   *  (which only draws it). Only ever returns entries for objects that
-   *  would actually move: an object already sitting on the target, or the
-   *  Exact Spacing panel's fixed object, contributes exactly zero delta and
-   *  is left out. */
-  private alignMoves(axis: AlignAxis, anchor: AlignAnchor): { id: string; view: PartView; delta: number }[] {
-    const selected = this.selectedIds
-      .map((id) => ({ id, view: this.parts.get(id), node: findNode(this.lastNodes, id) }))
-      .filter((item): item is { id: string; view: PartView; node: SceneNode } => !!item.view && !!item.node);
-    if (selected.length < 2) return [];
-
-    const boxes = selected.map(({ view }) => new THREE.Box3().setFromObject(view.group));
-    // With exactly two selected and one of them designated "stays fixed" in
-    // the Exact Spacing panel, align to THAT object's own edge/centre rather
-    // than the pair's combined box — the combined box generally sits
-    // somewhere between the two, which moved the "fixed" one too and made
-    // the panel's own label a lie. Otherwise (no pairing, or 3+ selected,
-    // where "fixed" has no meaning) keep the original shared-box behaviour.
-    const fixedIndex = selected.length === 2
-      ? selected.findIndex((s) => s.id === this.alignFixedId)
-      : -1;
-    const reference = fixedIndex >= 0 ? boxes[fixedIndex] : boxes.reduce((all, box) => all.union(box.clone()), new THREE.Box3());
-    const target = anchor === "min"
-      ? reference.min.getComponent(axis)
-      : anchor === "max"
-        ? reference.max.getComponent(axis)
-        : reference.getCenter(new THREE.Vector3()).getComponent(axis);
-
-    const moves: { id: string; view: PartView; delta: number }[] = [];
-    selected.forEach(({ id, view }, index) => {
-      const box = boxes[index];
-      const current = anchor === "min"
-        ? box.min.getComponent(axis)
-        : anchor === "max"
-          ? box.max.getComponent(axis)
-          : box.getCenter(new THREE.Vector3()).getComponent(axis);
-      const delta = target - current;
-      if (Math.abs(delta) < 1e-9) return;
-      moves.push({ id, view, delta });
-    });
-    return moves;
+  private updateAlignPointDrag(e: PointerEvent) {
+    const drag = this.alignPointDrag;
+    if (!drag) return;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    let nearest: THREE.Mesh | null = null;
+    let nearestDistance = 28;
+    for (const handle of this.alignHandleMeshes) {
+      if (!handle.visible) continue;
+      const objectIndex = handle.userData.alignObjectIndex as number;
+      if (this.selectedIds[objectIndex] === drag.sourceId) continue;
+      const projected = handle.position.clone().project(this.camera);
+      const x = rect.left + ((projected.x + 1) / 2) * rect.width;
+      const y = rect.top + ((1 - projected.y) / 2) * rect.height;
+      const distance = Math.hypot(e.clientX - x, e.clientY - y);
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearest = handle;
+      }
+    }
+    const targetObjectIndex = nearest?.userData.alignObjectIndex as number | undefined;
+    drag.targetId = targetObjectIndex === undefined ? null : this.selectedIds[targetObjectIndex] ?? null;
+    drag.targetPoint = nearest?.position.clone() ?? null;
+    const end = drag.targetPoint ?? this.pointerWorldAtDepth(e, drag.sourcePoint);
+    const direction = end.clone().sub(drag.sourcePoint);
+    const length = direction.length();
+    this.alignDragArrow.position.copy(drag.sourcePoint);
+    if (length > 1e-6) {
+      this.alignDragArrow.setDirection(direction.normalize());
+      this.alignDragArrow.setLength(length, Math.min(length * 0.22, 1.2), Math.min(length * 0.12, 0.55));
+    }
+    this.clearAlignPreview();
+    if (drag.targetPoint) this.showAlignPointPreview(drag.sourceId, drag.targetPoint.clone().sub(drag.sourcePoint));
+    for (let index = 0; index < this.alignHandleMeshes.length; index++) {
+      const handle = this.alignHandleMeshes[index];
+      handle.material = handle === nearest ? this.alignHoverMaterial : handle.userData.baseMaterial as THREE.Material;
+    }
   }
 
-  private alignSelection(axis: AlignAxis, anchor: AlignAnchor) {
-    const moves = this.alignMoves(axis, anchor);
-    if (!moves.length) return;
-    const updates: { id: string; position: Vec3 }[] = [];
-    for (const { id, view, delta } of moves) {
-      const node = findNode(this.lastNodes, id);
-      if (!node) continue;
-      const position = [...node.position] as Vec3;
-      position[axis] += delta;
-      view.group.position.setComponent(axis, view.group.position.getComponent(axis) + delta);
-      updates.push({ id, position });
-    }
-    if (updates.length) this.onAlignObjects?.(updates);
+  private pointerWorldAtDepth(e: PointerEvent, reference: THREE.Vector3) {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const projected = reference.clone().project(this.camera);
+    return new THREE.Vector3(
+      ((e.clientX - rect.left) / rect.width) * 2 - 1,
+      -((e.clientY - rect.top) / rect.height) * 2 + 1,
+      projected.z,
+    ).unproject(this.camera);
+  }
+
+  private showAlignPointPreview(id: string, delta: THREE.Vector3) {
+    const view = this.parts.get(id);
+    if (!view) return;
+    const ghost = new THREE.Mesh(view.geom[0].faces, MATERIALS.alignPreview);
+    ghost.position.copy(view.group.position).add(delta);
+    ghost.rotation.copy(view.group.rotation);
+    ghost.scale.copy(view.group.scale);
+    ghost.renderOrder = 30;
+    this.alignPreviewGroup.add(ghost);
+    this.alignPreviewMeshes.push(ghost);
+  }
+
+  private finishAlignPointDrag() {
+    const drag = this.alignPointDrag;
+    this.alignPointDrag = null;
+    this.alignDragArrow.visible = false;
+    this.controls.enabled = true;
+    this.gizmo.enabled = true;
+    this.clearAlignPreview();
+    this.onDragChange?.(false);
+    if (!drag?.targetId || !drag.targetPoint) return;
+    const node = findNode(this.lastNodes, drag.sourceId);
+    const view = this.parts.get(drag.sourceId);
+    if (!node || !view) return;
+    const delta = drag.targetPoint.clone().sub(drag.sourcePoint);
+    const position: Vec3 = [
+      node.position[0] + delta.x,
+      node.position[1] + delta.y,
+      node.position[2] + delta.z,
+    ];
+    view.group.position.add(delta);
+    this.onAlignObjects?.([{ id: drag.sourceId, position }]);
     this.updateAlignOverlay();
   }
 
@@ -2372,24 +2558,6 @@ export class Scene {
     if (!this.alignPreviewMeshes.length) return;
     for (const mesh of this.alignPreviewMeshes) this.alignPreviewGroup.remove(mesh);
     this.alignPreviewMeshes = [];
-  }
-
-
-  /** TinkerCAD-style: a faint ghost at wherever the hovered dot would
-   *  actually send each object, in place before a person commits to
-   *  clicking it. Position only — same rotation/scale as the real part, so
-   *  the ghost reads as "this object, moved" rather than a generic marker. */
-  private showAlignPreview(axis: AlignAxis, anchor: AlignAnchor) {
-    this.clearAlignPreview();
-    for (const { view, delta } of this.alignMoves(axis, anchor)) {
-      const ghost = new THREE.Mesh(view.geom[0].faces, MATERIALS.alignPreview);
-      ghost.position.copy(view.group.position).setComponent(axis, view.group.position.getComponent(axis) + delta);
-      ghost.rotation.copy(view.group.rotation);
-      ghost.scale.copy(view.group.scale);
-      ghost.renderOrder = 30;
-      this.alignPreviewGroup.add(ghost);
-      this.alignPreviewMeshes.push(ghost);
-    }
   }
 
   /**
@@ -3777,6 +3945,124 @@ export class Scene {
     return updates;
   }
 
+  /**
+   * Moves the selected parts as one rigid set along a world axis until their
+   * shared bounds first meet another visible solid. Unlike downward gravity,
+   * the other five directions have no infinite workplane, so no target means
+   * no movement — an object can never be launched out of view.
+   */
+  dropSelectedDirection(direction: Vec3): { id: string; position: Vec3 }[] {
+    const axis = direction.findIndex((value) => Math.abs(value) > 0.5);
+    if (axis < 0) return [];
+    const sign = Math.sign(direction[axis]);
+    if (axis === 2 && sign < 0) return this.dropSelected();
+
+    this.scene.updateMatrixWorld(true);
+    const selected = new Set(this.selectedIds);
+    const moving = this.selectedIds
+      .map((id) => ({ id, view: this.parts.get(id), node: findNode(this.lastNodes, id) }))
+      .filter((entry): entry is { id: string; view: PartView; node: SceneNode } =>
+        !!entry.view && entry.view.group.visible && !!entry.node);
+    if (!moving.length) return [];
+
+    const movingBox = new THREE.Box3();
+    for (const { view } of moving) movingBox.expandByObject(view.group);
+    const perpendicular = [0, 1, 2].filter((candidate) => candidate !== axis);
+    let distance = Infinity;
+    const travel = new THREE.Vector3(direction[0], direction[1], direction[2]).normalize();
+    const targetMeshes = [...this.parts]
+      .filter(([id, target]) => !selected.has(id) && target.group.visible && !target.isHole)
+      .map(([, target]) => target.mesh);
+    const movingMeshes = moving.map(({ view }) => view.mesh);
+    const normalMatrix = new THREE.Matrix3();
+    const hitNormal = new THREE.Vector3();
+    const rayOrigins: THREE.Vector3[] = [];
+
+    for (const { view } of moving) {
+      rayOrigins.push(...this.sampleDirectionalFacePoints(view, travel, Scene.DROP_SAMPLES));
+    }
+
+    // Vertices alone miss a recess whose opening lies in the middle of a
+    // broad face. Fill the selection's leading face with probe columns, then
+    // cast backwards into the selected geometry so only columns that truly
+    // belong to the moving shape are retained.
+    const steps = Scene.DROP_GRID - 1;
+    const [uAxis, vAxis] = perpendicular;
+    const leading = sign > 0
+      ? movingBox.max.getComponent(axis)
+      : movingBox.min.getComponent(axis);
+    const reverse = travel.clone().negate();
+    for (let u = 0; u <= steps; u++) {
+      for (let v = 0; v <= steps; v++) {
+        const probe = movingBox.getCenter(new THREE.Vector3());
+        probe.setComponent(axis, leading + sign);
+        probe.setComponent(
+          uAxis,
+          movingBox.min.getComponent(uAxis) +
+            (movingBox.max.getComponent(uAxis) - movingBox.min.getComponent(uAxis)) * u / steps,
+        );
+        probe.setComponent(
+          vAxis,
+          movingBox.min.getComponent(vAxis) +
+            (movingBox.max.getComponent(vAxis) - movingBox.min.getComponent(vAxis)) * v / steps,
+        );
+        this.raycaster.set(probe, reverse);
+        for (const hit of this.raycaster.intersectObjects(movingMeshes, false)) {
+          if (!hit.face) continue;
+          normalMatrix.getNormalMatrix(hit.object.matrixWorld);
+          hitNormal.copy(hit.face.normal).applyNormalMatrix(normalMatrix);
+          if (hitNormal.dot(travel) <= 0.05) continue;
+          rayOrigins.push(hit.point.clone());
+          break;
+        }
+      }
+    }
+
+    // Probe the actual rendered faces, not only each object's outer box. This
+    // lets a second directional drop see a recess, ledge, or internal wall in
+    // the same compound object after its outermost face is already touching.
+    for (const origin of rayOrigins) {
+      this.raycaster.set(origin, travel);
+      for (const hit of this.raycaster.intersectObjects(targetMeshes, false)) {
+        if (hit.distance <= Scene.DROP_EPS || !hit.face) continue;
+        normalMatrix.getNormalMatrix(hit.object.matrixWorld);
+        hitNormal.copy(hit.face.normal).applyNormalMatrix(normalMatrix);
+        if (hitNormal.dot(travel) >= -0.05) continue;
+        distance = Math.min(distance, hit.distance);
+        break;
+      }
+    }
+
+    for (const [id, target] of this.parts) {
+      if (selected.has(id) || !target.group.visible || target.isHole) continue;
+      const targetBox = new THREE.Box3().setFromObject(target.group);
+      const overlapsPath = perpendicular.every((otherAxis) =>
+        movingBox.max.getComponent(otherAxis) >= targetBox.min.getComponent(otherAxis) - Scene.DROP_EPS &&
+        movingBox.min.getComponent(otherAxis) <= targetBox.max.getComponent(otherAxis) + Scene.DROP_EPS);
+      if (!overlapsPath) continue;
+
+      const gap = sign > 0
+        ? targetBox.min.getComponent(axis) - movingBox.max.getComponent(axis)
+        : movingBox.min.getComponent(axis) - targetBox.max.getComponent(axis);
+      // Match normal gravity: a face already touching the selection is the
+      // layer we are leaving, not a permanent lock. Ignore it and search for
+      // the next object farther along the chosen direction. If there is no
+      // farther target, the selection stays where it is.
+      if (gap > Scene.DROP_EPS) distance = Math.min(distance, gap);
+    }
+
+    if (!Number.isFinite(distance)) return [];
+    const delta = sign * distance;
+    const updates = moving.map(({ id, view, node }) => {
+      view.group.position.setComponent(axis, view.group.position.getComponent(axis) + delta);
+      view.group.updateMatrixWorld(true);
+      const position = [...node.position] as Vec3;
+      position[axis] = Math.round((position[axis] + delta) * 1e6) / 1e6;
+      return { id, position };
+    });
+    return updates;
+  }
+
   /** Live world bounding box of the current selection (visible parts only),
    *  or null with nothing selected/visible — the same box the resize cage
    *  itself draws (see updateResizeOverlay), exposed so the Inspector can
@@ -4041,6 +4327,39 @@ export class Scene {
     const points: THREE.Vector3[] = [];
     for (let i = 0; i < indices.length; i += stride) {
       points.push(new THREE.Vector3().fromBufferAttribute(position, indices[i]).applyMatrix4(matrix));
+    }
+    return points;
+  }
+
+  /** World-space samples from the side of a part facing the travel direction. */
+  private sampleDirectionalFacePoints(
+    view: PartView,
+    direction: THREE.Vector3,
+    max: number,
+  ): THREE.Vector3[] {
+    const geometry = view.mesh.geometry;
+    const position = geometry.getAttribute("position");
+    const normal = geometry.getAttribute("normal");
+    const matrix = view.mesh.matrixWorld;
+    const normalMatrix = new THREE.Matrix3().getNormalMatrix(matrix);
+    const facing = new THREE.Vector3();
+    const indices: number[] = [];
+    for (let index = 0; index < position.count; index++) {
+      if (normal) {
+        facing.fromBufferAttribute(normal, index).applyNormalMatrix(normalMatrix);
+        if (facing.dot(direction) <= 0.05) continue;
+      }
+      indices.push(index);
+    }
+    const candidates = indices.length
+      ? indices
+      : Array.from({ length: position.count }, (_, index) => index);
+    const stride = Math.max(1, Math.ceil(candidates.length / max));
+    const points: THREE.Vector3[] = [];
+    for (let index = 0; index < candidates.length; index += stride) {
+      points.push(new THREE.Vector3()
+        .fromBufferAttribute(position, candidates[index])
+        .applyMatrix4(matrix));
     }
     return points;
   }
@@ -4460,6 +4779,14 @@ export class Scene {
     if (mode !== "select") this.clearMoveReadout();
     if (this.toolMode === "build" && mode !== "build") this.setCells(null);
     this.toolMode = mode;
+    if (mode !== "align" && this.alignPointDrag) {
+      this.alignPointDrag = null;
+      this.alignDragArrow.visible = false;
+      this.controls.enabled = true;
+      this.gizmo.enabled = true;
+      this.clearAlignPreview();
+      this.onDragChange?.(false);
+    }
     if (mode !== "place" && this.placementPreview) this.placementPreview.visible = false;
     if (mode !== "edge") {
       this.clearEdgeSelection(true);
@@ -5524,6 +5851,20 @@ export class Scene {
   };
 
   private pickEdge(e: PointerEvent) {
+    const selectedIndex = this.selectedEdgeAtScreen(e);
+    if (selectedIndex >= 0) {
+      const selected = this.selectedEdges[selectedIndex];
+      selected.line.removeFromParent();
+      selected.line.geometry.dispose();
+      selected.line.material.dispose();
+      this.selectedEdges.splice(selectedIndex, 1);
+      this.clearEdgeHover();
+      this.onSelectEdges?.(
+        this.selectedEdges[0]?.partId ?? null,
+        this.selectedEdges.map((edge) => edge.point),
+      );
+      return;
+    }
     const picked = this.edgeAt(e);
     if (!picked) return;
     const existing = this.selectedEdges.findIndex(
@@ -5546,6 +5887,67 @@ export class Scene {
       this.selectedEdges[0]?.partId ?? null,
       this.selectedEdges.map((edge) => edge.point),
     );
+  }
+
+  /** The preview removes the original topological edge from the part mesh,
+   * but its orange selection stroke remains visible. Hit-test that stroke in
+   * screen space first so clicking it can still toggle the edge off. */
+  private selectedEdgeAtScreen(e: PointerEvent): number {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.set(
+      ((e.clientX - rect.left) / rect.width) * 2 - 1,
+      -((e.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    (this.raycaster.params as THREE.RaycasterParameters & { Line2?: { threshold: number } }).Line2 = {
+      threshold: 1,
+    };
+    const renderedHit = this.raycaster.intersectObjects(
+      this.selectedEdges.map((edge) => edge.line),
+      false,
+    )[0];
+    if (renderedHit) {
+      const index = this.selectedEdges.findIndex((edge) => edge.line === renderedHit.object);
+      if (index >= 0) return index;
+    }
+    const distanceToSegment = (
+      px: number, py: number,
+      ax: number, ay: number,
+      bx: number, by: number,
+    ) => {
+      const dx = bx - ax;
+      const dy = by - ay;
+      const lengthSquared = dx * dx + dy * dy;
+      const t = lengthSquared
+        ? Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / lengthSquared))
+        : 0;
+      return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+    };
+    let nearest = -1;
+    let nearestDistance = 11;
+    for (let edgeIndex = 0; edgeIndex < this.selectedEdges.length; edgeIndex++) {
+      const line = this.selectedEdges[edgeIndex].line;
+      line.updateWorldMatrix(true, false);
+      const starts = line.geometry.getAttribute("instanceStart");
+      const ends = line.geometry.getAttribute("instanceEnd");
+      if (!starts || !ends) continue;
+      for (let segment = 0; segment < starts.count; segment++) {
+        const start = new THREE.Vector3().fromBufferAttribute(starts, segment)
+          .applyMatrix4(line.matrixWorld).project(this.camera);
+        const end = new THREE.Vector3().fromBufferAttribute(ends, segment)
+          .applyMatrix4(line.matrixWorld).project(this.camera);
+        const ax = rect.left + (start.x + 1) * rect.width / 2;
+        const ay = rect.top + (1 - start.y) * rect.height / 2;
+        const bx = rect.left + (end.x + 1) * rect.width / 2;
+        const by = rect.top + (1 - end.y) * rect.height / 2;
+        const distance = distanceToSegment(e.clientX, e.clientY, ax, ay, bx, by);
+        if (distance < nearestDistance) {
+          nearestDistance = distance;
+          nearest = edgeIndex;
+        }
+      }
+    }
+    return nearest;
   }
 
   private edgeAt(e: PointerEvent): { id: string; view: PartView; groupIndex: number; point: Vec3 } | null {
@@ -5622,6 +6024,10 @@ export class Scene {
     }
     this.selectedEdges = [];
     if (report) this.onSelectEdges?.(null, []);
+  }
+
+  clearSelectedEdges() {
+    this.clearEdgeSelection(true);
   }
 
   /**
@@ -5980,6 +6386,11 @@ export class Scene {
     this.downAt = null;
     if (!this.showSelectedCollisionContacts || !this.collisionContactOwnerId || !this.selectedIds.includes(this.collisionContactOwnerId)) {
       this.clearCollisionContacts();
+    }
+
+    if (this.alignPointDrag) {
+      this.finishAlignPointDrag();
+      return;
     }
 
     // The region click was already handled on pointerdown. Selection is
@@ -6636,6 +7047,10 @@ export class Scene {
     this.collisionContactMaterial.dispose();
     this.alignHandleMeshes[0]?.geometry.dispose();
     for (const handle of this.alignHandleMeshes) (handle.material as THREE.Material).dispose();
+    this.alignDragArrow.line.geometry.dispose();
+    (this.alignDragArrow.line.material as THREE.Material).dispose();
+    this.alignDragArrow.cone.geometry.dispose();
+    (this.alignDragArrow.cone.material as THREE.Material).dispose();
     for (const handle of this.pushPullHandleMeshes) disposeArrow(handle);
     this.renderer.dispose();
     for (const input of this.dimensionInputs) input.remove();

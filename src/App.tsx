@@ -504,6 +504,14 @@ export function App() {
   // position is computed from the trigger button each time it opens.
   const wireframeFlyoutRef = useRef<HTMLDivElement>(null);
   const [wireframeFlyoutPos, setWireframeFlyoutPos] = useState<{ top: number; left: number } | null>(null);
+  const [dropMenuOpen, setDropMenuOpen] = useState(false);
+  const [dropDirection, setDropDirection] = useState<{ label: string; vector: Vec3 }>({
+    label: "Down",
+    vector: [0, 0, -1],
+  });
+  const dropMenuRef = useRef<HTMLDivElement>(null);
+  const dropFlyoutRef = useRef<HTMLDivElement>(null);
+  const [dropFlyoutPos, setDropFlyoutPos] = useState<{ top: number; left: number } | null>(null);
   const cycleWireframe = useCallback(() => {
     setWireframe((curr) => NEXT_WIREFRAME[curr]);
   }, []);
@@ -557,6 +565,26 @@ export function App() {
     window.addEventListener("pointerdown", onDocClick);
     return () => window.removeEventListener("pointerdown", onDocClick);
   }, [wireframeMenuOpen]);
+  useEffect(() => {
+    if (!dropMenuOpen) {
+      setDropFlyoutPos(null);
+      return;
+    }
+    const trigger = dropMenuRef.current;
+    if (trigger) {
+      const rect = trigger.getBoundingClientRect();
+      setDropFlyoutPos({ top: rect.top + rect.height / 2, left: rect.right + 10 });
+    }
+    const onDocClick = (e: PointerEvent | MouseEvent) => {
+      const target = e.target as Node;
+      if (
+        dropMenuRef.current && !dropMenuRef.current.contains(target) &&
+        dropFlyoutRef.current && !dropFlyoutRef.current.contains(target)
+      ) setDropMenuOpen(false);
+    };
+    window.addEventListener("pointerdown", onDocClick);
+    return () => window.removeEventListener("pointerdown", onDocClick);
+  }, [dropMenuOpen]);
   // Remembered like the export quality: whether you want things snapping is
   // a working preference, not a per-session one.
   const [snapEnabled, setSnapEnabled] = useState(
@@ -951,6 +979,7 @@ export function App() {
   const textFontInputRef = useRef<HTMLInputElement>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
   const faceApplyButtonRef = useRef<HTMLButtonElement>(null);
+  const edgePreviewRequestRef = useRef(0);
 
   // A slider fires far more onChange events than there are meaningful
   // rebuilds worth doing — a short debounce coalesces a drag's burst into one
@@ -1988,9 +2017,88 @@ export function App() {
   );
 
   const dropSelected = useCallback(() => {
-    const updates = sceneRef.current?.dropSelected() ?? [];
-    if (updates.length) setPositions(updates);
-  }, [setPositions]);
+    const updates = sceneRef.current?.dropSelectedDirection(dropDirection.vector) ?? [];
+    if (updates.length) {
+      setPositions(updates);
+      setError(null);
+    } else {
+      setError("Nothing to drop onto in that direction.");
+    }
+  }, [dropDirection, setPositions]);
+
+  const selectDropDirection = useCallback((label: string, vector: Vec3) => {
+    setDropDirection({ label, vector });
+    setDropMenuOpen(false);
+    setError(null);
+  }, []);
+
+  const edgeCandidate = useCallback(() => {
+    if (!edgeSelection) return null;
+    const op = {
+      kind: edgeKind,
+      point: edgeSelection.points[0],
+      points: edgeSelection.points,
+      distance: edgeDistance,
+    } as const;
+    const node = findNode(useDoc.getState().nodes, edgeSelection.id);
+    if (!node || node.type === "import") return null;
+    const candidate: EditSpec = node.type === "edit"
+      ? { ...(toSpec(node) as EditSpec), ops: [...node.ops, op] }
+      : {
+          type: "edit",
+          id: node.id,
+          base: toSpec(node),
+          ops: [op],
+          position: node.position,
+          rotation: node.rotation,
+          scale: node.scale,
+          isHole: node.isHole,
+        };
+    return { op, candidate };
+  }, [edgeSelection, edgeKind, edgeDistance]);
+
+  // Edge finishing can be expensive, so wait until the value has paused for
+  // a moment and coalesce stale requests. The preview never touches history.
+  useEffect(() => {
+    const request = ++edgePreviewRequestRef.current;
+    if (toolMode !== "edge" || !edgeSelection) {
+      sceneRef.current?.setEdgePreview(null, null);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      const pending = edgeCandidate();
+      if (!pending) return;
+      void kernel.previewLocal(pending.candidate).then((preview) => {
+        if (request !== edgePreviewRequestRef.current) return;
+        sceneRef.current?.setEdgePreview(edgeSelection.id, preview);
+      }).catch(() => {
+        if (request === edgePreviewRequestRef.current) {
+          sceneRef.current?.setEdgePreview(null, null);
+        }
+      });
+    }, 280);
+    return () => window.clearTimeout(timer);
+  }, [toolMode, edgeSelection, edgeCandidate]);
+
+  const applyEdgeFinish = useCallback(async () => {
+    if (!edgeSelection) return;
+    const pending = edgeCandidate();
+    if (!pending) return;
+    try {
+      const surviving = await kernel.pruneDeadOps(pending.candidate);
+      if (!surviving || surviving.length !== pending.candidate.ops.length) {
+        setError("That edge finish cannot be applied at this size.");
+        return;
+      }
+    } catch (e) {
+      setError(msg(e));
+      return;
+    }
+    sceneRef.current?.setEdgePreview(null, null);
+    setError(null);
+    finishEdit(edgeSelection.id, pending.op);
+    setEdgeSelection(null);
+  }, [edgeSelection, edgeCandidate, finishEdit]);
 
   const toggleHoleSelected = useCallback(() => {
     const state = useDoc.getState();
@@ -2586,14 +2694,55 @@ export function App() {
         >
           <ZoomToFitIcon />
         </button>
-        <button
-          onClick={dropSelected}
-          title="Drop onto what is below (D)"
-          aria-label="Drop"
-          disabled={!selectedIds.length}
-        >
-          <DropIcon />
-        </button>
+        <div className="tool-rail-item-container drop-tool" ref={dropMenuRef}>
+          <button
+            onClick={dropSelected}
+            title={"Drop " + dropDirection.label.toLowerCase() + " (D)"}
+            aria-label={"Drop " + dropDirection.label.toLowerCase()}
+            disabled={!selectedIds.length}
+          >
+            <DropIcon />
+          </button>
+          <button
+            className={dropMenuOpen ? "drop-menu-toggle active" : "drop-menu-toggle"}
+            onClick={() => setDropMenuOpen((open) => !open)}
+            title="Choose drop direction"
+            aria-label="Choose drop direction"
+            aria-expanded={dropMenuOpen}
+            disabled={!selectedIds.length}
+          >
+            ›
+          </button>
+          {dropMenuOpen && dropFlyoutPos && createPortal(
+            <div
+              ref={dropFlyoutRef}
+              className="tool-rail-flyout drop-direction-flyout"
+              role="menu"
+              aria-label="Drop direction"
+              style={{ position: "fixed", top: dropFlyoutPos.top, left: dropFlyoutPos.left, transform: "translateY(-50%)" }}
+            >
+              {([
+                ["←", "Left", [-1, 0, 0]],
+                ["→", "Right", [1, 0, 0]],
+                ["↙", "Back", [0, -1, 0]],
+                ["↗", "Front", [0, 1, 0]],
+                ["↓", "Down", [0, 0, -1]],
+                ["↑", "Up", [0, 0, 1]],
+              ] as [string, string, Vec3][]).map(([arrow, label, direction]) => (
+                <button
+                  key={label}
+                  className={dropDirection.label === label ? "active" : ""}
+                  onClick={() => selectDropDirection(label, direction)}
+                  title={"Use " + label.toLowerCase() + " for D"}
+                >
+                  <span className="drop-direction-arrow">{arrow}</span>
+                  <span className="flyout-label">{label}</span>
+                </button>
+              ))}
+            </div>,
+            document.body,
+          )}
+        </div>
       </div>
 
       {objectsPanelOpen && (
@@ -2883,52 +3032,56 @@ export function App() {
         )}
         {toolMode === "edge" && (
           <div className="edge-bar">
-            <strong>{edgeSelection ? `${edgeSelection.points.length} edge${edgeSelection.points.length === 1 ? "" : "s"} selected` : "Select edges"}</strong>
-            <select value={edgeKind} onChange={(e) => setEdgeKind(e.target.value as "fillet" | "chamfer")}>
-              <option value="fillet">Fillet</option>
-              <option value="chamfer">Chamfer</option>
-            </select>
+            <div className="edge-selection-summary">
+              <strong>{edgeSelection ? `${edgeSelection.points.length} edge${edgeSelection.points.length === 1 ? "" : "s"} selected` : "Select edges"}</strong>
+              {edgeSelection && (
+                <button
+                  className="edge-clear-selection"
+                  onClick={() => {
+                    sceneRef.current?.clearSelectedEdges?.();
+                    setEdgeSelection(null);
+                  }}
+                  aria-label="Clear selected edges"
+                  title="Clear selected edges"
+                >
+                  <svg viewBox="0 0 16 16" aria-hidden="true">
+                    <path d="M4.5 4.5l7 7m0-7-7 7" />
+                  </svg>
+                </button>
+              )}
+            </div>
+            <div className="edge-kind-buttons" role="group" aria-label="Edge finish type">
+              <button
+                className={edgeKind === "fillet" ? "active" : ""}
+                onClick={() => setEdgeKind("fillet")}
+                title="Fillet — rounded edge"
+                aria-label="Fillet"
+                aria-pressed={edgeKind === "fillet"}
+              >
+                <FaceModifierIcon kind="fillet" />
+              </button>
+              <button
+                className={edgeKind === "chamfer" ? "active" : ""}
+                onClick={() => setEdgeKind("chamfer")}
+                title="Chamfer — bevelled edge"
+                aria-label="Chamfer"
+                aria-pressed={edgeKind === "chamfer"}
+              >
+                <FaceModifierIcon kind="chamfer" />
+              </button>
+            </div>
             <label>
               Size
               <input type="number" min="0.1" step="0.5" value={edgeDistance}
-                onChange={(e) => setEdgeDistance(Math.max(0.1, Number(e.target.value) || 0.1))} /> mm
+                onChange={(e) => setEdgeDistance(Math.max(0.1, Number(e.target.value) || 0.1))}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void applyEdgeFinish();
+                  }
+                }} /> mm
             </label>
-            <button disabled={!edgeSelection} onClick={async () => {
-              if (!edgeSelection) return;
-              const op = {
-                kind: edgeKind,
-                point: edgeSelection.points[0],
-                points: edgeSelection.points,
-                distance: edgeDistance,
-              } as const;
-              const node = findNode(useDoc.getState().nodes, edgeSelection.id);
-              if (!node || node.type === "import") return;
-              const candidate: EditSpec = node.type === "edit"
-                ? { ...(toSpec(node) as EditSpec), ops: [...node.ops, op] }
-                : {
-                    type: "edit",
-                    id: node.id,
-                    base: toSpec(node),
-                    ops: [op],
-                    position: node.position,
-                    rotation: node.rotation,
-                    scale: node.scale,
-                    isHole: node.isHole,
-                  };
-              try {
-                const surviving = await kernel.pruneDeadOps(candidate);
-                if (!surviving || surviving.length !== candidate.ops.length) {
-                  setError(`That ${edgeKind} cannot be applied to the selected Triangle edge at this size.`);
-                  return;
-                }
-              } catch (e) {
-                setError(msg(e));
-                return;
-              }
-              setError(null);
-              finishEdit(edgeSelection.id, op);
-              setEdgeSelection(null);
-            }}>Apply</button>
+            <button disabled={!edgeSelection} onClick={() => void applyEdgeFinish()}>Apply</button>
           </div>
         )}
         {toolMode === "build" && !buildBusy && buildCells.length > 0 && (
@@ -2981,7 +3134,7 @@ export function App() {
               ? "Working out the regions…"
               : "Alt-click a shape to subtract it · Click to add it back · Use the region chips below for one region at a time"
             : toolMode === "align"
-            ? "Click a dot to align minimum, centre, or maximum · A Align · Esc Select"
+            ? "Drag a coloured node onto a node on the other object · yellow marks the current target · release to align · Esc Select"
             : toolMode === "face"
             ? faceOp === "wall"
               ? "Select the face to leave open, set a thickness, then Hollow · Esc Select · Right-drag orbit"
@@ -2995,7 +3148,7 @@ export function App() {
                 ? "Select a face, set the border bevel size, then Apply · Esc Select · Right-drag orbit"
                 : "Click a flat face, then drag its arrow or type a distance to push/pull · Esc Select · Right-drag orbit"
             : toolMode === "edge"
-            ? "Click edges to add or remove them · Choose Fillet or Chamfer, then Apply · Esc Select · Right-drag orbit"
+            ? "Click edges to add or remove them · adjust Size for a live preview · Enter or Apply to finish · Esc cancels · Right-drag orbit"
             : "V Select · F Face · M Move · R Rotate · A Align · Z Zoom · H Hole · T Transparent · W Wireframe · D Drop · S Snapping · Home Reset view · Drag an object to move it · Alt-drag duplicate · Shift-drag straight · Right-drag orbit"}
         </div>
         {/* One centred stack. The progress card and the slow-file warning

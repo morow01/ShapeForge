@@ -1268,19 +1268,6 @@ function resizePlanarFace(solid: Shape3D, face: Face, op: ResizeFaceOp): Shape3D
   const rawNormal = face.normalAt(center);
   const normal = new Vector([rawNormal.x, rawNormal.y, rawNormal.z]).normalized();
   const faceProjection = center.x * normal.x + center.y * normal.y + center.z * normal.z;
-  const [min, max] = solid.boundingBox.bounds;
-  let oppositeProjection = Infinity;
-  for (const x of [min[0], max[0]]) {
-    for (const y of [min[1], max[1]]) {
-      for (const z of [min[2], max[2]]) {
-        oppositeProjection = Math.min(oppositeProjection, x * normal.x + y * normal.y + z * normal.z);
-      }
-    }
-  }
-  const height = faceProjection - oppositeProjection;
-  if (!Number.isFinite(height) || height < 0.1) {
-    throw new Error("The opposite side of this face could not be found.");
-  }
 
   const boundary = face.edges;
   const adjoining = solid.faces.filter((candidate) =>
@@ -1289,6 +1276,25 @@ function resizePlanarFace(solid: Shape3D, face: Face, op: ResizeFaceOp): Shape3D
   );
   if (!adjoining.length) throw new Error("No adjoining faces could be resized.");
 
+  // Stop the draft where the immediately adjoining faces end. Using the
+  // complete solid's minimum made a face on top of a stepped/compound shape
+  // taper all the way through the lower body instead of ending at its local
+  // shoulder.
+  let oppositeProjection = Infinity;
+  for (const adjoiningFace of adjoining) {
+    const [min, max] = adjoiningFace.boundingBox.bounds;
+    for (const x of [min[0], max[0]]) {
+      for (const y of [min[1], max[1]]) {
+        for (const z of [min[2], max[2]]) {
+          oppositeProjection = Math.min(oppositeProjection, x * normal.x + y * normal.y + z * normal.z);
+        }
+      }
+    }
+  }
+  const height = faceProjection - oppositeProjection;
+  if (!Number.isFinite(height) || height < 0.1) {
+    throw new Error("The opposite side of this face could not be found.");
+  }
   // Positive OCCT draft angles taper IN, so negate the angle to make the
   // user-facing positive value mean grow/outset.
   const angle = -Math.atan(op.offset / height) * 180 / Math.PI;
