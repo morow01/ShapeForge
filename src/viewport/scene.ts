@@ -4921,27 +4921,6 @@ export class Scene {
     for (const snap of contactSnaps) {
       const axis = axisIndex[snap.axis];
       const others = [0, 1, 2].filter((value) => value !== axis);
-      const lo0 = Math.max(moving.min[others[0]], snap.targetBounds.min[others[0]]);
-      const hi0 = Math.min(moving.max[others[0]], snap.targetBounds.max[others[0]]);
-      const lo1 = Math.max(moving.min[others[1]], snap.targetBounds.min[others[1]]);
-      const hi1 = Math.min(moving.max[others[1]], snap.targetBounds.max[others[1]]);
-      // A real snap can be face-to-face, edge-to-face, or point-to-face.
-      // Zero-width contact has no drawable area, so give it a very slim
-      // visual footprint without pretending the whole bounding box touches.
-      let displayLo0 = lo0;
-      let displayHi0 = hi0;
-      let displayLo1 = lo1;
-      let displayHi1 = hi1;
-      if (displayHi0 - displayLo0 <= 0.01) {
-        const middle = (displayLo0 + displayHi0) / 2;
-        displayLo0 = middle - 0.2;
-        displayHi0 = middle + 0.2;
-      }
-      if (displayHi1 - displayLo1 <= 0.01) {
-        const middle = (displayLo1 + displayHi1) / 2;
-        displayLo1 = middle - 0.2;
-        displayHi1 = middle + 0.2;
-      }
       // The selected object's contact may itself be a recessed/internal
       // surface, so the actual shared plane comes from the matched surface,
       // not necessarily from the selected object's outer min/max bounds.
@@ -4963,28 +4942,10 @@ export class Scene {
           }
         }
       }
-      // Some imported/edited meshes do not preserve a perfectly coplanar
-      // triangle on both sides even though the real target surface produced
-      // the snap. In that case, use that real target surface clipped to the
-      // moving object's footprint—never the target's oversized outer box.
-      if (!vertices.length && targetTriangles.length) {
-        const footprint: [number, number][] = [
-          [displayLo0, displayLo1], [displayHi0, displayLo1],
-          [displayHi0, displayHi1], [displayLo0, displayHi1],
-        ];
-        for (const triangle of targetTriangles) {
-          const polygon = this.clipContactPolygon(triangle, footprint);
-          for (let i = 1; i + 1 < polygon.length; i++) {
-            for (const [a, b] of [polygon[0], polygon[i], polygon[i + 1]]) {
-              const point = [0, 0, 0];
-              point[axis] = plane;
-              point[others[0]] = a;
-              point[others[1]] = b;
-              vertices.push(point[0], point[1], point[2]);
-            }
-          }
-        }
-      }
+      // Never substitute the selected object's outer footprint when its real
+      // mesh has no surface here. Concave objects can have a large empty area
+      // inside their bounds; painting the target through that empty area is a
+      // false collision. Both meshes must contribute overlapping triangles.
       if (!vertices.length) continue;
       const geometry = new THREE.BufferGeometry();
       geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
