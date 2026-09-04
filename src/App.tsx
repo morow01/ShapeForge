@@ -7,12 +7,17 @@ import { Inspector } from "./ui/Inspector";
 import { Tree } from "./ui/Tree";
 import { ProjectsModal } from "./ui/ProjectsModal";
 import {
+  AlignToolIcon,
   CombineIcon,
+  CornerFlyoutMark,
+  DirectionArrowIcon,
   DropIcon,
+  EdgeToolIcon,
   ExportIcon,
   FaceModifierIcon,
   GroupIcon,
   MagnetIcon,
+  MoveToolIcon,
   NewDesignIcon,
   ObjectsIcon,
   OrthographicIcon,
@@ -21,10 +26,13 @@ import {
   PrimitiveShapeIcon,
   ProjectsIcon,
   RedoIcon,
+  RotateToolIcon,
   SaveFileIcon,
+  SelectIcon,
   SettingsIcon,
   ShapeBuilderIcon,
   SolidCubeIcon,
+  TextToolIcon,
   TransparencyIcon,
   UndoIcon,
   UngroupIcon,
@@ -512,6 +520,25 @@ export function App() {
   const dropMenuRef = useRef<HTMLDivElement>(null);
   const dropFlyoutRef = useRef<HTMLDivElement>(null);
   const [dropFlyoutPos, setDropFlyoutPos] = useState<{ top: number; left: number } | null>(null);
+  // Illustrator-style tool flyout: holding the Drop button opens the
+  // direction picker instead of dropping; a plain click still drops.
+  const dropPressTimerRef = useRef<number | null>(null);
+  const dropLongPressFiredRef = useRef(false);
+  const cancelDropPressTimer = useCallback(() => {
+    if (dropPressTimerRef.current !== null) {
+      window.clearTimeout(dropPressTimerRef.current);
+      dropPressTimerRef.current = null;
+    }
+  }, []);
+  const startDropPressTimer = useCallback(() => {
+    dropLongPressFiredRef.current = false;
+    cancelDropPressTimer();
+    dropPressTimerRef.current = window.setTimeout(() => {
+      dropLongPressFiredRef.current = true;
+      dropPressTimerRef.current = null;
+      setDropMenuOpen(true);
+    }, 400);
+  }, [cancelDropPressTimer]);
   const cycleWireframe = useCallback(() => {
     setWireframe((curr) => NEXT_WIREFRAME[curr]);
   }, []);
@@ -2531,7 +2558,7 @@ export function App() {
           onClick={() => setToolMode("select")}
           title="Select and resize (V)"
           aria-label="Select tool"
-        ><span className="tool-symbol cursor-symbol">➤</span></button>
+        ><SelectIcon /></button>
         {([
           ["push", "Push/Pull", "Select a face to push or pull (F)"],
           ["wall", "Wall", "Hollow a shape through the selected face"],
@@ -2556,31 +2583,31 @@ export function App() {
           onClick={() => { setToolMode("edge"); setEdgeSelection(null); }}
           title="Select an edge to fillet or chamfer (E)"
           aria-label="Edge finishing tool"
-        ><span className="tool-symbol">⌞</span></button>
+        ><EdgeToolIcon /></button>
         <button
           onClick={() => void openTextTool()}
           title="Add 3D text using an installed system font"
           aria-label="Add text tool"
-        ><span className="tool-symbol text-tool-symbol">T</span></button>
+        ><TextToolIcon /></button>
         <button
           className={toolMode === "move" ? "active" : ""}
           onClick={() => setToolMode("move")}
           title="Move with axis controls (M)"
           aria-label="Move tool"
-        ><span className="tool-symbol">✥</span></button>
+        ><MoveToolIcon /></button>
         <button
           className={toolMode === "rotate" ? "active" : ""}
           onClick={() => setToolMode("rotate")}
           title="Rotate (R)"
           aria-label="Rotate tool"
-        ><span className="tool-symbol">↻</span></button>
+        ><RotateToolIcon /></button>
         <button
           className={toolMode === "align" ? "active" : ""}
           onClick={() => setToolMode("align")}
           title="Align selected objects (A)"
           aria-label="Align tool"
           disabled={selectedIds.length < 2}
-        ><span className="tool-symbol">⋮</span></button>
+        ><AlignToolIcon /></button>
         <button
           className={toolMode === "build" ? "active" : ""}
           onClick={() => setToolMode("build")}
@@ -2696,23 +2723,25 @@ export function App() {
         </button>
         <div className="tool-rail-item-container drop-tool" ref={dropMenuRef}>
           <button
-            onClick={dropSelected}
-            title={"Drop " + dropDirection.label.toLowerCase() + " (D)"}
+            onPointerDown={(e) => { if (e.button === 0) startDropPressTimer(); }}
+            onPointerUp={cancelDropPressTimer}
+            onPointerLeave={cancelDropPressTimer}
+            onClick={() => {
+              // The timer already opened the menu on this same press — a
+              // held-then-released click shouldn't also drop the selection.
+              if (dropLongPressFiredRef.current) {
+                dropLongPressFiredRef.current = false;
+                return;
+              }
+              dropSelected();
+            }}
+            title={"Drop " + dropDirection.label.toLowerCase() + " (D) — hold for directions"}
             aria-label={"Drop " + dropDirection.label.toLowerCase()}
             disabled={!selectedIds.length}
           >
             <DropIcon />
           </button>
-          <button
-            className={dropMenuOpen ? "drop-menu-toggle active" : "drop-menu-toggle"}
-            onClick={() => setDropMenuOpen((open) => !open)}
-            title="Choose drop direction"
-            aria-label="Choose drop direction"
-            aria-expanded={dropMenuOpen}
-            disabled={!selectedIds.length}
-          >
-            ›
-          </button>
+          <CornerFlyoutMark className="corner-flyout-mark drop-corner-mark" />
           {dropMenuOpen && dropFlyoutPos && createPortal(
             <div
               ref={dropFlyoutRef}
@@ -2722,20 +2751,20 @@ export function App() {
               style={{ position: "fixed", top: dropFlyoutPos.top, left: dropFlyoutPos.left, transform: "translateY(-50%)" }}
             >
               {([
-                ["←", "Left", [-1, 0, 0]],
-                ["→", "Right", [1, 0, 0]],
-                ["↙", "Back", [0, -1, 0]],
-                ["↗", "Front", [0, 1, 0]],
-                ["↓", "Down", [0, 0, -1]],
-                ["↑", "Up", [0, 0, 1]],
-              ] as [string, string, Vec3][]).map(([arrow, label, direction]) => (
+                ["left", "Left", [-1, 0, 0]],
+                ["right", "Right", [1, 0, 0]],
+                ["back", "Back", [0, -1, 0]],
+                ["front", "Front", [0, 1, 0]],
+                ["down", "Down", [0, 0, -1]],
+                ["up", "Up", [0, 0, 1]],
+              ] as [Parameters<typeof DirectionArrowIcon>[0]["direction"], string, Vec3][]).map(([arrowDir, label, direction]) => (
                 <button
                   key={label}
                   className={dropDirection.label === label ? "active" : ""}
                   onClick={() => selectDropDirection(label, direction)}
                   title={"Use " + label.toLowerCase() + " for D"}
                 >
-                  <span className="drop-direction-arrow">{arrow}</span>
+                  <span className="drop-direction-arrow"><DirectionArrowIcon direction={arrowDir} /></span>
                   <span className="flyout-label">{label}</span>
                 </button>
               ))}

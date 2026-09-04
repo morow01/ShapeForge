@@ -7,36 +7,168 @@ export function FaceModifierIcon({ kind, className = "tool-icon modifier-icon" }
   kind: FaceModifierKind;
   className?: string;
 }) {
-  const body = { fill: "none", stroke: "currentColor", strokeWidth: 1.15, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
   const accent = { className: "modifier-accent", fill: "none", strokeWidth: 1.35, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
+  const ghostCorner = <path d="M5.5 19V5h13.5" fill="none" stroke="currentColor" strokeWidth={1.15} strokeDasharray="1.6 1.8" opacity={.4} />;
   let drawing;
   if (kind === "push") drawing = <>
-    <g {...body}><path d="m5 10 7 3.2 7-3.4v7.5L12 21l-7-3.2Z"/><path d="m5 10 7 3.2 7-3.4"/></g>
-    <g {...accent}><path d="M12 10V3m-2.3 2.4L12 3l2.3 2.4"/><path d="m8 8.2 4 1.8 4-1.9"/></g>
+    {/* Face the operation acts on, kept pale so the arrow reads clearly on top of it. */}
+    <path d="M4 9 12 5 20 9 12 13Z" fill="currentColor" fillOpacity=".08" stroke="currentColor" strokeWidth={1.3} strokeOpacity={.55} />
+    {/* White knockout behind the arrow so it never blends into the face outline it crosses. */}
+    <path d="M9 5.2 12 2 15 5.2M12 2V17M9 13.8 12 17 15 13.8" fill="none" stroke="#fff" strokeWidth={4.2} strokeLinecap="round" strokeLinejoin="round" />
+    <path {...accent} d="M9 5.2 12 2 15 5.2M12 2V17M9 13.8 12 17 15 13.8" strokeWidth={2.1} />
   </>;
   else if (kind === "wall") drawing = <>
-    <g {...body}><path d="m4.5 8.5 7.5 3.4 7.5-3.7v8.3L12 20.4l-7.5-3.5Z"/></g>
-    <g {...accent}><path d="m4.5 8.5 7.6-3.8 7.4 3.5-2.2 1.1-5.2-2.4-5.4 2.7Z" fill="currentColor" opacity=".1"/><path d="m6.7 9.6 5.4 2.4 5.2-2.7v5.4L12 17.5l-5.3-2.4Z"/></g>
+    {/* Outer wall + inner cavity reads as "hollow" without a caption. */}
+    <rect x={5} y={5} width={14} height={14} rx={2} fill="none" stroke="currentColor" strokeWidth={1.3} />
+    <rect {...accent} x={9} y={9} width={6} height={6} rx={1} strokeDasharray="1.6 1.8" />
+    <path {...accent} d="M6.6 6.6 8.6 8.6M17.4 6.6 15.4 8.6M6.6 17.4 8.6 15.4M17.4 17.4 15.4 15.4" />
   </>;
   else if (kind === "resize") drawing = <>
-    <g {...body}><path d="M6 7.5h12v9H6Z"/><path d="M8.2 10h7.6v4H8.2Z" opacity=".55"/></g>
-    <g {...accent}><path d="M2.7 12H8m-3.2-2.1L2.7 12l2.1 2.1M21.3 12H16m3.2-2.1 2.1 2.1-2.1 2.1"/></g>
+    {/* Corner drag-handles instead of ambiguous inward arrows. */}
+    <rect x={6} y={7} width={12} height={10} rx={1.5} fill="none" stroke="currentColor" strokeWidth={1.3} />
+    <path {...accent} d="M3 21 8 16M3 21v-4M3 21h4" />
+    <path {...accent} d="M21 3 16 8M21 3h-4M21 3v4" />
   </>;
   else if (kind === "offset") drawing = <>
-    <g {...body}><path d="m4 13 8 4 8-4-8-4Z"/><path d="m4 16.2 8 4 8-4" opacity=".65"/></g>
-    <g {...accent}><path d="m7 8.2 5 2.5 5-2.5-5-2.5Z"/><path d="M12 7V2.8m-1.8 1.8L12 2.8l1.8 1.8"/></g>
+    {/* The actual stepped result: shrinking tiers stacked upward, not a face-plus-arrow
+        that read as a duplicate of Push/Pull. */}
+    <rect x={4} y={15} width={16} height={6} rx={1} fill="none" stroke="currentColor" strokeWidth={1.3} />
+    <rect x={7} y={9} width={10} height={6} rx={1} fill="none" stroke="currentColor" strokeWidth={1.3} />
+    <rect {...accent} x={9.5} y={4} width={5} height={5} rx={1} />
   </>;
   else if (kind === "fillet") drawing = <>
-    <g {...body}><path d="M5 4v15h15"/><path d="M8 4v7a5 5 0 0 0 5 5h7" strokeDasharray="1.5 2" opacity=".55"/></g>
-    <g {...accent}><path d="M5 19h3a9 9 0 0 0 9-9V4"/><path d="m14.7 6.1 2.3-2 2.1 2.2"/></g>
+    {/* The icon *is* a filleted corner, sharing its anchor points with Chamfer below
+        so the two read as one pair. */}
+    {ghostCorner}
+    <path {...accent} d="M5.5 19V14A9 9 0 0 1 14.5 5H19" strokeWidth={2.4} />
   </>;
   else drawing = <>
-    <g {...body}><path d="M5 4v15h15"/><path d="M8 4v9l6 6h6" strokeDasharray="1.5 2" opacity=".55"/></g>
-    <g {...accent}><path d="M5 19h5l7-7V4"/><path d="m14.7 6.1 2.3-2 2.1 2.2"/></g>
+    {ghostCorner}
+    <path {...accent} d="M5.5 19V14L14.5 5H19" strokeWidth={2.4} />
   </>;
   return (
     <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
       {drawing}
+    </svg>
+  );
+}
+
+/** Select tool: a cursor-arrow silhouette with a marquee-corner accent. */
+export function SelectIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path
+        d="M6 3.4 6 18.6 9.7 15.3 12.4 20.4 15 19.1 12.3 14 17.8 13.8Z"
+        fill="currentColor"
+        stroke="currentColor"
+        strokeWidth="1"
+        strokeLinejoin="round"
+      />
+      <path className="icon-accent" d="M15 4.5h4.5V9" fill="none" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="2.4 2.4" />
+    </svg>
+  );
+}
+
+/** Edge finishing tool: one edge drawn bold on a faint box, its own height
+ *  exactly matching the box's front edge, with a pick handle at its middle. */
+export function EdgeToolIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      {/* Same proportioned cube used by Transparency / View Modes, so every
+          side reads as equal instead of a squat tray. */}
+      <path
+        d="M12 3 20 7.5V16.5L12 21 4 16.5V7.5Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.15"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        opacity=".32"
+      />
+      <path
+        d="M12 12 4 7.5M12 12l8-4.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.15"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        opacity=".32"
+      />
+      <path className="icon-accent" d="M12 12v9" fill="none" strokeWidth="2.4" strokeLinecap="round" />
+      <circle className="icon-accent-fill" cx="12" cy="16.5" r="1.4" />
+    </svg>
+  );
+}
+
+/** Add text tool: a filled serif "T" glyph — reads as an actual letterform
+ *  (crossbar + flared foot) rather than a plus-sign-like block. */
+export function TextToolIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M4 4H20V7H13.5V17H16V20H8V17H10.5V7H4Z" fill="currentColor" />
+    </svg>
+  );
+}
+
+/** Move tool: the standard 4-way cross. */
+export function MoveToolIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <g fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 3v18M3 12h18" />
+        <path d="M9 6l3-3 3 3M9 18l3 3 3-3M6 9l-3 3 3 3M18 9l3 3-3 3" />
+      </g>
+    </svg>
+  );
+}
+
+/** Rotate tool: a pivot arc ending in a small chevron arrowhead, with a
+ *  pivot-point dot at the object's centre. */
+export function RotateToolIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      {/* Exact circle (center 12,12 r=7) so the chevron below lands precisely
+          tangent to the arc's end, instead of floating near it. */}
+      <path d="M18.06 8.5A7 7 0 1 1 12 5" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+      <path d="M9.4 3.3 12 5 9.4 6.7" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+      <circle className="icon-accent-fill" cx="12" cy="12" r="1.3" />
+    </svg>
+  );
+}
+
+/** Drop-direction arrow: shaft + chevron on the four axes, shaft + corner
+ *  bracket on the two diagonals — the same construction as Move's arms and
+ *  Resize's corner handles, applied to a single direction. Replaces the
+ *  plain ← → ↙ ↗ ↓ ↑ glyphs in the drop-direction menu. */
+export function DirectionArrowIcon({
+  direction,
+  className = "tool-icon",
+}: {
+  direction: "left" | "right" | "up" | "down" | "front" | "back";
+  className?: string;
+}) {
+  const d =
+    direction === "left" ? "M19 12H10M10 8.5 6 12 10 15.5"
+    : direction === "right" ? "M5 12h9M14 8.5 18 12 14 15.5"
+    : direction === "up" ? "M12 19V10M8.5 10 12 6 15.5 10"
+    : direction === "down" ? "M12 5V14M8.5 14 12 18 15.5 14"
+    : direction === "front" ? "M19 5 12 12M19 5h-5M19 5v5"
+    : "M5 19 12 12M5 19h5M5 19v-5";
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d={d} fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+/** Align tool: two objects meeting a shared dashed guide line — replaces the
+ *  old vertical-dots glyph, which read as unrelated to alignment. */
+export function AlignToolIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path className="icon-accent" d="M12 3v18" fill="none" strokeWidth="1.6" strokeDasharray="2 2" />
+      <rect x="5" y="6" width="7" height="4" rx="1" fill="none" stroke="currentColor" strokeWidth="1.6" />
+      <rect x="9" y="15" width="10" height="4" rx="1" fill="none" stroke="currentColor" strokeWidth="1.6" />
     </svg>
   );
 }
@@ -101,10 +233,13 @@ export function SolidCubeIcon({ className = "tool-icon" }: { className?: string 
 
 /**
  * A wireframe icon that reflects the active wireframe mode:
- * - "edges": crisp CAD boundary edges
- * - "mesh": full tessellation mesh grid
- * - "xray": see-through dashed structure
- * - "off": standard wireframe globe
+ * - "outlined": cube outline, no fill, hidden back edges shown faint grey
+ * - "edges": clean cube outline, no fill, no hidden edges at all
+ * - "mesh": cube outline with a facet line across each face
+ * - "xray": ghosted cube with dashed hidden edges in the teal accent
+ * - "transparent": ghosted cube with dashed hidden edges, subtler still
+ * - "off" (Solid): plain filled cube, identical to SolidCubeIcon — this is
+ *   ShapeForge's default view
  */
 export function WireframeIcon({
   mode = "off",
@@ -114,12 +249,16 @@ export function WireframeIcon({
   className?: string;
 }) {
   if (mode === "outlined") {
+    // Same "see through to the hidden edges" idea as X-Ray, but dialed down
+    // to plain light grey instead of the teal accent — was previously
+    // identical to Clean Edges, with no hidden-line indication at all.
     return (
       <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
         <g fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
           <path d="M12 3 20 7.5V16.5L12 21 4 16.5V7.5Z" />
           <path d="M12 12 4 7.5M12 12l8-4.5M12 12v9" />
         </g>
+        <path d="M12 12V3M12 12l-8 4.5M12 12l8 4.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="2 2" opacity=".35" />
       </svg>
     );
   }
@@ -136,8 +275,8 @@ export function WireframeIcon({
         >
           <path d="M12 3 20 7.5V16.5L12 21 4 16.5V7.5Z" />
           <path d="M12 12 4 7.5M12 12l8-4.5M12 12v9" />
-          <path d="M12 12V3M12 12l-8 4.5M12 12l8 4.5" opacity=".55" strokeDasharray="2 2" />
         </g>
+        <path className="icon-accent" d="M12 12V3M12 12l-8 4.5M12 12l8 4.5" fill="none" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="2 2" opacity=".7" />
       </svg>
     );
   }
@@ -157,6 +296,21 @@ export function WireframeIcon({
       </svg>
     );
   }
+  if (mode === "mesh") {
+    // Had no case of its own before — it was silently falling through to
+    // the default branch, so it rendered identically to "Solid" and the
+    // two became impossible to tell apart in the flyout. A facet line
+    // across each face reads as "full triangulated mesh".
+    return (
+      <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <g fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M12 3 20 7.5V16.5L12 21 4 16.5V7.5Z" />
+          <path d="M12 12 4 7.5M12 12l8-4.5M12 12v9" />
+        </g>
+        <path className="icon-accent" d="M4 7.5H20M4 7.5 12 21M20 7.5 12 21" fill="none" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round" />
+      </svg>
+    );
+  }
   if (mode === "xray") {
     return (
       <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -169,22 +323,18 @@ export function WireframeIcon({
         >
           <path d="M12 3 20 7.5V16.5L12 21 4 16.5V7.5Z" />
           <path d="M12 12 4 7.5M12 12l8-4.5M12 12v9" />
-          <path d="M12 12V3M12 12l-8 4.5M12 12l8 4.5" opacity=".7" strokeDasharray="2 2" />
         </g>
+        <path className="icon-accent" d="M12 12V3M12 12l-8 4.5M12 12l8 4.5" fill="none" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" strokeDasharray="2 2" opacity=".85" />
       </svg>
     );
   }
-  return (
-    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <g fill="none" stroke="currentColor" strokeWidth="1.5">
-        <circle cx="12" cy="12" r="8.5" />
-        <ellipse cx="12" cy="12" rx="3.7" ry="8.5" />
-        <path d="M3.5 12h17" />
-        <path d="M5 7.2c1.9 1.1 4.3 1.7 7 1.7s5.1-.6 7-1.7" opacity=".75" />
-        <path d="M5 16.8c1.9-1.1 4.3-1.7 7-1.7s5.1.6 7 1.7" opacity=".75" />
-      </g>
-    </svg>
-  );
+  // Default (solid-shaded) state. Two redesigns of this icon (a split
+  // cube, then a split swatch) both ended up looking unrelated to the
+  // "Solid" entry in this same flyout, which has always used a plain
+  // filled cube (SolidCubeIcon) — so the closed button showed one icon
+  // and picking it from the menu showed a completely different one.
+  // Reusing that exact icon here keeps the two in sync.
+  return <SolidCubeIcon className={className} />;
 }
 
 /**
@@ -195,12 +345,30 @@ export function WireframeIcon({
 export function DropIcon({ className = "tool-icon" }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <rect x="8" y="2.5" width="8" height="6" rx="1.2" fill="currentColor" opacity=".55" />
+      {/* fill-opacity (not opacity) so the box keeps a crisp, fully-visible outline
+          instead of fading the stroke along with the fill. */}
+      <rect x="8" y="3" width="8" height="6" rx="1.2" fill="currentColor" fillOpacity=".22" stroke="currentColor" strokeWidth="1.3" />
+      {/* Trailing dashes = "just fell from here", not ambiguous side marks. */}
+      <path d="M10 .6v1.7M14 .6v1.7" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" opacity=".32" />
       <g fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M12 10v5.5" />
-        <path d="M8.7 12.8 12 16.1l3.3-3.3" />
-        <path d="M4.5 19.5h15" />
+        <path d="M12 10.5v5" />
+        <path d="M8.8 13 12 16.2 15.2 13" />
       </g>
+      <path className="icon-accent" d="M4.5 19.5h15" fill="none" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/** Illustrator-style flyout indicator: a small folded-corner triangle.
+ *  Deliberately a separate, tiny element (not part of DropIcon's own
+ *  viewBox) — the icon's viewBox only fills the button's inner 21px glyph
+ *  area, so anything drawn inside it is stuck well short of the button's
+ *  actual corner no matter where in that viewBox it sits. This renders on
+ *  its own, positioned by the caller against the real button edge. */
+export function CornerFlyoutMark({ className = "corner-flyout-mark" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 10 10" aria-hidden="true" focusable="false">
+      <path d="M10 10 10 2.5 2.5 10Z" fill="currentColor" />
     </svg>
   );
 }
@@ -216,13 +384,13 @@ export function ShapeBuilderIcon({ className = "tool-icon" }: { className?: stri
       {/* The lens where the two circles meet, drawn as the intersection of
           their paths via even-odd on a single filled shape. */}
       <path
-        d="M12 5.6a6.4 6.4 0 0 1 0 12.8 6.4 6.4 0 0 1 0-12.8Z"
-        fill="currentColor"
-        opacity=".55"
+        className="icon-accent-fill"
+        d="M12 6.1a6.3 6.3 0 0 1 0 11.8 6.3 6.3 0 0 1 0-11.8Z"
+        opacity=".5"
       />
-      <g fill="none" stroke="currentColor" strokeWidth="1.6">
-        <circle cx="9" cy="12" r="6.4" />
-        <circle cx="15" cy="12" r="6.4" />
+      <g fill="none" stroke="currentColor" strokeWidth="1.7">
+        <circle cx="9.2" cy="12" r="6.3" />
+        <circle cx="14.8" cy="12" r="6.3" />
       </g>
     </svg>
   );
@@ -263,7 +431,7 @@ export function ZoomToFitIcon({ className = "tool-icon" }: { className?: string 
         <path d="M20 16v3a1 1 0 0 1-1 1h-3" />
         <path d="M8 20H5a1 1 0 0 1-1-1v-3" />
       </g>
-      <rect x="8.5" y="8.5" width="7" height="7" rx="1.5" fill="currentColor" opacity=".6" />
+      <rect className="icon-accent-fill" x="8.5" y="8.5" width="7" height="7" rx="1.5" opacity=".6" />
     </svg>
   );
 }
