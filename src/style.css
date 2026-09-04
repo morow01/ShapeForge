@@ -386,7 +386,7 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 }
 
 .settings-modal {
-  width: min(520px, calc(100vw - 32px));
+  width: min(450px, calc(100vw - 32px));
   overflow: hidden;
   border: 1px solid #d8e0e5;
   border-radius: 12px;
@@ -438,9 +438,9 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 .settings-body { display: grid; padding: 6px 20px 20px; }
 .settings-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 190px;
+  grid-template-columns: minmax(0, 1fr) 160px;
   align-items: center;
-  gap: 24px;
+  gap: 18px;
   padding: 16px 0;
   border-bottom: 1px solid #e8edef;
 }
@@ -457,6 +457,40 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
   color: #273640;
   font: inherit;
 }
+.settings-toggle {
+  position: relative;
+  justify-self: end;
+  width: 38px;
+  min-height: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid #bcc8ce;
+  border-radius: 999px;
+  background: #dfe6e9;
+  cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease;
+}
+.settings-toggle:hover { border-color: #91a2aa; }
+.settings-toggle:focus-visible {
+  outline: 3px solid rgb(9 151 157 / 25%);
+  outline-offset: 2px;
+}
+.settings-toggle.on {
+  border-color: #078b8d;
+  background: #079da0;
+}
+.settings-toggle-knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgb(31 48 57 / 30%);
+  transition: transform 140ms ease;
+}
+.settings-toggle.on .settings-toggle-knob { transform: translateX(16px); }
 /* An offset is a signed distance travelled, not a size — dashed so the two
    can never be read as the same kind of number at a glance. */
 .measure-pill.is-offset { border-style: dashed; }

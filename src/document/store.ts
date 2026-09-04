@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { useStore } from "zustand";
 import { temporal } from "zundo";
 import type { TemporalState } from "zundo";
-import { PRIMITIVES, isGroup } from "./types";
+import { PRIMITIVES, TINKERCAD_COLORS, isGroup } from "./types";
 import { extractNodes, findNode, firstRootIndex, updateNode, walk } from "./tree";
 import { bakeScale } from "./bake";
 import {
@@ -840,6 +840,14 @@ export const useDoc = create<DocState>()(
       addPrimitive: (kind, position, rotation) => {
         set((s) => {
           const def = PRIMITIVES[kind];
+          let randomColor: string | undefined;
+          try {
+            if (localStorage.getItem("cad.randomNewObjectColors") === "on") {
+              randomColor = TINKERCAD_COLORS[Math.floor(Math.random() * TINKERCAD_COLORS.length)]?.hex;
+            }
+          } catch {
+            // Storage can be blocked; creation simply keeps the default blue.
+          }
           // Count the whole tree, not just the roots, so a part nested in a
           // group does not leave two "Box 1"s on screen.
           let n = 1;
@@ -857,6 +865,7 @@ export const useDoc = create<DocState>()(
             rotation: rotation ?? [0, 0, 0],
             scale: [1, 1, 1],
             isHole: false,
+            ...(randomColor ? { color: randomColor } : {}),
             ...(kind === "text" ? { text: "TEXT", fontName: "Default" } : {}),
           };
           return { nodes: [...s.nodes, node], selectedIds: [node.id] };

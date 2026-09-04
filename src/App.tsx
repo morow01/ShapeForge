@@ -254,6 +254,7 @@ const EXPORT_FORMAT_KEY = "cad.exportFormat";
 const SNAP_KEY = "cad.smartGuides";
 const GRID_SNAP_KEY = "cad.gridSnap";
 const SELECTED_COLLISIONS_KEY = "cad.showSelectedCollisions";
+const RANDOM_NEW_OBJECT_COLORS_KEY = "cad.randomNewObjectColors";
 const OBJECTS_PANEL_KEY = "cad.objectsPanelOpen";
 const VIEW_STYLE_KEY = "cad.viewStyle";
 const RESIZE_CONSTRAINED_KEY = "cad.resizeConstrained";
@@ -566,6 +567,9 @@ export function App() {
   );
   const [showSelectedCollisionContacts, setShowSelectedCollisionContacts] = useState(
     () => localStorage.getItem(SELECTED_COLLISIONS_KEY) !== "off",
+  );
+  const [randomNewObjectColors, setRandomNewObjectColors] = useState(
+    () => localStorage.getItem(RANDOM_NEW_OBJECT_COLORS_KEY) === "on",
   );
   // The Objects panel is not always wanted — a single object needs it least
   // of all — so it is a toggle, remembered the same way Snap is.
@@ -1066,6 +1070,14 @@ export function App() {
       // Private mode / blocked storage: the choice just won't be remembered.
     }
   }, [showSelectedCollisionContacts]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(RANDOM_NEW_OBJECT_COLORS_KEY, randomNewObjectColors ? "on" : "off");
+    } catch {
+      // Private mode / blocked storage: the choice just won't be remembered.
+    }
+  }, [randomNewObjectColors]);
 
   useEffect(() => {
     try {
@@ -3308,12 +3320,14 @@ export function App() {
         snapToGrid={gridSnapEnabled}
         snapToObjects={snapEnabled}
         showSelectedCollisionContacts={showSelectedCollisionContacts}
+        randomNewObjectColors={randomNewObjectColors}
         onUnit={setDisplayUnit}
         onDecimals={setDecimalPlaces}
         onAppearance={setAppearance}
         onSnapToGrid={setGridSnapEnabled}
         onSnapToObjects={setSnapEnabled}
         onShowSelectedCollisionContacts={setShowSelectedCollisionContacts}
+        onRandomNewObjectColors={setRandomNewObjectColors}
         onClose={() => setSettingsOpen(false)}
       />
 

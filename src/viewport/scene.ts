@@ -701,7 +701,10 @@ export class Scene {
   private altDown = false;
   private guides = new SmartGuides();
   private collisionContacts = new THREE.Group();
+  /** Separate pass so no transparent model overlay can cover the gizmo. */
+  private gizmoScene = new THREE.Scene();
   private collisionContactOwnerId: string | null = null;
+  private collisionContactCache = new Map<string, import("../snapping/snap").ActiveSnap[]>();
   private showSelectedCollisionContacts = true;
   private collisionContactMaterial = new THREE.MeshBasicMaterial({
     color: 0xff6b35,
@@ -972,9 +975,9 @@ export class Scene {
     this.removeNegativeMoveArrowheads();
     this.gizmo.addEventListener("dragging-changed", this.onDraggingChanged);
     this.gizmo.addEventListener("objectChange", this.onGizmoChange);
-    this.scene.add(this.gizmo.getHelper());
+    this.gizmoScene.add(this.gizmo.getHelper());
     this.scene.add(this.guides.group);
-    this.collisionContacts.renderOrder = 28;
+    this.collisionContacts.renderOrder = 10;
     this.scene.add(this.collisionContacts);
     this.scene.add(
       this.resizeBox,
@@ -4550,6 +4553,11 @@ export class Scene {
       this.assemblyDragStart = null;
     } else {
       const id = this.gizmoTarget();
+      // TransformControls captures its handle before the canvas pointerdown
+      // path runs. Clear any marker left by the previously selected object
+      // here, at the authoritative start of every gizmo drag. Fresh contact
+      // for the object being moved is rebuilt by onGizmoChange.
+      this.clearCollisionContacts();
       if (id && this.assemblyGroups.has(id)) {
         const node = findNode(this.lastNodes, id);
         const pivotObj = this.assemblyPivots.get(id);
@@ -4620,6 +4628,7 @@ export class Scene {
     // object freely without giving up snapping for everything after it.
     if (!this.snapEnabled || this.altDown) {
       this.guides.clear();
+      this.collisionContactCache.delete(id);
       this.clearCollisionContacts();
       return [0, 0, 0];
     }
@@ -4634,16 +4643,60 @@ export class Scene {
     );
     const moving = this.boundsOf(obj);
     const targets: SnapTarget[] = [];
+    const movingRoot = this.assemblyGroups.get(id) ?? this.parts.get(id)?.group;
     for (const [targetId, view] of this.parts) {
-      if (travelling.has(targetId) || !view.group.visible) continue;
+      if (
+        travelling.has(targetId) || !view.group.visible ||
+        (movingRoot && movingRoot !== view.group && !!movingRoot.getObjectById(view.group.id))
+      ) continue;
+      const targetBounds = this.boundsOf(view.group);
       const surfaces = this.surfaceSnapTargets(targetId, view.group, moving);
       if (surfaces.length) targets.push(...surfaces);
-      else targets.push({ id: targetId, bounds: this.boundsOf(view.group) });
+      else {
+        // Curved meshes may have no axis-aligned surface triangles. They can
+        // still use their bounds as a fallback, but only when the two 3D
+        // boxes are genuinely nearby. Previously a matching X or Y value
+        // could magnetise objects that were far apart on another axis.
+        const gapSquared = [0, 1, 2].reduce((sum, axis) => {
+          const gap = moving.max[axis] < targetBounds.min[axis]
+            ? targetBounds.min[axis] - moving.max[axis]
+            : targetBounds.max[axis] < moving.min[axis]
+              ? moving.min[axis] - targetBounds.max[axis]
+              : 0;
+          return sum + gap * gap;
+        }, 0);
+        if (gapSquared <= 4) targets.push({ id: targetId, bounds: targetBounds });
+      }
     }
 
     const result = snapBounds(moving, targets, this.worldSnapTolerance(obj.position));
-    if (!result.active.length) {
+    const featureDelta = this.meshFeatureSnap(id, travelling, this.worldSnapTolerance(obj.position));
+    // On a gizmo-axis drag, a corner-to-sloped-edge match is the meaningful
+    // snap for that axis. Bounds may simultaneously report a zero-distance
+    // centre alignment on another axis; that must not suppress this contact.
+    const featureDistance = featureDelta ? Math.hypot(...featureDelta) : Infinity;
+    const boundsDistance = Math.hypot(...result.delta);
+    const featureWins = !!featureDelta && (
+      (this.gizmo.dragging && !!this.gizmo.axis) ||
+      boundsDistance <= 1e-6 || featureDistance < boundsDistance
+    );
+    if (featureWins && featureDelta) {
+      obj.position.add(new THREE.Vector3(...featureDelta));
+      obj.updateWorldMatrix(true, true);
       this.guides.clear();
+      this.refreshCollisionContactsFor(id);
+      return featureDelta;
+    }
+    if (!result.active.length) {
+      if (featureDelta) {
+        obj.position.add(new THREE.Vector3(...featureDelta));
+        obj.updateWorldMatrix(true, true);
+        this.guides.clear();
+        this.refreshCollisionContactsFor(id);
+        return featureDelta;
+      }
+      this.guides.clear();
+      this.collisionContactCache.delete(id);
       this.clearCollisionContacts();
       return [0, 0, 0];
     }
@@ -4654,8 +4707,149 @@ export class Scene {
     obj.updateWorldMatrix(true, true);
     const snappedBounds = this.boundsOf(obj);
     this.guides.show(result.active, snappedBounds);
-    this.showCollisionContacts(id, snappedBounds, result.active);
+    this.refreshCollisionContactsFor(id, result.active);
     return result.delta;
+  }
+
+  /** Magnetic corner/edge snapping for contacts that cannot be represented by
+   * axis-aligned bounds, such as a box corner meeting a chamfered edge. */
+  private meshFeatureSnap(id: string, travelling: Set<string>, tolerance: number): Vec3 | null {
+    const movingTriangles = this.worldTriangles(id);
+    if (!movingTriangles.length) return null;
+    const movingRoot = this.assemblyGroups.get(id) ?? this.parts.get(id)?.group;
+    const pointMap = new Map<string, THREE.Vector3>();
+    const edgeMap = new Map<string, [THREE.Vector3, THREE.Vector3]>();
+    const collect = (
+      triangles: THREE.Vector3[][],
+      points: Map<string, THREE.Vector3>,
+      edges: Map<string, [THREE.Vector3, THREE.Vector3]>,
+    ) => {
+      for (const triangle of triangles) {
+        for (let index = 0; index < 3; index++) {
+          const a = triangle[index];
+          const b = triangle[(index + 1) % 3];
+          const aKey = this.contactPointKey(a);
+          const bKey = this.contactPointKey(b);
+          points.set(aKey, a);
+          const keys = [aKey, bKey].sort();
+          edges.set(`${keys[0]}|${keys[1]}`, [a, b]);
+        }
+      }
+    };
+    collect(movingTriangles, pointMap, edgeMap);
+
+    const axis = this.gizmo.dragging ? this.gizmo.axis : null;
+    const allowed = axis === "X" ? [0] : axis === "Y" ? [1] : axis === "Z" ? [2] : [0, 1];
+    const contactTolerance = 0.06;
+    let best: Vec3 | null = null;
+    let bestLength = Math.min(tolerance, 2);
+    let comparisons = 0;
+    const consider = (delta: THREE.Vector3) => {
+      for (let component = 0; component < 3; component++) {
+        if (!allowed.includes(component) && Math.abs(delta.getComponent(component)) > contactTolerance) return;
+        if (!allowed.includes(component)) delta.setComponent(component, 0);
+      }
+      const length = delta.length();
+      if (length <= bestLength) {
+        best = [delta.x, delta.y, delta.z];
+        bestLength = length;
+      }
+    };
+    const constrainedPointDelta = (
+      point: THREE.Vector3,
+      segmentA: THREE.Vector3,
+      segmentB: THREE.Vector3,
+      movingPoint: boolean,
+    ) => {
+      if (allowed.length !== 1) {
+        const closest = new THREE.Line3(segmentA, segmentB)
+          .closestPointToPoint(point, true, new THREE.Vector3());
+        return movingPoint ? closest.sub(point) : point.clone().sub(closest);
+      }
+      const moveAxis = allowed[0];
+      const fixedAxes = [0, 1, 2].filter((component) => component !== moveAxis);
+      const estimates: number[] = [];
+      for (const component of fixedAxes) {
+        const span = segmentB.getComponent(component) - segmentA.getComponent(component);
+        if (Math.abs(span) > 1e-8) {
+          estimates.push((point.getComponent(component) - segmentA.getComponent(component)) / span);
+        } else if (Math.abs(point.getComponent(component) - segmentA.getComponent(component)) > contactTolerance) {
+          return null;
+        }
+      }
+      const t = estimates.length ? estimates.reduce((sum, value) => sum + value, 0) / estimates.length : 0.5;
+      if (t < -1e-6 || t > 1 + 1e-6 || estimates.some((value) => Math.abs(value - t) > 0.01)) return null;
+      const crossing = segmentA.clone().lerp(segmentB, Math.max(0, Math.min(1, t)));
+      for (const component of fixedAxes) {
+        if (Math.abs(crossing.getComponent(component) - point.getComponent(component)) > contactTolerance) return null;
+      }
+      const delta = new THREE.Vector3();
+      delta.setComponent(
+        moveAxis,
+        movingPoint
+          ? crossing.getComponent(moveAxis) - point.getComponent(moveAxis)
+          : point.getComponent(moveAxis) - crossing.getComponent(moveAxis),
+      );
+      return delta;
+    };
+
+    for (const [targetId, view] of this.parts) {
+      if (
+        travelling.has(targetId) || !view.group.visible ||
+        (movingRoot && movingRoot !== view.group && !!movingRoot.getObjectById(view.group.id))
+      ) continue;
+      const targetTriangles = this.worldTriangles(targetId);
+      const targetPoints = new Map<string, THREE.Vector3>();
+      const targetEdges = new Map<string, [THREE.Vector3, THREE.Vector3]>();
+      collect(targetTriangles, targetPoints, targetEdges);
+      // A box corner commonly meets the interior of a chamfered face rather
+      // than one of that face's boundary edges. Solve the intersection along
+      // the active movement axis so that contact is magnetic in 3D as well as
+      // visible in the collision overlay.
+      for (const point of pointMap.values()) {
+        for (const vertices of targetTriangles) {
+          if (++comparisons > 300000) break;
+          const triangle = new THREE.Triangle(vertices[0], vertices[1], vertices[2]);
+          if (allowed.length === 1) {
+            const moveAxis = allowed[0];
+            const normal = triangle.getNormal(new THREE.Vector3());
+            const along = normal.getComponent(moveAxis);
+            if (Math.abs(along) <= 1e-8) continue;
+            const distance = normal.dot(point.clone().sub(vertices[0]));
+            const amount = -distance / along;
+            if (Math.abs(amount) > bestLength) continue;
+            const contact = point.clone();
+            contact.setComponent(moveAxis, contact.getComponent(moveAxis) + amount);
+            if (!triangle.containsPoint(contact)) continue;
+            const delta = new THREE.Vector3();
+            delta.setComponent(moveAxis, amount);
+            consider(delta);
+          } else {
+            const contact = triangle.closestPointToPoint(point, new THREE.Vector3());
+            consider(contact.sub(point));
+          }
+        }
+        if (comparisons > 300000) break;
+      }
+      for (const point of pointMap.values()) {
+        for (const [a, b] of targetEdges.values()) {
+          if (++comparisons > 300000) break;
+          const delta = constrainedPointDelta(point, a, b, true);
+          if (delta) consider(delta);
+        }
+        if (comparisons > 300000) break;
+      }
+      for (const point of targetPoints.values()) {
+        for (const [a, b] of edgeMap.values()) {
+          if (++comparisons > 300000) break;
+          const delta = constrainedPointDelta(point, a, b, false);
+          if (delta) consider(delta);
+        }
+        if (comparisons > 300000) break;
+      }
+      if (comparisons > 300000) break;
+    }
+    return best;
   }
 
   /** Produces snap targets from real axis-aligned surface triangles. Concave
@@ -4711,11 +4905,21 @@ export class Scene {
   private showCollisionContacts(id: string, moving: Bounds3, snaps: import("../snapping/snap").ActiveSnap[]) {
     this.clearCollisionContacts();
     const axisIndex = { x: 0, y: 1, z: 2 } as const;
-    for (const snap of snaps) {
+    const faceTargets = new Set<string>();
+    const selectedRoot = this.assemblyGroups.get(id) ?? this.parts.get(id)?.group;
+    const movingBox = new THREE.Box3(
+      new THREE.Vector3(...moving.min),
+      new THREE.Vector3(...moving.max),
+    ).expandByScalar(0.08);
+    // Smart Guides can align objects across empty space. They are useful for
+    // positioning but are not collisions, so never let those distant snaps
+    // create either a face patch or an edge marker.
+    const contactSnaps = snaps.filter((snap) => {
+      const target = this.parts.get(snap.targetId)?.group;
+      return !!target && target.visible && movingBox.intersectsBox(new THREE.Box3().setFromObject(target));
+    });
+    for (const snap of contactSnaps) {
       const axis = axisIndex[snap.axis];
-      const contacting = (snap.movingAnchor === "min" || snap.movingAnchor === "max") &&
-        (snap.targetAnchor === "min" || snap.targetAnchor === "max");
-      if (!contacting) continue;
       const others = [0, 1, 2].filter((value) => value !== axis);
       const lo0 = Math.max(moving.min[others[0]], snap.targetBounds.min[others[0]]);
       const hi0 = Math.min(moving.max[others[0]], snap.targetBounds.max[others[0]]);
@@ -4738,7 +4942,10 @@ export class Scene {
         displayLo1 = middle - 0.2;
         displayHi1 = middle + 0.2;
       }
-      const plane = snap.movingAnchor === "min" ? moving.min[axis] : moving.max[axis];
+      // The selected object's contact may itself be a recessed/internal
+      // surface, so the actual shared plane comes from the matched surface,
+      // not necessarily from the selected object's outer min/max bounds.
+      const plane = snap.value;
       const movingTriangles = this.planarContactTriangles(id, axis, plane);
       const targetTriangles = this.planarContactTriangles(snap.targetId, axis, plane);
       const vertices: number[] = [];
@@ -4782,11 +4989,165 @@ export class Scene {
       const geometry = new THREE.BufferGeometry();
       geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
       const patch = new THREE.Mesh(geometry, this.collisionContactMaterial);
-      patch.renderOrder = 28;
+      patch.renderOrder = 10;
       patch.frustumCulled = false;
       this.collisionContacts.add(patch);
+      faceTargets.add(snap.targetId);
     }
-    if (this.collisionContacts.children.length) this.collisionContactOwnerId = id;
+    // Edge contact is independent from axis-aligned snapping. A box can touch
+    // a sloped face without producing any ActiveSnap at all, so also inspect
+    // every visible object whose bounds are genuinely at the moving object.
+    const edgeTargets = new Set(contactSnaps.map((snap) => snap.targetId));
+    for (const [targetId, view] of this.parts) {
+      if (targetId === id || !view.group.visible || selectedRoot?.getObjectById(view.group.id)) continue;
+      if (movingBox.intersectsBox(new THREE.Box3().setFromObject(view.group))) edgeTargets.add(targetId);
+    }
+    for (const targetId of edgeTargets) {
+      if (!faceTargets.has(targetId)) this.showMeshEdgeContacts(id, targetId);
+    }
+    if (this.collisionContacts.children.length) {
+      this.collisionContactOwnerId = id;
+      this.collisionContactCache.set(id, contactSnaps);
+    }
+  }
+
+  /** Highlights real edge-to-face contact when there is no shared face area. */
+  private showMeshEdgeContacts(id: string, targetId: string) {
+    const movingTriangles = this.worldTriangles(id);
+    const targetTriangles = this.worldTriangles(targetId);
+    if (!movingTriangles.length || !targetTriangles.length) return;
+    const tolerance = 0.06;
+    const segments = new Map<string, [THREE.Vector3, THREE.Vector3]>();
+    const points = new Map<string, THREE.Vector3>();
+    let comparisons = 0;
+
+    const inspectEdges = (source: THREE.Vector3[], target: THREE.Vector3[]) => {
+      const triangle = new THREE.Triangle(target[0], target[1], target[2]);
+      const normal = triangle.getNormal(new THREE.Vector3());
+      if (normal.lengthSq() < 1e-10) return;
+      for (let edge = 0; edge < 3; edge++) {
+        const next = (edge + 1) % 3;
+        const da = Math.abs(normal.dot(source[edge].clone().sub(target[0])));
+        const db = Math.abs(normal.dot(source[next].clone().sub(target[0])));
+        if (da <= tolerance && db <= tolerance) {
+          const clipped = this.clipCoplanarEdgeToTriangle(source[edge], source[next], target, normal);
+          if (!clipped) continue;
+          const [a, b] = clipped;
+          if (a.distanceToSquared(b) <= 0.0009) {
+            points.set(this.contactPointKey(a), a);
+            continue;
+          }
+          const keys = [this.contactPointKey(a), this.contactPointKey(b)].sort();
+          segments.set(`${keys[0]}|${keys[1]}`, [a, b]);
+        }
+      }
+    };
+
+    for (const movingTriangle of movingTriangles) {
+      const movingBox = new THREE.Box3().setFromPoints(movingTriangle).expandByScalar(tolerance);
+      for (const targetTriangle of targetTriangles) {
+        if (++comparisons > 250000) break;
+        const targetBox = new THREE.Box3().setFromPoints(targetTriangle);
+        if (!movingBox.intersectsBox(targetBox)) continue;
+        inspectEdges(movingTriangle, targetTriangle);
+        inspectEdges(targetTriangle, movingTriangle);
+      }
+      if (comparisons > 250000) break;
+    }
+
+    for (const [a, b] of segments.values()) {
+      const direction = b.clone().sub(a);
+      const length = direction.length();
+      if (length <= 0.03) continue;
+      const geometry = new THREE.CylinderGeometry(0.05, 0.05, length, 8);
+      const marker = new THREE.Mesh(geometry, this.collisionContactMaterial);
+      marker.position.copy(a).add(b).multiplyScalar(0.5);
+      marker.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), direction.normalize());
+      marker.renderOrder = 10;
+      marker.frustumCulled = false;
+      this.collisionContacts.add(marker);
+    }
+    if (!segments.size) {
+      for (const point of points.values()) {
+        const marker = new THREE.Mesh(new THREE.SphereGeometry(0.16, 10, 8), this.collisionContactMaterial);
+        marker.position.copy(point);
+        marker.renderOrder = 10;
+        marker.frustumCulled = false;
+        this.collisionContacts.add(marker);
+      }
+    }
+  }
+
+  private contactPointKey(point: THREE.Vector3) {
+    return [point.x, point.y, point.z].map((value) => Math.round(value / 0.05)).join(",");
+  }
+
+  /** Clips a coplanar 3D edge to a triangle by projecting onto the triangle's
+   * strongest 2D plane. This finds partial edge contact, not just cases where
+   * both original edge endpoints happen to fall inside one mesh triangle. */
+  private clipCoplanarEdgeToTriangle(
+    a: THREE.Vector3,
+    b: THREE.Vector3,
+    triangle: THREE.Vector3[],
+    normal: THREE.Vector3,
+  ): [THREE.Vector3, THREE.Vector3] | null {
+    const absolute = [Math.abs(normal.x), Math.abs(normal.y), Math.abs(normal.z)];
+    const drop = absolute.indexOf(Math.max(...absolute));
+    const components = [0, 1, 2].filter((axis) => axis !== drop);
+    const point2 = (point: THREE.Vector3): [number, number] => [
+      point.getComponent(components[0]), point.getComponent(components[1]),
+    ];
+    const a2 = point2(a);
+    const b2 = point2(b);
+    const triangle2 = triangle.map(point2);
+    const cross = (u: [number, number], v: [number, number]) => u[0] * v[1] - u[1] * v[0];
+    const subtract = (u: [number, number], v: [number, number]): [number, number] => [u[0] - v[0], u[1] - v[1]];
+    const parameters: number[] = [];
+    const threeTriangle = new THREE.Triangle(triangle[0], triangle[1], triangle[2]);
+    if (threeTriangle.containsPoint(a)) parameters.push(0);
+    if (threeTriangle.containsPoint(b)) parameters.push(1);
+    const direction = subtract(b2, a2);
+    for (let index = 0; index < 3; index++) {
+      const c = triangle2[index];
+      const d = triangle2[(index + 1) % 3];
+      const targetDirection = subtract(d, c);
+      const denominator = cross(direction, targetDirection);
+      if (Math.abs(denominator) <= 1e-9) continue;
+      const offset = subtract(c, a2);
+      const t = cross(offset, targetDirection) / denominator;
+      const u = cross(offset, direction) / denominator;
+      if (t >= -1e-6 && t <= 1 + 1e-6 && u >= -1e-6 && u <= 1 + 1e-6) {
+        parameters.push(Math.max(0, Math.min(1, t)));
+      }
+    }
+    if (!parameters.length) return null;
+    parameters.sort((left, right) => left - right);
+    const start = a.clone().lerp(b, parameters[0]);
+    const end = a.clone().lerp(b, parameters[parameters.length - 1]);
+    return [start, end];
+  }
+
+  private worldTriangles(id: string): THREE.Vector3[][] {
+    const root = this.assemblyGroups.get(id) ?? this.parts.get(id)?.group;
+    if (!root) return [];
+    root.updateWorldMatrix(true, true);
+    const triangles: THREE.Vector3[][] = [];
+    root.traverse((child) => {
+      if (!(child instanceof THREE.Mesh) || !(child.geometry instanceof THREE.BufferGeometry)) return;
+      const position = child.geometry.getAttribute("position");
+      if (!position) return;
+      const index = child.geometry.getIndex();
+      const count = index ? index.count : position.count;
+      for (let offset = 0; offset + 2 < count && triangles.length < 1500; offset += 3) {
+        const triangle: THREE.Vector3[] = [];
+        for (let corner = 0; corner < 3; corner++) {
+          const vertexIndex = index ? index.getX(offset + corner) : offset + corner;
+          triangle.push(new THREE.Vector3().fromBufferAttribute(position, vertexIndex).applyMatrix4(child.matrixWorld));
+        }
+        triangles.push(triangle);
+      }
+    });
+    return triangles;
   }
 
   /** Actual coplanar mesh triangles at a contact plane, projected to 2D. */
@@ -4868,7 +5229,10 @@ export class Scene {
     this.refreshCollisionContactsFor(this.selectedIds[0]);
   }
 
-  private refreshCollisionContactsFor(id: string) {
+  private refreshCollisionContactsFor(
+    id: string,
+    activeSnaps: import("../snapping/snap").ActiveSnap[] = [],
+  ) {
     const selected = this.assemblyGroups.get(id) ?? this.parts.get(id)?.group;
     if (!selected) {
       this.clearCollisionContacts();
@@ -4876,11 +5240,77 @@ export class Scene {
     }
     const moving = this.boundsOf(selected);
     const axes = ["x", "y", "z"] as const;
-    const contacts: import("../snapping/snap").ActiveSnap[] = [];
+    const cached = (this.collisionContactCache.get(id) ?? []).filter((contact) => {
+      if (!this.parts.has(contact.targetId)) return false;
+      const axis = { x: 0, y: 1, z: 2 }[contact.axis];
+      const coordinate = contact.movingAnchor === "min"
+        ? moving.min[axis]
+        : contact.movingAnchor === "max"
+          ? moving.max[axis]
+          : (moving.min[axis] + moving.max[axis]) / 2;
+      return Math.abs(coordinate - contact.value) <= 0.05;
+    });
+    if (!cached.length) this.collisionContactCache.delete(id);
+    const contacts: import("../snapping/snap").ActiveSnap[] = [...cached, ...activeSnaps];
     const tolerance = 0.05;
     for (const [targetId, view] of this.parts) {
       if (targetId === id || !view.group.visible || selected.getObjectById(view.group.id)) continue;
       const targetBounds = this.boundsOf(view.group);
+      const selectedSurfaces = this.surfaceSnapTargets(id, selected, targetBounds);
+      const targetSurfaces = this.surfaceSnapTargets(targetId, view.group, moving);
+      const targetBuckets = new Map<string, SnapTarget[]>();
+      for (const surface of targetSurfaces) {
+        const axis = [0, 1, 2].find((candidate) =>
+          Math.abs(surface.bounds.max[candidate] - surface.bounds.min[candidate]) <= 1e-4
+        );
+        if (axis === undefined) continue;
+        const plane = surface.bounds.min[axis];
+        const key = `${axis}:${Math.round(plane / tolerance)}`;
+        const bucket = targetBuckets.get(key) ?? [];
+        bucket.push(surface);
+        targetBuckets.set(key, bucket);
+      }
+      for (const surface of selectedSurfaces) {
+        const axis = [0, 1, 2].find((candidate) =>
+          Math.abs(surface.bounds.max[candidate] - surface.bounds.min[candidate]) <= 1e-4
+        );
+        if (axis === undefined) continue;
+        const plane = surface.bounds.min[axis];
+        const bucket = Math.round(plane / tolerance);
+        for (const offset of [-1, 0, 1]) {
+          for (const targetSurface of targetBuckets.get(`${axis}:${bucket + offset}`) ?? []) {
+            const targetPlane = targetSurface.bounds.min[axis];
+            if (Math.abs(plane - targetPlane) > tolerance) continue;
+            contacts.push({
+              axis: axes[axis], movingAnchor: "center", targetAnchor: "center",
+              value: (plane + targetPlane) / 2, targetId,
+              targetBounds: targetSurface.bounds,
+            });
+          }
+        }
+      }
+      // Check every real target surface, not only the target's outermost box.
+      // This is what lets selection rediscover a contact against the inside
+      // wall of a concave/L-shaped or compound object.
+      for (const surface of this.surfaceSnapTargets(targetId, view.group, moving)) {
+        for (let axis = 0; axis < axes.length; axis++) {
+          if (Math.abs(surface.bounds.max[axis] - surface.bounds.min[axis]) > 1e-4) continue;
+          const plane = surface.bounds.min[axis];
+          if (Math.abs(moving.min[axis] - plane) <= tolerance) {
+            contacts.push({
+              axis: axes[axis], movingAnchor: "min", targetAnchor: "max",
+              value: plane, targetId, targetBounds: surface.bounds,
+            });
+          }
+          if (Math.abs(moving.max[axis] - plane) <= tolerance) {
+            contacts.push({
+              axis: axes[axis], movingAnchor: "max", targetAnchor: "min",
+              value: plane, targetId, targetBounds: surface.bounds,
+            });
+          }
+          break;
+        }
+      }
       for (let axis = 0; axis < axes.length; axis++) {
         if (Math.abs(moving.min[axis] - targetBounds.max[axis]) <= tolerance) {
           contacts.push({
@@ -4911,7 +5341,11 @@ export class Scene {
         }
       }
     }
-    this.showCollisionContacts(id, moving, contacts);
+    const unique = [...new Map(contacts.map((contact) => [
+      `${contact.targetId}|${contact.axis}|${contact.movingAnchor}|${contact.targetAnchor}|${contact.value.toFixed(4)}`,
+      contact,
+    ])).values()];
+    this.showCollisionContacts(id, moving, unique);
   }
 
   private clearCollisionContacts() {
@@ -5094,6 +5528,13 @@ export class Scene {
     const targetId = e.altKey ? hitId : this.findRootOwner(hitId);
     const targetObj = this.assemblyGroups.get(targetId) ?? this.parts.get(targetId)?.group;
     if (!targetObj) return;
+    // Collision markers live in world space and belong to the object that
+    // produced them. Remove the previous owner's markers as soon as another
+    // object begins a gesture; waiting for React's selection round-trip lets
+    // the old marker linger while the new object is already moving.
+    if (this.collisionContactOwnerId && this.collisionContactOwnerId !== targetId) {
+      this.clearCollisionContacts();
+    }
 
     const planeZ = targetObj.position.z;
     const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -planeZ);
@@ -5934,6 +6375,9 @@ export class Scene {
     if (this.showResult) return;
     const hitId = this.hitTest(e);
     const rootId = hitId && !e.altKey ? this.findRootOwner(hitId) : hitId;
+    if (!additive && this.collisionContactOwnerId !== rootId) {
+      this.clearCollisionContacts();
+    }
     this.onSelectObject?.(rootId, additive);
     // React records the click selection asynchronously. Refresh from the
     // object that was actually picked on the following frame, rather than
@@ -6169,6 +6613,10 @@ export class Scene {
     this.emitFaceSelection();
     this.updateMoveReadout();
     this.renderer.render(this.scene, this.camera);
+    this.renderer.autoClear = false;
+    this.renderer.clearDepth();
+    this.renderer.render(this.gizmoScene, this.camera);
+    this.renderer.autoClear = true;
     this.renderNavCube();
   }
 

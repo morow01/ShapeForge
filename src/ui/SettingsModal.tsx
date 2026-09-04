@@ -8,13 +8,34 @@ interface Props {
   snapToGrid: boolean;
   snapToObjects: boolean;
   showSelectedCollisionContacts: boolean;
+  randomNewObjectColors: boolean;
   onUnit: (unit: DisplayUnit) => void;
   onDecimals: (decimals: number) => void;
   onAppearance: (appearance: AppearancePreference) => void;
   onSnapToGrid: (enabled: boolean) => void;
   onSnapToObjects: (enabled: boolean) => void;
   onShowSelectedCollisionContacts: (enabled: boolean) => void;
+  onRandomNewObjectColors: (enabled: boolean) => void;
   onClose: () => void;
+}
+
+function SettingsToggle({ checked, onChange, label }: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      className={`settings-toggle ${checked ? "on" : ""}`}
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={() => onChange(!checked)}
+    >
+      <span className="settings-toggle-knob" />
+    </button>
+  );
 }
 
 export function SettingsModal({
@@ -25,12 +46,14 @@ export function SettingsModal({
   snapToGrid,
   snapToObjects,
   showSelectedCollisionContacts,
+  randomNewObjectColors,
   onUnit,
   onDecimals,
   onAppearance,
   onSnapToGrid,
   onSnapToObjects,
   onShowSelectedCollisionContacts,
+  onRandomNewObjectColors,
   onClose,
 }: Props) {
   if (!open) return null;
@@ -69,27 +92,22 @@ export function SettingsModal({
               <option value="system" disabled>System (coming soon)</option>
             </select>
           </label>
-          <label className="settings-row">
+          <div className="settings-row">
             <span><strong>Snap to grid</strong><small>Moves objects in 1 mm steps while dragging</small></span>
-            <select value={snapToGrid ? "on" : "off"} onChange={(e) => onSnapToGrid(e.target.value === "on")}>
-              <option value="on">On</option>
-              <option value="off">Off</option>
-            </select>
-          </label>
-          <label className="settings-row">
+            <SettingsToggle checked={snapToGrid} onChange={onSnapToGrid} label="Snap to grid" />
+          </div>
+          <div className="settings-row">
             <span><strong>Snap to objects</strong><small>Aligns nearby object edges and shows Smart Guides</small></span>
-            <select value={snapToObjects ? "on" : "off"} onChange={(e) => onSnapToObjects(e.target.value === "on")}>
-              <option value="on">On</option>
-              <option value="off">Off</option>
-            </select>
-          </label>
-          <label className="settings-row">
+            <SettingsToggle checked={snapToObjects} onChange={onSnapToObjects} label="Snap to objects" />
+          </div>
+          <div className="settings-row">
             <span><strong>Show selected collisions</strong><small>Keeps touching areas highlighted after selecting an object</small></span>
-            <select value={showSelectedCollisionContacts ? "on" : "off"} onChange={(e) => onShowSelectedCollisionContacts(e.target.value === "on")}>
-              <option value="on">On</option>
-              <option value="off">Off</option>
-            </select>
-          </label>
+            <SettingsToggle checked={showSelectedCollisionContacts} onChange={onShowSelectedCollisionContacts} label="Show selected collisions" />
+          </div>
+          <div className="settings-row">
+            <span><strong>Random colours for new objects</strong><small>Gives each newly created object a varied colour instead of default blue</small></span>
+            <SettingsToggle checked={randomNewObjectColors} onChange={onRandomNewObjectColors} label="Random colours for new objects" />
+          </div>
         </div>
       </section>
     </div>
