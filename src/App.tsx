@@ -8,6 +8,9 @@ import { Tree } from "./ui/Tree";
 import { ProjectsModal } from "./ui/ProjectsModal";
 import {
   AlignToolIcon,
+  BuildPlateIcon,
+  ChevronDownIcon,
+  CollisionHighlightIcon,
   CombineIcon,
   CornerFlyoutMark,
   DirectionArrowIcon,
@@ -16,6 +19,7 @@ import {
   ExportIcon,
   FaceModifierIcon,
   GroupIcon,
+  ImportIcon,
   MagnetIcon,
   MoveToolIcon,
   NewDesignIcon,
@@ -43,6 +47,8 @@ import { buildThreeMF } from "./export/threemf";
 import { SvgImportModal } from "./ui/SvgImportModal";
 import { TextModal } from "./ui/TextModal";
 import { SettingsModal } from "./ui/SettingsModal";
+import type { BuildPlateSize } from "./ui/SettingsModal";
+import { ExportModal } from "./ui/ExportModal";
 import { displayStep, formatLength, fromMillimetres, toMillimetres } from "./measurement";
 import type { AppearancePreference, DisplayUnit } from "./measurement";
 import type { TextConfig } from "./ui/TextModal";
@@ -56,7 +62,7 @@ import {
   useDoc,
   useTemporal,
 } from "./document/store";
-import { MAX_BUILD_SOURCES, PRIMITIVES, isGroup } from "./document/types";
+import { MAX_BUILD_SOURCES, PRIMITIVES, PRIMITIVE_CATEGORIES, isGroup } from "./document/types";
 import { findNode, parentOf, resolveNodeTransparent, resolveNodeColor, updateNode, walk } from "./document/tree";
 import { bakeScale } from "./document/bake";
 import { putBlob } from "./document/blobStore";
@@ -269,15 +275,11 @@ const RESIZE_CONSTRAINED_KEY = "cad.resizeConstrained";
 const DISPLAY_UNIT_KEY = "cad.displayUnit";
 const DECIMAL_PLACES_KEY = "cad.decimalPlaces.v2";
 const APPEARANCE_KEY = "cad.appearance";
+const BUILD_PLATE_VISIBLE_KEY = "cad.buildPlateVisible";
+const BUILD_PLATE_SIZE_KEY = "cad.buildPlateSize";
 
 /** What each preset costs, so the choice is not guesswork — measured on a
  *  40x30x15 box with a 10mm spherical bowl (see EXPORT_PRESETS in worker.ts). */
-const EXPORT_QUALITY_HINT: Record<ExportQuality, string> = {
-  draft: "Draft — fastest, visibly faceted curves. Good for test prints.",
-  standard: "Standard — faint facets on curved surfaces, exports in a moment.",
-  fine: "Fine — smooth curves, but a curved part can take several seconds.",
-};
-
 function SignedMeasurementInput({ valueMm, unit, decimals, onValue, onEnter }: {
   valueMm: number;
   unit: DisplayUnit;
@@ -335,6 +337,9 @@ export function App() {
 
   const [projectsModalOpen, setProjectsModalOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [exportModalOpen, setExportModalOpen] = useState(false);
+  const [fileMenuOpen, setFileMenuOpen] = useState(false);
+  const fileMenuRef = useRef<HTMLDivElement>(null);
   const [displayUnit, setDisplayUnit] = useState<DisplayUnit>(() => {
     const saved = localStorage.getItem(DISPLAY_UNIT_KEY);
     return saved === "cm" || saved === "in" ? saved : "mm";
@@ -454,6 +459,40 @@ export function App() {
   const [cameraMode, setCameraMode] = useState<CameraMode>(() => loadCameraState()?.mode ?? "perspective");
   const [toolMode, setToolMode] = useState<ToolMode>("select");
   const [pendingPrimitive, setPendingPrimitive] = useState<PrimitiveKind | null>(null);
+  const [openCategories, setOpenCategories] = useState<Record<string, boolean>>(() => {
+    try {
+      const saved = localStorage.getItem("cad.primitiveCategoriesOpen");
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return { basic: true, curved: false, profiles: false, hardware: false };
+  });
+
+  const toggleCategory = useCallback((catId: string) => {
+    setOpenCategories((prev) => {
+      const next = { ...prev, [catId]: !prev[catId] };
+      try {
+        localStorage.setItem("cad.primitiveCategoriesOpen", JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  }, []);
+
+  const allCategoriesOpen = PRIMITIVE_CATEGORIES.every((c) => openCategories[c.id]);
+
+  const toggleAllCategories = useCallback(() => {
+    setOpenCategories((prev) => {
+      const allOpen = PRIMITIVE_CATEGORIES.every((c) => prev[c.id]);
+      const nextVal = !allOpen;
+      const next: Record<string, boolean> = {};
+      for (const c of PRIMITIVE_CATEGORIES) {
+        next[c.id] = nextVal;
+      }
+      try {
+        localStorage.setItem("cad.primitiveCategoriesOpen", JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+  }, []);
   const [edgeSelection, setEdgeSelection] = useState<{ id: string; points: Vec3[] } | null>(null);
   const [edgeKind, setEdgeKind] = useState<"fillet" | "chamfer">("fillet");
   const [edgeDistance, setEdgeDistance] = useState(2);
@@ -593,6 +632,18 @@ export function App() {
     return () => window.removeEventListener("pointerdown", onDocClick);
   }, [wireframeMenuOpen]);
   useEffect(() => {
+    // The topbar doesn't clip its own children, so unlike the tool-rail
+    // flyouts, this dropdown doesn't need a portal or computed position —
+    // a plain ref covering both the button and the menu is enough.
+    if (!fileMenuOpen) return;
+    const onDocClick = (e: PointerEvent | MouseEvent) => {
+      const target = e.target as Node;
+      if (fileMenuRef.current && !fileMenuRef.current.contains(target)) setFileMenuOpen(false);
+    };
+    window.addEventListener("pointerdown", onDocClick);
+    return () => window.removeEventListener("pointerdown", onDocClick);
+  }, [fileMenuOpen]);
+  useEffect(() => {
     if (!dropMenuOpen) {
       setDropFlyoutPos(null);
       return;
@@ -626,6 +677,28 @@ export function App() {
   const [randomNewObjectColors, setRandomNewObjectColors] = useState(
     () => localStorage.getItem(RANDOM_NEW_OBJECT_COLORS_KEY) === "on",
   );
+  const [plateVisible, setPlateVisible] = useState(
+    () => localStorage.getItem(BUILD_PLATE_VISIBLE_KEY) !== "off",
+  );
+  useEffect(() => {
+    localStorage.setItem(BUILD_PLATE_VISIBLE_KEY, plateVisible ? "on" : "off");
+  }, [plateVisible]);
+
+  const [plateSize, setPlateSize] = useState<BuildPlateSize>(() => {
+    try {
+      const saved = localStorage.getItem(BUILD_PLATE_SIZE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Number.isFinite(parsed.width) && Number.isFinite(parsed.depth) && parsed.width > 0 && parsed.depth > 0) {
+          return { width: Math.round(parsed.width), depth: Math.round(parsed.depth) };
+        }
+      }
+    } catch {}
+    return { width: 256, depth: 256 };
+  });
+  useEffect(() => {
+    localStorage.setItem(BUILD_PLATE_SIZE_KEY, JSON.stringify(plateSize));
+  }, [plateSize]);
   // The Objects panel is not always wanted — a single object needs it least
   // of all — so it is a toggle, remembered the same way Snap is.
   const [objectsPanelOpen, setObjectsPanelOpen] = useState(
@@ -732,6 +805,24 @@ export function App() {
         : "Autosaves to this browser";
 
   const selected = selectedIds.length ? findNode(nodes, selectedIds[selectedIds.length - 1]) : null;
+
+  const [rightPanelTab, setRightPanelTab] = useState<"shapes" | "properties">("shapes");
+  const prevSelectionKeyRef = useRef<string>("");
+
+  useEffect(() => {
+    const currentKey = selectedIds.join(",");
+    const wasEmpty = prevSelectionKeyRef.current === "";
+    const isNowEmpty = currentKey === "";
+
+    if (wasEmpty && !isNowEmpty) {
+      setRightPanelTab("properties");
+    } else if (!wasEmpty && isNowEmpty) {
+      setRightPanelTab("shapes");
+    } else if (!wasEmpty && !isNowEmpty && currentKey !== prevSelectionKeyRef.current) {
+      setRightPanelTab("properties");
+    }
+    prevSelectionKeyRef.current = currentKey;
+  }, [selectedIds]);
   // A compound shape (group/edit/build/import) has no width/depth/height
   // parameter to read the way a primitive does — its real size only exists
   // in its evaluated mesh. Measured in the node's own LOCAL frame (before
@@ -2285,238 +2376,280 @@ export function App() {
   return (
     <div className={`app-shell${objectsPanelOpen ? "" : " objects-collapsed"}`}>
       <header className="topbar">
-        <div className="brand">
-          <span className="brand-mark">S</span>
-          <span className="brand-name">{APP_NAME}</span>
-          <span className="brand-version">v{APP_VERSION}</span>
-        </div>
+        <div className="topbar-left">
+          <div className="brand">
+            <span className="brand-mark">S</span>
+            <span className="brand-name">{APP_NAME}</span>
+            <span className="brand-version">v{APP_VERSION}</span>
+          </div>
 
-        <div className="project-title-container">
-          {isEditingTitle ? (
-            <input
-              type="text"
-              className="project-title-input"
-              value={titleDraft}
-              onChange={(e) => setTitleDraft(e.target.value)}
-              onBlur={() => {
-                setIsEditingTitle(false);
-                if (titleDraft.trim()) renameProject(titleDraft.trim());
-                else setTitleDraft(projectName);
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
+          <div className="project-title-container">
+            {isEditingTitle ? (
+              <input
+                type="text"
+                className="project-title-input"
+                value={titleDraft}
+                onChange={(e) => setTitleDraft(e.target.value)}
+                onBlur={() => {
                   setIsEditingTitle(false);
                   if (titleDraft.trim()) renameProject(titleDraft.trim());
-                } else if (e.key === "Escape") {
-                  setIsEditingTitle(false);
-                  setTitleDraft(projectName);
-                }
-              }}
-              autoFocus
-            />
-          ) : (
-            <button
-              className="project-title-btn"
-              onClick={() => setIsEditingTitle(true)}
-              title="Click to rename design"
-            >
-              <span className="project-title-text">{projectName}</span>
-              <PencilIcon className="project-title-edit-icon" />
-            </button>
-          )}
-        </div>
-
-        <div className="toolbar-group project-actions-group">
-          <button
-            onClick={() => setProjectsModalOpen(true)}
-            className="topbar-icon-btn projects-nav-btn"
-            title="Open Projects Library (Ctrl+O)"
-            aria-label="Projects Library"
-          >
-            <ProjectsIcon className="topbar-icon" />
-          </button>
-          <button
-            onClick={() => {
-              const name = prompt("Enter project name:", "Untitled Project");
-              if (name !== null) newProject(name);
-            }}
-            className="topbar-icon-btn"
-            title="New design (Ctrl+Alt+N)"
-            aria-label="New design"
-          >
-            <NewDesignIcon className="topbar-icon" />
-          </button>
-        </div>
-
-        <div className="toolbar-group">
-          <button
-            className="topbar-icon-btn"
-            onClick={() => undo()}
-            disabled={!canUndo}
-            title="Undo (Ctrl+Z)"
-            aria-label="Undo"
-          >
-            <UndoIcon className="topbar-icon" />
-          </button>
-          <button
-            className="topbar-icon-btn"
-            onClick={() => redo()}
-            disabled={!canRedo}
-            title="Redo (Ctrl+Shift+Z)"
-            aria-label="Redo"
-          >
-            <RedoIcon className="topbar-icon" />
-          </button>
-        </div>
-        <div className="toolbar-group">
-          <button
-            className="topbar-icon-btn"
-            onClick={groupSelected}
-            disabled={!canGroup || treeChangeBusy}
-            title={canGroup ? "Group / Assembly (Ctrl+G) — Link objects to move together" : "Group (Ctrl+G) — Select 2 or more objects"}
-            aria-label="Group"
-          >
-            <GroupIcon className="topbar-icon" />
-          </button>
-          <button
-            className="topbar-icon-btn"
-            onClick={() => combineSelected("union")}
-            disabled={!canGroup || treeChangeBusy}
-            title={canGroup ? "Combine Solid (Ctrl+Shift+B) — Fuse overlapping solids into one" : "Combine — Select 2 or more objects"}
-            aria-label="Combine Solid"
-          >
-            <CombineIcon className="topbar-icon" />
-          </button>
-          <button
-            className={`topbar-icon-btn ${canUngroup ? "on" : ""}`}
-            onClick={ungroupSelected}
-            disabled={!canUngroup || treeChangeBusy}
-            title={canUngroup ? "Ungroup / Separate (Ctrl+Shift+G)" : "Ungroup — Select a group or combined solid"}
-            aria-label="Ungroup"
-          >
-            <UngroupIcon className="topbar-icon" />
-          </button>
-        </div>
-        <div className="toolbar-group view-tools">
-          <button
-            className={`topbar-icon-btn ${objectsPanelOpen ? "on" : ""}`}
-            onClick={() => setObjectsPanelOpen((v) => !v)}
-            title={objectsPanelOpen ? "Hide Objects panel" : "Show Objects panel"}
-            aria-pressed={objectsPanelOpen}
-            aria-label="Toggle Objects panel"
-          >
-            <ObjectsIcon className="topbar-icon" />
-          </button>
-          <button
-            className="topbar-icon-btn"
-            onClick={() => setCameraMode((m) => (m === "perspective" ? "orthographic" : "perspective"))}
-            title={
-              cameraMode === "perspective"
-                ? "Perspective View (Click to switch to Orthographic)"
-                : "Orthographic View (Click to switch to Perspective)"
-            }
-            aria-label={
-              cameraMode === "perspective"
-                ? "Perspective View"
-                : "Orthographic View"
-            }
-          >
-            {cameraMode === "perspective" ? (
-              <PerspectiveIcon className="topbar-icon" />
+                  else setTitleDraft(projectName);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    setIsEditingTitle(false);
+                    if (titleDraft.trim()) renameProject(titleDraft.trim());
+                  } else if (e.key === "Escape") {
+                    setIsEditingTitle(false);
+                    setTitleDraft(projectName);
+                  }
+                }}
+                autoFocus
+              />
             ) : (
-              <OrthographicIcon className="topbar-icon" />
+              <button
+                className="project-title-btn"
+                onClick={() => setIsEditingTitle(true)}
+                title="Click to rename design"
+              >
+                <span className="project-title-text">{projectName}</span>
+                <PencilIcon className="project-title-edit-icon" />
+              </button>
             )}
-          </button>
+          </div>
+
+          <div className="file-menu-container" ref={fileMenuRef}>
+            <button
+              className={`topbar-btn file-menu-btn ${fileMenuOpen ? "on" : ""}`}
+              onClick={() => setFileMenuOpen((v) => !v)}
+              aria-haspopup="menu"
+              aria-expanded={fileMenuOpen}
+              aria-label="File menu"
+            >
+              <ProjectsIcon className="topbar-icon" />
+              <span>File</span>
+              <ChevronDownIcon className="file-menu-chevron" />
+            </button>
+            {fileMenuOpen && (
+              <div className="file-menu-dropdown" role="menu" aria-label="File">
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    setFileMenuOpen(false);
+                    const name = prompt("Enter project name:", "Untitled Project");
+                    if (name !== null) newProject(name);
+                  }}
+                >
+                  <NewDesignIcon className="topbar-icon" />
+                  <span className="item-label">New Design</span>
+                  <span className="item-key">Ctrl+Alt+N</span>
+                </button>
+                <button
+                  role="menuitem"
+                  onClick={() => { setFileMenuOpen(false); setProjectsModalOpen(true); }}
+                >
+                  <ProjectsIcon className="topbar-icon" />
+                  <span className="item-label">Open…</span>
+                  <span className="item-key">Ctrl+O</span>
+                </button>
+                <button
+                  role="menuitem"
+                  onClick={() => { setFileMenuOpen(false); importInputRef.current?.click(); }}
+                >
+                  <ImportIcon className="topbar-icon" />
+                  <span className="item-label">Import…</span>
+                </button>
+                <hr />
+                <button
+                  role="menuitem"
+                  onClick={() => { setFileMenuOpen(false); exportCurrentProject(); }}
+                >
+                  <SaveFileIcon className="topbar-icon" />
+                  <span className="item-label">Save</span>
+                  <span className="item-key">Ctrl+S</span>
+                </button>
+                <button
+                  role="menuitem"
+                  onClick={() => { setFileMenuOpen(false); setExportModalOpen(true); }}
+                >
+                  <ExportIcon className="topbar-icon" />
+                  <span className="item-label">Export…</span>
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div className="topbar-divider" aria-hidden="true" />
+
+          <div className="topbar-group" role="group" aria-label="History">
+            <button
+              className="topbar-icon-btn"
+              onClick={() => undo()}
+              disabled={!canUndo}
+              title="Undo (Ctrl+Z)"
+              aria-label="Undo"
+            >
+              <UndoIcon className="topbar-icon" />
+            </button>
+            <button
+              className="topbar-icon-btn"
+              onClick={() => redo()}
+              disabled={!canRedo}
+              title="Redo (Ctrl+Shift+Z)"
+              aria-label="Redo"
+            >
+              <RedoIcon className="topbar-icon" />
+            </button>
+          </div>
+
+          <div className="topbar-divider" aria-hidden="true" />
+
+          <div className="topbar-group" role="group" aria-label="Arrange">
+            <button
+              className="topbar-icon-btn"
+              onClick={groupSelected}
+              disabled={!canGroup || treeChangeBusy}
+              title={canGroup ? "Group / Assembly (Ctrl+G) — Link objects to move together" : "Group (Ctrl+G) — Select 2 or more objects"}
+              aria-label="Group"
+            >
+              <GroupIcon className="topbar-icon" />
+            </button>
+            <button
+              className="topbar-icon-btn"
+              onClick={() => combineSelected("union")}
+              disabled={!canGroup || treeChangeBusy}
+              title={canGroup ? "Combine Solid (Ctrl+Shift+B) — Fuse overlapping solids into one" : "Combine — Select 2 or more objects"}
+              aria-label="Combine Solid"
+            >
+              <CombineIcon className="topbar-icon" />
+            </button>
+            <button
+              className={`topbar-icon-btn ${canUngroup ? "on" : ""}`}
+              onClick={ungroupSelected}
+              disabled={!canUngroup || treeChangeBusy}
+              title={canUngroup ? "Ungroup / Separate (Ctrl+Shift+G)" : "Ungroup — Select a group or combined solid"}
+              aria-label="Ungroup"
+            >
+              <UngroupIcon className="topbar-icon" />
+            </button>
+          </div>
+
+          <div className="topbar-divider" aria-hidden="true" />
+
+          <div className="topbar-group" role="group" aria-label="View">
+            <button
+              className={`topbar-icon-btn ${objectsPanelOpen ? "on" : ""}`}
+              onClick={() => setObjectsPanelOpen((v) => !v)}
+              title={objectsPanelOpen ? "Hide Objects panel" : "Show Objects panel"}
+              aria-pressed={objectsPanelOpen}
+              aria-label="Toggle Objects panel"
+            >
+              <ObjectsIcon className="topbar-icon" />
+            </button>
+            <button
+              className="topbar-icon-btn"
+              onClick={() => setCameraMode((m) => (m === "perspective" ? "orthographic" : "perspective"))}
+              title={
+                cameraMode === "perspective"
+                  ? "Perspective View (Click to switch to Orthographic)"
+                  : "Orthographic View (Click to switch to Perspective)"
+              }
+              aria-label={
+                cameraMode === "perspective"
+                  ? "Perspective View"
+                  : "Orthographic View"
+              }
+            >
+              {cameraMode === "perspective" ? (
+                <PerspectiveIcon className="topbar-icon" />
+              ) : (
+                <OrthographicIcon className="topbar-icon" />
+              )}
+            </button>
+            <button
+              className={`topbar-icon-btn ${plateVisible ? "on" : ""}`}
+              onClick={() => setPlateVisible((v) => !v)}
+              title={plateVisible ? "Hide build plate" : "Show build plate"}
+              aria-pressed={plateVisible}
+              aria-label="Toggle build plate"
+            >
+              <BuildPlateIcon className="topbar-icon" />
+            </button>
+            <button
+              className={`topbar-icon-btn snap-toggle ${snapEnabled ? "on" : ""}`}
+              onClick={() => setSnapEnabled((v) => !v)}
+              title={
+                snapEnabled
+                  ? "Snap to objects on — Smart Guides appear while dragging (S). Hold Alt to bypass for one drag."
+                  : "Snap to objects off (S)"
+              }
+              aria-pressed={snapEnabled}
+              aria-label="Toggle Snap to Objects"
+            >
+              <MagnetIcon className="topbar-icon snap-icon" />
+            </button>
+            <button
+              className={`topbar-icon-btn ${showSelectedCollisionContacts ? "on" : ""}`}
+              onClick={() => setShowSelectedCollisionContacts((v) => !v)}
+              title={
+                showSelectedCollisionContacts
+                  ? "Show selected collisions on — keeps touching areas highlighted after selecting an object"
+                  : "Show selected collisions off"
+              }
+              aria-pressed={showSelectedCollisionContacts}
+              aria-label="Toggle Show Selected Collisions"
+            >
+              <CollisionHighlightIcon className="topbar-icon" />
+            </button>
+          </div>
+        </div>
+
+        <div className="toolbar-spacer" />
+
+        <div className="topbar-right">
+          <span className={["status-pill", error ? "error" : busy || exporting || buildBusy ? "busy" : ""].filter(Boolean).join(" ")}>
+            {error
+              ? "Needs attention"
+              : exporting
+                ? "Exporting…"
+                : buildBusy
+                  ? "Finding regions…"
+                  : readyExportUrl
+                    ? `${exportFileName.split(".").pop()?.toUpperCase() ?? "Export"} ready`
+                    : busy
+                      ? "Building…"
+                      : "Ready"}
+          </span>
+
           <button
-            className={`topbar-icon-btn snap-toggle ${snapEnabled ? "on" : ""}`}
-            onClick={() => setSnapEnabled((v) => !v)}
-            title={
-              snapEnabled
-                ? "Snap to objects on — Smart Guides appear while dragging (S). Hold Alt to bypass for one drag."
-                : "Snap to objects off (S)"
-            }
-            aria-pressed={snapEnabled}
-            aria-label="Toggle Snap to Objects"
+            className="topbar-btn topbar-export-btn"
+            onClick={() => {
+              if (readyExportUrl) {
+                const a = document.createElement("a");
+                a.href = readyExportUrl;
+                a.download = exportFileName;
+                a.click();
+              } else {
+                setExportModalOpen(true);
+              }
+            }}
+            disabled={exporting}
+            title="Export 3D Model (STL / 3MF)"
+            aria-label="Export"
           >
-            <MagnetIcon className="topbar-icon snap-icon" />
+            <ExportIcon className="topbar-icon" />
+            <span>{exporting ? "Exporting…" : readyExportUrl ? "Download" : "Export"}</span>
+          </button>
+
+          <button
+            className="topbar-icon-btn"
+            onClick={() => setSettingsOpen(true)}
+            title="Settings"
+            aria-label="Settings"
+          >
+            <SettingsIcon className="topbar-icon" />
           </button>
         </div>
-        <div className="toolbar-spacer" />
-        <span className={["status-pill", error ? "error" : busy || exporting || buildBusy ? "busy" : ""].filter(Boolean).join(" ")}>
-          {error
-            ? "Needs attention"
-            : exporting
-              ? "Exporting…"
-              : buildBusy
-                ? "Finding regions…"
-                : readyExportUrl
-                  ? `${exportFileName.split(".").pop()?.toUpperCase() ?? "Export"} ready`
-                  : busy
-                    ? "Building…"
-                    : "Ready"}
-        </span>
-        <button
-          className="topbar-icon-btn export-project-btn"
-          onClick={exportCurrentProject}
-          title="Save project file (.shapeforge) to computer (Ctrl+S)"
-          aria-label="Save project file"
-        >
-          <SaveFileIcon className="topbar-icon" />
-        </button>
-        <button
-          className="topbar-icon-btn"
-          onClick={() => setSettingsOpen(true)}
-          title="Settings"
-          aria-label="Settings"
-        >
-          <SettingsIcon className="topbar-icon" />
-        </button>
-        <label className="export-quality" title={EXPORT_QUALITY_HINT[exportQuality]}>
-          <span>Quality</span>
-          <select
-            value={exportQuality}
-            onChange={(e) => setExportQuality(e.target.value as ExportQuality)}
-            disabled={exporting}
-            aria-label="STL export quality"
-          >
-            <option value="draft">Draft</option>
-            <option value="standard">Standard</option>
-            <option value="fine">Fine</option>
-          </select>
-        </label>
-        <label className="export-quality">
-          FORMAT
-          <select
-            value={exportFormat}
-            onChange={(e) => setExportFormat(e.target.value as "stl" | "3mf")}
-            disabled={exporting}
-            aria-label="Export file format"
-            title="STL states no units, so a slicer has to guess the scale. 3MF states millimetres, keeps each object separate and carries its colour."
-          >
-            <option value="stl">STL</option>
-            <option value="3mf">3MF</option>
-          </select>
-        </label>
-        <button
-          className="export-btn topbar-btn"
-          onClick={exportSTL}
-          disabled={exporting}
-          title={
-            selectedIds.length
-              ? `Export ${selectedIds.length} selected object${selectedIds.length > 1 ? "s" : ""} to ${exportFormat.toUpperCase()}`
-              : `Export entire scene to ${exportFormat.toUpperCase()}`
-          }
-          aria-label="Export"
-        >
-          <ExportIcon className="topbar-icon" />
-          <span>
-            {exporting
-              ? "Exporting…"
-              : readyExportUrl
-              ? `Download`
-              : "Export"}
-          </span>
-        </button>
       </header>
 
       {readyExportUrl && exportReadyNoticeOpen && (
@@ -2824,6 +2957,8 @@ export function App() {
           snapEnabled={snapEnabled}
           gridSnapEnabled={gridSnapEnabled}
           showSelectedCollisionContacts={showSelectedCollisionContacts}
+          plateVisible={plateVisible}
+          plateSize={plateSize}
           displayUnit={displayUnit}
           decimalPlaces={decimalPlaces}
           onSceneReady={(scene) => { sceneRef.current = scene; }}
@@ -3225,37 +3360,97 @@ export function App() {
       </main>
 
       <aside className="panel tools-panel">
-        <section className="tool-section shape-library">
-          <div className="panel-heading compact">
+        <div className="tools-panel-tabs" role="tablist">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={rightPanelTab === "shapes"}
+            className={`tools-panel-tab ${rightPanelTab === "shapes" ? "active" : ""}`}
+            onClick={() => setRightPanelTab("shapes")}
+          >
+            <span>Shapes</span>
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={rightPanelTab === "properties"}
+            className={`tools-panel-tab ${rightPanelTab === "properties" ? "active" : ""}`}
+            onClick={() => setRightPanelTab("properties")}
+          >
+            <span>Properties</span>
+            {selectedIds.length > 0 && (
+              <span className="tools-panel-tab-badge">{selectedIds.length}</span>
+            )}
+          </button>
+        </div>
+
+        {rightPanelTab === "shapes" && (
+          <section className="tool-section shape-library">
+          <div className="panel-heading compact shape-library-header">
             <div><h1>Shape library</h1><p>Drag or click to add</p></div>
+            <button
+              type="button"
+              className="shape-lib-toggle-all"
+              onClick={toggleAllCategories}
+              title={allCategoriesOpen ? "Collapse all categories" : "Expand all categories"}
+            >
+              {allCategoriesOpen ? "Collapse all" : "Expand all"}
+            </button>
           </div>
-          <div className="shape-grid">
-            {(Object.keys(PRIMITIVES) as PrimitiveKind[]).map((kind) => {
-              // Parked alongside the two-object auto-connector — the whole
-              // feature is paused, not just that one panel, so the entry
-              // point that lets someone place a Connector at all needs to be
-              // off too.
-              const paused = kind === "connector";
+          <div className="shape-categories-list">
+            {PRIMITIVE_CATEGORIES.map((cat) => {
+              const isOpen = !!openCategories[cat.id];
               return (
-                <button
-                  key={kind}
-                  className={`shape-card ${pendingPrimitive === kind ? "active" : ""} ${paused ? "paused" : ""}`}
-                  disabled={paused}
-                  title={paused ? "Paused for now — coming back to this soon" : undefined}
-                  onClick={() => {
-                    setPendingPrimitive(kind);
-                    setToolMode("place");
-                    select(null);
-                  }}
-                >
-                  <PrimitiveShapeIcon kind={kind} className="shape-icon-svg" />
-                  <span>{PRIMITIVES[kind].label}</span>
-                </button>
+                <div key={cat.id} className={`shape-category ${isOpen ? "is-open" : "is-collapsed"}`}>
+                  <button
+                    type="button"
+                    className="shape-category-header"
+                    onClick={() => toggleCategory(cat.id)}
+                    aria-expanded={isOpen}
+                  >
+                    <span className="shape-category-title-wrap">
+                      <ChevronDownIcon className={`shape-category-chevron ${isOpen ? "open" : ""}`} />
+                      <span className="shape-category-title">{cat.label}</span>
+                    </span>
+                    <span className="shape-category-count">{cat.kinds.length}</span>
+                  </button>
+                  <div className={`shape-category-body ${isOpen ? "is-open" : "is-closed"}`}>
+                    <div className="shape-category-content">
+                      <div className="shape-grid">
+                        {cat.kinds.map((kind) => {
+                          // Parked alongside the two-object auto-connector — the whole
+                          // feature is paused, not just that one panel, so the entry
+                          // point that lets someone place a Connector at all needs to be
+                          // off too.
+                          const paused = kind === "connector";
+                          return (
+                            <button
+                              key={kind}
+                              className={`shape-card ${pendingPrimitive === kind ? "active" : ""} ${paused ? "paused" : ""}`}
+                              disabled={paused}
+                              tabIndex={isOpen ? 0 : -1}
+                              title={paused ? "Paused for now — coming back to this soon" : undefined}
+                              onClick={() => {
+                                setPendingPrimitive(kind);
+                                setToolMode("place");
+                                select(null);
+                              }}
+                            >
+                              <PrimitiveShapeIcon kind={kind} className="shape-icon-svg" />
+                              <span>{PRIMITIVES[kind].label}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                </div>
               );
             })}
           </div>
           <button className="import-btn" onClick={() => importInputRef.current?.click()}>↑ Import STL, 3MF or SVG</button>
         </section>
+        )}
         <input
           ref={textFontInputRef}
           type="file"
@@ -3278,7 +3473,9 @@ export function App() {
             if (file) void importSTLFile(file);
           }}
         />
-        <section className="tool-section inspector-section">
+        {rightPanelTab === "properties" && (
+          <div className="tools-panel-inspector-wrap">
+            <section className="tool-section inspector-section">
           <div className="panel-heading compact">
             <div>
               <h1>Properties</h1>
@@ -3348,7 +3545,18 @@ export function App() {
               displayUnit={displayUnit}
               decimalPlaces={decimalPlaces}
             />
-          ) : <div className="empty-state small">Select an object to edit its dimensions and position.</div>}
+          ) : (
+            <div className="inspector-empty-state">
+              <div className="inspector-empty-icon">↖</div>
+              <p className="inspector-empty-title">No shape selected</p>
+              <p className="inspector-empty-desc">
+                Click an object on the plate or in the Objects tree to view and edit its dimensions, hole toggle, and colors.
+              </p>
+              <button type="button" className="inspector-empty-action" onClick={() => setRightPanelTab("shapes")}>
+                Browse Shapes
+              </button>
+            </div>
+          )}
         </section>
 
         {/* Parked: selecting the wall this is meant to attach to did not work
@@ -3473,6 +3681,8 @@ export function App() {
           )}
         </section>
         )}
+          </div>
+        )}
 
       </aside>
 
@@ -3499,6 +3709,8 @@ export function App() {
         unit={displayUnit}
         decimals={decimalPlaces}
         appearance={appearance}
+        plateVisible={plateVisible}
+        plateSize={plateSize}
         snapToGrid={gridSnapEnabled}
         snapToObjects={snapEnabled}
         showSelectedCollisionContacts={showSelectedCollisionContacts}
@@ -3506,11 +3718,26 @@ export function App() {
         onUnit={setDisplayUnit}
         onDecimals={setDecimalPlaces}
         onAppearance={setAppearance}
+        onPlateVisible={setPlateVisible}
+        onPlateSize={setPlateSize}
         onSnapToGrid={setGridSnapEnabled}
         onSnapToObjects={setSnapEnabled}
         onShowSelectedCollisionContacts={setShowSelectedCollisionContacts}
         onRandomNewObjectColors={setRandomNewObjectColors}
         onClose={() => setSettingsOpen(false)}
+      />
+
+      <ExportModal
+        open={exportModalOpen}
+        quality={exportQuality}
+        format={exportFormat}
+        exporting={exporting}
+        readyExportUrl={readyExportUrl}
+        selectedCount={selectedIds.length}
+        onQuality={setExportQuality}
+        onFormat={setExportFormat}
+        onExport={exportSTL}
+        onClose={() => setExportModalOpen(false)}
       />
 
       {pendingSvg && (

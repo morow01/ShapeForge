@@ -12,31 +12,69 @@ body { overflow: hidden; font-size: 13px; }
 .app-shell {
   display: grid;
   /* tool rail | Objects panel | viewport | Inspector */
-  grid-template-columns: 56px 220px minmax(360px, 1fr) 310px;
-  grid-template-rows: 58px minmax(0, 1fr);
+  grid-template-columns: 56px 220px minmax(0, 1fr) 310px;
+  grid-template-rows: 56px minmax(0, 1fr);
   height: 100%;
+  width: 100%;
+  max-width: 100vw;
   background: #edf1f4;
 }
 /* The Objects panel is a toggle (see the topbar button), not a fixed part of
    the layout — collapsing its track to 0 rather than unmounting the grid
    column keeps every other column's index stable. */
-.app-shell.objects-collapsed { grid-template-columns: 56px 0 minmax(360px, 1fr) 310px; }
+.app-shell.objects-collapsed { grid-template-columns: 56px 0 minmax(0, 1fr) 310px; }
 
 .topbar {
   grid-column: 1 / -1;
   display: flex;
   align-items: center;
-  gap: 10px;
+  justify-content: space-between;
+  gap: 12px;
   min-width: 0;
-  padding: 0 14px;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  height: 56px;
+  padding: 0 16px;
   color: #34424d;
   background: #fff;
   border-bottom: 1px solid #d7dee3;
-  box-shadow: 0 1px 4px rgb(34 52 65 / 8%);
+  box-shadow: 0 1px 4px rgb(34 52 65 / 6%);
   z-index: 5;
 }
 
-.brand { display: flex; align-items: center; gap: 8px; min-width: 180px; }
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  justify-content: flex-end;
+}
+
+.topbar-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.topbar-divider {
+  width: 1px;
+  height: 22px;
+  background: #d8e0e5;
+  margin: 0 4px;
+  flex-shrink: 0;
+}
+
+.brand { display: flex; align-items: center; gap: 8px; min-width: 150px; }
 .brand-mark {
   display: grid;
   place-items: center;
@@ -53,7 +91,6 @@ body { overflow: hidden; font-size: 13px; }
 
 .toolbar-group { display: flex; gap: 4px; padding-left: 10px; border-left: 1px solid #e1e6ea; }
 .toolbar-spacer { flex: 1; }
-.view-tools { min-width: 0; }
 
 .topbar-icon-btn {
   display: inline-flex;
@@ -139,7 +176,139 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 
 .panel { min-height: 0; overflow: auto; background: #fff; }
 .object-panel { grid-column: 2; grid-row: 2; display: flex; flex-direction: column; padding: 16px 12px; border-right: 1px solid #d7dee3; }
-.tools-panel { grid-column: 4; grid-row: 2; border-left: 1px solid #d7dee3; }
+.tools-panel {
+  grid-column: 4;
+  grid-row: 2;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid #d7dee3;
+  overflow: hidden;
+  background: #fff;
+}
+
+.tools-panel-tabs {
+  display: flex;
+  align-items: stretch;
+  height: 38px;
+  min-height: 38px;
+  border-bottom: 1px solid #d7dee3;
+  background: #f8fafb;
+  flex-shrink: 0;
+}
+
+.tools-panel-tab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 100%;
+  padding: 0 12px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  color: #5f707d;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: all 0.12s ease;
+  user-select: none;
+}
+
+.tools-panel-tab:hover {
+  color: #1e293b;
+  background: #f0f4f7;
+}
+
+.tools-panel-tab.active {
+  color: #007a78;
+  background: #ffffff;
+  border-bottom-color: #00a7a5;
+}
+
+.tools-panel-tab-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #ffffff;
+  background: #00a7a5;
+  line-height: 1;
+}
+
+.tools-panel > .tool-section,
+.tools-panel-inspector-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.tools-panel-inspector-wrap {
+  display: flex;
+  flex-direction: column;
+}
+
+.inspector-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 40px 20px;
+  color: #64748b;
+}
+
+.inspector-empty-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: #edf2f5;
+  color: #008f8d;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  font-weight: bold;
+  margin-bottom: 12px;
+}
+
+.inspector-empty-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #273640;
+  margin: 0 0 6px;
+}
+
+.inspector-empty-desc {
+  font-size: 11.5px;
+  color: #788894;
+  line-height: 1.45;
+  margin: 0 0 16px;
+  max-width: 220px;
+}
+
+.inspector-empty-action {
+  font-size: 12px;
+  font-weight: 600;
+  color: #008f8d;
+  background: #eef6f6;
+  border: 1px solid #74c9c7;
+  border-radius: 6px;
+  padding: 6px 14px;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+
+.inspector-empty-action:hover {
+  background: #e0f2f1;
+  color: #007a78;
+}
 .workspace { grid-column: 3; grid-row: 2; position: relative; min-width: 0; min-height: 0; overflow: hidden; }
 .viewport { position: absolute; inset: 0; overflow: hidden; }
 .viewport canvas { display: block; }
@@ -483,6 +652,22 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
   stroke-width: 2;
   stroke-linejoin: round;
 }
+
+/* Icon-choice buttons that also carry a short text label (Export's Quality
+   and Format pickers) — the plain icon-only layout above is a single
+   centered child, so a second child (the label) needs its own stacked
+   layout instead of overlapping it. */
+.binary-choice.icon-choice.labeled button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-height: 54px;
+}
+.binary-choice.icon-choice.labeled svg { width: 26px; height: 20px; }
+.icon-choice-label { font-size: 10.5px; font-weight: 600; }
+.field-hint { margin: 5px 2px 0; color: #89959d; font-size: 10.5px; line-height: 1.4; }
 .settings-body { display: grid; padding: 6px 20px 20px; }
 .settings-row {
   display: grid;
@@ -504,6 +689,47 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
   background: #fff;
   color: #273640;
   font: inherit;
+}
+.plate-dimensions-inputs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  justify-content: flex-end;
+}
+.plate-dim-field {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: #f8fafc;
+  border: 1px solid #ced8de;
+  border-radius: 6px;
+  padding: 4px 6px;
+}
+.plate-dim-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: #64748b;
+}
+.plate-dim-input {
+  width: 46px;
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  color: #0f172a;
+  text-align: right;
+  outline: none;
+  padding: 0;
+}
+.plate-dim-unit {
+  font-size: 11px;
+  color: #94a3b8;
+}
+.plate-dim-cross {
+  color: #94a3b8;
+  font-weight: 600;
+  font-size: 12px;
 }
 .settings-toggle {
   position: relative;
@@ -584,6 +810,142 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 
 .tool-section { padding: 16px; border-bottom: 1px solid #e0e6ea; }
 .shape-library { background: #f8fafb; }
+.shape-library-header { display: flex; align-items: flex-start; justify-content: space-between; }
+.shape-lib-toggle-all {
+  background: none;
+  border: none;
+  color: #008f8d;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 3px 6px;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: all 0.12s ease;
+  white-space: nowrap;
+}
+.shape-lib-toggle-all:hover {
+  background: #e6f5f4;
+  color: #007a78;
+}
+
+.shape-categories-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 2px;
+}
+
+.shape-category {
+  border: none;
+  background: transparent;
+  overflow: hidden;
+}
+
+.shape-category-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 6px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.12s ease;
+}
+
+.shape-category-header:hover {
+  background: #edf3f6;
+}
+
+.shape-category-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.shape-category-chevron {
+  width: 11px;
+  height: 11px;
+  color: #7b8b95;
+  transition: transform 0.18s ease;
+  transform: rotate(-90deg);
+  flex-shrink: 0;
+}
+
+.shape-category-chevron.open {
+  transform: rotate(0deg);
+}
+
+.shape-category-title {
+  font-size: 12px;
+  font-weight: 650;
+  color: #273640;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.shape-category-count {
+  font-size: 10px;
+  font-weight: 600;
+  color: #7b8b95;
+  background: #edf2f5;
+  padding: 1px 6px;
+  border-radius: 10px;
+  flex-shrink: 0;
+}
+
+.shape-category-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.22s cubic-bezier(0.2, 0, 0, 1);
+}
+
+.shape-category-body.is-open {
+  grid-template-rows: 1fr;
+}
+
+.shape-category-content {
+  overflow: hidden;
+  min-height: 0;
+}
+
+.shape-category .shape-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  padding: 4px 0 8px;
+  background: transparent;
+  border-top: none;
+  transition: opacity 0.18s ease;
+}
+
+.shape-category-body.is-closed .shape-grid {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.shape-category-body.is-open .shape-grid {
+  opacity: 1;
+}
+
+.shape-category .shape-card {
+  min-height: 66px;
+  padding: 7px 3px 5px;
+}
+
+.shape-category .shape-card span {
+  font-size: 10.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
 .shape-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }
 .shape-card {
   display: flex;
@@ -1226,24 +1588,42 @@ select.num { height: 31px; }
 .empty-state { padding: 18px 12px; color: #8d99a1; background: #f6f9fa; border: 1px dashed #ccd7dd; border-radius: 7px; text-align: center; font-size: 11px; }
 .empty-state.small { padding: 13px 10px; }
 
-@media (max-width: 900px) {
-  .app-shell { grid-template-columns: 56px 180px minmax(320px, 1fr) 270px; }
-  .app-shell.objects-collapsed { grid-template-columns: 56px 0 minmax(320px, 1fr) 270px; }
+@media (max-width: 960px) {
+  .app-shell { grid-template-columns: 56px 180px minmax(0, 1fr) 270px; }
+  .app-shell.objects-collapsed { grid-template-columns: 56px 0 minmax(0, 1fr) 270px; }
   .topbar { gap: 6px; padding: 0 8px; }
-  .brand { min-width: 140px; }
-  /* Objects is now the first view-tool button (see the JSX) and, being a
-     whole panel's on/off switch rather than a camera setting, is worth
-     keeping regardless of width — n+4 instead of the old n+3 keeps exactly
-     the same three camera/snap buttons this rule always curated (Perspective,
-     Ortho always shown; Snap the one that drops), just shifted by one. */
-  .view-tools button:nth-child(n+4) { display: none; }
+  .brand-version { display: none; }
+  .brand { min-width: auto; }
+  .project-title-btn { max-width: 140px; }
+}
+
+@media (max-width: 800px) {
+  .app-shell { grid-template-columns: 56px 160px minmax(0, 1fr) 250px; }
+  .app-shell.objects-collapsed { grid-template-columns: 56px 0 minmax(0, 1fr) 250px; }
+  .brand { gap: 6px; }
+  .project-title-container { margin-left: 0; }
+  .project-title-btn { max-width: 105px; }
+  .file-menu-btn { padding: 4px 8px; }
+  .topbar-left { gap: 4px; }
+  .topbar-group { gap: 3px; }
+  .topbar-divider { margin: 0 2px; }
+  .topbar-export-btn span { display: none; }
+  .topbar-export-btn { padding: 0; width: 32px; min-width: 32px; }
+  .topbar-group[aria-label="View"] button:nth-child(n+5) { display: none; }
+  .status-pill { display: none; }
+}
+
+@media (max-width: 680px) {
+  .brand-name { display: none; }
+  .topbar-group[aria-label="View"] button:nth-child(n+4) { display: none; }
+  .topbar-group[aria-label="Arrange"] button:nth-child(n+3) { display: none; }
 }
 
 /* ---- Project Management & Topbar Title ---- */
 .project-title-container {
   display: flex;
   align-items: center;
-  margin-left: 4px;
+  margin-left: 16px;
 }
 .project-title-btn {
   display: flex;
@@ -1296,44 +1676,117 @@ select.num { height: 31px; }
   box-shadow: 0 0 0 2px rgba(0, 167, 165, 0.2);
   width: 180px;
 }
-.projects-nav-btn {
-  font-weight: 600;
+/* ---- Topbar: File menu ---- */
+/* File used to be two separate icon buttons (Open via ProjectsIcon, New via
+   its own icon) with Save and Export living elsewhere in the bar entirely —
+   Save past Undo/Redo/Group/View-tools, Export as a permanently-visible
+   Quality/Format/button cluster. All five file operations now live under
+   one menu, the same place a person would look for any of them. */
+.file-menu-container { position: relative; }
+.file-menu-btn { font-weight: 600; }
+.file-menu-btn.on { color: #00807e; background: #e6f7f7; border-color: #00a7a5; }
+.file-menu-chevron { width: 10px; height: 10px; }
+.file-menu-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  min-width: 210px;
+  padding: 6px;
+  background: rgb(255 255 255 / 97%);
+  border: 1px solid #d3dce1;
+  border-radius: 10px;
+  box-shadow: 0 10px 28px rgb(31 50 62 / 16%);
+  backdrop-filter: blur(8px);
+  z-index: 30;
+  animation: flyoutSlideIn 0.14s cubic-bezier(0.16, 1, 0.3, 1);
 }
-.export-project-btn {
-  background: #f8fafc;
-  color: #334155;
-  border-color: #cbd5e1;
-  font-weight: 600;
-}
-
-/* Sits with the export buttons: the quality you pick applies to the file you
-   are about to save, so it belongs beside the button that saves it. */
-.export-quality {
+.file-menu-dropdown button {
   display: flex;
   align-items: center;
-  gap: 5px;
-  color: #72818c;
-  font-size: 10px;
-  font-weight: 750;
-  letter-spacing: .05em;
-  text-transform: uppercase;
-}
-.export-quality select {
-  padding: 3px 4px;
-  border: 1px solid #cbd7df;
-  border-radius: 5px;
-  background: #fff;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 9px;
+  border: none;
+  background: none;
+  border-radius: 6px;
   color: #25313b;
-  font: 600 11px system-ui, sans-serif;
-  letter-spacing: 0;
-  text-transform: none;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
   cursor: pointer;
 }
-.export-quality select:disabled { opacity: .5; cursor: default; }
-.export-project-btn:hover {
-  background: #f1f5f9;
-  border-color: #94a3b8;
+.file-menu-dropdown button:hover { background: #f0f4f7; }
+.file-menu-dropdown .topbar-icon { width: 18px; height: 18px; color: #52616c; flex-shrink: 0; }
+.file-menu-dropdown .item-label { flex: 1; }
+.file-menu-dropdown .item-key { font-size: 10.5px; color: #9aa7ac; font-family: ui-monospace, monospace; }
+.file-menu-dropdown hr { border: none; border-top: 1px solid #eef2f4; margin: 5px 2px; }
+
+/* Quick Export Direct Button */
+.topbar-export-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: #00a7a5;
+  color: #ffffff;
+  border: 1px solid #009290;
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: 12.5px;
+  min-height: 32px;
+  height: 32px;
+  padding: 0 12px;
+  box-shadow: 0 1px 3px rgba(0, 167, 165, 0.2);
+  transition: all 0.15s ease;
+  cursor: pointer;
 }
+
+.topbar-export-btn:hover:not(:disabled) {
+  background: #009290;
+  border-color: #00807e;
+  box-shadow: 0 2px 6px rgba(0, 167, 165, 0.32);
+}
+
+.topbar-export-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.topbar-export-btn .topbar-icon {
+  width: 16px;
+  height: 16px;
+  color: #ffffff;
+}
+
+/* ---- Topbar: Export dialog ---- */
+/* Export needs Quality/Format chosen before it can run, so its File-menu
+   row opens this instead of just closing the menu — the same dialog
+   chrome as Settings and the Projects Library, not a bespoke popup. */
+.export-modal {
+  width: min(360px, calc(100vw - 32px));
+  border: 1px solid #d8e0e5;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 18px 55px rgb(24 40 50 / 22%);
+  overflow: hidden;
+}
+.export-modal-body { display: grid; padding: 6px 20px 20px; }
+.export-modal-footer { display: flex; gap: 8px; padding: 0 20px 20px; }
+.export-modal-cancel {
+  flex: 1;
+  color: #334155;
+  background: #fff;
+  border: 1px solid #cfd7dd;
+}
+.export-modal-confirm {
+  flex: 1.4;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+.export-modal-confirm .tool-icon { flex-shrink: 0; }
 
 /* ---- Projects Modal ---- */
 .modal-backdrop {

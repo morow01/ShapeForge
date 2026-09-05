@@ -574,6 +574,10 @@ export class Scene {
   private controls: OrbitControls;
   private gizmo: TransformControls;
   private resizeBox = new THREE.Box3Helper(new THREE.Box3(), 0x00a9b7);
+  private plateGroup = new THREE.Group();
+  private plateVisible = true;
+  private plateWidth = 256;
+  private plateDepth = 256;
   private resizeHandles = new THREE.Group();
   private resizeHandleMeshes: THREE.Mesh[] = [];
   private resizeHoverIndex = -1;
@@ -1007,7 +1011,8 @@ export class Scene {
     this.scene.add(this.pushPullHandles);
 
     this.addLights();
-    this.addGrid();
+    this.scene.add(this.plateGroup);
+    this.rebuildPlate();
 
     this.renderer.domElement.addEventListener("pointerdown", this.onPointerDown);
     this.renderer.domElement.addEventListener("pointermove", this.onPointerMove);
@@ -1024,6 +1029,28 @@ export class Scene {
     window.addEventListener("keyup", this.onModifierChange);
 
     this.animate();
+  }
+
+  public setPlateVisible(visible: boolean) {
+    this.plateVisible = visible;
+    this.plateGroup.visible = visible;
+  }
+
+  public setPlateSize(width: number, depth: number) {
+    const w = Math.max(10, Math.round(width));
+    const d = Math.max(10, Math.round(depth));
+    if (this.plateWidth === w && this.plateDepth === d) return;
+    this.plateWidth = w;
+    this.plateDepth = d;
+    this.rebuildPlate();
+  }
+
+  public getPlateVisible(): boolean {
+    return this.plateVisible;
+  }
+
+  public getPlateSize(): { width: number; depth: number } {
+    return { width: this.plateWidth, depth: this.plateDepth };
   }
 
   private makePerspective(): THREE.PerspectiveCamera {
@@ -1046,16 +1073,41 @@ export class Scene {
     this.scene.add(fill);
   }
 
-  private addGrid() {
-    // 8 mm cells over a 256 x 256 mm bed — a common FDM heatbed size
-    // (Bambu Lab's X1/P1 series among them). GridHelper is centred on its
-    // own origin, so this spans -128..128 on both axes, matching how a
-    // primitive or import already lands centred on X/Y with its base on
-    // Z=0 — the plate's centre is the document's origin.
-    const grid = new THREE.GridHelper(256, 32, 0xaebac2, 0xd8e0e5);
-    grid.rotation.x = Math.PI / 2;
-    this.scene.add(grid);
-    this.scene.add(new THREE.AxesHelper(25));
+  private rebuildPlate() {
+    while (this.plateGroup.children.length > 0) {
+      const child = this.plateGroup.children[0];
+      this.plateGroup.remove(child);
+      if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments || child instanceof THREE.Line) {
+        child.geometry?.dispose();
+        if (Array.isArray(child.material)) {
+          child.material.forEach((m) => m.dispose());
+        } else {
+          child.material?.dispose();
+        }
+      }
+    }
+
+    const w = this.plateWidth;
+    const d = this.plateDepth;
+
+    if (w === d) {
+      const divisions = Math.max(2, Math.round(w / 8));
+      const grid = new THREE.GridHelper(w, divisions, 0xd8e0e5, 0xd8e0e5);
+      grid.rotation.x = Math.PI / 2;
+      this.plateGroup.add(grid);
+    } else {
+      const base = Math.max(w, d);
+      const divisions = Math.max(2, Math.round(base / 8));
+      const grid = new THREE.GridHelper(base, divisions, 0xd8e0e5, 0xd8e0e5);
+      grid.rotation.x = Math.PI / 2;
+      grid.scale.set(w / base, 1, d / base);
+      this.plateGroup.add(grid);
+    }
+
+    const axes = new THREE.AxesHelper(25);
+    this.plateGroup.add(axes);
+
+    this.plateGroup.visible = this.plateVisible;
   }
 
   private setupResizeOverlay() {

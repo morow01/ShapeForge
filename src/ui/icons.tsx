@@ -667,6 +667,42 @@ export function ExportIcon({ className = "tool-icon" }: { className?: string }) 
   );
 }
 
+/** Import: the mirror of ExportIcon — arrow into the tray instead of out of it. */
+export function ImportIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <g fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M3.5 14v4.5A1.5 1.5 0 0 0 5 20h14a1.5 1.5 0 0 0 1.5-1.5V14" />
+        <path d="M12 3v12" />
+        <path d="m7 9.5 5 5 5-5" />
+      </g>
+    </svg>
+  );
+}
+
+/** Small down chevron: a menu-trigger's own "this opens a dropdown" cue. */
+export function ChevronDownIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M4 8l8 8 8-8" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+/** Show Selected Collisions: two touching shapes with their shared contact
+ *  seam highlighted — the touching-areas idea the toggle actually controls. */
+export function CollisionHighlightIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <g fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="7" width="9" height="10" rx="2" />
+        <rect x="12" y="7" width="9" height="10" rx="2" />
+      </g>
+      <path d="M12 8v8" stroke="#00a7a5" strokeWidth="2.6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 /**
  * 3D Isometric Vector Icons for Shape Library Primitives
  */
@@ -1141,3 +1177,17 @@ export function PrimitiveShapeIcon({
       );
   }
 }
+
+/** 3D Printer build plate toggle icon with bed grid and vertical Z-axis */
+export function BuildPlateIcon({ className = "topbar-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <path d="M2.5 13.5L12 18.5L21.5 13.5L12 8.5L2.5 13.5Z" />
+      <path d="M2.5 13.5V16L12 21L21.5 16V13.5" />
+      <path d="M7.25 11L16.75 16" strokeWidth="1.2" strokeOpacity="0.7" />
+      <path d="M16.75 11L7.25 16" strokeWidth="1.2" strokeOpacity="0.7" />
+      <path d="M12 13.5V5.5M9.5 7.5L12 5L14.5 7.5" strokeWidth="1.5" />
+    </svg>
+  );
+}
+

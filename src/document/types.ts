@@ -74,6 +74,35 @@ const angle = (key: string, label: string, showIf?: ParamField["showIf"]): Param
 
 const onlyIn = (...modes: number[]) => ({ key: "mode", oneOf: modes });
 
+export interface PrimitiveCategory {
+  id: string;
+  label: string;
+  kinds: PrimitiveKind[];
+}
+
+export const PRIMITIVE_CATEGORIES: PrimitiveCategory[] = [
+  {
+    id: "basic",
+    label: "Basic Shapes",
+    kinds: ["box", "cylinder", "sphere", "cone", "triangle", "wedge", "pyramid"],
+  },
+  {
+    id: "curved",
+    label: "Curved & Revolved",
+    kinds: ["hemisphere", "capsule", "ellipsoid", "paraboloid", "torus", "tube"],
+  },
+  {
+    id: "profiles",
+    label: "Profiles & Containers",
+    kinds: ["polygonPrism", "star", "tray", "text"],
+  },
+  {
+    id: "hardware",
+    label: "Hardware & Joints",
+    kinds: ["threadedRod", "threadedNut", "connector"],
+  },
+];
+
 export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
   box: {
     label: "Box",

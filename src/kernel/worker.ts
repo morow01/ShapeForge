@@ -39,6 +39,7 @@ import type {
   MeshedEdges,
   MeshedFaces,
   NodeSpec,
+  ObjectSpec,
   PreviewBuild,
   ScenePart,
   SceneBuild,
@@ -297,6 +298,12 @@ function withEllipsoidNormals(mesh: KernelMesh): KernelMesh {
   return { ...mesh, faces: { ...mesh.faces, normals } };
 }
 
+function getBaseObjectSpec(spec: NodeSpec): ObjectSpec | null {
+  if (spec.type === "object") return spec;
+  if (spec.type === "edit") return getBaseObjectSpec(spec.base);
+  return null;
+}
+
 /** Hide only a polygon-cylinder's vertical facet boundaries while retaining
  * its top/bottom silhouette and any rounded-rim edges. The faces themselves
  * are untouched, so Sides still controls the real model and its exports. */
@@ -304,9 +311,6 @@ function withoutExtrusionSideEdges(mesh: KernelMesh, axis = 2): KernelMesh {
   const source = mesh.edges.lines;
   const lines: number[] = [];
   const edgeGroups: MeshedEdges["edgeGroups"] = [];
-  const bounds = meshBounds(mesh);
-  const minAxis = bounds?.min[axis] ?? 0;
-  const maxAxis = bounds?.max[axis] ?? 0;
 
   for (const group of mesh.edges.edgeGroups) {
     let groupMin = Infinity;
@@ -316,9 +320,8 @@ function withoutExtrusionSideEdges(mesh: KernelMesh, axis = 2): KernelMesh {
       groupMin = Math.min(groupMin, value);
       groupMax = Math.max(groupMax, value);
     }
-    const liesOnEnd = groupMax - groupMin < 1e-5;
-    const outerRim = Math.abs(groupMin - minAxis) < 1e-5 || Math.abs(groupMax - maxAxis) < 1e-5;
-    if (!liesOnEnd || !outerRim) continue;
+    const liesOnEnd = groupMax - groupMin < 1e-4;
+    if (!liesOnEnd) continue;
     const start = lines.length / 3;
     for (let vertex = group.start; vertex < group.start + group.count; vertex++) {
       const offset = vertex * 3;
@@ -1144,147 +1147,148 @@ const api = {
               solid = null;
             }
             if (solid) {
-              const meshQuality = spec.type === "object" &&
-                (spec.kind === "hemisphere" || spec.kind === "capsule" || spec.kind === "sphere")
+              const baseSpec = getBaseObjectSpec(spec);
+              const meshQuality = baseSpec &&
+                (baseSpec.kind === "hemisphere" || baseSpec.kind === "capsule" || baseSpec.kind === "sphere")
                 ? {
                     ...EDIT_QUALITY,
                     angularTolerance: Math.PI /
                       Math.max(4, Math.min(64, Math.round(
-                        spec.params.surfaceSteps ?? (spec.kind === "hemisphere" ? 24 : 48),
+                        baseSpec.params.surfaceSteps ?? (baseSpec.kind === "hemisphere" ? 24 : 48),
                       ))),
                   }
                 : EDIT_QUALITY;
               let candidate = toMesh(spec.id, solid, meshQuality);
-              if (spec.type === "object" && spec.kind === "ellipsoid") {
+              if (baseSpec?.kind === "ellipsoid") {
                 candidate = withEllipsoidNormals(candidate);
               }
               if (
-                spec.type === "object" && (spec.kind === "cylinder" || spec.kind === "cone" || spec.kind === "pyramid") &&
-                (spec.params.sideEdges ?? 0) === 0
+                baseSpec && (baseSpec.kind === "cylinder" || baseSpec.kind === "cone" || baseSpec.kind === "pyramid") &&
+                (baseSpec.params.sideEdges ?? 0) === 0
               ) {
                 candidate = withoutExtrusionSideEdges(candidate);
               }
               if (
-                spec.type === "object" && spec.kind === "triangle" &&
-                (spec.params.cornerEdges ?? 0) === 0 &&
-                ((spec.params.leftFillet ?? spec.params.fillet ?? 0) > 0 ||
-                  (spec.params.rightFillet ?? spec.params.fillet ?? 0) > 0 ||
-                  (spec.params.apexFillet ?? spec.params.fillet ?? 0) > 0)
+                baseSpec && baseSpec.kind === "triangle" &&
+                (baseSpec.params.cornerEdges ?? 0) === 0 &&
+                ((baseSpec.params.leftFillet ?? baseSpec.params.fillet ?? 0) > 0 ||
+                  (baseSpec.params.rightFillet ?? baseSpec.params.fillet ?? 0) > 0 ||
+                  (baseSpec.params.apexFillet ?? baseSpec.params.fillet ?? 0) > 0)
               ) {
                 candidate = withoutExtrusionSideEdges(candidate);
               }
               if (
-                spec.type === "object" && spec.kind === "wedge" &&
-                (spec.params.cornerEdges ?? 0) === 0 &&
-                ((spec.params.topFillet ?? spec.params.fillet ?? 0) > 0 ||
-                  (spec.params.bottomFillet ?? spec.params.fillet ?? 0) > 0)
+                baseSpec && baseSpec.kind === "wedge" &&
+                (baseSpec.params.cornerEdges ?? 0) === 0 &&
+                ((baseSpec.params.topFillet ?? baseSpec.params.fillet ?? 0) > 0 ||
+                  (baseSpec.params.bottomFillet ?? baseSpec.params.fillet ?? 0) > 0)
               ) {
                 candidate = withoutExtrusionSideEdges(candidate, 0);
               }
               if (
-                spec.type === "object" && spec.kind === "polygonPrism" &&
-                (spec.params.cornerEdges ?? 0) === 0 &&
-                ((spec.params.fillet ?? 0) > 0 ||
-                  (spec.params.topFillet ?? 0) > 0 ||
-                  (spec.params.bottomFillet ?? 0) > 0)
+                baseSpec && baseSpec.kind === "polygonPrism" &&
+                (baseSpec.params.cornerEdges ?? 0) === 0 &&
+                ((baseSpec.params.fillet ?? 0) > 0 ||
+                  (baseSpec.params.topFillet ?? 0) > 0 ||
+                  (baseSpec.params.bottomFillet ?? 0) > 0)
               ) {
                 candidate = withoutExtrusionSideEdges(candidate);
               }
               if (
-                spec.type === "object" && spec.kind === "star" &&
-                (spec.params.style ?? 0) === 0 &&
-                (spec.params.cornerEdges ?? 0) === 0 &&
-                ((spec.params.outerFillet ?? spec.params.fillet ?? 0) > 0 ||
-                  (spec.params.innerFillet ?? spec.params.fillet ?? 0) > 0 ||
-                  (spec.params.topFillet ?? 0) > 0 ||
-                  (spec.params.bottomFillet ?? 0) > 0)
+                baseSpec && baseSpec.kind === "star" &&
+                (baseSpec.params.style ?? 0) === 0 &&
+                (baseSpec.params.cornerEdges ?? 0) === 0 &&
+                ((baseSpec.params.outerFillet ?? baseSpec.params.fillet ?? 0) > 0 ||
+                  (baseSpec.params.innerFillet ?? baseSpec.params.fillet ?? 0) > 0 ||
+                  (baseSpec.params.topFillet ?? 0) > 0 ||
+                  (baseSpec.params.bottomFillet ?? 0) > 0)
               ) {
                 candidate = withoutExtrusionSideEdges(candidate);
               }
               if (
-                spec.type === "object" && spec.kind === "threadedNut" &&
-                (spec.params.cornerEdges ?? 0) === 1
+                baseSpec && baseSpec.kind === "threadedNut" &&
+                (baseSpec.params.cornerEdges ?? 0) === 1
               ) {
-                candidate = withNutCornerLines(candidate, spec.params);
+                candidate = withNutCornerLines(candidate, baseSpec.params);
               }
               if (
-                spec.type === "object" && spec.kind === "threadedRod" &&
-                Math.round(spec.params.headType ?? 0) >= 1
+                baseSpec && baseSpec.kind === "threadedRod" &&
+                Math.round(baseSpec.params.headType ?? 0) >= 1
               ) {
-                candidate = (spec.params.cornerEdges ?? 0) === 1
-                  ? withThreadedHeadCornerLines(candidate, spec.params)
+                candidate = (baseSpec.params.cornerEdges ?? 0) === 1
+                  ? withThreadedHeadCornerLines(candidate, baseSpec.params)
                   : { ...candidate, edges: { lines: new Float32Array(0), edgeGroups: [] } };
               }
               if (
-                spec.type === "object" && spec.kind === "paraboloid" &&
-                (spec.params.surfaceEdges ?? 0) === 0
+                baseSpec && baseSpec.kind === "paraboloid" &&
+                (baseSpec.params.surfaceEdges ?? 0) === 0
               ) {
                 candidate = withoutExtrusionSideEdges(candidate);
               }
               if (
-                spec.type === "object" && spec.kind === "tube" &&
-                (spec.params.cornerEdges ?? 0) === 0 &&
-                ((spec.params.outerTopFillet ?? spec.params.bevel ?? 0) > 0 ||
-                  (spec.params.outerBottomFillet ?? spec.params.bevel ?? 0) > 0 ||
-                  (spec.params.innerTopFillet ?? spec.params.bevel ?? 0) > 0 ||
-                  (spec.params.innerBottomFillet ?? spec.params.bevel ?? 0) > 0)
+                baseSpec && baseSpec.kind === "tube" &&
+                (baseSpec.params.cornerEdges ?? 0) === 0 &&
+                ((baseSpec.params.outerTopFillet ?? baseSpec.params.bevel ?? 0) > 0 ||
+                  (baseSpec.params.outerBottomFillet ?? baseSpec.params.bevel ?? 0) > 0 ||
+                  (baseSpec.params.innerTopFillet ?? baseSpec.params.bevel ?? 0) > 0 ||
+                  (baseSpec.params.innerBottomFillet ?? baseSpec.params.bevel ?? 0) > 0)
               ) {
                 candidate = withoutExtrusionSideEdges(candidate);
               }
               if (
-                spec.type === "object" && spec.kind === "hemisphere" &&
-                (spec.params.surfaceEdges ?? 0) === 0
+                baseSpec && baseSpec.kind === "hemisphere" &&
+                (baseSpec.params.surfaceEdges ?? 0) === 0
               ) {
                 candidate = { ...candidate, edges: { lines: new Float32Array(0), edgeGroups: [] } };
               } else if (
-                spec.type === "object" && spec.kind === "hemisphere" &&
-                (spec.params.surfaceEdges ?? 0) === 1
+                baseSpec && baseSpec.kind === "hemisphere" &&
+                (baseSpec.params.surfaceEdges ?? 0) === 1
               ) {
-                candidate = withSurfaceContourLines(candidate, spec.params.surfaceSteps ?? 24);
+                candidate = withSurfaceContourLines(candidate, baseSpec.params.surfaceSteps ?? 24);
               }
               if (
-                spec.type === "object" && spec.kind === "ellipsoid" &&
-                (spec.params.surfaceEdges ?? 0) === 0
+                baseSpec && baseSpec.kind === "ellipsoid" &&
+                (baseSpec.params.surfaceEdges ?? 0) === 0
               ) {
                 candidate = { ...candidate, edges: { lines: new Float32Array(0), edgeGroups: [] } };
               } else if (
-                spec.type === "object" && spec.kind === "ellipsoid" &&
-                (spec.params.surfaceEdges ?? 0) === 1
+                baseSpec && baseSpec.kind === "ellipsoid" &&
+                (baseSpec.params.surfaceEdges ?? 0) === 1
               ) {
-                candidate = withSurfaceContourLines(candidate, spec.params.surfaceSteps ?? 48);
+                candidate = withSurfaceContourLines(candidate, baseSpec.params.surfaceSteps ?? 48);
               }
               if (
-                spec.type === "object" && spec.kind === "capsule" &&
-                (spec.params.surfaceEdges ?? 0) === 0
+                baseSpec && baseSpec.kind === "capsule" &&
+                (baseSpec.params.surfaceEdges ?? 0) === 0
               ) {
                 candidate = { ...candidate, edges: { lines: new Float32Array(0), edgeGroups: [] } };
               } else if (
-                spec.type === "object" && spec.kind === "capsule" &&
-                (spec.params.surfaceEdges ?? 0) === 1
+                baseSpec && baseSpec.kind === "capsule" &&
+                (baseSpec.params.surfaceEdges ?? 0) === 1
               ) {
-                candidate = withSurfaceContourLines(candidate, spec.params.surfaceSteps ?? 48);
+                candidate = withSurfaceContourLines(candidate, baseSpec.params.surfaceSteps ?? 48);
               }
               if (
-                spec.type === "object" && spec.kind === "torus" &&
-                (spec.params.surfaceEdges ?? 0) === 0
+                baseSpec && baseSpec.kind === "torus" &&
+                (baseSpec.params.surfaceEdges ?? 0) === 0
               ) {
                 candidate = { ...candidate, edges: { lines: new Float32Array(0), edgeGroups: [] } };
               } else if (
-                spec.type === "object" && spec.kind === "torus" &&
-                (spec.params.surfaceEdges ?? 0) === 1
+                baseSpec && baseSpec.kind === "torus" &&
+                (baseSpec.params.surfaceEdges ?? 0) === 1
               ) {
-                candidate = withTorusSurfaceLines(candidate, spec.params);
+                candidate = withTorusSurfaceLines(candidate, baseSpec.params);
               }
               if (
-                spec.type === "object" && spec.kind === "sphere" &&
-                (spec.params.surfaceEdges ?? 0) === 0
+                baseSpec && baseSpec.kind === "sphere" &&
+                (baseSpec.params.surfaceEdges ?? 0) === 0
               ) {
                 candidate = { ...candidate, edges: { lines: new Float32Array(0), edgeGroups: [] } };
               } else if (
-                spec.type === "object" && spec.kind === "sphere" &&
-                (spec.params.surfaceEdges ?? 0) === 1
+                baseSpec && baseSpec.kind === "sphere" &&
+                (baseSpec.params.surfaceEdges ?? 0) === 1
               ) {
-                candidate = withSphereSurfaceLines(candidate, spec.params);
+                candidate = withSphereSurfaceLines(candidate, baseSpec.params);
               }
               const candidateBounds = meshBounds(candidate);
               if (

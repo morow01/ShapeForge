@@ -28,6 +28,8 @@ interface Props {
   gridSnapEnabled: boolean;
   /** Keep collision contact patches visible while an object is selected. */
   showSelectedCollisionContacts: boolean;
+  plateVisible?: boolean;
+  plateSize?: { width: number; depth: number };
   displayUnit: DisplayUnit;
   decimalPlaces: number;
   onSelect: (id: string | null, additive: boolean) => void;
@@ -107,6 +109,12 @@ export function Viewport(props: Props) {
     scene.setSnapEnabled(latest.current.snapEnabled);
     scene.setGridSnapEnabled(latest.current.gridSnapEnabled);
     scene.setShowSelectedCollisionContacts(latest.current.showSelectedCollisionContacts);
+    if (latest.current.plateVisible !== undefined) {
+      scene.setPlateVisible(latest.current.plateVisible);
+    }
+    if (latest.current.plateSize) {
+      scene.setPlateSize(latest.current.plateSize.width, latest.current.plateSize.depth);
+    }
     scene.setMeasurementFormat(latest.current.displayUnit, latest.current.decimalPlaces);
 
     sceneRef.current = scene;
@@ -169,6 +177,18 @@ export function Viewport(props: Props) {
   useEffect(() => {
     sceneRef.current?.setShowSelectedCollisionContacts(showSelectedCollisionContacts);
   }, [showSelectedCollisionContacts]);
+
+  useEffect(() => {
+    if (props.plateVisible !== undefined) {
+      sceneRef.current?.setPlateVisible(props.plateVisible);
+    }
+  }, [props.plateVisible]);
+
+  useEffect(() => {
+    if (props.plateSize) {
+      sceneRef.current?.setPlateSize(props.plateSize.width, props.plateSize.depth);
+    }
+  }, [props.plateSize?.width, props.plateSize?.depth]);
 
   useEffect(() => {
     sceneRef.current?.setMeasurementFormat(props.displayUnit, props.decimalPlaces);

@@ -216,59 +216,88 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
         topCorner *= scale;
         bottomCorner *= scale;
       }
-      const polygonSketch = (radius: number, z: number) => {
-        const points: [number, number][] = Array.from({ length: sides }, (_, i) => {
-          const angle = 2 * Math.PI * i / sides;
-          return [radius * Math.cos(angle), radius * Math.sin(angle)];
-        });
-        let pen = draw(points[0]);
-        for (let i = 1; i < points.length; i++) pen = pen.lineTo(points[i]);
-        return pen.close().sketchOnPlane("XY", z) as Sketch;
-      };
-      if (topCorner <= 0 && bottomCorner <= 0) {
-        s = polygonSketch(p.radius, 0).extrude(p.height) as Shape3D;
+      if (sides >= 32) {
+        if (topCorner <= 0 && bottomCorner <= 0) {
+          s = makeCylinder(p.radius, p.height);
+        } else {
+          const curveSteps = 24;
+          let pen = draw([0, 0]);
+          const baseRadius = p.radius - bottomCorner;
+          if (baseRadius > 1e-7) {
+            pen = pen.lineTo([baseRadius, 0]);
+          }
+          if (bottomCorner > 0) {
+            const cx = p.radius - bottomCorner;
+            const cy = bottomCorner;
+            for (let i = 1; i <= curveSteps; i++) {
+              const angle = -Math.PI / 2 + (Math.PI / 2) * (i / curveSteps);
+              pen = pen.lineTo([cx + bottomCorner * Math.cos(angle), cy + bottomCorner * Math.sin(angle)]);
+            }
+          }
+          pen = pen.lineTo([p.radius, p.height - topCorner]);
+          if (topCorner > 0) {
+            const cx = p.radius - topCorner;
+            const cy = p.height - topCorner;
+            for (let i = 1; i <= curveSteps; i++) {
+              const angle = (Math.PI / 2) * (i / curveSteps);
+              pen = pen.lineTo([cx + topCorner * Math.cos(angle), cy + topCorner * Math.sin(angle)]);
+            }
+          }
+          pen = pen.lineTo([0, p.height]);
+          s = pen.close().sketchOnPlane("XZ").revolve([0, 0, 1]) as Shape3D;
+        }
       } else {
-        // Build the two quarter-rounds into the axial profile itself. Lofting
-        // matching polygon rings keeps the solid closed at every radius and
-        // avoids OCCT's multi-edge fillet opening a hole in the end face.
-        const axialProfile: [number, number][] = [];
-        const curveSteps = 24;
-        if (bottomCorner > 0) {
-          const centreR = p.radius - bottomCorner;
-          for (let i = 0; i <= curveSteps; i++) {
-            const angle = -Math.PI / 2 + (Math.PI / 2) * i / curveSteps;
-            axialProfile.push([
-              centreR + bottomCorner * Math.cos(angle),
-              bottomCorner + bottomCorner * Math.sin(angle),
-            ]);
-          }
+        const polygonSketch = (radius: number, z: number) => {
+          const points: [number, number][] = Array.from({ length: sides }, (_, i) => {
+            const angle = 2 * Math.PI * i / sides;
+            return [radius * Math.cos(angle), radius * Math.sin(angle)];
+          });
+          let pen = draw(points[0]);
+          for (let i = 1; i < points.length; i++) pen = pen.lineTo(points[i]);
+          return pen.close().sketchOnPlane("XY", z) as Sketch;
+        };
+        if (topCorner <= 0 && bottomCorner <= 0) {
+          s = polygonSketch(p.radius, 0).extrude(p.height) as Shape3D;
         } else {
-          axialProfile.push([p.radius, 0]);
-        }
-        if (topCorner > 0) {
-          const centreR = p.radius - topCorner;
-          const centreZ = p.height - topCorner;
-          for (let i = 0; i <= curveSteps; i++) {
-            const angle = (Math.PI / 2) * i / curveSteps;
-            axialProfile.push([
-              centreR + topCorner * Math.cos(angle),
-              centreZ + topCorner * Math.sin(angle),
-            ]);
+          const axialProfile: [number, number][] = [];
+          const curveSteps = 24;
+          if (bottomCorner > 0) {
+            const centreR = p.radius - bottomCorner;
+            for (let i = 0; i <= curveSteps; i++) {
+              const angle = -Math.PI / 2 + (Math.PI / 2) * i / curveSteps;
+              axialProfile.push([
+                centreR + bottomCorner * Math.cos(angle),
+                bottomCorner + bottomCorner * Math.sin(angle),
+              ]);
+            }
+          } else {
+            axialProfile.push([p.radius, 0]);
           }
-        } else {
-          axialProfile.push([p.radius, p.height]);
+          if (topCorner > 0) {
+            const centreR = p.radius - topCorner;
+            const centreZ = p.height - topCorner;
+            for (let i = 0; i <= curveSteps; i++) {
+              const angle = (Math.PI / 2) * i / curveSteps;
+              axialProfile.push([
+                centreR + topCorner * Math.cos(angle),
+                centreZ + topCorner * Math.sin(angle),
+              ]);
+            }
+          } else {
+            axialProfile.push([p.radius, p.height]);
+          }
+          const startsAtPoint = axialProfile[0][0] <= 1e-7;
+          const endsAtPoint = axialProfile[axialProfile.length - 1][0] <= 1e-7;
+          const ringProfile = axialProfile.filter(([radius]) => radius > 1e-7);
+          const rings = ringProfile.map(([radius, z]) => polygonSketch(radius, z));
+          s = rings[0].loftWith(rings.slice(1), {
+            ruled: true,
+            ...(startsAtPoint ? { startPoint: [0, 0, axialProfile[0][1]] as [number, number, number] } : {}),
+            ...(endsAtPoint
+              ? { endPoint: [0, 0, axialProfile[axialProfile.length - 1][1]] as [number, number, number] }
+              : {}),
+          }) as Shape3D;
         }
-        const startsAtPoint = axialProfile[0][0] <= 1e-7;
-        const endsAtPoint = axialProfile[axialProfile.length - 1][0] <= 1e-7;
-        const ringProfile = axialProfile.filter(([radius]) => radius > 1e-7);
-        const rings = ringProfile.map(([radius, z]) => polygonSketch(radius, z));
-        s = rings[0].loftWith(rings.slice(1), {
-          ruled: true,
-          ...(startsAtPoint ? { startPoint: [0, 0, axialProfile[0][1]] as [number, number, number] } : {}),
-          ...(endsAtPoint
-            ? { endPoint: [0, 0, axialProfile[axialProfile.length - 1][1]] as [number, number, number] }
-            : {}),
-        }) as Shape3D;
       }
       break;
     }
@@ -615,18 +644,72 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
       const h = Math.max(p.height ?? 10, 0.1);
       const sides = Math.max(3, Math.min(64, Math.round(p.sides ?? 32)));
       const legacyBevel = Math.max(p.bevel ?? 0, 0);
-      const maxRim = Math.max(0, Math.min(wall / 2, h / 2) - 0.01);
+      const maxRim = Math.max(0, Math.min(wall / 2, h / 2) - 0.001);
       const outerTop = Math.min(Math.max(p.outerTopFillet ?? legacyBevel, 0), maxRim);
       const outerBottom = Math.min(Math.max(p.outerBottomFillet ?? legacyBevel, 0), maxRim);
       const innerTop = Math.min(Math.max(p.innerTopFillet ?? legacyBevel, 0), maxRim);
       const innerBottom = Math.min(Math.max(p.innerBottomFillet ?? legacyBevel, 0), maxRim);
 
-      let outer: Shape3D;
-      let inner: Shape3D;
-
       if (sides >= 32) {
-        outer = makeCylinder(rOut, h);
-        inner = makeCylinder(rIn, h + 2).translate([0, 0, -1]);
+        // Revolve the 2D annular profile directly. This avoids OCCT's BRepFillet
+        // seam artifacts on cylindrical faces, which caused jagged sawtooth triangles
+        // along the rounded rim.
+        const curveSteps = 16;
+        let pen = draw([rIn, h - innerTop]);
+
+        // Inner vertical wall down
+        pen = pen.lineTo([rIn, innerBottom]);
+
+        // Bottom-inner corner
+        if (innerBottom > 0) {
+          const cx = rIn + innerBottom;
+          const cy = innerBottom;
+          for (let i = 1; i <= curveSteps; i++) {
+            const angle = Math.PI + (Math.PI / 2) * (i / curveSteps);
+            pen = pen.lineTo([cx + innerBottom * Math.cos(angle), cy + innerBottom * Math.sin(angle)]);
+          }
+        }
+
+        // Bottom wall
+        pen = pen.lineTo([rOut - outerBottom, 0]);
+
+        // Bottom-outer corner
+        if (outerBottom > 0) {
+          const cx = rOut - outerBottom;
+          const cy = outerBottom;
+          for (let i = 1; i <= curveSteps; i++) {
+            const angle = -Math.PI / 2 + (Math.PI / 2) * (i / curveSteps);
+            pen = pen.lineTo([cx + outerBottom * Math.cos(angle), cy + outerBottom * Math.sin(angle)]);
+          }
+        }
+
+        // Outer vertical wall up
+        pen = pen.lineTo([rOut, h - outerTop]);
+
+        // Top-outer corner
+        if (outerTop > 0) {
+          const cx = rOut - outerTop;
+          const cy = h - outerTop;
+          for (let i = 1; i <= curveSteps; i++) {
+            const angle = (Math.PI / 2) * (i / curveSteps);
+            pen = pen.lineTo([cx + outerTop * Math.cos(angle), cy + outerTop * Math.sin(angle)]);
+          }
+        }
+
+        // Top wall
+        pen = pen.lineTo([rIn + innerTop, h]);
+
+        // Top-inner corner
+        if (innerTop > 0) {
+          const cx = rIn + innerTop;
+          const cy = h - innerTop;
+          for (let i = 1; i <= curveSteps; i++) {
+            const angle = Math.PI / 2 + (Math.PI / 2) * (i / curveSteps);
+            pen = pen.lineTo([cx + innerTop * Math.cos(angle), cy + innerTop * Math.sin(angle)]);
+          }
+        }
+
+        s = pen.close().sketchOnPlane("XZ").revolve([0, 0, 1]) as Shape3D;
       } else {
         const dTheta = (2 * Math.PI) / sides;
         const outPts: [number, number][] = [];
@@ -642,32 +725,10 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
           penOut = penOut.lineTo(outPts[i]);
           penIn = penIn.lineTo(inPts[i]);
         }
-        outer = penOut.close().sketchOnPlane("XY").extrude(h) as Shape3D;
-        inner = penIn.close().sketchOnPlane("XY").extrude(h + 2).translate([0, 0, -1]) as Shape3D;
+        const outer = penOut.close().sketchOnPlane("XY").extrude(h) as Shape3D;
+        const inner = penIn.close().sketchOnPlane("XY").extrude(h + 2).translate([0, 0, -1]) as Shape3D;
+        s = outer.cut(inner) as Shape3D;
       }
-
-      let tubeSolid = outer.cut(inner);
-      if (outerTop > 0 || outerBottom > 0 || innerTop > 0 || innerBottom > 0) {
-        try {
-          const splitRadius = (rOut + rIn) / 2;
-          tubeSolid = tubeSolid.fillet((edge) => {
-            const [[minX, minY, minZ], [maxX, maxY, maxZ]] = edge.boundingBox.bounds;
-            if (maxZ - minZ > 1e-5) return null;
-            const extentRadius = Math.max(
-              Math.max(Math.abs(minX), Math.abs(maxX)),
-              Math.max(Math.abs(minY), Math.abs(maxY)),
-            );
-            const outerEdge = extentRadius > splitRadius;
-            const topEdge = Math.abs((minZ + maxZ) / 2 - h) < 1e-5;
-            if (outerEdge) return topEdge ? outerTop || null : outerBottom || null;
-            return topEdge ? innerTop || null : innerBottom || null;
-          });
-        } catch {
-          // Keep the last valid unrounded tube for combinations rejected by
-          // OCCT; the Inspector limits normal UI input to the safe range.
-        }
-      }
-      s = tubeSolid;
       break;
     }
     case "paraboloid": {
@@ -1227,10 +1288,113 @@ function hollowEditedBox(solid: Shape3D, op: ShellOp): Shape3D | null {
   return solid.cut(cutter) as Shape3D;
 }
 
+function getBaseObjectSpec(spec: NodeSpec): ObjectSpec | null {
+  if (spec.type === "object") return spec;
+  if (spec.type === "edit") return getBaseObjectSpec(spec.base);
+  return null;
+}
+
 function isBoxBased(spec: NodeSpec): boolean {
   if (spec.type === "object") return spec.kind === "box";
   if (spec.type === "edit") return isBoxBased(spec.base);
   return false;
+}
+
+function isCylinderBased(spec: NodeSpec): boolean {
+  if (spec.type === "object") return spec.kind === "cylinder";
+  if (spec.type === "edit") return isCylinderBased(spec.base);
+  return false;
+}
+
+/** Reliable fallback for Cylinder (including cylinders with rounded top/bottom corners)
+ * when OCCT's offset shell fails on multi-patch lofted fillets. Creates an inner
+ * cylindrical cavity leaving `thickness` on the wall and closed floor/ceiling. */
+function hollowEditedCylinder(solid: Shape3D, op: ShellOp, baseNode?: NodeSpec): Shape3D | null {
+  const [min, max] = solid.boundingBox.bounds;
+  const t = Math.max(0.01, op.thickness);
+
+  const xCenter = (min[0] + max[0]) / 2;
+  const yCenter = (min[1] + max[1]) / 2;
+  const rx = (max[0] - min[0]) / 2;
+  const ry = (max[1] - min[1]) / 2;
+  const zMin = min[2];
+  const zMax = max[2];
+  const height = zMax - zMin;
+
+  const innerRx = rx - t;
+  const innerRy = ry - t;
+  if (innerRx <= 0.01 || innerRy <= 0.01 || height <= t + 0.01) return null;
+
+  const baseSpec = baseNode ? getBaseObjectSpec(baseNode) : null;
+  const sides = baseSpec && baseSpec.kind === "cylinder" && baseSpec.params.sides
+    ? Math.max(3, Math.min(96, Math.round(baseSpec.params.sides)))
+    : 48;
+
+  let opensTop = false;
+  let opensBottom = false;
+
+  if (op.normal) {
+    if (op.normal[2] > 0.5) opensTop = true;
+    else if (op.normal[2] < -0.5) opensBottom = true;
+    else {
+      // User picked a side wall face; let standard shell try or handle it
+      return null;
+    }
+  } else {
+    const point = op.points[0];
+    if (point) {
+      const distToTop = Math.abs(point[2] - zMax);
+      const distToBottom = Math.abs(point[2] - zMin);
+      if (distToTop < distToBottom && distToTop < height * 0.4) {
+        opensTop = true;
+      } else if (distToBottom <= distToTop && distToBottom < height * 0.4) {
+        opensBottom = true;
+      } else {
+        return null;
+      }
+    }
+  }
+
+  if (op.points.length > 1) {
+    const hasTop = op.points.some((p) => Math.abs(p[2] - zMax) < height * 0.3);
+    const hasBottom = op.points.some((p) => Math.abs(p[2] - zMin) < height * 0.3);
+    if (hasTop && hasBottom) {
+      opensTop = true;
+      opensBottom = true;
+    }
+  }
+
+  if (!opensTop && !opensBottom) return null;
+
+  const overlap = Math.max(0.1, t * 0.1);
+  let cutterZMin: number;
+  let cutterZMax: number;
+
+  if (opensTop && opensBottom) {
+    cutterZMin = zMin - overlap;
+    cutterZMax = zMax + overlap;
+  } else if (opensTop) {
+    cutterZMin = zMin + t;
+    cutterZMax = zMax + overlap;
+  } else {
+    cutterZMin = zMin - overlap;
+    cutterZMax = zMax - t;
+  }
+
+  const cutterHeight = cutterZMax - cutterZMin;
+  if (cutterHeight <= 0.01) return null;
+
+  const points: [number, number][] = Array.from({ length: sides }, (_, i) => {
+    const angle = (2 * Math.PI * i) / sides;
+    return [innerRx * Math.cos(angle), innerRy * Math.sin(angle)];
+  });
+
+  let pen = draw(points[0]);
+  for (let i = 1; i < points.length; i++) pen = pen.lineTo(points[i]);
+  const sketch = pen.close().sketchOnPlane("XY", 0) as Sketch;
+  const cutter = sketch.extrude(cutterHeight).translate([xCenter, yCenter, cutterZMin]) as Shape3D;
+
+  return solid.cut(cutter) as Shape3D;
 }
 
 /**
@@ -1672,6 +1836,12 @@ async function replayEdit(
           if (candidate && isOcctValid(candidate) && !tessellatesEmpty(candidate) && isWatertight(candidate)) hollow = candidate;
         } catch { /* Keep the original shape if even the bounded cavity fails. */ }
       }
+      if (isCylinderBased(spec.base)) {
+        try {
+          const candidate = hollowEditedCylinder(solid, op, spec.base);
+          if (candidate && isOcctValid(candidate) && !tessellatesEmpty(candidate) && isWatertight(candidate)) hollow = candidate;
+        } catch { /* Fall back to shellSolid */ }
+      }
       for (let attempt = 0; attempt < 3 && !hollow; attempt++) {
         try {
           const candidate = shellSolid(solid, op);
@@ -1831,6 +2001,7 @@ export async function survivingOps(
     if (op.kind === "shell") {
       const candidate = op.points.length ? settled(() => {
         if (isBoxBased(spec.base)) return hollowEditedBox(solid, op) ?? shellSolid(solid, op);
+        if (isCylinderBased(spec.base)) return hollowEditedCylinder(solid, op, spec.base) ?? shellSolid(solid, op);
         return shellSolid(solid, op);
       }) : null;
       if (candidate) {
