@@ -7,6 +7,7 @@ import { Inspector } from "./ui/Inspector";
 import { Tree } from "./ui/Tree";
 import { ProjectsModal } from "./ui/ProjectsModal";
 import {
+  AlignNodeIcon,
   AlignToolIcon,
   BuildPlateIcon,
   ChevronDownIcon,
@@ -529,6 +530,8 @@ export function App() {
    *  far in from the edge, and how far out from there. */
   const [faceHeight, setFaceHeight] = useState(3);
   const [faceValue, setFaceValue] = useState(2);
+  const [alignSubMode, setAlignSubMode] = useState<"box" | "points">("box");
+  const [alignAnchorId, setAlignAnchorId] = useState<string | null>(null);
   // Remembered the same way Snap is — whether the padlock is on is a
   // working preference (how THIS person likes to resize things), not
   // something that should reset back to locked every time the page loads.
@@ -578,6 +581,27 @@ export function App() {
       setDropMenuOpen(true);
     }, 400);
   }, [cancelDropPressTimer]);
+  const [alignMenuOpen, setAlignMenuOpen] = useState(false);
+  const alignMenuRef = useRef<HTMLDivElement>(null);
+  const alignFlyoutRef = useRef<HTMLDivElement>(null);
+  const [alignFlyoutPos, setAlignFlyoutPos] = useState<{ top: number; left: number } | null>(null);
+  const alignPressTimerRef = useRef<number | null>(null);
+  const alignLongPressFiredRef = useRef(false);
+  const cancelAlignPressTimer = useCallback(() => {
+    if (alignPressTimerRef.current !== null) {
+      window.clearTimeout(alignPressTimerRef.current);
+      alignPressTimerRef.current = null;
+    }
+  }, []);
+  const startAlignPressTimer = useCallback(() => {
+    alignLongPressFiredRef.current = false;
+    cancelAlignPressTimer();
+    alignPressTimerRef.current = window.setTimeout(() => {
+      alignLongPressFiredRef.current = true;
+      alignPressTimerRef.current = null;
+      setAlignMenuOpen(true);
+    }, 400);
+  }, [cancelAlignPressTimer]);
   const cycleWireframe = useCallback(() => {
     setWireframe((curr) => NEXT_WIREFRAME[curr]);
   }, []);
@@ -663,6 +687,26 @@ export function App() {
     window.addEventListener("pointerdown", onDocClick);
     return () => window.removeEventListener("pointerdown", onDocClick);
   }, [dropMenuOpen]);
+  useEffect(() => {
+    if (!alignMenuOpen) {
+      setAlignFlyoutPos(null);
+      return;
+    }
+    const trigger = alignMenuRef.current;
+    if (trigger) {
+      const rect = trigger.getBoundingClientRect();
+      setAlignFlyoutPos({ top: rect.top + rect.height / 2, left: rect.right + 10 });
+    }
+    const onDocClick = (e: PointerEvent | MouseEvent) => {
+      const target = e.target as Node;
+      if (
+        alignMenuRef.current && !alignMenuRef.current.contains(target) &&
+        alignFlyoutRef.current && !alignFlyoutRef.current.contains(target)
+      ) setAlignMenuOpen(false);
+    };
+    window.addEventListener("pointerdown", onDocClick);
+    return () => window.removeEventListener("pointerdown", onDocClick);
+  }, [alignMenuOpen]);
   // Remembered like the export quality: whether you want things snapping is
   // a working preference, not a per-session one.
   const [snapEnabled, setSnapEnabled] = useState(
@@ -911,6 +955,45 @@ export function App() {
   }, [nodes, parts, selectedIds, spacingSwapped]);
 
   useEffect(() => setSpacingSwapped(false), [selectedIds[0], selectedIds[1]]);
+  useEffect(() => {
+    if (selectedIds.length === 2) {
+      setAlignAnchorId(selectedIds[1]);
+    } else {
+      setAlignAnchorId(null);
+    }
+  }, [selectedIds[0], selectedIds[1], selectedIds.length]);
+
+  useEffect(() => {
+    if (toolMode === "align" && selectedIds.length < 2) {
+      setToolMode("select");
+    }
+  }, [toolMode, selectedIds.length]);
+
+  const effectiveAlignFixedId = alignAnchorId;
+  const currentAnchorNode = effectiveAlignFixedId ? findNode(nodes, effectiveAlignFixedId) : null;
+  const currentAnchorName = currentAnchorNode ? currentAnchorNode.name : "None (align to bounds)";
+
+  const currentMovingId = selectedIds.length === 2 && effectiveAlignFixedId
+    ? (selectedIds[0] === effectiveAlignFixedId ? selectedIds[1] : selectedIds[0])
+    : null;
+  const currentMovingNode = currentMovingId ? findNode(nodes, currentMovingId) : null;
+
+  const handleSelectAnchor = useCallback((id: string | null) => {
+    setAlignAnchorId(id);
+    if (id && selectedIds.length === 2) {
+      setSpacingSwapped(id === selectedIds[1]);
+    }
+  }, [selectedIds]);
+
+  const handleSwapAlign = useCallback(() => {
+    if (selectedIds.length === 2) {
+      const current = effectiveAlignFixedId ?? selectedIds[1];
+      const next = current === selectedIds[0] ? selectedIds[1] : selectedIds[0];
+      setAlignAnchorId(next);
+      setSpacingSwapped(next === selectedIds[1]);
+      sceneRef.current?.setAlignFixedId(next);
+    }
+  }, [selectedIds, effectiveAlignFixedId]);
 
   // Only offers this between two TOP-LEVEL objects: meshBounds reads
   // position/rotation/scale as world-space, which is only true at the root —
@@ -2705,13 +2788,74 @@ export function App() {
           title="Rotate (R)"
           aria-label="Rotate tool"
         ><RotateToolIcon /></button>
-        <button
-          className={toolMode === "align" ? "active" : ""}
-          onClick={() => setToolMode("align")}
-          title="Align selected objects (A)"
-          aria-label="Align tool"
-          disabled={selectedIds.length < 2}
-        ><AlignToolIcon /></button>
+        <div className="tool-rail-item-container align-tool" ref={alignMenuRef}>
+          <button
+            className={toolMode === "align" ? "active" : ""}
+            onPointerDown={(e) => { if (e.button === 0 && selectedIds.length >= 2) startAlignPressTimer(); }}
+            onPointerUp={cancelAlignPressTimer}
+            onPointerLeave={cancelAlignPressTimer}
+            onContextMenu={(e) => {
+              if (selectedIds.length >= 2) {
+                e.preventDefault();
+                setAlignMenuOpen((v) => !v);
+              }
+            }}
+            onClick={() => {
+              if (alignLongPressFiredRef.current) {
+                alignLongPressFiredRef.current = false;
+                return;
+              }
+              setToolMode("align");
+            }}
+            title={
+              selectedIds.length < 2
+                ? "Align (A) — select at least 2 objects"
+                : alignSubMode === "box"
+                  ? "Box Align (A) — hold for align options"
+                  : "Node Align (A) — hold for align options"
+            }
+            aria-label="Align tool"
+            disabled={selectedIds.length < 2}
+          >
+            {alignSubMode === "points" ? <AlignNodeIcon /> : <AlignToolIcon />}
+          </button>
+          <CornerFlyoutMark className="corner-flyout-mark align-corner-mark" />
+          {alignMenuOpen && alignFlyoutPos && createPortal(
+            <div
+              ref={alignFlyoutRef}
+              className="tool-rail-flyout align-submode-flyout"
+              role="menu"
+              aria-label="Align mode"
+              style={{ position: "fixed", top: alignFlyoutPos.top, left: alignFlyoutPos.left, transform: "translateY(-50%)" }}
+            >
+              <button
+                className={alignSubMode === "box" ? "active" : ""}
+                onClick={() => {
+                  setAlignSubMode("box");
+                  setToolMode("align");
+                  setAlignMenuOpen(false);
+                }}
+                title="Box Align — align edges, centres, or faces with anchor"
+              >
+                <span className="flyout-icon"><AlignToolIcon /></span>
+                <span className="flyout-label">Box Align</span>
+              </button>
+              <button
+                className={alignSubMode === "points" ? "active" : ""}
+                onClick={() => {
+                  setAlignSubMode("points");
+                  setToolMode("align");
+                  setAlignMenuOpen(false);
+                }}
+                title="Node Align — drag node to node"
+              >
+                <span className="flyout-icon"><AlignNodeIcon /></span>
+                <span className="flyout-label">Node Align</span>
+              </button>
+            </div>,
+            document.body,
+          )}
+        </div>
         <div className="tool-rail-item-container drop-tool" ref={dropMenuRef}>
           <button
             onPointerDown={(e) => { if (e.button === 0) startDropPressTimer(); }}
@@ -2956,10 +3100,12 @@ export function App() {
           selectedIds={selectedIds}
           cameraMode={cameraMode}
           toolMode={toolMode}
+          alignSubMode={alignSubMode}
           facePushPullEnabled={faceOp === "push"}
           placementKind={pendingPrimitive}
           resizeConstrained={resizeConstrained}
-          alignFixedId={spacingSelection ? spacingSelection.fixedNode.id : null}
+          alignFixedId={effectiveAlignFixedId}
+          onSelectAnchor={handleSelectAnchor}
           wireframe={wireframe}
           snapEnabled={snapEnabled}
           gridSnapEnabled={gridSnapEnabled}
@@ -3255,6 +3401,112 @@ export function App() {
             <button disabled={!edgeSelection} onClick={() => void applyEdgeFinish()}>Apply</button>
           </div>
         )}
+        {toolMode === "align" && (
+          <div className="edge-bar align-bar">
+            <div className="edge-kind-buttons" role="group" aria-label="Align mode">
+              <button
+                type="button"
+                className={alignSubMode === "box" ? "active" : ""}
+                onClick={() => setAlignSubMode("box")}
+                title="Box Align — align edges, centres, or faces with anchor"
+                aria-label="Box Align"
+              >
+                <span style={{ fontSize: 11, fontWeight: 700 }}>Box</span>
+              </button>
+              <button
+                type="button"
+                className={alignSubMode === "points" ? "active" : ""}
+                onClick={() => setAlignSubMode("points")}
+                title="Node Align — drag node to node"
+                aria-label="Node Align"
+              >
+                <span style={{ fontSize: 11, fontWeight: 700 }}>Node</span>
+              </button>
+            </div>
+
+            {alignSubMode === "box" && (
+              <>
+                {selectedIds.length === 2 && currentAnchorNode && currentMovingNode ? (
+                  <div className="align-bar-objects">
+                    <div className="align-obj-badge anchor" title="Stationary anchor (does not move)">
+                      <span className="align-badge-label">Anchor:</span>
+                      <strong className="align-badge-name">{currentAnchorNode.name}</strong>
+                    </div>
+                    <button
+                      type="button"
+                      className="align-swap-btn"
+                      onClick={handleSwapAlign}
+                      title="Swap anchor and moving object"
+                      aria-label="Swap anchor and moving object"
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="m7 16-4-4 4-4M3 12h14M17 8l4 4-4 4M21 12H7" />
+                      </svg>
+                      <span>Swap</span>
+                    </button>
+                    <div className="align-obj-badge moving" title="Moving object (aligns to anchor)">
+                      <span className="align-badge-label">Moving:</span>
+                      <strong className="align-badge-name">{currentMovingNode.name}</strong>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="align-bar-anchor">
+                    <span style={{ color: "#6e828d", fontSize: 11 }}>Anchor:</span>
+                    <strong>{currentAnchorName}</strong>
+                    {selectedIds.length === 2 && (
+                      <button
+                        type="button"
+                        className="align-swap-btn"
+                        onClick={handleSwapAlign}
+                        title="Designate an anchor object"
+                      >
+                        Set Anchor
+                      </button>
+                    )}
+                    {selectedIds.length > 2 && (
+                      <span style={{ color: "#8a9ba5", fontSize: 10 }}>
+                        ({selectedIds.length - (effectiveAlignFixedId ? 1 : 0)} moving)
+                      </span>
+                    )}
+                  </div>
+                )}
+                <div className="align-bar-axes">
+                  <div className="align-axis-group">
+                    <span className="align-axis-badge x">X</span>
+                    <button type="button" className="align-axis-btn" onClick={() => sceneRef.current?.alignSelection(0, "min")} title="Align X Minimum">Min</button>
+                    <button type="button" className="align-axis-btn" onClick={() => sceneRef.current?.alignSelection(0, "center")} title="Align X Centre">Mid</button>
+                    <button type="button" className="align-axis-btn" onClick={() => sceneRef.current?.alignSelection(0, "max")} title="Align X Maximum">Max</button>
+                  </div>
+                  <div className="align-axis-group">
+                    <span className="align-axis-badge y">Y</span>
+                    <button type="button" className="align-axis-btn" onClick={() => sceneRef.current?.alignSelection(1, "min")} title="Align Y Minimum">Min</button>
+                    <button type="button" className="align-axis-btn" onClick={() => sceneRef.current?.alignSelection(1, "center")} title="Align Y Centre">Mid</button>
+                    <button type="button" className="align-axis-btn" onClick={() => sceneRef.current?.alignSelection(1, "max")} title="Align Y Maximum">Max</button>
+                  </div>
+                  <div className="align-axis-group">
+                    <span className="align-axis-badge z">Z</span>
+                    <button type="button" className="align-axis-btn" onClick={() => sceneRef.current?.alignSelection(2, "min")} title="Align Z Minimum">Min</button>
+                    <button type="button" className="align-axis-btn" onClick={() => sceneRef.current?.alignSelection(2, "center")} title="Align Z Centre">Mid</button>
+                    <button type="button" className="align-axis-btn" onClick={() => sceneRef.current?.alignSelection(2, "max")} title="Align Z Maximum">Max</button>
+                  </div>
+                </div>
+              </>
+            )}
+
+            {alignSubMode === "points" && (
+              <span className="align-hint">Drag a coloured node to a target node to snap</span>
+            )}
+
+            <button
+              type="button"
+              className="align-done-btn"
+              onClick={() => setToolMode("select")}
+              title="Finish aligning (Esc)"
+            >
+              Done
+            </button>
+          </div>
+        )}
         {toolMode === "build" && !buildBusy && buildCells.length > 0 && (
           // Finishing has to be visible. Enter alone was not: Esc is the key
           // people reach for to get out of a mode, and Esc throws the session
@@ -3305,7 +3557,9 @@ export function App() {
               ? "Working out the regions…"
               : "Alt-click a shape to subtract it · Click to add it back · Use the region chips below for one region at a time"
             : toolMode === "align"
-            ? "Drag a coloured node onto a node on the other object · yellow marks the current target · release to align · Esc Select"
+            ? alignSubMode === "points"
+              ? "Drag a coloured node onto a node on the other object · yellow marks the current target · release to align · Esc Select"
+              : "Click a dot to align min, centre, or max · Click an object to set as anchor · Esc Select"
             : toolMode === "face"
             ? faceOp === "wall"
               ? "Select the face to leave open, set a thickness, then Hollow · Esc Select · Right-drag orbit"

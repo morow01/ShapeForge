@@ -314,6 +314,46 @@ function withEllipsoidNormals(mesh: KernelMesh): KernelMesh {
   return { ...mesh, faces: { ...mesh.faces, normals } };
 }
 
+/** A torus is created through Manifold rather than as an OCCT analytic
+ * surface. Its mesh can contain split vertices, so averaged triangle normals
+ * still reveal polygon bands. The analytic normal of the torus surface gives
+ * the exact smooth normal at every vertex, independent of mesh topology. */
+function withTorusNormals(mesh: KernelMesh, params?: Record<string, number>): KernelMesh {
+  const bounds = meshBounds(mesh);
+  if (!bounds) return mesh;
+  const cx = (bounds.min[0] + bounds.max[0]) / 2;
+  const cy = (bounds.min[1] + bounds.max[1]) / 2;
+  const cz = (bounds.min[2] + bounds.max[2]) / 2;
+  const r = (bounds.max[2] - bounds.min[2]) / 2;
+  const rxOuter = (bounds.max[0] - bounds.min[0]) / 2;
+  const ryOuter = (bounds.max[1] - bounds.min[1]) / 2;
+  const R = params?.radius && params?.tubeRadius
+    ? Math.max(params.radius, 0.05)
+    : Math.max((rxOuter + ryOuter) / 2 - r, 0.05);
+  const vertices = mesh.faces.vertices;
+  const normals = new Float32Array(vertices.length);
+  for (let i = 0; i + 2 < vertices.length; i += 3) {
+    const dx = vertices[i] - cx;
+    const dy = vertices[i + 1] - cy;
+    const dz = vertices[i + 2] - cz;
+    const xyDist = Math.hypot(dx, dy);
+    let nx = 0;
+    let ny = 0;
+    const nz = dz;
+    if (xyDist > 1e-6) {
+      const spineX = (dx / xyDist) * R;
+      const spineY = (dy / xyDist) * R;
+      nx = dx - spineX;
+      ny = dy - spineY;
+    }
+    const length = Math.hypot(nx, ny, nz) || 1;
+    normals[i] = nx / length;
+    normals[i + 1] = ny / length;
+    normals[i + 2] = nz / length;
+  }
+  return { ...mesh, faces: { ...mesh.faces, normals } };
+}
+
 function getBaseObjectSpec(spec: NodeSpec): ObjectSpec | null {
   if (spec.type === "object") return spec;
   if (spec.type === "edit") return getBaseObjectSpec(spec.base);
@@ -514,10 +554,10 @@ function withSurfaceContourLines(mesh: KernelMesh, requestedSteps: number): Kern
 }
 
 function withTorusSurfaceLines(mesh: KernelMesh, params: Record<string, number>): KernelMesh {
-  const R = Math.max(params.radius ?? 15, 1);
-  const r = Math.min(Math.max(params.tubeRadius ?? 5, 0.2), R - 0.05);
-  const ringSteps = Math.max(8, Math.min(64, Math.round(params.ringSteps ?? 48)));
-  const tubeSteps = Math.max(8, Math.min(64, Math.round(params.tubeSteps ?? 32)));
+  const R = Math.max(params.radius ?? 15, 0.05);
+  const r = Math.min(Math.max(params.tubeRadius ?? 5, 0.01), R - 0.005);
+  const ringSteps = Math.max(8, Math.min(128, Math.round(params.ringSteps ?? 48)));
+  const tubeSteps = Math.max(8, Math.min(128, Math.round(params.tubeSteps ?? 32)));
   const ringGuides = Math.max(4, Math.min(12, Math.round(ringSteps / 4)));
   const tubeGuides = Math.max(4, Math.min(12, Math.round(tubeSteps / 4)));
   const lines: number[] = [];
@@ -1177,6 +1217,9 @@ const api = {
               let candidate = toMesh(spec.id, solid, meshQuality);
               if (baseSpec?.kind === "ellipsoid") {
                 candidate = withEllipsoidNormals(candidate);
+              }
+              if (baseSpec?.kind === "torus") {
+                candidate = withTorusNormals(candidate, baseSpec.params);
               }
               if (
                 baseSpec && (baseSpec.kind === "cylinder" || baseSpec.kind === "cone" || baseSpec.kind === "pyramid") &&
@@ -1906,7 +1949,13 @@ const api = {
       // right (see applyPreviewMesh in scene.ts), just the arrow marking it
       // wasn't, and then visibly snapped once that real rebuild landed.
       // Reported live as "the face I was moving jumps a little bit extra."
-      const mesh = toMesh(spec.id, solid, EDIT_QUALITY);
+      let mesh = toMesh(spec.id, solid, EDIT_QUALITY);
+      const baseSpec = getBaseObjectSpec(spec);
+      if (baseSpec?.kind === "ellipsoid") {
+        mesh = withEllipsoidNormals(mesh);
+      } else if (baseSpec?.kind === "torus") {
+        mesh = withTorusNormals(mesh, baseSpec.params);
+      }
       return { mesh, faces: faceInfoOf(mesh) };
     } catch {
       // A mid-drag distance can transiently describe something OCCT can't

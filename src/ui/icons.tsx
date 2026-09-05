@@ -173,6 +173,19 @@ export function AlignToolIcon({ className = "tool-icon" }: { className?: string 
   );
 }
 
+/** Node Align tool: two feature points/nodes connecting with a dashed guide line. */
+export function AlignNodeIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <rect x="3.5" y="4" width="7" height="6" rx="1" fill="none" stroke="currentColor" strokeWidth="1.4" opacity="0.65" />
+      <rect x="13.5" y="14" width="7" height="6" rx="1" fill="none" stroke="currentColor" strokeWidth="1.4" opacity="0.65" />
+      <path className="icon-accent" d="M10.5 7L13.5 17" fill="none" strokeWidth="1.5" strokeDasharray="2 2" />
+      <circle className="icon-accent-fill" cx="10.5" cy="7" r="2.2" stroke="none" />
+      <circle className="icon-accent-fill" cx="13.5" cy="17" r="2.2" stroke="none" />
+    </svg>
+  );
+}
+
 export function SettingsIcon({ className = "tool-icon" }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">

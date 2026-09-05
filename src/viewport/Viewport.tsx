@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import { Scene } from "./scene";
-import type { CameraMode, ToolMode, WireframeMode } from "./scene";
+import type { CameraMode, ToolMode, WireframeMode, AlignSubMode } from "./scene";
 import type { PreviewBuild, ScenePart } from "../kernel/types";
 import type { PrimitiveKind, SceneNode, Vec3 } from "../document/types";
 import type { DisplayUnit } from "../measurement";
@@ -12,6 +12,7 @@ interface Props {
   selectedIds: string[];
   cameraMode: CameraMode;
   toolMode: ToolMode;
+  alignSubMode?: AlignSubMode;
   /** Only Push/Pull owns the draggable face-normal arrow and its distance pill. */
   facePushPullEnabled: boolean;
   placementKind: PrimitiveKind | null;
@@ -58,6 +59,7 @@ interface Props {
   onSelectEdges: (id: string | null, points: Vec3[]) => void;
   onSelectFace: (id: string | null, point: Vec3 | null, normal: Vec3 | null, size: number, edges: Vec3[]) => void;
   onPlaceSurface: (point: Vec3, normal: Vec3) => void;
+  onSelectAnchor?: (id: string | null) => void;
   /** Handed the Scene on mount and null on unmount. A keyboard action like
    *  Drop has to call INTO the scene (it needs the built geometry), which the
    *  one-way props everything else uses cannot express. */
@@ -95,12 +97,14 @@ export function Viewport(props: Props) {
     scene.onSelectEdges = (id, points) => latest.current.onSelectEdges(id, points);
     scene.onSelectFace = (id, point, normal, size, edges) => latest.current.onSelectFace(id, point, normal, size, edges);
     scene.onPlaceSurface = (point, normal) => latest.current.onPlaceSurface(point, normal);
+    scene.onSelectAnchor = (id) => latest.current.onSelectAnchor?.(id);
     scene.onCellsChanged = (cells) => latest.current.onCellsChanged?.(cells);
 
     scene.setParts(latest.current.parts);
     scene.setPlacements(latest.current.nodes, latest.current.selectedIds);
     scene.setCameraMode(latest.current.cameraMode);
     scene.setToolMode(latest.current.toolMode);
+    scene.setAlignSubMode(latest.current.alignSubMode ?? "box");
     scene.setFacePushPullEnabled(latest.current.facePushPullEnabled);
     scene.setPlacementPreview(latest.current.placementKind);
     scene.setResizeConstrained(latest.current.resizeConstrained);
@@ -145,6 +149,10 @@ export function Viewport(props: Props) {
   useEffect(() => {
     sceneRef.current?.setToolMode(toolMode);
   }, [toolMode]);
+
+  useEffect(() => {
+    sceneRef.current?.setAlignSubMode(props.alignSubMode ?? "box");
+  }, [props.alignSubMode]);
 
   useEffect(() => {
     sceneRef.current?.setFacePushPullEnabled(props.facePushPullEnabled);

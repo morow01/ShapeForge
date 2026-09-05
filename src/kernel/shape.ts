@@ -444,10 +444,10 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
       break;
     }
     case "torus": {
-      const R = Math.max(p.radius, 1);
-      const r = Math.min(Math.max(p.tubeRadius, 0.2), R - 0.05);
-      const ringSteps = Math.max(8, Math.min(64, Math.round(p.ringSteps ?? 48)));
-      const tubeSteps = Math.max(8, Math.min(64, Math.round(p.tubeSteps ?? 32)));
+      const R = Math.max(p.radius ?? 15, 0.05);
+      const r = Math.min(Math.max(p.tubeRadius ?? 5, 0.01), R - 0.005);
+      const ringSteps = Math.max(8, Math.min(128, Math.round(p.ringSteps ?? 48)));
+      const tubeSteps = Math.max(8, Math.min(128, Math.round(p.tubeSteps ?? 32)));
       const vertices: number[] = [];
       const triangles: number[] = [];
       for (let ring = 0; ring < ringSteps; ring++) {

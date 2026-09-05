@@ -250,8 +250,8 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
     fields: [
       dim("radius", "Ring radius"),
       dim("tubeRadius", "Tube radius"),
-      { key: "ringSteps", label: "Ring steps", min: 8, max: 64, step: 1 },
-      { key: "tubeSteps", label: "Tube steps", min: 8, max: 64, step: 1 },
+      { key: "ringSteps", label: "Ring steps", min: 8, max: 128, step: 1 },
+      { key: "tubeSteps", label: "Tube steps", min: 8, max: 128, step: 1 },
       {
         key: "surfaceEdges", label: "Surface lines", min: 0, max: 1, step: 1,
         options: [{ value: 0, label: "Hidden" }, { value: 1, label: "Shown" }],

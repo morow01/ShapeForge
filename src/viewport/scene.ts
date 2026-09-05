@@ -22,6 +22,9 @@ import type { DisplayUnit } from "../measurement";
 
 export type { CameraMode } from "../document/types";
 export type ToolMode = "select" | "face" | "edge" | "place" | "move" | "rotate" | "align" | "build";
+export type AlignAxis = 0 | 1 | 2;
+export type AlignAnchor = "min" | "center" | "max";
+export type AlignSubMode = "box" | "points";
 export type WireframeMode = "off" | "outlined" | "edges" | "mesh" | "xray" | "transparent";
 
 /** How far the pointer may move between down and up and still count as a click
@@ -612,6 +615,9 @@ export class Scene {
    *  out, and cleared the instant the hover moves off. */
   private alignPreviewGroup = new THREE.Group();
   private alignPreviewMeshes: THREE.Mesh[] = [];
+  private alignSubMode: AlignSubMode = "box";
+  private alignFixedId: string | null = null;
+  onSelectAnchor: ((id: string | null) => void) | null = null;
   private alignPointDrag: AlignPointDrag | null = null;
   private alignDragArrow = new THREE.ArrowHelper(
     new THREE.Vector3(1, 0, 0), new THREE.Vector3(), 1, 0xff5b13, 0.8, 0.35,
@@ -1544,9 +1550,24 @@ export class Scene {
     this.resizeConstrained = value;
   }
 
-  setAlignFixedId(_id: string | null) {
-    // Point-to-point Align makes the dragged object the mover and the other
-    // endpoint the fixed reference, so no separate fixed-id state is needed.
+  setAlignFixedId(id: string | null) {
+    if (this.alignFixedId === id) return;
+    this.alignFixedId = id;
+    this.updateAlignOverlay();
+  }
+
+  setAlignSubMode(mode: AlignSubMode) {
+    if (this.alignSubMode === mode) return;
+    this.alignSubMode = mode;
+    this.clearAlignPreview();
+    if (this.alignPointDrag) {
+      this.alignPointDrag = null;
+      this.alignDragArrow.visible = false;
+      this.controls.enabled = true;
+      this.gizmo.enabled = true;
+      this.onDragChange?.(false);
+    }
+    this.updateAlignOverlay();
   }
 
   /** Shares the part's own face geometry — never its own copy, so it stays in
@@ -2412,11 +2433,11 @@ export class Scene {
     const entries = this.selectedIds
       .map((id) => ({ id, view: this.parts.get(id) }))
       .filter((item): item is { id: string; view: PartView } => !!item.view && item.view.group.visible);
-    const visible = this.toolMode === "align" && entries.length === 2 && !this.showResult;
+    const visible = this.toolMode === "align" && entries.length >= 2 && !this.showResult;
     this.alignBox.visible = visible;
     this.alignHandles.visible = visible;
     if (!visible) {
-      if (this.alignHoverIndex >= 0) {
+      if (this.alignHoverIndex >= 0 && this.alignHandleMeshes[this.alignHoverIndex]) {
         const handle = this.alignHandleMeshes[this.alignHoverIndex];
         handle.material = handle.userData.baseMaterial as THREE.Material;
         this.alignHoverIndex = -1;
@@ -2428,41 +2449,95 @@ export class Scene {
     for (const { view } of entries) view.group.updateWorldMatrix(true, true);
     const union = new THREE.Box3();
     for (const { view } of entries) union.expandByObject(view.group);
-    this.alignBox.box.copy(union);
-    this.alignBox.updateMatrixWorld(true);
 
-    const featurePoints = entries.map(({ view }) => this.alignFeaturePoints(view));
-    const totalHandles = featurePoints.reduce((sum, points) => sum + points.length, 0);
-    this.ensureAlignHandleCount(totalHandles);
-    let handleIndex = 0;
-    for (let objectIndex = 0; objectIndex < 2; objectIndex++) {
-      for (let pointIndex = 0; pointIndex < featurePoints[objectIndex].length; pointIndex++) {
-        const handle = this.alignHandleMeshes[handleIndex++];
-        handle.visible = true;
-        handle.position.copy(featurePoints[objectIndex][pointIndex]);
-        handle.userData.alignObjectIndex = objectIndex;
-        handle.userData.alignPointIndex = pointIndex;
-        (handle.userData.baseMaterial as THREE.MeshBasicMaterial).color.setHex(
-          objectIndex === 0 ? 0xff8a4c : 0x7c68ee,
-        );
+    if (this.alignSubMode === "box") {
+      this.alignDragArrow.visible = false;
+      const fixedEntry = entries.find((e) => e.id === this.alignFixedId);
+      const box = fixedEntry ? new THREE.Box3().setFromObject(fixedEntry.view.group) : union;
+      this.alignBox.box.copy(box);
+      this.alignBox.updateMatrixWorld(true);
+
+      this.ensureAlignHandleCount(9);
+      const centre = box.getCenter(new THREE.Vector3());
+      const offset = Math.max(2, this.worldSnapTolerance(centre) * 3.2);
+      const anchors = (min: number, mid: number, max: number) => [min, mid, max];
+      const xs = anchors(box.min.x, centre.x, box.max.x);
+      const ys = anchors(box.min.y, centre.y, box.max.y);
+      const zs = anchors(box.min.z, centre.z, box.max.z);
+
+      let idx = 0;
+      for (let i = 0; i < 3; i++) {
+        const h = this.alignHandleMeshes[idx++];
+        h.visible = true;
+        h.position.set(xs[i], box.min.y - offset, box.min.z);
+        h.userData.alignType = "box";
+        h.userData.alignAxis = 0;
+        h.userData.alignAnchor = i === 0 ? "min" : i === 1 ? "center" : "max";
+        (h.userData.baseMaterial as THREE.MeshBasicMaterial).color.setHex(i === 1 ? 0x222a30 : 0x87939a);
       }
-    }
-    for (; handleIndex < this.alignHandleMeshes.length; handleIndex++) this.alignHandleMeshes[handleIndex].visible = false;
-    // See the matching comment in updateResizeOverlay — a world-space floor
-    // here breaks the constant-screen-size these dots are meant to have.
-    const handleSize = Math.max(MIN_HANDLE_WORLD, this.worldSnapTolerance(union.getCenter(new THREE.Vector3())) * 0.62);
-    for (let i = 0; i < this.alignHandleMeshes.length; i++) {
-      const handle = this.alignHandleMeshes[i];
-      handle.userData.baseScale = handleSize;
-      handle.scale.setScalar(handleSize * (i === this.alignHoverIndex ? HOVER_GROW : 1));
+      for (let i = 0; i < 3; i++) {
+        const h = this.alignHandleMeshes[idx++];
+        h.visible = true;
+        h.position.set(box.min.x - offset, ys[i], box.min.z);
+        h.userData.alignType = "box";
+        h.userData.alignAxis = 1;
+        h.userData.alignAnchor = i === 0 ? "min" : i === 1 ? "center" : "max";
+        (h.userData.baseMaterial as THREE.MeshBasicMaterial).color.setHex(i === 1 ? 0x222a30 : 0x87939a);
+      }
+      for (let i = 0; i < 3; i++) {
+        const h = this.alignHandleMeshes[idx++];
+        h.visible = true;
+        h.position.set(box.max.x + offset, box.max.y, zs[i]);
+        h.userData.alignType = "box";
+        h.userData.alignAxis = 2;
+        h.userData.alignAnchor = i === 0 ? "min" : i === 1 ? "center" : "max";
+        (h.userData.baseMaterial as THREE.MeshBasicMaterial).color.setHex(i === 1 ? 0x222a30 : 0x87939a);
+      }
+      for (; idx < this.alignHandleMeshes.length; idx++) {
+        this.alignHandleMeshes[idx].visible = false;
+      }
+
+      const handleSize = Math.max(MIN_HANDLE_WORLD, this.worldSnapTolerance(centre) * 0.75);
+      for (let i = 0; i < 9; i++) {
+        const handle = this.alignHandleMeshes[i];
+        handle.userData.baseScale = handleSize;
+        handle.scale.setScalar(handleSize * (i === this.alignHoverIndex ? HOVER_GROW : 1));
+      }
+    } else {
+      this.alignBox.box.copy(union);
+      this.alignBox.updateMatrixWorld(true);
+
+      const featurePoints = entries.slice(0, 2).map(({ view }) => this.alignFeaturePoints(view));
+      const totalHandles = featurePoints.reduce((sum, points) => sum + points.length, 0);
+      this.ensureAlignHandleCount(totalHandles);
+      let handleIndex = 0;
+      for (let objectIndex = 0; objectIndex < 2 && objectIndex < entries.length; objectIndex++) {
+        for (let pointIndex = 0; pointIndex < featurePoints[objectIndex].length; pointIndex++) {
+          const handle = this.alignHandleMeshes[handleIndex++];
+          handle.visible = true;
+          handle.position.copy(featurePoints[objectIndex][pointIndex]);
+          handle.userData.alignType = "points";
+          handle.userData.alignObjectIndex = objectIndex;
+          handle.userData.alignPointIndex = pointIndex;
+          (handle.userData.baseMaterial as THREE.MeshBasicMaterial).color.setHex(
+            objectIndex === 0 ? 0xff8a4c : 0x7c68ee,
+          );
+        }
+      }
+      for (; handleIndex < this.alignHandleMeshes.length; handleIndex++) this.alignHandleMeshes[handleIndex].visible = false;
+
+      const handleSize = Math.max(MIN_HANDLE_WORLD, this.worldSnapTolerance(union.getCenter(new THREE.Vector3())) * 0.62);
+      for (let i = 0; i < this.alignHandleMeshes.length; i++) {
+        const handle = this.alignHandleMeshes[i];
+        handle.userData.baseScale = handleSize;
+        handle.scale.setScalar(handleSize * (i === this.alignHoverIndex ? HOVER_GROW : 1));
+      }
     }
   }
 
-  /** Same nearest-on-screen hover as the resize corners (updateResizeHover):
-   *  highlights whichever align dot the pointer is closest to, without
-   *  requiring a pixel-perfect hit on a handle rendered at world scale. */
+  /** Highlights whichever align dot the pointer is closest to. */
   private updateAlignHover(e: PointerEvent) {
-    if (this.alignPointDrag) {
+    if (this.alignSubMode === "points" && this.alignPointDrag) {
       this.updateAlignPointDrag(e);
       return;
     }
@@ -2470,7 +2545,8 @@ export class Scene {
     if (this.alignHandles.visible) {
       const rect = this.renderer.domElement.getBoundingClientRect();
       let nearest = 16;
-      for (let i = 0; i < this.alignHandleMeshes.length; i++) {
+      const count = this.alignSubMode === "box" ? 9 : this.alignHandleMeshes.length;
+      for (let i = 0; i < count && i < this.alignHandleMeshes.length; i++) {
         if (!this.alignHandleMeshes[i].visible) continue;
         const p = this.alignHandleMeshes[i].position.clone().project(this.camera);
         const x = rect.left + ((p.x + 1) / 2) * rect.width;
@@ -2480,7 +2556,7 @@ export class Scene {
       }
     }
     if (next === this.alignHoverIndex) return;
-    if (this.alignHoverIndex >= 0) {
+    if (this.alignHoverIndex >= 0 && this.alignHandleMeshes[this.alignHoverIndex]) {
       const old = this.alignHandleMeshes[this.alignHoverIndex];
       old.material = old.userData.baseMaterial as THREE.Material;
       old.scale.setScalar(old.userData.baseScale ?? 1);
@@ -2490,6 +2566,11 @@ export class Scene {
       const handle = this.alignHandleMeshes[next];
       handle.material = this.alignHoverMaterial;
       handle.scale.setScalar((handle.userData.baseScale ?? 1) * HOVER_GROW);
+      if (this.alignSubMode === "box") {
+        this.showAlignPreview(handle.userData.alignAxis as AlignAxis, handle.userData.alignAnchor as AlignAnchor);
+      }
+    } else {
+      this.clearAlignPreview();
     }
     if (this.alignHandles.visible) {
       this.renderer.domElement.style.cursor = next < 0 ? "" : "pointer";
@@ -2503,7 +2584,14 @@ export class Scene {
     this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
     this.raycaster.setFromCamera(this.pointer, this.camera);
     const hit = this.raycaster.intersectObjects(this.alignHandleMeshes, false)[0]?.object as THREE.Mesh | undefined;
-    if (!hit) return false;
+    if (!hit || !hit.visible) return false;
+
+    if (this.alignSubMode === "box") {
+      this.alignSelection(hit.userData.alignAxis as AlignAxis, hit.userData.alignAnchor as AlignAnchor);
+      e.preventDefault();
+      return true;
+    }
+
     const objectIndex = hit.userData.alignObjectIndex as number;
     const sourceId = this.selectedIds[objectIndex];
     if (!sourceId) return false;
@@ -2610,6 +2698,75 @@ export class Scene {
     if (!this.alignPreviewMeshes.length) return;
     for (const mesh of this.alignPreviewMeshes) this.alignPreviewGroup.remove(mesh);
     this.alignPreviewMeshes = [];
+  }
+
+  /** The move each selected object needs to land on the given align dot —
+   *  shared by alignSelection (which applies it) and showAlignPreview
+   *  (which only draws it). Only ever returns entries for objects that
+   *  would actually move: an object already sitting on the target, or the
+   *  fixed anchor object, contributes exactly zero delta and is left out. */
+  private alignMoves(axis: AlignAxis, anchor: AlignAnchor): { id: string; view: PartView; delta: number }[] {
+    const selected = this.selectedIds
+      .map((id) => ({ id, view: this.parts.get(id), node: findNode(this.lastNodes, id) }))
+      .filter((item): item is { id: string; view: PartView; node: SceneNode } => !!item.view && !!item.node);
+    if (selected.length < 2) return [];
+
+    const boxes = selected.map(({ view }) => new THREE.Box3().setFromObject(view.group));
+    const fixedIndex = this.alignFixedId
+      ? selected.findIndex((s) => s.id === this.alignFixedId)
+      : -1;
+    const reference = fixedIndex >= 0 ? boxes[fixedIndex] : boxes.reduce((all, box) => all.union(box.clone()), new THREE.Box3());
+    const target = anchor === "min"
+      ? reference.min.getComponent(axis)
+      : anchor === "max"
+        ? reference.max.getComponent(axis)
+        : reference.getCenter(new THREE.Vector3()).getComponent(axis);
+
+    const moves: { id: string; view: PartView; delta: number }[] = [];
+    selected.forEach(({ id, view }, index) => {
+      if (fixedIndex >= 0 && index === fixedIndex) return;
+      const box = boxes[index];
+      const current = anchor === "min"
+        ? box.min.getComponent(axis)
+        : anchor === "max"
+          ? box.max.getComponent(axis)
+          : box.getCenter(new THREE.Vector3()).getComponent(axis);
+      const delta = target - current;
+      if (Math.abs(delta) < 1e-9) return;
+      moves.push({ id, view, delta });
+    });
+    return moves;
+  }
+
+  alignSelection(axis: AlignAxis, anchor: AlignAnchor) {
+    const moves = this.alignMoves(axis, anchor);
+    if (!moves.length) return;
+    const updates: { id: string; position: Vec3 }[] = [];
+    for (const { id, view, delta } of moves) {
+      const node = findNode(this.lastNodes, id);
+      if (!node) continue;
+      const position = [...node.position] as Vec3;
+      position[axis] = Math.round((position[axis] + delta) * 1e6) / 1e6;
+      view.group.position.setComponent(axis, view.group.position.getComponent(axis) + delta);
+      updates.push({ id, position });
+    }
+    if (updates.length) this.onAlignObjects?.(updates);
+    this.updateAlignOverlay();
+  }
+
+  private showAlignPreview(axis: AlignAxis, anchor: AlignAnchor) {
+    this.clearAlignPreview();
+    for (const { view, delta } of this.alignMoves(axis, anchor)) {
+      const faces = view.geom[0]?.faces;
+      if (!faces) continue;
+      const ghost = new THREE.Mesh(faces, MATERIALS.alignPreview);
+      ghost.position.copy(view.group.position).setComponent(axis, view.group.position.getComponent(axis) + delta);
+      ghost.rotation.copy(view.group.rotation);
+      ghost.scale.copy(view.group.scale);
+      ghost.renderOrder = 30;
+      this.alignPreviewGroup.add(ghost);
+      this.alignPreviewMeshes.push(ghost);
+    }
   }
 
   /**
@@ -6565,6 +6722,17 @@ export class Scene {
     // tool a click on an object is just a click on the OBJECT — which is
     // what makes plain dragging reliably move things.
     if (this.toolMode === "face" && !(e.ctrlKey || e.metaKey || e.shiftKey) && this.selectFaceAt(e)) return;
+    if (this.toolMode === "align" && this.alignSubMode === "box" && !(e.ctrlKey || e.metaKey || e.shiftKey)) {
+      const hitId = this.hitTest(e);
+      const rootId = hitId ? this.findRootOwner(hitId) : null;
+      if (rootId && this.selectedIds.includes(rootId)) {
+        const nextAnchor = this.alignFixedId === rootId ? null : rootId;
+        this.setAlignFixedId(nextAnchor);
+        this.onSelectAnchor?.(nextAnchor);
+        this.updateAlignOverlay();
+        return;
+      }
+    }
     this.pick(e, e.ctrlKey || e.metaKey || e.shiftKey);
   };
 
