@@ -107,7 +107,7 @@ interface MeshQuality {
  * comfortably under 100ms even at a 100mm radius (measured), which is
  * already smoother than a viewport needs while dragging a slider live.
  */
-const EDIT_QUALITY: MeshQuality = { tolerance: 0.05, angularTolerance: 0.4 };
+const EDIT_QUALITY: MeshQuality = { tolerance: 0.05, angularTolerance: 0.2 };
 
 /**
  * Tessellation quality for an STL export, chosen per export by the user (the
@@ -199,17 +199,17 @@ function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdg
   };
 }
 
-/** Rebuild display normals independently for every CAD face.
+/** Preserve exact analytic display normals per CAD face while isolating
+ * vertex indexing to maintain sharp B-Rep boundaries across adjacent faces.
  *
- * OCCT occasionally returns a misleading vertex normal at a corner where a
- * fillet terminates against a chamfer.  The triangles themselves are sound
- * (and therefore export correctly), but sharing that normal across adjacent
- * faces produces a dark triangular "dent" in the viewport.  Welding only
- * equal positions inside one face gives curved faces smooth shading while
- * keeping every real B-Rep boundary sharp. */
+ * OCCT computes exact analytic surface normals (e.g. toroidal blend on fillets,
+ * radial on cylinders, spherical on spheres). We preserve these exact normals,
+ * falling back to face-triangle cross-products only if a normal is missing,
+ * NaN, or degenerate (e.g. at singular multi-blend pole corners). */
 function normalsPerCadFace(faces: MeshedFaces): MeshedFaces {
   const sourceVertices = faces.vertices;
   const sourceTriangles = faces.triangles;
+  const sourceNormals = faces.normals;
   if (!sourceTriangles.length || !faces.faceGroups.length) return faces;
 
   const vertices: number[] = [];
@@ -219,7 +219,9 @@ function normalsPerCadFace(faces: MeshedFaces): MeshedFaces {
   for (const face of faces.faceGroups) {
     const baseVertex = vertices.length / 3;
     const local = new Map<string, number>();
-    const accumulated: number[] = [];
+    const fallbackAccumulated: number[] = [];
+    const exactNormals: ([number, number, number] | null)[] = [];
+
     for (let offset = face.start; offset < face.start + face.count; offset += 3) {
       const sourceIds = [sourceTriangles[offset], sourceTriangles[offset + 1], sourceTriangles[offset + 2]];
       const points = sourceIds.map((id) => {
@@ -228,8 +230,6 @@ function normalsPerCadFace(faces: MeshedFaces): MeshedFaces {
       });
       const ab = [points[1][0] - points[0][0], points[1][1] - points[0][1], points[1][2] - points[0][2]];
       const ac = [points[2][0] - points[0][0], points[2][1] - points[0][1], points[2][2] - points[0][2]];
-      // Keep the cross product unnormalised so larger triangles contribute
-      // proportionally more to the smooth normal.
       const cross = [
         ab[1] * ac[2] - ab[2] * ac[1],
         ab[2] * ac[0] - ab[0] * ac[2],
@@ -237,27 +237,43 @@ function normalsPerCadFace(faces: MeshedFaces): MeshedFaces {
       ];
       for (let corner = 0; corner < 3; corner++) {
         const point = points[corner];
+        const sourceId = sourceIds[corner];
         const key = `${Math.round(point[0] * 1e6)},${Math.round(point[1] * 1e6)},${Math.round(point[2] * 1e6)}`;
         let index = local.get(key);
         if (index === undefined) {
           index = vertices.length / 3;
           local.set(key, index);
           vertices.push(point[0], point[1], point[2]);
-          accumulated.push(0, 0, 0);
+          fallbackAccumulated.push(0, 0, 0);
+
+          const nx = sourceNormals ? (sourceNormals[sourceId * 3] as number) : NaN;
+          const ny = sourceNormals ? (sourceNormals[sourceId * 3 + 1] as number) : NaN;
+          const nz = sourceNormals ? (sourceNormals[sourceId * 3 + 2] as number) : NaN;
+          const nLen = Math.hypot(nx, ny, nz);
+          if (!isNaN(nLen) && nLen > 0.1) {
+            exactNormals.push([nx / nLen, ny / nLen, nz / nLen]);
+          } else {
+            exactNormals.push(null);
+          }
         }
         triangles[offset + corner] = index;
         const localIndex = index - baseVertex;
-        accumulated[localIndex * 3] += cross[0];
-        accumulated[localIndex * 3 + 1] += cross[1];
-        accumulated[localIndex * 3 + 2] += cross[2];
+        fallbackAccumulated[localIndex * 3] += cross[0];
+        fallbackAccumulated[localIndex * 3 + 1] += cross[1];
+        fallbackAccumulated[localIndex * 3 + 2] += cross[2];
       }
     }
-    for (let index = 0; index < accumulated.length / 3; index++) {
-      const x = accumulated[index * 3];
-      const y = accumulated[index * 3 + 1];
-      const z = accumulated[index * 3 + 2];
-      const length = Math.hypot(x, y, z) || 1;
-      normals.push(x / length, y / length, z / length);
+    for (let index = 0; index < exactNormals.length; index++) {
+      const exact = exactNormals[index];
+      if (exact) {
+        normals.push(exact[0], exact[1], exact[2]);
+      } else {
+        const x = fallbackAccumulated[index * 3];
+        const y = fallbackAccumulated[index * 3 + 1];
+        const z = fallbackAccumulated[index * 3 + 2];
+        const length = Math.hypot(x, y, z) || 1;
+        normals.push(x / length, y / length, z / length);
+      }
     }
   }
   return { ...faces, vertices, triangles, normals };

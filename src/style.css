@@ -400,8 +400,16 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
   background: transparent;
 }
 .tool-rail button.active { color: #087a79; background: #dff5f4; border-color: #55c5c3; }
-/* Rules off the toggles below from the run of mutually exclusive tools. */
-.tool-rail-sep { height: 1px; margin: 3px 4px; background: #dae2e7; }
+/* Category divider separator in the left tool rail. */
+.tool-rail-sep {
+  display: block;
+  width: 28px;
+  height: 1px;
+  margin: 5px auto;
+  background: #d8e0e5;
+  border: none;
+  flex-shrink: 0;
+}
 .tool-symbol { font-size: 20px; line-height: 1; }
 .face-operation-symbol { font-size: 22px; font-weight: 600; }
 .text-tool-symbol { font-family: Georgia, serif; font-size: 21px; font-weight: 700; }

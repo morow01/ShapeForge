@@ -220,28 +220,25 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
         if (topCorner <= 0 && bottomCorner <= 0) {
           s = makeCylinder(p.radius, p.height);
         } else {
-          const curveSteps = 24;
           let pen = draw([0, 0]);
           const baseRadius = p.radius - bottomCorner;
           if (baseRadius > 1e-7) {
             pen = pen.lineTo([baseRadius, 0]);
           }
           if (bottomCorner > 0) {
-            const cx = p.radius - bottomCorner;
-            const cy = bottomCorner;
-            for (let i = 1; i <= curveSteps; i++) {
-              const angle = -Math.PI / 2 + (Math.PI / 2) * (i / curveSteps);
-              pen = pen.lineTo([cx + bottomCorner * Math.cos(angle), cy + bottomCorner * Math.sin(angle)]);
-            }
+            const mid = [
+              p.radius - bottomCorner + bottomCorner * Math.cos(-Math.PI / 4),
+              bottomCorner + bottomCorner * Math.sin(-Math.PI / 4),
+            ] as [number, number];
+            pen = pen.threePointsArcTo([p.radius, bottomCorner], mid);
           }
           pen = pen.lineTo([p.radius, p.height - topCorner]);
           if (topCorner > 0) {
-            const cx = p.radius - topCorner;
-            const cy = p.height - topCorner;
-            for (let i = 1; i <= curveSteps; i++) {
-              const angle = (Math.PI / 2) * (i / curveSteps);
-              pen = pen.lineTo([cx + topCorner * Math.cos(angle), cy + topCorner * Math.sin(angle)]);
-            }
+            const mid = [
+              p.radius - topCorner + topCorner * Math.cos(Math.PI / 4),
+              p.height - topCorner + topCorner * Math.sin(Math.PI / 4),
+            ] as [number, number];
+            pen = pen.threePointsArcTo([p.radius - topCorner, p.height], mid);
           }
           pen = pen.lineTo([0, p.height]);
           s = pen.close().sketchOnPlane("XZ").revolve([0, 0, 1]) as Shape3D;
@@ -651,10 +648,9 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
       const innerBottom = Math.min(Math.max(p.innerBottomFillet ?? legacyBevel, 0), maxRim);
 
       if (sides >= 32) {
-        // Revolve the 2D annular profile directly. This avoids OCCT's BRepFillet
-        // seam artifacts on cylindrical faces, which caused jagged sawtooth triangles
-        // along the rounded rim.
-        const curveSteps = 16;
+        // Revolve the 2D annular profile directly with true circular arcs.
+        // This avoids OCCT BRepFillet seam artifacts while producing an exact analytic
+        // toroidal blend surface for each rounded rim.
         let pen = draw([rIn, h - innerTop]);
 
         // Inner vertical wall down
@@ -664,10 +660,8 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
         if (innerBottom > 0) {
           const cx = rIn + innerBottom;
           const cy = innerBottom;
-          for (let i = 1; i <= curveSteps; i++) {
-            const angle = Math.PI + (Math.PI / 2) * (i / curveSteps);
-            pen = pen.lineTo([cx + innerBottom * Math.cos(angle), cy + innerBottom * Math.sin(angle)]);
-          }
+          const mid = [cx + innerBottom * Math.cos(5 * Math.PI / 4), cy + innerBottom * Math.sin(5 * Math.PI / 4)] as [number, number];
+          pen = pen.threePointsArcTo([rIn + innerBottom, 0], mid);
         }
 
         // Bottom wall
@@ -677,10 +671,8 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
         if (outerBottom > 0) {
           const cx = rOut - outerBottom;
           const cy = outerBottom;
-          for (let i = 1; i <= curveSteps; i++) {
-            const angle = -Math.PI / 2 + (Math.PI / 2) * (i / curveSteps);
-            pen = pen.lineTo([cx + outerBottom * Math.cos(angle), cy + outerBottom * Math.sin(angle)]);
-          }
+          const mid = [cx + outerBottom * Math.cos(-Math.PI / 4), cy + outerBottom * Math.sin(-Math.PI / 4)] as [number, number];
+          pen = pen.threePointsArcTo([rOut, outerBottom], mid);
         }
 
         // Outer vertical wall up
@@ -690,10 +682,8 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
         if (outerTop > 0) {
           const cx = rOut - outerTop;
           const cy = h - outerTop;
-          for (let i = 1; i <= curveSteps; i++) {
-            const angle = (Math.PI / 2) * (i / curveSteps);
-            pen = pen.lineTo([cx + outerTop * Math.cos(angle), cy + outerTop * Math.sin(angle)]);
-          }
+          const mid = [cx + outerTop * Math.cos(Math.PI / 4), cy + outerTop * Math.sin(Math.PI / 4)] as [number, number];
+          pen = pen.threePointsArcTo([rOut - outerTop, h], mid);
         }
 
         // Top wall
@@ -703,10 +693,8 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
         if (innerTop > 0) {
           const cx = rIn + innerTop;
           const cy = h - innerTop;
-          for (let i = 1; i <= curveSteps; i++) {
-            const angle = Math.PI / 2 + (Math.PI / 2) * (i / curveSteps);
-            pen = pen.lineTo([cx + innerTop * Math.cos(angle), cy + innerTop * Math.sin(angle)]);
-          }
+          const mid = [cx + innerTop * Math.cos(3 * Math.PI / 4), cy + innerTop * Math.sin(3 * Math.PI / 4)] as [number, number];
+          pen = pen.threePointsArcTo([rIn, h - innerTop], mid);
         }
 
         s = pen.close().sketchOnPlane("XZ").revolve([0, 0, 1]) as Shape3D;
@@ -1383,6 +1371,11 @@ function hollowEditedCylinder(solid: Shape3D, op: ShellOp, baseNode?: NodeSpec):
 
   const cutterHeight = cutterZMax - cutterZMin;
   if (cutterHeight <= 0.01) return null;
+
+  if (Math.abs(innerRx - innerRy) < 1e-4 && sides >= 32) {
+    const cutter = makeCylinder(innerRx, cutterHeight).translate([xCenter, yCenter, cutterZMin]) as Shape3D;
+    return solid.cut(cutter) as Shape3D;
+  }
 
   const points: [number, number][] = Array.from({ length: sides }, (_, i) => {
     const angle = (2 * Math.PI * i) / sides;
