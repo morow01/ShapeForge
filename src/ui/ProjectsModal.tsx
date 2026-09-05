@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import { useDoc } from "../document/store";
 import { exportProjectFile, loadProject } from "../document/persist";
 import type { ProjectMeta } from "../document/types";
+import { DuplicateIcon, ExportIcon, FolderOpenIcon, PlusIcon, TrashIcon } from "./icons";
 
 function timeAgo(timestamp: number): string {
   const seconds = Math.floor((Date.now() - timestamp) / 1000);
@@ -120,10 +121,12 @@ export function ProjectsModal({
           />
           <div className="modal-actions">
             <button className="modal-btn" onClick={() => fileInputRef.current?.click()} title="Open a .shapeforge or .json file from your computer">
-              📂 Open File
+              <FolderOpenIcon className="modal-btn-icon" />
+              <span>Open File</span>
             </button>
             <button className="modal-btn primary" onClick={handleNew} title="Create a new design">
-              ＋ New Project
+              <PlusIcon className="modal-btn-icon" />
+              <span>New Project</span>
             </button>
           </div>
         </div>
@@ -177,21 +180,23 @@ export function ProjectsModal({
                       onClick={() => duplicateProject(p.id)}
                       title="Duplicate project"
                     >
-                      📋 Duplicate
+                      <DuplicateIcon className="card-btn-icon" />
+                      <span>Duplicate</span>
                     </button>
                     <button
                       className="card-btn icon"
                       onClick={() => handleExport(p)}
                       title="Export .shapeforge file"
                     >
-                      💾 Export
+                      <ExportIcon className="card-btn-icon" />
+                      <span>Export</span>
                     </button>
                     <button
                       className="card-btn danger icon"
                       onClick={() => handleDelete(p)}
                       title="Delete project"
                     >
-                      🗑️
+                      <TrashIcon className="card-btn-icon" />
                     </button>
                   </div>
                 </div>

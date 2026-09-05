@@ -1191,3 +1191,46 @@ export function BuildPlateIcon({ className = "topbar-icon" }: { className?: stri
   );
 }
 
+/** Folder open icon */
+export function FolderOpenIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <path d="M4 6.5A1.5 1.5 0 0 1 5.5 5h3.5c.4 0 .78.16 1.06.44l1.5 1.5c.28.28.66.44 1.06.44H18.5A1.5 1.5 0 0 1 20 8.88V11H5.5" />
+      <path d="M2.5 20l2.2-8.2A1.5 1.5 0 0 1 6.15 10.7h15.2a1.5 1.5 0 0 1 1.45 1.9l-2.2 7.4" />
+    </svg>
+  );
+}
+
+/** Duplicate / Copy icon: overlapping documents */
+export function DuplicateIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <rect x="8" y="8" width="13" height="13" rx="2" />
+      <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+    </svg>
+  );
+}
+
+/** Trash can delete icon */
+export function TrashIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <path d="M3 6h18" />
+      <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+      <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+      <line x1="10" y1="11" x2="10" y2="17" />
+      <line x1="14" y1="11" x2="14" y2="17" />
+    </svg>
+  );
+}
+
+/** Plus / Add icon */
+export function PlusIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <path d="M12 5v14M5 12h14" />
+    </svg>
+  );
+}
+
+
