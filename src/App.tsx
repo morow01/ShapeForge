@@ -104,7 +104,7 @@ import {
   localMeshBounds,
   mergeBinarySTLs,
 } from "./export/stl";
-import { findTouchingSeam, positionWithReferenceGap } from "./snapping/spacing";
+import { findTouchingSeam, positionWithBoundsGap } from "./snapping/spacing";
 import type { TouchingSeam } from "./snapping/spacing";
 import type { SnapAnchor, SnapAxis } from "./snapping/snap";
 
@@ -985,12 +985,10 @@ export function App() {
     const movingId = selectedIds[spacingSwapped ? 0 : 1];
     const fixedNode = findNode(nodes, fixedId);
     const movingNode = findNode(nodes, movingId);
-    const fixedPart = parts.find((p) => p.id === fixedId);
-    const movingPart = parts.find((p) => p.id === movingId);
-    return fixedNode && movingNode && fixedPart && movingPart
-      ? { fixedNode, movingNode, fixedPart, movingPart }
+    return fixedNode && movingNode
+      ? { fixedNode, movingNode }
       : null;
-  }, [nodes, parts, selectedIds, spacingSwapped]);
+  }, [nodes, selectedIds, spacingSwapped]);
 
   useEffect(() => setSpacingSwapped(false), [selectedIds[0], selectedIds[1]]);
   useEffect(() => {
@@ -1640,11 +1638,13 @@ export function App() {
 
   const applyGap = useCallback(() => {
     if (!spacingSelection || !Number.isFinite(gapMm)) return;
-    const position = positionWithReferenceGap(
-      spacingSelection.fixedNode,
-      spacingSelection.fixedPart.mesh,
+    const fixedBounds = sceneRef.current?.getObjectBounds(spacingSelection.fixedNode.id);
+    const movingBounds = sceneRef.current?.getObjectBounds(spacingSelection.movingNode.id);
+    if (!fixedBounds || !movingBounds) return;
+    const position = positionWithBoundsGap(
+      fixedBounds,
       spacingSelection.movingNode,
-      spacingSelection.movingPart.mesh,
+      movingBounds,
       gapAxis,
       fixedAnchor,
       movingAnchor,

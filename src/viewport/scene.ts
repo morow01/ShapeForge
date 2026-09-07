@@ -1111,6 +1111,18 @@ export class Scene {
     return box.isEmpty() ? gObj.position.clone() : box.getCenter(new THREE.Vector3());
   }
 
+  getObjectBounds(id: string): { min: Vec3; max: Vec3 } | null {
+    const obj = this.assemblyGroups.get(id) ?? this.parts.get(id)?.group;
+    if (!obj) return null;
+    obj.updateWorldMatrix(true, true);
+    const box = new THREE.Box3().setFromObject(obj);
+    if (box.isEmpty()) return null;
+    return {
+      min: [box.min.x, box.min.y, box.min.z],
+      max: [box.max.x, box.max.y, box.max.z],
+    };
+  }
+
   private findRootOwner(targetId: string): string {
     const check = (list: SceneNode[]): string | null => {
       for (const node of list) {
@@ -1766,65 +1778,68 @@ export class Scene {
    * sampled curves contain many intermediate render points, so retain graph
    * junctions and genuine direction changes rather than rejecting the whole
    * object once it happens to contain more than a fixed number of points. */
-  private alignFeaturePoints(view: PartView): THREE.Vector3[] {
-    view.group.updateWorldMatrix(true, true);
-    const position = view.geom[0].lines.getAttribute("position");
-    const vertices = new Map<string, { point: THREE.Vector3; count: number; neighbours: Set<string> }>();
-    const topologyEndpoints = new Set<string>();
-    const keyFor = (point: THREE.Vector3) =>
-      [point.x, point.y, point.z].map((value) => Math.round(value * 100) / 100).join("|");
-    if (position) {
-      for (let index = 0; index + 1 < position.count; index += 2) {
-        const points = [index, index + 1].map((offset) =>
-          new THREE.Vector3().fromBufferAttribute(position, offset).applyMatrix4(view.group.matrixWorld));
-        const keys = points.map(keyFor);
-        for (let endpoint = 0; endpoint < 2; endpoint++) {
-          const key = keys[endpoint];
-          const existing = vertices.get(key);
-          if (existing) existing.count++;
-          else vertices.set(key, { point: points[endpoint], count: 1, neighbours: new Set() });
-          if (keys[0] !== keys[1]) vertices.get(key)!.neighbours.add(keys[1 - endpoint]);
+  private alignFeaturePoints(obj: THREE.Object3D, view?: PartView): THREE.Vector3[] {
+    if (view) {
+      view.group.updateWorldMatrix(true, true);
+      const position = view.geom[0]?.lines?.getAttribute("position");
+      const vertices = new Map<string, { point: THREE.Vector3; count: number; neighbours: Set<string> }>();
+      const topologyEndpoints = new Set<string>();
+      const keyFor = (point: THREE.Vector3) =>
+        [point.x, point.y, point.z].map((value) => Math.round(value * 100) / 100).join("|");
+      if (position) {
+        for (let index = 0; index + 1 < position.count; index += 2) {
+          const points = [index, index + 1].map((offset) =>
+            new THREE.Vector3().fromBufferAttribute(position, offset).applyMatrix4(view.group.matrixWorld));
+          const keys = points.map(keyFor);
+          for (let endpoint = 0; endpoint < 2; endpoint++) {
+            const key = keys[endpoint];
+            const existing = vertices.get(key);
+            if (existing) existing.count++;
+            else vertices.set(key, { point: points[endpoint], count: 1, neighbours: new Set() });
+            if (keys[0] !== keys[1]) vertices.get(key)!.neighbours.add(keys[1 - endpoint]);
+          }
+        }
+        // Buffer groups mirror Replicad's topological CAD edges. Their first
+        // and last rendered vertices are stable feature points even when the
+        // edge between them is sampled into dozens of curve segments.
+        for (const group of view.geom[0]?.lines?.groups ?? []) {
+          if (group.count < 1) continue;
+          const firstIndex = group.start;
+          const lastIndex = Math.min(position.count - 1, group.start + group.count - 1);
+          topologyEndpoints.add(keyFor(
+            new THREE.Vector3().fromBufferAttribute(position, firstIndex).applyMatrix4(view.group.matrixWorld),
+          ));
+          topologyEndpoints.add(keyFor(
+            new THREE.Vector3().fromBufferAttribute(position, lastIndex).applyMatrix4(view.group.matrixWorld),
+          ));
         }
       }
-      // Buffer groups mirror Replicad's topological CAD edges. Their first
-      // and last rendered vertices are stable feature points even when the
-      // edge between them is sampled into dozens of curve segments.
-      for (const group of view.geom[0].lines.groups) {
-        if (group.count < 1) continue;
-        const firstIndex = group.start;
-        const lastIndex = Math.min(position.count - 1, group.start + group.count - 1);
-        topologyEndpoints.add(keyFor(
-          new THREE.Vector3().fromBufferAttribute(position, firstIndex).applyMatrix4(view.group.matrixWorld),
-        ));
-        topologyEndpoints.add(keyFor(
-          new THREE.Vector3().fromBufferAttribute(position, lastIndex).applyMatrix4(view.group.matrixWorld),
-        ));
-      }
+      const graphVertices = [...vertices.values()];
+      const primaryPoints = [...vertices.entries()]
+        .filter(([key, entry]) => topologyEndpoints.has(key) || entry.count >= 3 || entry.neighbours.size !== 2)
+        .map(([, entry]) => entry.point);
+      const featurePoints = graphVertices
+        .filter((entry) => {
+          if (entry.count >= 3 || entry.neighbours.size !== 2) return true;
+          const [firstKey, secondKey] = [...entry.neighbours];
+          const first = vertices.get(firstKey)?.point;
+          const second = vertices.get(secondKey)?.point;
+          if (!first || !second) return true;
+          const a = first.clone().sub(entry.point).normalize();
+          const b = second.clone().sub(entry.point).normalize();
+          // A straight/smooth sample approaches 180 degrees. Keep a point only
+          // when the edge changes direction by more than six degrees.
+          return a.angleTo(b) < Math.PI - THREE.MathUtils.degToRad(6);
+        })
+        .map((entry) => entry.point);
+      if (featurePoints.length >= 4 && featurePoints.length <= 96) return featurePoints;
+      // Detailed booleans can contain hundreds of curve samples. In that case
+      // keep their true edge endpoints/junctions rather than throwing every
+      // feature away and reverting to an eight-corner bounding box.
+      if (primaryPoints.length >= 4 && primaryPoints.length <= 96) return primaryPoints;
     }
-    const graphVertices = [...vertices.values()];
-    const primaryPoints = [...vertices.entries()]
-      .filter(([key, entry]) => topologyEndpoints.has(key) || entry.count >= 3 || entry.neighbours.size !== 2)
-      .map(([, entry]) => entry.point);
-    const featurePoints = graphVertices
-      .filter((entry) => {
-        if (entry.count >= 3 || entry.neighbours.size !== 2) return true;
-        const [firstKey, secondKey] = [...entry.neighbours];
-        const first = vertices.get(firstKey)?.point;
-        const second = vertices.get(secondKey)?.point;
-        if (!first || !second) return true;
-        const a = first.clone().sub(entry.point).normalize();
-        const b = second.clone().sub(entry.point).normalize();
-        // A straight/smooth sample approaches 180 degrees. Keep a point only
-        // when the edge changes direction by more than six degrees.
-        return a.angleTo(b) < Math.PI - THREE.MathUtils.degToRad(6);
-      })
-      .map((entry) => entry.point);
-    if (featurePoints.length >= 4 && featurePoints.length <= 96) return featurePoints;
-    // Detailed booleans can contain hundreds of curve samples. In that case
-    // keep their true edge endpoints/junctions rather than throwing every
-    // feature away and reverting to an eight-corner bounding box.
-    if (primaryPoints.length >= 4 && primaryPoints.length <= 96) return primaryPoints;
-    const box = new THREE.Box3().setFromObject(view.group);
+    obj.updateWorldMatrix(true, true);
+    const box = new THREE.Box3().setFromObject(obj);
     const fallback: THREE.Vector3[] = [];
     for (let corner = 0; corner < 8; corner++) {
       fallback.push(new THREE.Vector3(
@@ -1833,6 +1848,7 @@ export class Scene {
         corner & 4 ? box.max.z : box.min.z,
       ));
     }
+    fallback.push(box.getCenter(new THREE.Vector3()));
     return fallback;
   }
 
@@ -2488,6 +2504,10 @@ export class Scene {
         view.wire.visible = true;
       }
     }
+    for (const [id, groupObj] of this.assemblyGroups) {
+      const node = findNode(this.lastNodes, id);
+      groupObj.visible = !node?.hidden;
+    }
     if (this.resultView) {
       this.resultView.group.visible = this.showResult;
       if (this.wireframe === "outlined") {
@@ -2853,8 +2873,15 @@ export class Scene {
    *  where that reference actually is, not the union's own extent. */
   private updateAlignOverlay() {
     const entries = this.selectedIds
-      .map((id) => ({ id, view: this.parts.get(id) }))
-      .filter((item): item is { id: string; view: PartView } => !!item.view && item.view.group.visible);
+      .map((id): { id: string; obj: THREE.Group | undefined; view: PartView | undefined } => {
+        const g = this.assemblyGroups.get(id);
+        if (g) return { id, obj: g, view: undefined };
+        const v = this.parts.get(id);
+        return { id, obj: v?.group, view: v };
+      })
+      .filter((item): item is { id: string; obj: THREE.Group; view: PartView | undefined } =>
+        !!item.obj && item.obj.visible
+      );
     const visible = this.toolMode === "align" && entries.length >= 2 && !this.showResult;
     this.alignBox.visible = visible;
     this.alignHandles.visible = visible;
@@ -2868,14 +2895,14 @@ export class Scene {
       return;
     }
 
-    for (const { view } of entries) view.group.updateWorldMatrix(true, true);
+    for (const { obj } of entries) obj.updateWorldMatrix(true, true);
     const union = new THREE.Box3();
-    for (const { view } of entries) union.expandByObject(view.group);
+    for (const { obj } of entries) union.expandByObject(obj);
 
     if (this.alignSubMode === "box") {
       this.alignDragArrow.visible = false;
       const fixedEntry = entries.find((e) => e.id === this.alignFixedId);
-      const box = fixedEntry ? new THREE.Box3().setFromObject(fixedEntry.view.group) : union;
+      const box = fixedEntry ? new THREE.Box3().setFromObject(fixedEntry.obj) : union;
       this.alignBox.box.copy(box);
       this.alignBox.updateMatrixWorld(true);
 
@@ -2929,7 +2956,7 @@ export class Scene {
       this.alignBox.box.copy(union);
       this.alignBox.updateMatrixWorld(true);
 
-      const featurePoints = entries.slice(0, 2).map(({ view }) => this.alignFeaturePoints(view));
+      const featurePoints = entries.slice(0, 2).map(({ obj, view }) => this.alignFeaturePoints(obj, view));
       const totalHandles = featurePoints.reduce((sum, points) => sum + points.length, 0);
       this.ensureAlignHandleCount(totalHandles);
       let handleIndex = 0;
@@ -3083,14 +3110,32 @@ export class Scene {
 
   private showAlignPointPreview(id: string, delta: THREE.Vector3) {
     const view = this.parts.get(id);
-    if (!view) return;
-    const ghost = new THREE.Mesh(view.geom[0].faces, MATERIALS.alignPreview);
-    ghost.position.copy(view.group.position).add(delta);
-    ghost.rotation.copy(view.group.rotation);
-    ghost.scale.copy(view.group.scale);
-    ghost.renderOrder = 30;
-    this.alignPreviewGroup.add(ghost);
-    this.alignPreviewMeshes.push(ghost);
+    const obj = this.assemblyGroups.get(id) ?? view?.group;
+    if (!obj) return;
+    if (view?.geom[0]?.faces) {
+      const ghost = new THREE.Mesh(view.geom[0].faces, MATERIALS.alignPreview);
+      ghost.position.copy(view.group.position).add(delta);
+      ghost.rotation.copy(view.group.rotation);
+      ghost.scale.copy(view.group.scale);
+      ghost.renderOrder = 30;
+      this.alignPreviewGroup.add(ghost);
+      this.alignPreviewMeshes.push(ghost);
+    } else {
+      obj.traverse((child) => {
+        if ((child as THREE.Mesh).isMesh && child !== this.alignBox) {
+          const mesh = child as THREE.Mesh;
+          const ghost = new THREE.Mesh(mesh.geometry, MATERIALS.alignPreview);
+          ghost.matrixAutoUpdate = false;
+          ghost.matrix.copy(mesh.matrixWorld);
+          const translation = new THREE.Matrix4().makeTranslation(delta.x, delta.y, delta.z);
+          ghost.matrix.premultiply(translation);
+          ghost.matrixWorld.copy(ghost.matrix);
+          ghost.renderOrder = 30;
+          this.alignPreviewGroup.add(ghost);
+          this.alignPreviewMeshes.push(ghost);
+        }
+      });
+    }
   }
 
   private finishAlignPointDrag() {
@@ -3103,15 +3148,16 @@ export class Scene {
     this.onDragChange?.(false);
     if (!drag?.targetId || !drag.targetPoint) return;
     const node = findNode(this.lastNodes, drag.sourceId);
-    const view = this.parts.get(drag.sourceId);
-    if (!node || !view) return;
+    const obj = this.assemblyGroups.get(drag.sourceId) ?? this.parts.get(drag.sourceId)?.group;
+    if (!node || !obj) return;
     const delta = drag.targetPoint.clone().sub(drag.sourcePoint);
     const position: Vec3 = [
       node.position[0] + delta.x,
       node.position[1] + delta.y,
       node.position[2] + delta.z,
     ];
-    view.group.position.add(delta);
+    obj.position.add(delta);
+    obj.updateMatrixWorld(true);
     this.onAlignObjects?.([{ id: drag.sourceId, position }]);
     this.updateAlignOverlay();
   }
@@ -3127,13 +3173,18 @@ export class Scene {
    *  (which only draws it). Only ever returns entries for objects that
    *  would actually move: an object already sitting on the target, or the
    *  fixed anchor object, contributes exactly zero delta and is left out. */
-  private alignMoves(axis: AlignAxis, anchor: AlignAnchor): { id: string; view: PartView; delta: number }[] {
+  private alignMoves(axis: AlignAxis, anchor: AlignAnchor): { id: string; obj: THREE.Group; delta: number }[] {
     const selected = this.selectedIds
-      .map((id) => ({ id, view: this.parts.get(id), node: findNode(this.lastNodes, id) }))
-      .filter((item): item is { id: string; view: PartView; node: SceneNode } => !!item.view && !!item.node);
+      .map((id): { id: string; obj: THREE.Group | undefined; node: SceneNode | null } => ({
+        id,
+        obj: this.assemblyGroups.get(id) ?? this.parts.get(id)?.group,
+        node: findNode(this.lastNodes, id),
+      }))
+      .filter((item): item is { id: string; obj: THREE.Group; node: SceneNode } => !!item.obj && item.obj.visible && !!item.node);
     if (selected.length < 2) return [];
 
-    const boxes = selected.map(({ view }) => new THREE.Box3().setFromObject(view.group));
+    for (const { obj } of selected) obj.updateWorldMatrix(true, true);
+    const boxes = selected.map(({ obj }) => new THREE.Box3().setFromObject(obj));
     const fixedIndex = this.alignFixedId
       ? selected.findIndex((s) => s.id === this.alignFixedId)
       : -1;
@@ -3144,8 +3195,8 @@ export class Scene {
         ? reference.max.getComponent(axis)
         : reference.getCenter(new THREE.Vector3()).getComponent(axis);
 
-    const moves: { id: string; view: PartView; delta: number }[] = [];
-    selected.forEach(({ id, view }, index) => {
+    const moves: { id: string; obj: THREE.Group; delta: number }[] = [];
+    selected.forEach(({ id, obj }, index) => {
       if (fixedIndex >= 0 && index === fixedIndex) return;
       const box = boxes[index];
       const current = anchor === "min"
@@ -3155,7 +3206,7 @@ export class Scene {
           : box.getCenter(new THREE.Vector3()).getComponent(axis);
       const delta = target - current;
       if (Math.abs(delta) < 1e-9) return;
-      moves.push({ id, view, delta });
+      moves.push({ id, obj, delta });
     });
     return moves;
   }
@@ -3164,12 +3215,13 @@ export class Scene {
     const moves = this.alignMoves(axis, anchor);
     if (!moves.length) return;
     const updates: { id: string; position: Vec3 }[] = [];
-    for (const { id, view, delta } of moves) {
+    for (const { id, obj, delta } of moves) {
       const node = findNode(this.lastNodes, id);
       if (!node) continue;
       const position = [...node.position] as Vec3;
       position[axis] = Math.round((position[axis] + delta) * 1e6) / 1e6;
-      view.group.position.setComponent(axis, view.group.position.getComponent(axis) + delta);
+      obj.position.setComponent(axis, obj.position.getComponent(axis) + delta);
+      obj.updateMatrixWorld(true);
       updates.push({ id, position });
     }
     if (updates.length) this.onAlignObjects?.(updates);
@@ -3178,16 +3230,36 @@ export class Scene {
 
   private showAlignPreview(axis: AlignAxis, anchor: AlignAnchor) {
     this.clearAlignPreview();
-    for (const { view, delta } of this.alignMoves(axis, anchor)) {
-      const faces = view.geom[0]?.faces;
-      if (!faces) continue;
-      const ghost = new THREE.Mesh(faces, MATERIALS.alignPreview);
-      ghost.position.copy(view.group.position).setComponent(axis, view.group.position.getComponent(axis) + delta);
-      ghost.rotation.copy(view.group.rotation);
-      ghost.scale.copy(view.group.scale);
-      ghost.renderOrder = 30;
-      this.alignPreviewGroup.add(ghost);
-      this.alignPreviewMeshes.push(ghost);
+    for (const { id, obj, delta } of this.alignMoves(axis, anchor)) {
+      const view = this.parts.get(id);
+      if (view?.geom[0]?.faces) {
+        const ghost = new THREE.Mesh(view.geom[0].faces, MATERIALS.alignPreview);
+        ghost.position.copy(view.group.position).setComponent(axis, view.group.position.getComponent(axis) + delta);
+        ghost.rotation.copy(view.group.rotation);
+        ghost.scale.copy(view.group.scale);
+        ghost.renderOrder = 30;
+        this.alignPreviewGroup.add(ghost);
+        this.alignPreviewMeshes.push(ghost);
+      } else {
+        obj.traverse((child) => {
+          if ((child as THREE.Mesh).isMesh && child !== this.alignBox) {
+            const mesh = child as THREE.Mesh;
+            const ghost = new THREE.Mesh(mesh.geometry, MATERIALS.alignPreview);
+            ghost.matrixAutoUpdate = false;
+            ghost.matrix.copy(mesh.matrixWorld);
+            const translation = new THREE.Matrix4().makeTranslation(
+              axis === 0 ? delta : 0,
+              axis === 1 ? delta : 0,
+              axis === 2 ? delta : 0,
+            );
+            ghost.matrix.premultiply(translation);
+            ghost.matrixWorld.copy(ghost.matrix);
+            ghost.renderOrder = 30;
+            this.alignPreviewGroup.add(ghost);
+            this.alignPreviewMeshes.push(ghost);
+          }
+        });
+      }
     }
   }
 

@@ -59,9 +59,24 @@ export function positionWithReferenceGap(
 ): Vec3 {
   const fixed = meshBounds(fixedMesh, fixedNode);
   const moving = meshBounds(movingMesh, movingNode);
+  return positionWithBoundsGap(fixed, movingNode, moving, axis, fixedAnchor, movingAnchor, gap, direction);
+}
+
+/** Moves one chosen reference on the moving object an exact signed distance
+ * from a chosen reference on the fixed object, using precomputed world bounds. */
+export function positionWithBoundsGap(
+  fixedBounds: Bounds3,
+  movingNode: SceneNode,
+  movingBounds: Bounds3,
+  axis: SnapAxis,
+  fixedAnchor: SnapAnchor,
+  movingAnchor: SnapAnchor,
+  gap: number,
+  direction: -1 | 1,
+): Vec3 {
   const i = axis === "x" ? 0 : axis === "y" ? 1 : 2;
-  const fixedReference = coordinate(fixed, i, fixedAnchor);
-  const movingReference = coordinate(moving, i, movingAnchor);
+  const fixedReference = coordinate(fixedBounds, i, fixedAnchor);
+  const movingReference = coordinate(movingBounds, i, movingAnchor);
   const delta = fixedReference + direction * gap - movingReference;
   const position = [...movingNode.position] as Vec3;
   position[i] += delta;

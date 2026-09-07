@@ -1107,12 +1107,19 @@ export const useDoc = create<DocState>()(
       // action and therefore one immutable state transition / undo step.
       setPositions: (updates) => {
         const byId = new Map(updates.map((update) => [update.id, update.position]));
-        set((s) => ({
-          nodes: s.nodes.map((node) => {
+        const updateRecursive = (nodes: SceneNode[]): SceneNode[] =>
+          nodes.map((node) => {
             const position = byId.get(node.id);
-            return position ? { ...node, position } : node;
-          }),
+            const updated = position ? { ...node, position } : node;
+            if (isGroup(updated)) {
+              return { ...updated, children: updateRecursive(updated.children) };
+            }
+            return updated;
+          });
+        set((s) => ({
+          nodes: updateRecursive(s.nodes),
         }));
+        afterBatchedMutation();
       },
 
       duplicateNodes: (source, offset) => {
