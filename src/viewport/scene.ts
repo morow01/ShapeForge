@@ -1270,9 +1270,11 @@ export class Scene {
     if (mode === "orthographic") {
       const halfH = Math.tan(THREE.MathUtils.degToRad(45 / 2)) * distance;
       const halfW = halfH * this.aspect();
-      const cam = new THREE.OrthographicCamera(-halfW, halfW, halfH, -halfH, 0.1, 5000);
+      const cam = new THREE.OrthographicCamera(-halfW, halfW, halfH, -halfH, 0.1, 50000);
       cam.up.set(0, 0, 1);
-      cam.position.copy(posVec);
+      const dir = posVec.clone().sub(tgtVec).normalize();
+      if (dir.lengthSq() < 0.001) dir.set(1, -1, 0.8).normalize();
+      cam.position.copy(tgtVec).addScaledVector(dir, Math.max(3000, distance));
       cam.lookAt(tgtVec);
       if (savedCam?.zoom) cam.zoom = savedCam.zoom;
       cam.updateProjectionMatrix();
@@ -1371,7 +1373,7 @@ export class Scene {
   }
 
   private makePerspective(): THREE.PerspectiveCamera {
-    const cam = new THREE.PerspectiveCamera(45, this.aspect(), 0.1, 5000);
+    const cam = new THREE.PerspectiveCamera(45, this.aspect(), 0.1, 50000);
     cam.up.set(0, 0, 1);
     return cam;
   }
@@ -5827,7 +5829,7 @@ export class Scene {
       this.camera.bottom = -fitHalfH;
       this.camera.updateProjectionMatrix();
 
-      const orthoDist = 300;
+      const orthoDist = Math.max(3000, fitHalfH * 3);
       endPos = center.clone().add(camZ.clone().multiplyScalar(orthoDist));
     }
 
@@ -5858,7 +5860,10 @@ export class Scene {
 
     // Classic ISO 3D view: 45° corner azimuth with 35° isometric elevation
     const defaultTarget = new THREE.Vector3(0, 0, 0);
-    const defaultPos = new THREE.Vector3(150, -150, 115);
+    const defaultDir = new THREE.Vector3(150, -150, 115).normalize();
+    const defaultPos = this.camera instanceof THREE.OrthographicCamera
+      ? defaultDir.clone().multiplyScalar(3000)
+      : new THREE.Vector3(150, -150, 115);
 
     if (this.camera instanceof THREE.OrthographicCamera) {
       const halfH = 105;
@@ -7139,7 +7144,10 @@ export class Scene {
   private snapToDirection(dir: THREE.Vector3) {
     cancelAnimationFrame(this.navAnimFrame);
     const target = this.controls.target.clone();
-    const distance = this.camera.position.distanceTo(target);
+    const isOrtho = this.camera instanceof THREE.OrthographicCamera;
+    const distance = isOrtho
+      ? Math.max(3000, this.camera.position.distanceTo(target))
+      : this.camera.position.distanceTo(target);
     const startDir = this.camera.position.clone().sub(target).normalize();
     const endDir = dir.clone().normalize();
     const rotation = new THREE.Quaternion().setFromUnitVectors(startDir, endDir);
@@ -8456,12 +8464,24 @@ export class Scene {
     if (mode === "orthographic") {
       const halfH = Math.tan(THREE.MathUtils.degToRad(45 / 2)) * distance;
       const halfW = halfH * this.aspect();
-      next = new THREE.OrthographicCamera(-halfW, halfW, halfH, -halfH, 0.1, 5000);
+      next = new THREE.OrthographicCamera(-halfW, halfW, halfH, -halfH, 0.1, 50000);
+      const dir = position.clone().sub(target).normalize();
+      if (dir.lengthSq() < 0.001) dir.set(1, -1, 0.8).normalize();
+      next.position.copy(target).addScaledVector(dir, Math.max(3000, distance));
     } else {
       next = this.makePerspective();
+      if (this.camera instanceof THREE.OrthographicCamera) {
+        const currentOrtho = this.camera as THREE.OrthographicCamera;
+        const halfH = (currentOrtho.top - currentOrtho.bottom) / (2 * (currentOrtho.zoom || 1));
+        const perspDist = halfH / Math.tan(THREE.MathUtils.degToRad(45 / 2));
+        const dir = position.clone().sub(target).normalize();
+        if (dir.lengthSq() < 0.001) dir.set(1, -1, 0.8).normalize();
+        next.position.copy(target).addScaledVector(dir, Math.max(50, perspDist));
+      } else {
+        next.position.copy(position);
+      }
     }
     next.up.set(0, 0, 1);
-    next.position.copy(position);
     next.lookAt(target);
 
     this.controls.removeEventListener("change", this.onCameraChange);
@@ -8568,6 +8588,16 @@ export class Scene {
   renderFrame() {
     this.syncSize();
     this.controls.update();
+    if (this.camera instanceof THREE.OrthographicCamera) {
+      const target = this.controls.target;
+      const dist = this.camera.position.distanceTo(target);
+      if (dist < 2000) {
+        const dir = this.camera.position.clone().sub(target).normalize();
+        if (dir.lengthSq() < 0.001) dir.set(1, -1, 0.8).normalize();
+        this.camera.position.copy(target).addScaledVector(dir, 3000);
+        this.camera.updateMatrixWorld();
+      }
+    }
     this.updateResizeOverlay();
     this.updateAlignOverlay();
     this.updatePushPullOverlay();
