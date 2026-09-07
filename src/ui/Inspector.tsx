@@ -279,6 +279,7 @@ interface Props {
   onOp: (op: BooleanOp) => void;
   onRename: (name: string) => void;
   onDelete: () => void;
+  onRetryNode?: (id: string) => void;
   /** Edit nodes only: permanently drops whichever push/pull op(s) can no
    *  longer find their target face, instead of leaving them to keep
    *  re-failing (and re-showing `error`) on every future rebuild. */
@@ -336,6 +337,7 @@ export function Inspector({
   onOp,
   onRename,
   onDelete,
+  onRetryNode,
   onPruneDeadOps,
   onDuplicateWithParams,
   onCreateMatchingThreadPart,
@@ -516,7 +518,21 @@ export function Inspector({
         )}
       </div>
 
-      {error && <p className="invalid">{error}</p>}
+      {error && (
+        <div className="invalid-box">
+          <p className="invalid">{error}</p>
+          {onRetryNode && (
+            <button
+              type="button"
+              className="retry-build-btn"
+              onClick={() => onRetryNode(node.id)}
+              title="Clear timeout/skip state and retry building this shape"
+            >
+              🔄 Re-enable & Retry
+            </button>
+          )}
+        </div>
+      )}
 
       {!isMulti && (
         <>

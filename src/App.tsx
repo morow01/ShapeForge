@@ -76,8 +76,7 @@ import {
 import { MAX_BUILD_SOURCES, PRIMITIVES, PRIMITIVE_CATEGORIES, isGroup } from "./document/types";
 import { findNode, parentOf, resolveNodeTransparent, resolveNodeColor, updateNode, walk } from "./document/tree";
 import { bakeScale } from "./document/bake";
-import { getBlob, putBlob } from "./document/blobStore";
-import { simplifyMesh } from "./mesh/simplify";
+import { putBlob } from "./document/blobStore";
 import { loadCameraState } from "./document/persist";
 import type { EditOp, GroupNode, PrimitiveKind, SceneNode, ShellOp, Vec3 } from "./document/types";
 import { RETRYABLE_MESH_ERROR } from "./kernel/types";
@@ -2016,30 +2015,43 @@ export function App() {
     const s = useDoc.getState();
     const targetNode = findNode(s.nodes, nodeId);
     if (!targetNode || targetNode.type !== "import") return;
-    const buffer = await getBlob(targetNode.blobId);
-    if (!buffer) throw new Error("Imported mesh file not found in storage.");
 
-    const result = await simplifyMesh(buffer, ratio);
-    const newBlobId = crypto.randomUUID();
-    await putBlob(newBlobId, result.buffer);
+    const res = await kernel.simplifyMesh(targetNode.blobId, ratio);
+    replaceImportBlob(nodeId, res.newBlobId, res.byteSize);
 
-    replaceImportBlob(nodeId, newBlobId, result.buffer.byteLength);
-
-    // Un-skip and clear warning if it was previously timed out/skipped
+    // Un-skip and clear warning for this node and any parent group
+    const parent = parentOf(s.nodes, nodeId);
     setSkippedIds((prev) => {
-      if (!prev.has(nodeId)) return prev;
       const next = new Set(prev);
       next.delete(nodeId);
+      if (parent) next.delete(parent.id);
       return next;
     });
     setInvalid((prev) => {
-      if (!prev[nodeId]) return prev;
       const next = { ...prev };
       delete next[nodeId];
+      if (parent) delete next[parent.id];
       return next;
     });
-    return result;
+    return res;
   }, [replaceImportBlob]);
+
+  const handleRetryNode = useCallback((id: string) => {
+    const s = useDoc.getState();
+    const parent = parentOf(s.nodes, id);
+    setSkippedIds((prev) => {
+      const next = new Set(prev);
+      next.delete(id);
+      if (parent) next.delete(parent.id);
+      return next;
+    });
+    setInvalid((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      if (parent) delete next[parent.id];
+      return next;
+    });
+  }, []);
   // A gizmo drag emits a change every frame; collapse the whole drag into one
   // undo step so undo jumps back to where the drag started.
   const onDragChange = useCallback(
@@ -4436,6 +4448,7 @@ export function App() {
               onRename={(n) => rename(selected.id, n)}
               onDelete={removeSelected}
               onPruneDeadOps={onPruneDeadOps}
+              onRetryNode={handleRetryNode}
               onDuplicateWithParams={(params, overrides) => duplicateWithParams(selected.id, params, overrides)}
               onText={(t) => setText(selected.id, t)}
               onFontName={(fn) => setFontName(selected.id, fn)}

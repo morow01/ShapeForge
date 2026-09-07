@@ -421,4 +421,6 @@ export const kernel = {
   // Not coalesced: an explicit, one-off user action (the "Remove broken
   // edit" button), not a rebuild fired on every change.
   pruneDeadOps: (spec: NodeSpec) => withWatchdog("scene", (raw) => raw.pruneDeadOps(spec)),
+  simplifyMesh: (blobId: string, ratio: number) =>
+    withWatchdog("scene", (raw) => raw.simplifyMesh(blobId, ratio)),
 };

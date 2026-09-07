@@ -24,6 +24,7 @@ import {
   place,
   survivingOps,
   boundsOf,
+  simplifyImport,
 } from "./shape";
 import { SVG_IMPORT_REVISION } from "./svgSolid";
 import { loadSTLPreview } from "./stlPreview";
@@ -1980,6 +1981,15 @@ const api = {
     await init();
     if (spec.type !== "edit") return null;
     return survivingOps(spec);
+  },
+
+  /**
+   * Simplifies an imported STL mesh using Manifold's topology-preserving decimation.
+   * Guarantees a watertight 2-manifold output (no open boundary holes, no cracked edges).
+   */
+  async simplifyMesh(blobId: string, ratio: number) {
+    await init();
+    return simplifyImport(blobId, ratio);
   },
 };
 

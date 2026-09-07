@@ -1533,6 +1533,28 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
   gap: 4px;
 }
 
+.invalid-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.retry-build-btn {
+  padding: 6px 10px;
+  background: #fff;
+  color: #d97706;
+  border: 1px solid #f59e0b;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.retry-build-btn:hover {
+  background: #fffbeb;
+  border-color: #d97706;
+}
+
 /* ---- TinkerCAD-style Solid/Hole Toggle & Color Picker ---- */
 .shape-type-container {
   position: relative;

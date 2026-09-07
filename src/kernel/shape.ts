@@ -16,7 +16,7 @@ import {
 } from "replicad";
 import type { Face, Shape3D, Sketch } from "replicad";
 import { InvalidShapeError, solveTriangle, solveScaledTriangle } from "../geometry/triangle";
-import { getBlob } from "../document/blobStore";
+import { getBlob, putBlob } from "../document/blobStore";
 import { svgMeshSolid } from "./svgSolid";
 import { makeThreadedRodSolid, makeThreadedNutSolid } from "./threads";
 import { makeSpringSolid } from "./spring";
@@ -1838,6 +1838,125 @@ async function loadImport(blobId: string): Promise<MeshShape> {
   const blob = new Blob([bytes], { type: "model/stl" });
   const shape = await importSTLAsMesh(blob);
   return normalise(shape);
+}
+
+export function exportManifoldToBinarySTL(mesh: {
+  numProp: number;
+  vertProperties: Float32Array;
+  triVerts: Uint32Array;
+}): ArrayBuffer {
+  const numTri = mesh.triVerts.length / 3;
+  const numProp = mesh.numProp;
+  const buffer = new ArrayBuffer(84 + numTri * 50);
+  const view = new DataView(buffer);
+  view.setUint32(80, numTri, true);
+  let offset = 84;
+  const vp = mesh.vertProperties;
+  const tv = mesh.triVerts;
+  for (let t = 0; t < numTri; t++) {
+    const i0 = tv[t * 3] * numProp;
+    const i1 = tv[t * 3 + 1] * numProp;
+    const i2 = tv[t * 3 + 2] * numProp;
+    const ax = vp[i0], ay = vp[i0 + 1], az = vp[i0 + 2];
+    const bx = vp[i1], by = vp[i1 + 1], bz = vp[i1 + 2];
+    const cx = vp[i2], cy = vp[i2 + 1], cz = vp[i2 + 2];
+    const abx = bx - ax, aby = by - ay, abz = bz - az;
+    const acx = cx - ax, acy = cy - ay, acz = cz - az;
+    let nx = aby * acz - abz * acy;
+    let ny = abz * acx - abx * acz;
+    let nz = abx * acy - aby * acx;
+    const len = Math.hypot(nx, ny, nz);
+    if (len > 1e-12) {
+      nx /= len;
+      ny /= len;
+      nz /= len;
+    } else {
+      nx = 0;
+      ny = 0;
+      nz = 0;
+    }
+    view.setFloat32(offset, nx, true);
+    view.setFloat32(offset + 4, ny, true);
+    view.setFloat32(offset + 8, nz, true);
+    view.setFloat32(offset + 12, ax, true);
+    view.setFloat32(offset + 16, ay, true);
+    view.setFloat32(offset + 20, az, true);
+    view.setFloat32(offset + 24, bx, true);
+    view.setFloat32(offset + 28, by, true);
+    view.setFloat32(offset + 32, bz, true);
+    view.setFloat32(offset + 36, cx, true);
+    view.setFloat32(offset + 40, cy, true);
+    view.setFloat32(offset + 44, cz, true);
+    view.setUint16(offset + 48, 0, true);
+    offset += 50;
+  }
+  return buffer;
+}
+
+export async function simplifyImport(
+  blobId: string,
+  targetRatio: number,
+): Promise<{
+  newBlobId: string;
+  byteSize: number;
+  trianglesBefore: number;
+  trianglesAfter: number;
+}> {
+  const shape = await loadImport(blobId);
+  const rawManifold = (shape as any).wrapped;
+  const initialTri = rawManifold.numTri();
+
+  if (initialTri <= 12) {
+    return {
+      newBlobId: blobId,
+      byteSize: (await getBlob(blobId))?.byteLength ?? 0,
+      trianglesBefore: initialTri,
+      trianglesAfter: initialTri,
+    };
+  }
+
+  const bb = rawManifold.boundingBox();
+  const diag = Math.hypot(
+    bb.max[0] - bb.min[0],
+    bb.max[1] - bb.min[1],
+    bb.max[2] - bb.min[2],
+  );
+
+  const safeRatio = Math.max(0.05, Math.min(0.95, targetRatio));
+  const targetTri = initialTri * (1 - safeRatio);
+
+  let low = Math.max(1e-5, diag * 0.0001);
+  let high = Math.max(0.1, diag * 0.05);
+  let best = rawManifold.simplify(diag * 0.002);
+
+  for (let iter = 0; iter < 8; iter++) {
+    const mid = (low + high) / 2;
+    const test = rawManifold.simplify(mid);
+    const count = test.numTri();
+    if (Math.abs(count - targetTri) < Math.abs(best.numTri() - targetTri)) {
+      best = test;
+    }
+    if (count > targetTri) {
+      low = mid;
+    } else {
+      high = mid;
+    }
+  }
+
+  const outMesh = best.getMesh();
+  const resultBuffer = exportManifoldToBinarySTL(outMesh);
+  const newBlobId = crypto.randomUUID();
+  await putBlob(newBlobId, resultBuffer);
+
+  const simplifiedShape = normalise(new MeshShape(best));
+  importCache.set(newBlobId, Promise.resolve(simplifiedShape));
+
+  return {
+    newBlobId,
+    byteSize: resultBuffer.byteLength,
+    trianglesBefore: initialTri,
+    trianglesAfter: best.numTri(),
+  };
 }
 
 /** True if a node or any of its descendants is an imported STL — those are
