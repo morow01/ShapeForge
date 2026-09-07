@@ -107,7 +107,7 @@ interface MeshQuality {
  * comfortably under 100ms even at a 100mm radius (measured), which is
  * already smoother than a viewport needs while dragging a slider live.
  */
-const EDIT_QUALITY: MeshQuality = { tolerance: 0.04, angularTolerance: 0.14 };
+const EDIT_QUALITY: MeshQuality = { tolerance: 0.08, angularTolerance: 0.20 };
 
 /**
  * Tessellation quality for an STL export, chosen per export by the user (the
