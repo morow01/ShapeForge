@@ -20,8 +20,14 @@ export type PrimitiveKind =
   | "threadedRod"
   | "threadedNut"
   | "star"
+  | "gear"
+  | "washer"
+  | "bearing"
   | "tray"
-  | "ellipsoid";
+  | "ellipsoid"
+  | "spring"
+  | "hinge"
+  | "screwHole";
 
 export interface ParamField {
   key: string;
@@ -89,17 +95,17 @@ export const PRIMITIVE_CATEGORIES: PrimitiveCategory[] = [
   {
     id: "curved",
     label: "Curved & Revolved",
-    kinds: ["hemisphere", "capsule", "ellipsoid", "paraboloid", "torus", "tube"],
+    kinds: ["hemisphere", "capsule", "ellipsoid", "paraboloid", "torus", "tube", "spring"],
   },
   {
     id: "profiles",
     label: "Profiles & Containers",
-    kinds: ["polygonPrism", "star", "tray", "text"],
+    kinds: ["polygonPrism", "star", "gear", "tray", "text"],
   },
   {
     id: "hardware",
-    label: "Hardware & Joints",
-    kinds: ["threadedRod", "threadedNut", "connector"],
+    label: "Hardware & Fasteners",
+    kinds: ["threadedRod", "threadedNut", "washer", "bearing", "hinge", "screwHole"],
   },
 ];
 
@@ -394,45 +400,79 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
     ],
   },
   connector: {
-    label: "Connector",
-    // Both shapes' params live in one flat dict (same pattern triangle uses
-    // across its three modes) so switching Shape or Fit never loses a value
-    // the other combination had set.
+    label: "Joinery Joint",
     defaults: {
-      shape: 0, // 0 = dovetail, 1 = round pin
-      fit: 0, // 0 = plug (male), 1 = socket (female)
+      shape: 0, // 0 = Dovetail, 1 = Round Pin, 2 = Square Pin, 3 = Tenon & Mortise, 4 = Screw Boss
+      fit: 0, // 0 = Plug (male), 1 = Socket (female)
       width: 14,
       taperAngle: 12,
       height: 6,
       radius: 5,
       chamfer: 1,
       length: 12,
-      clearance: 0.15,
+      thickness: 6,
+      fillet: 0,
+      innerRadius: 1.5,
+      outerRadius: 4,
+      clearance: 0.2,
+      stopped: 1,
+      stopEnd: 0,
+      sides: 64,
     },
     fields: [
       {
         key: "shape",
-        label: "Shape",
+        label: "Joint Type",
         min: 0,
-        max: 1,
+        max: 6,
         step: 1,
         options: [
-          { value: 0, label: "Dovetail" },
-          { value: 1, label: "Round pin" },
+          { value: 0, label: "Dovetail (Sliding Rail)" },
+          { value: 1, label: "Round Pin / Dowel" },
+          { value: 2, label: "Square Pin / Key" },
+          { value: 3, label: "Tenon & Mortise" },
+          { value: 4, label: "Screw Boss / Standoff" },
+          { value: 5, label: "Print-in-Place Hinge" },
+          { value: 6, label: "Cantilever Snap-Fit" },
         ],
       },
       {
         key: "fit",
-        label: "Fit",
+        label: "Fit Mode",
         min: 0,
         max: 1,
         step: 1,
         options: [
-          { value: 0, label: "Plug (male)" },
-          { value: 1, label: "Socket (female)" },
+          { value: 0, label: "Plug (Male)" },
+          { value: 1, label: "Socket (Female / Cut)" },
         ],
       },
-      { ...dim("width", "Width"), showIf: { key: "shape", oneOf: [0] } },
+      // Dovetail params
+      { ...dim("width", "Base Width"), showIf: { key: "shape", oneOf: [0] } },
+      {
+        key: "stopped",
+        label: "Rail Style",
+        min: 0,
+        max: 1,
+        step: 1,
+        options: [
+          { value: 0, label: "Through (Open)" },
+          { value: 1, label: "Stopped (Aligned Stop)" },
+        ],
+        showIf: { key: "shape", oneOf: [0] },
+      },
+      {
+        key: "stopEnd",
+        label: "Stop Position",
+        min: 0,
+        max: 1,
+        step: 1,
+        options: [
+          { value: 0, label: "Bottom" },
+          { value: 1, label: "Top" },
+        ],
+        showIf: { key: "shape", oneOf: [0] },
+      },
       {
         key: "taperAngle",
         label: "Taper angle",
@@ -443,37 +483,97 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
         noSlider: true,
         showIf: { key: "shape", oneOf: [0] },
       },
-      { ...dim("height", "Height"), showIf: { key: "shape", oneOf: [0] } },
-      { ...dim("radius", "Radius"), showIf: { key: "shape", oneOf: [1] } },
+      { ...dim("height", "Flare Height"), showIf: { key: "shape", oneOf: [0] } },
+      { ...dim("length", "Rail Length"), showIf: { key: "shape", oneOf: [0] } },
+
+      // Round Pin params
+      { ...dim("radius", "Pin Radius"), showIf: { key: "shape", oneOf: [1] } },
+      { ...dim("length", "Pin Length"), showIf: { key: "shape", oneOf: [1] } },
       {
         key: "chamfer",
-        label: "Tip taper",
+        label: "Lead-in Chamfer",
         min: 0,
         max: 20,
         step: 0.1,
         noSlider: true,
         showIf: { key: "shape", oneOf: [1] },
       },
-      dim("length", "Length"),
+
+      // Square Pin params
+      { ...dim("width", "Key Width"), showIf: { key: "shape", oneOf: [2] } },
+      { ...dim("length", "Key Length"), showIf: { key: "shape", oneOf: [2] } },
+      {
+        key: "chamfer",
+        label: "Lead-in Chamfer",
+        min: 0,
+        max: 20,
+        step: 0.1,
+        noSlider: true,
+        showIf: { key: "shape", oneOf: [2] },
+      },
+
+      // Tenon & Mortise params
+      { ...dim("width", "Tenon Width"), showIf: { key: "shape", oneOf: [3] } },
+      { ...dim("thickness", "Tenon Thickness"), showIf: { key: "shape", oneOf: [3] } },
+      { ...dim("length", "Tenon Length"), showIf: { key: "shape", oneOf: [3] } },
+      {
+        key: "fillet",
+        label: "Round Edges",
+        min: 0,
+        max: 50,
+        step: 0.5,
+        noSlider: true,
+        showIf: { key: "shape", oneOf: [3] },
+      },
+
+      // Screw Boss / Standoff params
+      { ...dim("outerRadius", "Boss Outer Radius"), showIf: { key: "shape", oneOf: [4] } },
+      { ...dim("innerRadius", "Pilot Hole Radius"), showIf: { key: "shape", oneOf: [4] } },
+      { ...dim("length", "Boss Height"), showIf: { key: "shape", oneOf: [4] } },
+
+      // Cantilever Snap-Fit params (shape 6)
+      { ...dim("width", "Snap Tab Width"), showIf: { key: "shape", oneOf: [6] } },
+      { ...dim("thickness", "Beam Thickness"), showIf: { key: "shape", oneOf: [6] } },
+      { ...dim("length", "Beam Length"), showIf: { key: "shape", oneOf: [6] } },
+      {
+        key: "hookDepth",
+        label: "Snap Catch Depth",
+        min: 0.5,
+        max: 4.0,
+        step: 0.1,
+        noSlider: true,
+        showIf: { key: "shape", oneOf: [6] },
+      },
+
+      // Clearance for all sockets
       {
         key: "clearance",
-        label: "Clearance",
-        min: 0,
-        max: 2,
+        label: "Print Clearance",
+        min: 0.05,
+        max: 1.0,
         step: 0.05,
+        suffix: "mm",
         noSlider: true,
         showIf: { key: "fit", oneOf: [1] },
+      },
+      {
+        key: "sides",
+        label: "Roundness",
+        min: 16,
+        max: 96,
+        step: 4,
+        showIf: { key: "shape", oneOf: [1, 4, 5] },
       },
     ],
   },
   threadedRod: {
-    label: "Threaded Rod / Bolt",
+    label: "Threaded Bolt",
     defaults: {
       preset: 8,
       diameter: 8,
       pitch: 1.25,
       length: 30,
-      headType: 1,
+      headType: 0,
       headSize: 13,
       headHeight: 5.5,
       socketSize: 6,
@@ -699,6 +799,167 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
       },
     ],
   },
+  gear: {
+    label: "Gear",
+    defaults: {
+      sizeBy: 0,
+      radius: 15,
+      height: 6,
+      teeth: 16,
+      module: 1.5,
+      pressureAngle: 20,
+      shaftType: 0,
+      boreRadius: 2.5,
+    },
+    fields: [
+      {
+        key: "sizeBy",
+        label: "Sizing Method",
+        min: 0,
+        max: 1,
+        step: 1,
+        options: [
+          { value: 0, label: "By Radius (Wheel Size)" },
+          { value: 1, label: "By Module (Engineering Pitch)" },
+        ],
+      },
+      { ...dim("radius", "Radius"), showIf: { key: "sizeBy", oneOf: [0] } },
+      { ...dim("height", "Thickness"), showIf: { key: "sizeBy", oneOf: [0] } },
+      { ...dim("height", "Thickness"), showIf: { key: "sizeBy", oneOf: [1] } },
+      { key: "teeth", label: "Teeth", min: 5, max: 100, step: 1 },
+      {
+        key: "module",
+        label: "Module (m)",
+        min: 0.4,
+        max: 8.0,
+        step: 0.1,
+        suffix: "mm",
+        showIf: { key: "sizeBy", oneOf: [1] },
+      },
+      {
+        key: "pressureAngle",
+        label: "Pressure Angle",
+        min: 14.5,
+        max: 25,
+        step: 0.5,
+        options: [
+          { value: 14.5, label: "14.5° (Vintage / Low Friction)" },
+          { value: 20, label: "20° (Standard Industrial / 3D Print)" },
+          { value: 25, label: "25° (High Torque / Heavy Duty)" },
+        ],
+      },
+      {
+        key: "shaftType",
+        label: "Shaft Type",
+        min: 0,
+        max: 2,
+        step: 1,
+        options: [
+          { value: 0, label: "Round Hole" },
+          { value: 1, label: "D-Shaft (Motor Flat)" },
+          { value: 2, label: "Square Shaft" },
+        ],
+      },
+      { key: "boreRadius", label: "Bore radius", min: 0, max: 200, step: 0.25, suffix: "mm", noSlider: true },
+    ],
+  },
+  washer: {
+    label: "Washer",
+    defaults: { outerRadius: 10, innerRadius: 4, height: 2 },
+    fields: [
+      dim("outerRadius", "Outer radius"),
+      dim("innerRadius", "Bore radius"),
+      dim("height", "Thickness"),
+    ],
+  },
+  bearing: {
+    label: "Ball Bearing",
+    defaults: {
+      style: 0,
+      preset: 608,
+      outerRadius: 11,
+      innerRadius: 4,
+      height: 7,
+      ballCount: 8,
+      cage: 1,
+      clearance: 0.35,
+      shieldRecess: 0.6,
+      chamfer: 0.5,
+    },
+    fields: [
+      {
+        key: "style",
+        label: "Bearing Style",
+        min: 0,
+        max: 1,
+        step: 1,
+        options: [
+          { value: 0, label: "Sealed (Industrial / Press-Fit)" },
+          { value: 1, label: "Open (Visible Balls / Print-in-Place)" },
+        ],
+      },
+      {
+        key: "preset",
+        label: "Standard Size",
+        min: 0,
+        max: 6000,
+        step: 1,
+        options: [
+          { value: 0, label: "Custom" },
+          { value: 608, label: "608 (8x22x7mm - Skateboard / 3D Printer)" },
+          { value: 688, label: "688 (8x16x5mm - Slim 8mm)" },
+          { value: 624, label: "624 (4x13x5mm - V-Wheel / Motion)" },
+          { value: 625, label: "625 (5x16x5mm - Pulley / Extruder)" },
+          { value: 6000, label: "6000 (10x26x8mm - 10mm Shaft)" },
+        ],
+      },
+      { ...dim("outerRadius", "Outer radius"), showIf: { key: "preset", oneOf: [0] } },
+      { ...dim("innerRadius", "Bore radius"), showIf: { key: "preset", oneOf: [0] } },
+      { ...dim("height", "Width"), showIf: { key: "preset", oneOf: [0] } },
+      {
+        key: "cage",
+        label: "Ball Retainer Cage",
+        min: 0,
+        max: 1,
+        step: 1,
+        options: [
+          { value: 0, label: "None (Free Balls)" },
+          { value: 1, label: "Crown Cage (Retainer)" },
+        ],
+        showIf: { key: "style", oneOf: [1] },
+      },
+      {
+        key: "ballCount",
+        label: "Ball Count",
+        min: 5,
+        max: 16,
+        step: 1,
+        showIf: { key: "style", oneOf: [1] },
+      },
+      {
+        key: "clearance",
+        label: "Print Clearance",
+        min: 0.1,
+        max: 1.0,
+        step: 0.05,
+        suffix: "mm",
+        noSlider: true,
+        showIf: { key: "style", oneOf: [1] },
+      },
+      {
+        ...dim("shieldRecess", "Shield recess"),
+        showIf: { key: "style", oneOf: [0] },
+      },
+      {
+        key: "chamfer",
+        label: "Edge chamfer",
+        min: 0,
+        max: 2,
+        step: 0.1,
+        suffix: "mm",
+      },
+    ],
+  },
   tray: {
     label: "Organizer Bin",
     defaults: {
@@ -739,6 +1000,251 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
           { value: 1, label: "Shown" },
         ],
       },
+    ],
+  },
+  spring: {
+    label: "Spring / Coil",
+    defaults: {
+      radius: 12,
+      topRadius: 12,
+      wireRadius: 1.5,
+      height: 40,
+      turns: 6,
+      endStyle: 0,
+      wireShape: 0,
+    },
+    fields: [
+      dim("radius", "Bottom radius"),
+      dim("topRadius", "Top radius"),
+      dim("wireRadius", "Wire radius"),
+      dim("height", "Height"),
+      { key: "turns", label: "Active Coils", min: 1, max: 40, step: 0.5 },
+      {
+        key: "endStyle",
+        label: "Ends",
+        min: 0,
+        max: 1,
+        step: 1,
+        options: [
+          { value: 0, label: "Natural (Cut)" },
+          { value: 1, label: "Ground Flat (Upright)" },
+        ],
+      },
+      {
+        key: "wireShape",
+        label: "Wire Profile",
+        min: 0,
+        max: 1,
+        step: 1,
+        options: [
+          { value: 0, label: "Round Wire" },
+          { value: 1, label: "Square Wire" },
+        ],
+      },
+    ],
+  },
+  hinge: {
+    label: "Hinge",
+    defaults: {
+      hingeType: 0, // 0 = Knuckle (Print-in-Place), 1 = Living Hinge (Compliant), 2 = Butterfly Leaf
+      length: 40,
+      leafWidth: 15,
+      leafThickness: 3.0,
+      knuckleCount: 3,
+      pinDiameter: 7.0,
+      clearance: 0.20,
+      sides: 64,
+      angle: 0,
+      pinStyle: 1, // 0 = Captive Pin, 1 = Conical Pivots (45° Support-Free)
+      screwHoles: 0, // 0 = None, 1 = Straight, 2 = Countersunk (M3/M4)
+      holeCount: 2,
+      holeDiameter: 3.5,
+      bridgeThickness: 0.6,
+      bridgeWidth: 4.0,
+    },
+    fields: [
+      {
+        key: "hingeType",
+        label: "Hinge Type",
+        min: 0,
+        max: 2,
+        step: 1,
+        options: [
+          { value: 0, label: "Knuckle Hinge (Print-in-Place)" },
+          { value: 1, label: "Living Hinge (Compliant)" },
+          { value: 2, label: "Butterfly Leaf Hinge" },
+        ],
+      },
+      dim("length", "Length"),
+      dim("leafWidth", "Leaf Width"),
+      {
+        key: "leafThickness",
+        label: "Leaf Thickness",
+        min: 1,
+        max: 20,
+        step: 0.2,
+        noSlider: true,
+      },
+      // Knuckle hinge specific:
+      {
+        key: "knuckleCount",
+        label: "Knuckle Segments",
+        min: 3,
+        max: 15,
+        step: 2,
+        showIf: { key: "hingeType", oneOf: [0, 2] },
+      },
+      {
+        key: "pinDiameter",
+        label: "Knuckle Diameter",
+        min: 3,
+        max: 30,
+        step: 0.5,
+        noSlider: true,
+        showIf: { key: "hingeType", oneOf: [0, 2] },
+      },
+      {
+        key: "clearance",
+        label: "Print Clearance",
+        min: 0.01,
+        max: 1.0,
+        step: 0.01,
+        suffix: "mm",
+        showIf: { key: "hingeType", oneOf: [0, 2] },
+      },
+      {
+        key: "sides",
+        label: "Roundness",
+        min: 16,
+        max: 96,
+        step: 4,
+        showIf: { key: "hingeType", oneOf: [0, 2] },
+      },
+      {
+        key: "pinStyle",
+        label: "Pivot Mechanism",
+        min: 0,
+        max: 1,
+        step: 1,
+        options: [
+          { value: 0, label: "Captive Cylindrical Pin" },
+          { value: 1, label: "45° Conical Pivots (Support-Free)" },
+        ],
+        showIf: { key: "hingeType", oneOf: [0, 2] },
+      },
+      {
+        key: "angle",
+        label: "Presentation Angle",
+        min: 0,
+        max: 180,
+        step: 5,
+        suffix: "°",
+        showIf: { key: "hingeType", oneOf: [0, 2] },
+      },
+      // Living Hinge specific:
+      {
+        key: "bridgeThickness",
+        label: "Flex Membrane Thickness",
+        min: 0.4,
+        max: 2.0,
+        step: 0.05,
+        suffix: "mm",
+        noSlider: true,
+        showIf: { key: "hingeType", oneOf: [1] },
+      },
+      {
+        key: "bridgeWidth",
+        label: "Flex Bridge Span",
+        min: 1.5,
+        max: 20,
+        step: 0.5,
+        suffix: "mm",
+        noSlider: true,
+        showIf: { key: "hingeType", oneOf: [1] },
+      },
+      // Mounting holes:
+      {
+        key: "screwHoles",
+        label: "Mounting Holes",
+        min: 0,
+        max: 2,
+        step: 1,
+        options: [
+          { value: 0, label: "None (Smooth Surface)" },
+          { value: 1, label: "Cylindrical Holes" },
+          { value: 2, label: "Countersunk (Flush Flathead)" },
+        ],
+      },
+      {
+        key: "holeCount",
+        label: "Holes per Leaf",
+        min: 1,
+        max: 4,
+        step: 1,
+        showIf: { key: "screwHoles", oneOf: [1, 2] },
+      },
+      {
+        key: "holeDiameter",
+        label: "Hole Diameter",
+        min: 1.5,
+        max: 10,
+        step: 0.5,
+        suffix: "mm",
+        noSlider: true,
+        showIf: { key: "screwHoles", oneOf: [1, 2] },
+      },
+    ],
+  },
+  screwHole: {
+    label: "Screw Hole",
+    defaults: {
+      preset: 3,
+      headStyle: 0,
+      holeDia: 3.4,
+      headDia: 6.5,
+      headAngle: 90,
+      pocketDepth: 0,
+      recess: 0,
+      headDepth: 3.4,
+      depth: 15,
+    },
+    fields: [
+      {
+        key: "preset",
+        label: "Standard Size",
+        min: 0,
+        max: 10,
+        step: 0.5,
+        options: [
+          { value: 0, label: "Custom" },
+          { value: 2, label: "M2 (Ø2.4mm / Head Ø4.4mm)" },
+          { value: 2.5, label: "M2.5 (Ø2.9mm / Head Ø5.5mm)" },
+          { value: 3, label: "M3 (Ø3.4mm / Head Ø6.5mm)" },
+          { value: 4, label: "M4 (Ø4.5mm / Head Ø8.5mm)" },
+          { value: 5, label: "M5 (Ø5.5mm / Head Ø10.5mm)" },
+          { value: 6, label: "M6 (Ø6.6mm / Head Ø12.5mm)" },
+          { value: 8, label: "M8 (Ø9.0mm / Head Ø16.5mm)" },
+          { value: 10, label: "M10 (Ø11.0mm / Head Ø20.5mm)" },
+        ],
+      },
+      {
+        key: "headStyle",
+        label: "Head Style",
+        min: 0,
+        max: 2,
+        step: 1,
+        options: [
+          { value: 0, label: "Countersunk (90° Flat Head)" },
+          { value: 1, label: "Counterbored (Socket Cap)" },
+          { value: 2, label: "Simple Clearance Hole" },
+        ],
+      },
+      { key: "holeDia", label: "Shaft Hole Diameter", min: 0.5, max: 100, step: 0.1, suffix: "mm", noSlider: true },
+      { key: "depth", label: "Hole Depth", min: 1, max: 500, step: 0.5, suffix: "mm", noSlider: true },
+      { key: "headDia", label: "Head Diameter", min: 1, max: 120, step: 0.1, suffix: "mm", noSlider: true, showIf: { key: "headStyle", oneOf: [0, 1] } },
+      { key: "headAngle", label: "Countersink Angle", min: 60, max: 120, step: 1, suffix: "°", showIf: { key: "headStyle", oneOf: [0] } },
+      { key: "pocketDepth", label: "Pocket Depth", min: 0, max: 500, step: 0.5, suffix: "mm", noSlider: true, showIf: { key: "headStyle", oneOf: [0, 1] } },
+      { key: "headDepth", label: "Counterbore Depth", min: 0.5, max: 500, step: 0.5, suffix: "mm", noSlider: true, showIf: { key: "headStyle", oneOf: [1] } },
     ],
   },
 };

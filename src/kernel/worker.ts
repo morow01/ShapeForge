@@ -107,7 +107,7 @@ interface MeshQuality {
  * comfortably under 100ms even at a 100mm radius (measured), which is
  * already smoother than a viewport needs while dragging a slider live.
  */
-const EDIT_QUALITY: MeshQuality = { tolerance: 0.05, angularTolerance: 0.2 };
+const EDIT_QUALITY: MeshQuality = { tolerance: 0.01, angularTolerance: 0.04 };
 
 /**
  * Tessellation quality for an STL export, chosen per export by the user (the
@@ -115,30 +115,11 @@ const EDIT_QUALITY: MeshQuality = { tolerance: 0.05, angularTolerance: 0.2 };
  *
  * Curved faces are what this decides: a facet angle is what shows up in a
  * slicer's flat shading as banding across a spherical pocket, and halving it
- * costs roughly four times the triangles and four times the time. Measured
- * here on a 40x30x15 box with a 10mm spherical bowl cut into it:
- *
- *   draft     7.9 deg median facet     1,198 triangles     ~0.1s
- *   standard  5.1 deg                  2,588               ~0.05s
- *   fine      1.2 deg                 45,150               ~6.5s
- *
- * The cost scales with the curved area, not the part: a lone 40mm-radius
- * sphere takes 20s at a setting between standard and fine, which is why this
- * is the user's choice and not one hardcoded number. None of them is coarse
- * enough to matter dimensionally — even draft's deviation is 0.05mm — so the
- * choice is about how the surface LOOKS, and how long you are willing to wait.
- *
- * OCCT's own default (~0.001mm, no argument passed) is deliberately not an
- * option: it is the setting that turns a single large sphere into six figures
- * of triangles and can exhaust the WASM heap outright.
+ * costs roughly four times the triangles and four times the time.
  */
 const EXPORT_PRESETS: Record<ExportQuality, MeshQuality> = {
-  draft: { tolerance: 0.05, angularTolerance: 0.4 },
-  standard: { tolerance: 0.02, angularTolerance: 0.3 },
-  // Keep the original high-quality tessellation. The timeout was caused by
-  // converting that dense mesh through Manifold before writing it, not by
-  // OCCT's tessellation itself; the refined-shell path below writes those
-  // triangles directly and therefore retains the old smoothness.
+  draft: { tolerance: 0.03, angularTolerance: 0.15 },
+  standard: { tolerance: 0.01, angularTolerance: 0.08 },
   fine: { tolerance: 0.002, angularTolerance: 0.03 },
 };
 
@@ -358,6 +339,26 @@ function getBaseObjectSpec(spec: NodeSpec): ObjectSpec | null {
   if (spec.type === "object") return spec;
   if (spec.type === "edit") return getBaseObjectSpec(spec.base);
   return null;
+}
+
+function getMaxSidesFromSpec(spec: NodeSpec): number | undefined {
+  if (spec.type === "object") {
+    return spec.params.sides ?? spec.params.surfaceSteps;
+  }
+  if (spec.type === "edit") {
+    return getMaxSidesFromSpec(spec.base);
+  }
+  if (spec.type === "group") {
+    let max: number | undefined;
+    for (const child of spec.children) {
+      const childSides = getMaxSidesFromSpec(child);
+      if (childSides !== undefined) {
+        max = max !== undefined ? Math.max(max, childSides) : childSides;
+      }
+    }
+    return max;
+  }
+  return undefined;
 }
 
 /** Hide only a polygon-cylinder's vertical facet boundaries while retaining
@@ -853,7 +854,7 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
  * the group's own combined boolean. An import's key is just its blobId, which
  * never changes for a given node — importSTLAsMesh() only ever runs once.
  */
-export const KERNEL_REVISION = 5;
+export const KERNEL_REVISION = 6;
 
 function localKey(spec: NodeSpec): string {
   if (spec.type === "group") {
@@ -1204,14 +1205,14 @@ const api = {
             }
             if (solid) {
               const baseSpec = getBaseObjectSpec(spec);
-              const meshQuality = baseSpec &&
-                (baseSpec.kind === "hemisphere" || baseSpec.kind === "capsule" || baseSpec.kind === "sphere")
+              const sides = getMaxSidesFromSpec(spec);
+              const meshQuality = sides !== undefined
                 ? {
                     ...EDIT_QUALITY,
-                    angularTolerance: Math.PI /
-                      Math.max(4, Math.min(64, Math.round(
-                        baseSpec.params.surfaceSteps ?? (baseSpec.kind === "hemisphere" ? 24 : 48),
-                      ))),
+                    angularTolerance: Math.min(
+                      EDIT_QUALITY.angularTolerance,
+                      (2 * Math.PI) / Math.max(8, Math.min(96, Math.round(sides))),
+                    ),
                   }
                 : EDIT_QUALITY;
               let candidate = toMesh(spec.id, solid, meshQuality);

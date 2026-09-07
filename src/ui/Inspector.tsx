@@ -17,10 +17,12 @@ import {
   solveScaledTriangle,
 } from "../geometry/triangle";
 import type { TriangleSolution } from "../geometry/triangle";
-import type { BooleanOp, ParamField, PrimitiveKind, SceneNode, Vec3 } from "../document/types";
+import type { BooleanOp, ObjectNode, ParamField, PrimitiveKind, SceneNode, Vec3 } from "../document/types";
 import type { LocalFontData } from "../text/systemFonts";
 import { displayStep, formatLength, fromMillimetres, toMillimetres } from "../measurement";
 import type { DisplayUnit } from "../measurement";
+import { evaluateMathExpression } from "../utils/mathExpr";
+import { MathNumInput, StepperButtons } from "./MathNumInput";
 
 /**
  * The largest corner radius a box can actually take: half its smallest side.
@@ -281,7 +283,7 @@ interface Props {
    *  the Connector's "Copy as Socket/Plug" button, so the copy always sits
    *  exactly where the original does without the user positioning anything
    *  by hand. */
-  onDuplicateWithParams?: (params: Record<string, number>) => void;
+  onDuplicateWithParams?: (params: Record<string, number>, overrides?: Partial<ObjectNode>) => void;
   onCreateMatchingThreadPart?: () => void;
   onText?: (text: string) => void;
   onFontName?: (fontName: string) => void;
@@ -629,17 +631,15 @@ export function Inspector({
                   return (
                     <label key={label}>
                       <span className="field-label">{label}</span>
-                      <input
+                      <MathNumInput
                         className="num"
-                        type="number"
                         min={0.1}
                         step={displayStep(displayUnit, decimalPlaces)}
                         value={currentVal}
                         onFocus={beginHistoryBatch}
                         onBlur={endHistoryBatch}
-                        onChange={(e) => {
-                          const v = Number(e.target.value);
-                          if (!Number.isFinite(v) || v <= 0) return;
+                        onCommit={(v) => {
+                          if (v <= 0) return;
                           onResizeSelectionAxis?.(i as 0 | 1 | 2, toMillimetres(v, displayUnit));
                         }}
                       />
@@ -660,17 +660,15 @@ export function Inspector({
                   return (
                     <label key={label}>
                       <span className="field-label">{label}</span>
-                      <input
+                      <MathNumInput
                         className="num"
-                        type="number"
                         min={0.1}
                         step={displayStep(displayUnit, decimalPlaces)}
                         value={currentVal}
                         onFocus={beginHistoryBatch}
                         onBlur={endHistoryBatch}
-                        onChange={(e) => {
-                          const v = Number(e.target.value);
-                          if (!Number.isFinite(v) || v <= 0) return;
+                        onCommit={(v) => {
+                          if (v <= 0) return;
                           const nextFactor = Math.max(0.0001, toMillimetres(v, displayUnit) / localSize[i]);
                           const scale = resizeConstrained
                             ? ([nextFactor, nextFactor, nextFactor] as Vec3)
@@ -688,20 +686,19 @@ export function Inspector({
                 {AXES.map((axis, i) => (
                   <label key={axis}>
                     <span className="field-label">{axis} %</span>
-                    <input
+                    <MathNumInput
                       className="num"
-                      type="number"
                       min={1}
                       max={1000}
                       step={1}
                       value={round(node.scale[i] * 100)}
                       onFocus={beginHistoryBatch}
                       onBlur={endHistoryBatch}
-                      onChange={(e) => {
-                        const value = Math.max(0.01, Number(e.target.value) / 100);
+                      onCommit={(v) => {
+                        const value = Math.max(0.01, v / 100);
                         const scale = resizeConstrained
                           ? ([value, value, value] as Vec3)
-                          : (node.scale.map((v, at) => (at === i ? value : v)) as Vec3);
+                          : (node.scale.map((v2, at) => (at === i ? value : v2)) as Vec3);
                         onTransform({ scale });
                       }}
                     />
@@ -725,14 +722,13 @@ export function Inspector({
             {AXES.map((axis, i) => (
               <label key={axis}>
                 <span className="field-label">{axis}</span>
-                <input
+                <MathNumInput
                   className="num"
-                  type="number"
                   step={displayStep(displayUnit, decimalPlaces)}
                   value={formatLength(node.position[i], displayUnit, decimalPlaces)}
                   onFocus={beginHistoryBatch}
                   onBlur={endHistoryBatch}
-                  onChange={(e) => setAxis("position", i, toMillimetres(Number(e.target.value), displayUnit))}
+                  onCommit={(v) => setAxis("position", i, toMillimetres(v, displayUnit))}
                 />
               </label>
             ))}
@@ -743,14 +739,13 @@ export function Inspector({
             {AXES.map((axis, i) => (
               <label key={axis}>
                 <span className="field-label">{axis}</span>
-                <input
+                <MathNumInput
                   className="num"
-                  type="number"
                   step={15}
                   value={round(node.rotation[i])}
                   onFocus={beginHistoryBatch}
                   onBlur={endHistoryBatch}
-                  onChange={(e) => setAxis("rotation", i, Number(e.target.value))}
+                  onCommit={(v) => setAxis("rotation", i, v)}
                 />
               </label>
             ))}
@@ -770,17 +765,13 @@ export function Inspector({
             {AXES.map((axis, i) => (
               <label key={axis}>
                 <span className="field-label">{axis}</span>
-                <input
+                <MathNumInput
                   className="num"
-                  type="number"
                   step={displayStep(displayUnit, decimalPlaces)}
                   value={formatLength((selectionBounds.min[i] + selectionBounds.max[i]) / 2, displayUnit, decimalPlaces)}
                   onFocus={beginHistoryBatch}
                   onBlur={endHistoryBatch}
-                  onChange={(e) => {
-                    const v = Number(e.target.value);
-                    if (Number.isFinite(v)) onMoveSelectionAxis?.(i as 0 | 1 | 2, toMillimetres(v, displayUnit));
-                  }}
+                  onCommit={(v) => onMoveSelectionAxis?.(i as 0 | 1 | 2, toMillimetres(v, displayUnit))}
                 />
               </label>
             ))}
@@ -821,18 +812,14 @@ function ImportInfo({
         </dl>
         <div className="field-row">
           <span className="field-label">Thickness</span>
-          <input
+          <MathNumInput
             className="num"
-            type="number"
             min={0.1}
             step={displayStep(displayUnit, decimalPlaces)}
             value={formatLength(node.svg.thickness, displayUnit, decimalPlaces)}
             onFocus={beginHistoryBatch}
             onBlur={endHistoryBatch}
-            onChange={(e) => {
-              const v = Number(e.target.value);
-              if (Number.isFinite(v)) onSvgThickness(toMillimetres(v, displayUnit));
-            }}
+            onCommit={(v) => onSvgThickness(toMillimetres(v, displayUnit))}
             aria-label={`Extrusion thickness in ${displayUnit}`}
           />
         </div>
@@ -955,10 +942,11 @@ const DIM_AXES: Partial<Record<PrimitiveKind, Record<string, number[]>>> = {
   tube: { radius: [0, 1], height: [2] },
   paraboloid: { radius: [0, 1], height: [2] },
   text: { size: [0, 1] },
-  connector: { width: [0], length: [1], height: [2], radius: [0, 1] },
+  connector: { width: [0], length: [1, 2], height: [2], thickness: [1], radius: [0, 1], outerRadius: [0, 1], innerRadius: [0, 1] },
   star: { outerRadius: [0, 1], height: [2] },
   tray: { width: [0], depth: [1], height: [2] },
   ellipsoid: { radiusX: [0], radiusY: [1], radiusZ: [2] },
+  hinge: { leafWidth: [0], length: [1], leafThickness: [2] },
 };
 
 function ObjectParams({
@@ -984,7 +972,7 @@ function ObjectParams({
   onResizeConstrained: (value: boolean) => void;
   onParam: (key: string, value: number) => void;
   onTransform: (patch: { position?: Vec3; rotation?: Vec3; scale?: Vec3 }) => void;
-  onDuplicateWithParams?: (params: Record<string, number>) => void;
+  onDuplicateWithParams?: (params: Record<string, number>, overrides?: Partial<ObjectNode>) => void;
   onCreateMatchingThreadPart?: () => void;
   onText?: (text: string) => void;
   onFontName?: (fontName: string) => void;
@@ -1085,19 +1073,20 @@ function ObjectParams({
           <button
             type="button"
             className="connector-pair-btn"
-            disabled
-            title="Paused for now — coming back to this soon"
-            onClick={() =>
-              onDuplicateWithParams({ fit: node.params.fit === 1 ? 0 : 1 })
-            }
+            onClick={() => {
+              const nextFit = node.params.fit === 1 ? 0 : 1;
+              onDuplicateWithParams(
+                { fit: nextFit },
+                nextFit === 1 ? { isHole: true } : { isHole: false },
+              );
+            }}
           >
-            ⧉ Copy as matching {node.params.fit === 1 ? "Plug" : "Socket"}
+            ⧉ Create matching {node.params.fit === 1 ? "Plug (Solid)" : "Socket (Hole Cut)"}
           </button>
           <p className="hint">
-            Paused for now — coming back to this soon. Makes an exact copy at
-            this same position and rotation — union the Plug into one part,
-            subtract the Socket from the other. Don't reposition either
-            copy, or they will no longer line up.
+            {node.params.fit === 1
+              ? "Creates a solid plug at this exact mating position."
+              : "Creates an overlapping socket hole with print clearance, ready to subtract / cut into your mating part."}
           </p>
         </div>
       )}
@@ -1256,7 +1245,7 @@ function ObjectParams({
                 onChange={(v) => onParam(f.key, Math.min(v, shown.max))}
                 displayUnit={displayUnit}
                 decimalPlaces={decimalPlaces}
-                isLength={!shown.options && shown.suffix !== "°" && !["sides", "points", "cornerSteps", "surfaceSteps"].includes(shown.key)}
+                isLength={!shown.options && shown.suffix !== "°" && !["sides", "points", "cornerSteps", "surfaceSteps", "teeth", "ballCount", "turns"].includes(shown.key)}
               />
             ),
           };
@@ -1305,7 +1294,7 @@ function ObjectParams({
               }}
               displayUnit={displayUnit}
               decimalPlaces={decimalPlaces}
-              isLength={!f.options && f.suffix !== "°" && !["sides", "points", "cornerSteps", "surfaceSteps"].includes(f.key)}
+              isLength={!f.options && f.suffix !== "°" && !["sides", "points", "cornerSteps", "surfaceSteps", "teeth", "ballCount", "turns"].includes(f.key)}
             />
           ),
         };
@@ -1644,12 +1633,16 @@ function Field({
     );
   }
 
+  const stepDecimals = field.step ? (field.step.toString().split(".")[1]?.length ?? 0) : 0;
+  const precision = Math.max(decimalPlaces, stepDecimals);
   const shownValue = isLength ? fromMillimetres(value, displayUnit) : value;
   const shownMin = isLength ? fromMillimetres(field.min, displayUnit) : field.min;
   const shownMax = isLength ? fromMillimetres(field.max, displayUnit) : field.max;
-  const shownStep = isLength ? displayStep(displayUnit, decimalPlaces) : field.step;
+  const shownStep = field.step !== undefined
+    ? (isLength ? Math.min(fromMillimetres(field.step, displayUnit), displayStep(displayUnit, decimalPlaces)) : field.step)
+    : (isLength ? displayStep(displayUnit, decimalPlaces) : field.step);
   const commit = (shown: number) => onChange(isLength ? toMillimetres(shown, displayUnit) : shown);
-  const formattedValue = isLength ? shownValue.toFixed(decimalPlaces) : String(shownValue);
+  const formattedValue = isLength ? shownValue.toFixed(precision) : String(shownValue);
   const [draftValue, setDraftValue] = useState(formattedValue);
   const [editingValue, setEditingValue] = useState(false);
   useEffect(() => {
@@ -1657,8 +1650,8 @@ function Field({
   }, [editingValue, formattedValue]);
 
   const finishNumericEdit = () => {
-    const parsed = Number(draftValue);
-    if (draftValue.trim() !== "" && Number.isFinite(parsed)) {
+    const parsed = evaluateMathExpression(draftValue);
+    if (parsed !== null && Number.isFinite(parsed)) {
       // A multi-digit value must be treated as one edit. Rebuilding an
       // expensive threaded primitive after the first digit (typing 15 first
       // produced a complete 1 mm nut) can leave a long-running, visibly
@@ -1723,35 +1716,59 @@ function Field({
             onChange={(e) => commit(Number(e.target.value))}
           />
         )}
-        <input
-          className="num"
-          type="number"
-          min={shownMin}
-          max={shownMax}
-          step={shownStep}
-          value={draftValue}
-          disabled={disabled}
-          title={disabled ? (field.key === "clearance" ? "Choose Custom fit to edit this value" : "Constrained by the other 2 locked angles (sum is 180°)") : undefined}
-          onFocus={(e) => {
-            beginHistoryBatch();
-            setEditingValue(true);
-            setDraftValue(formattedValue);
-            e.currentTarget.select();
-          }}
-          onBlur={finishNumericEdit}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") e.currentTarget.blur();
-            if (e.key === "Escape") {
+        <div className="num-stepper-wrap">
+          <input
+            className="num"
+            type="text"
+            inputMode="decimal"
+            value={draftValue}
+            disabled={disabled}
+            title={disabled ? (field.key === "clearance" ? "Choose Custom fit to edit this value" : "Constrained by the other 2 locked angles (sum is 180°)") : undefined}
+            onFocus={(e) => {
+              beginHistoryBatch();
+              setEditingValue(true);
               setDraftValue(formattedValue);
-              e.currentTarget.blur();
-            }
-          }}
-          onChange={(e) => {
-            // Keep typing local and commit once on blur/Enter. Range sliders
-            // above still update the shape live while they are dragged.
-            setDraftValue(e.target.value);
-          }}
-        />
+              e.currentTarget.select();
+            }}
+            onBlur={finishNumericEdit}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") e.currentTarget.blur();
+              if (e.key === "Escape") {
+                setDraftValue(formattedValue);
+                e.currentTarget.blur();
+              }
+              if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+                e.preventDefault();
+                beginHistoryBatch();
+                const stp = shownStep ?? 1;
+                const delta = (e.key === "ArrowUp" ? 1 : -1) * (e.shiftKey ? stp * 10 : e.altKey ? stp / 10 : stp);
+                const current = evaluateMathExpression(draftValue) ?? shownValue;
+                const next = Math.min(shownMax, Math.max(shownMin, Math.round((current + delta) * 1e6) / 1e6));
+                setDraftValue(next.toFixed(precision));
+                commit(next);
+                endHistoryBatch();
+              }
+            }}
+            onChange={(e) => {
+              setDraftValue(e.target.value);
+            }}
+          />
+          {!disabled && (
+            <StepperButtons
+              onStep={(dir, shift, alt) => {
+                const stp = shownStep ?? 1;
+                const delta = dir * (shift ? stp * 10 : alt ? stp / 10 : stp);
+                const current = evaluateMathExpression(draftValue) ?? shownValue;
+                const next = Math.min(shownMax, Math.max(shownMin, Math.round((current + delta) * 1e6) / 1e6));
+                setDraftValue(next.toFixed(precision));
+                commit(next);
+              }}
+              onStart={beginHistoryBatch}
+              onEnd={endHistoryBatch}
+              disabled={disabled}
+            />
+          )}
+        </div>
       </div>
     </div>
   );

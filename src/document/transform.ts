@@ -21,26 +21,25 @@ export function eulerToMatrix([rx, ry, rz]: Vec3): Mat3 {
   const [sy, cy] = [Math.sin(ry * DEG), Math.cos(ry * DEG)];
   const [sz, cz] = [Math.sin(rz * DEG), Math.cos(rz * DEG)];
   return [
-    cy * cz, sx * sy * cz - cx * sz, cx * sy * cz + sx * sz,
-    cy * sz, sx * sy * sz + cx * cz, cx * sy * sz - sx * cz,
-    -sy,     sx * cy,                cx * cy,
+    cy * cz,                 -cy * sz,                sy,
+    sx * sy * cz + cx * sz,  -sx * sy * sz + cx * cz, -sx * cy,
+    -cx * sy * cz + sx * sz,  cx * sy * sz + sx * cz,  cx * cy,
   ];
 }
 
-/** The inverse of eulerToMatrix, in degrees. */
+/** The inverse of eulerToMatrix (Euler order 'XYZ'), in degrees. */
 export function matrixToEuler(m: Mat3): Vec3 {
-  const [m00, m01, , m10, m11, , m20, m21, m22] = m;
-  // Straight up or down: Y is ±90°, X and Z become the same rotation, so all
-  // of it is handed to Z and X is zeroed rather than left to numeric noise.
-  if (Math.abs(m20) > 0.999999) {
-    const ry = m20 < 0 ? 90 : -90;
-    return [0, ry, (Math.atan2(-m01, m11) / DEG)];
+  const [m00, m01, m02, m10, m11, m12, , , m22] = m;
+  const sy = Math.max(-1, Math.min(1, m02));
+  const ry = Math.asin(sy) / DEG;
+  if (Math.abs(m02) < 0.999999) {
+    const rx = Math.atan2(-m12, m22) / DEG;
+    const rz = Math.atan2(-m01, m00) / DEG;
+    return [rx, ry, rz];
+  } else {
+    const rx = m02 > 0 ? Math.atan2(m10, m11) / DEG : Math.atan2(-m10, m11) / DEG;
+    return [rx, ry, 0];
   }
-  return [
-    Math.atan2(m21, m22) / DEG,
-    Math.asin(-Math.max(-1, Math.min(1, m20))) / DEG,
-    Math.atan2(m10, m00) / DEG,
-  ];
 }
 
 export function multiplyMatrix(a: Mat3, b: Mat3): Mat3 {

@@ -89,7 +89,16 @@ export function buildThreeMF(objects: ThreeMFObject[]): Blob {
     );
   });
 
-  const items = printable.map((_, index) => `<item objectid="${index + 2}" />`).join("");
+  let assemblyBody = "";
+  let items = "";
+  if (printable.length > 1) {
+    const assemblyId = printable.length + 2;
+    const components = printable.map((_, index) => `<component objectid="${index + 2}" />`).join("");
+    assemblyBody = `<object id="${assemblyId}" type="model" name="Assembly"><components>${components}</components></object>`;
+    items = `<item objectid="${assemblyId}" />`;
+  } else {
+    items = printable.map((_, index) => `<item objectid="${index + 2}" />`).join("");
+  }
 
   const model =
     `<?xml version="1.0" encoding="UTF-8"?>` +
@@ -99,6 +108,7 @@ export function buildThreeMF(objects: ThreeMFObject[]): Blob {
     `<resources>` +
     (materials ? `<basematerials id="1">${materials}</basematerials>` : "") +
     bodies.join("") +
+    assemblyBody +
     `</resources>` +
     `<build>${items}</build>` +
     `</model>`;

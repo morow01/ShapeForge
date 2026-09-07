@@ -65,7 +65,7 @@ export class KernelTimeoutError extends Error {
  * genuinely too-complex file into a fast one; this bounds the wait to
  * something tolerable rather than promising every large file will finish.
  */
-export const WATCHDOG_MS = 3 * 60_000;
+export const WATCHDOG_MS = 45_000;
 /** High-detail STL gets a shorter budget because export has a complete,
  * already-rendered mesh fallback. Scene rebuilding still keeps the generous
  * three-minute ceiling above. */
@@ -201,9 +201,22 @@ function withWatchdog<R>(
   let settled = false;
 
   return new Promise<R>((resolve, reject) => {
+    const onWorkerError = (evt: ErrorEvent) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      worker.removeEventListener("error", onWorkerError);
+      worker.terminate();
+      if (lane === "scene") sceneCurrent = spawnWorker();
+      else heavyCurrent = spawnWorker();
+      reject(new Error(evt.message || "Kernel worker crashed"));
+    };
+    worker.addEventListener("error", onWorkerError);
+
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
+      worker.removeEventListener("error", onWorkerError);
       worker.terminate();
       if (lane === "scene") sceneCurrent = spawnWorker();
       else heavyCurrent = spawnWorker();
@@ -217,12 +230,14 @@ function withWatchdog<R>(
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        worker.removeEventListener("error", onWorkerError);
         resolve(r);
       },
       (e: unknown) => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        worker.removeEventListener("error", onWorkerError);
         reject(e);
       },
     );

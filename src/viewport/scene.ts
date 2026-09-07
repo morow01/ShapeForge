@@ -19,13 +19,27 @@ import { CUBE_MARGIN_PX, CUBE_PX, NavCube } from "./navcube";
 import { findApex, solveScaledTriangle } from "../geometry/triangle";
 import { displayStep, formatLength, toMillimetres } from "../measurement";
 import type { DisplayUnit } from "../measurement";
+import { evaluateMathExpression } from "../utils/mathExpr";
 
 export type { CameraMode } from "../document/types";
-export type ToolMode = "select" | "face" | "edge" | "place" | "move" | "rotate" | "align" | "build";
+export type ToolMode = "select" | "face" | "edge" | "place" | "move" | "rotate" | "align" | "build" | "join";
 export type AlignAxis = 0 | 1 | 2;
 export type AlignAnchor = "min" | "center" | "max";
 export type AlignSubMode = "box" | "points";
 export type WireframeMode = "off" | "outlined" | "edges" | "mesh" | "xray" | "transparent";
+
+export interface JoineryPreviewItem {
+  position: Vec3;
+  rotationDeg: Vec3;
+  shape: number;
+  params: Record<string, number>;
+}
+
+export interface JoineryPreviewData {
+  plugId: string;
+  socketId: string;
+  items: JoineryPreviewItem[];
+}
 
 /** How far the pointer may move between down and up and still count as a click
  *  rather than an orbit drag. */
@@ -542,6 +556,246 @@ function disposeArrow(handle: THREE.Object3D) {
   });
 }
 
+function mergeConnectorPreviewGeometries(geoms: THREE.BufferGeometry[]): THREE.BufferGeometry {
+  if (geoms.length === 1) return geoms[0];
+  const posArr: number[] = [];
+  const normArr: number[] = [];
+  for (const g of geoms) {
+    const pos = g.getAttribute("position");
+    const norm = g.getAttribute("normal");
+    const idx = g.getIndex();
+    if (idx) {
+      for (let i = 0; i < idx.count; i++) {
+        const index = idx.getX(i);
+        posArr.push(pos.getX(index), pos.getY(index), pos.getZ(index));
+        if (norm) normArr.push(norm.getX(index), norm.getY(index), norm.getZ(index));
+      }
+    } else {
+      for (let i = 0; i < pos.count; i++) {
+        posArr.push(pos.getX(i), pos.getY(i), pos.getZ(i));
+        if (norm) normArr.push(norm.getX(i), norm.getY(i), norm.getZ(i));
+      }
+    }
+    g.dispose();
+  }
+  const merged = new THREE.BufferGeometry();
+  merged.setAttribute("position", new THREE.BufferAttribute(Float32Array.from(posArr), 3));
+  if (normArr.length === posArr.length) {
+    merged.setAttribute("normal", new THREE.BufferAttribute(Float32Array.from(normArr), 3));
+  } else {
+    merged.computeVertexNormals();
+  }
+  return merged;
+}
+
+export function buildConnectorPreviewGeometry(p: Record<string, number>): THREE.BufferGeometry {
+  const shapeType = Math.round(p.shape ?? 0);
+  const fit = Math.round(p.fit ?? 0);
+  const clearance = fit === 1 || fit === 2 || fit === 3 ? Math.max(0.01, Math.min(5, p.clearance ?? 0.2)) : 0;
+  const seamBleed = fit === 1 || fit === 2 || fit === 3 ? 1.0 : 0;
+
+  if (shapeType === 0) {
+    // Dovetail
+    const baseW = Math.max(1, p.width ?? 14);
+    const angleDeg = Math.min(45, Math.max(2, p.taperAngle ?? 20));
+    const angleRad = (angleDeg * Math.PI) / 180;
+    const H = Math.max(0.5, p.height ?? 6);
+    const L = Math.max(1, p.length ?? 12);
+    const stopped = Math.round(p.stopped ?? 1) === 1;
+    const stopEnd = Math.round(p.stopEnd ?? 0); // 0 = bottom, 1 = top
+    const entryExtension = Math.max(0, p.entryExtension ?? 0);
+
+    const c = fit === 1
+      ? Math.max(0.01, Math.min(2, clearance <= 0.10 ? 0.05 : (clearance <= 0.16 ? 0.10 : 0.15)))
+      : 0;
+
+    let effL: number;
+    let yShift = 0;
+
+    if (!stopped) {
+      effL = fit === 1 ? L + 2 * c + 2.0 + entryExtension : L;
+      yShift = 0;
+    } else {
+      if (fit === 1) {
+        effL = L + 2.0 + c + entryExtension;
+        yShift = stopEnd === 0 ? (2.0 - c + entryExtension) / 2 : -(2.0 - c + entryExtension) / 2;
+      } else {
+        effL = L;
+        yShift = 0;
+      }
+    }
+
+    const shape = new THREE.Shape();
+    if (fit === 1) {
+      const deltaX = c / Math.cos(angleRad);
+      const halfB_sock = baseW / 2 + deltaX;
+      const halfT_sock = halfB_sock + (H + c) * Math.tan(angleRad);
+
+      shape.moveTo(-halfB_sock, -seamBleed);
+      shape.lineTo(halfB_sock, -seamBleed);
+      shape.lineTo(halfT_sock, H + c);
+      shape.lineTo(-halfT_sock, H + c);
+    } else {
+      const flare = H * Math.tan(angleRad);
+      const halfB = baseW / 2;
+      const halfT = halfB + flare;
+
+      shape.moveTo(-halfB, 0);
+      shape.lineTo(halfB, 0);
+      shape.lineTo(halfT, H);
+      shape.lineTo(-halfT, H);
+    }
+    shape.closePath();
+
+    const extrude = new THREE.ExtrudeGeometry(shape, { depth: effL, bevelEnabled: false });
+    extrude.rotateX(Math.PI / 2).translate(0, effL / 2 + yShift, 0);
+    return extrude;
+  } else if (shapeType === 1) {
+    // Round Pin
+    const r = Math.max(0.5, p.radius ?? 5) + (fit === 1 ? clearance : 0);
+    const len = Math.max(1, p.length ?? 12) + (fit === 1 ? clearance + seamBleed : 0);
+    const geom = new THREE.CylinderGeometry(r, r, len, 24);
+    geom.rotateX(Math.PI / 2).translate(0, 0, len / 2 - (fit === 1 ? seamBleed : 0));
+    return geom;
+  } else if (shapeType === 2) {
+    // Square Pin / Key
+    const w = Math.max(1, p.width ?? 10) + (fit === 1 ? 2 * clearance : 0);
+    const len = Math.max(1, p.length ?? 12) + (fit === 1 ? clearance + seamBleed : 0);
+    return new THREE.BoxGeometry(w, w, len).translate(0, 0, len / 2 - (fit === 1 ? seamBleed : 0));
+  } else if (shapeType === 3) {
+    // 3: Tenon & Mortise: classic rounded Domino / bullnose flat tab
+    const w = Math.max(2, p.width ?? 20) + (fit === 1 ? 2 * clearance : 0);
+    const t = Math.max(1, p.thickness ?? 6) + (fit === 1 ? 2 * clearance : 0);
+    const len = Math.max(1, p.length ?? 15) + (fit === 1 ? clearance + seamBleed : 0);
+    const rad = Math.min(t / 2, w / 2);
+    const hw = w / 2;
+    const ht = t / 2;
+
+    const shape = new THREE.Shape();
+    shape.moveTo(-hw + rad, -ht);
+    shape.lineTo(hw - rad, -ht);
+    shape.absarc(hw - rad, -ht + rad, rad, -Math.PI / 2, 0, false);
+    shape.lineTo(hw, ht - rad);
+    shape.absarc(hw - rad, ht - rad, rad, 0, Math.PI / 2, false);
+    shape.lineTo(-hw + rad, ht);
+    shape.absarc(-hw + rad, ht - rad, rad, Math.PI / 2, Math.PI, false);
+    shape.lineTo(-hw, -ht + rad);
+    shape.absarc(-hw + rad, -ht + rad, rad, Math.PI, (3 * Math.PI) / 2, false);
+    shape.closePath();
+
+    const extrude = new THREE.ExtrudeGeometry(shape, { depth: len, bevelEnabled: false, curveSegments: 16 });
+    extrude.translate(0, 0, fit === 1 ? -seamBleed : 0);
+    return extrude;
+  } else if (shapeType === 5) {
+    // 5: Print-in-Place Hinge: 45° self-supporting conical pivots
+    const L = Math.max(8, p.length ?? 30);
+    const Rk = Math.max(1.5, p.radius ?? 4);
+    const rawN = Math.max(3, Math.min(15, Math.round(p.knuckleCount ?? 3)));
+    const effN = rawN % 2 === 0 ? rawN + 1 : rawN;
+    const c = Math.max(0.15, Math.min(1.0, clearance || 0.40));
+    const totalGaps = (effN - 1) * c;
+    const kLen = Math.max(1.5, (L - totalGaps) / effN);
+    const yStartAll = -L / 2;
+
+    const Rcone = Math.max(0.8, Math.min(Rk * 0.62, kLen * 0.55));
+    const rTip = Math.max(0.3, Rcone * 0.22);
+    const Hcone = Rcone - rTip;
+
+    const geoms: THREE.BufferGeometry[] = [];
+
+    const indices = fit === 0
+      ? Array.from({ length: Math.ceil(effN / 2) }, (_, k) => k * 2)
+      : Array.from({ length: Math.floor(effN / 2) }, (_, k) => k * 2 + 1);
+
+    const radialSegs = Math.max(32, Math.min(96, Math.round(p.sides ?? 64)));
+
+    for (const i of indices) {
+      const yB = yStartAll + i * (kLen + c);
+      const kGeom = new THREE.CylinderGeometry(Rk, Rk, kLen, radialSegs);
+      kGeom.translate(0, yB + kLen / 2, 0);
+      geoms.push(kGeom);
+
+      if (i < effN - 1) {
+        // Upward male cone
+        const coneGeom = new THREE.CylinderGeometry(rTip, Rcone, Hcone, radialSegs);
+        coneGeom.translate(0, yB + kLen + Hcone / 2, 0);
+        geoms.push(coneGeom);
+      }
+    }
+
+    return mergeConnectorPreviewGeometries(geoms);
+  } else if (shapeType === 6) {
+    // 6: Split-Prong Snap Pin (Collet / Dowel Snap Joint)
+    const baseD = Math.max(3.5, p.thickness ?? (p.width ? Math.min(p.width, 12) : 6.0));
+    const R = baseD / 2;
+    const L = Math.max(8.0, p.length ?? 14.0);
+    const hookH = Math.max(0.25, Math.min(0.60, p.hookDepth ?? 0.40));
+    const c = fit === 1 ? Math.max(0.15, Math.min(1.0, clearance || 0.25)) : 0;
+    const slotW = Math.max(1.0, Math.min(2.0, R * 0.50));
+    const beadLen = Math.max(3.2, hookH * 4.5);
+    const zBeadStart = L - beadLen;
+
+    const geoms: THREE.BufferGeometry[] = [];
+
+    if (fit === 0) {
+      // Male Split-Prong Pin: two compliant prongs separated by slotW with tip bead
+      const prong1 = new THREE.CylinderGeometry(R, R, L, 16, 1, false, 0, Math.PI);
+      prong1.rotateX(Math.PI / 2).translate(slotW / 2, 0, L / 2);
+      geoms.push(prong1);
+
+      const prong2 = new THREE.CylinderGeometry(R, R, L, 16, 1, false, Math.PI, Math.PI);
+      prong2.rotateX(Math.PI / 2).translate(-slotW / 2, 0, L / 2);
+      geoms.push(prong2);
+
+      // Tip retention bead rings on prongs with gentle 18° lead-in cone
+      const bead1 = new THREE.CylinderGeometry(Math.max(0.5, R - 0.5), R + hookH, beadLen, 16, 1, false, 0, Math.PI);
+      bead1.rotateX(Math.PI / 2).translate(slotW / 2, 0, zBeadStart + beadLen / 2);
+      geoms.push(bead1);
+
+      const bead2 = new THREE.CylinderGeometry(Math.max(0.5, R - 0.5), R + hookH, beadLen, 16, 1, false, Math.PI, Math.PI);
+      bead2.rotateX(Math.PI / 2).translate(-slotW / 2, 0, zBeadStart + beadLen / 2);
+      geoms.push(bead2);
+
+      return mergeConnectorPreviewGeometries(geoms);
+    } else {
+      // Female Socket: cylindrical hole with internal retention groove ring
+      const effR = R + c;
+      const effL = L + c + seamBleed;
+      const holeGeom = new THREE.CylinderGeometry(effR, effR, effL, 24);
+      holeGeom.rotateX(Math.PI / 2).translate(0, 0, effL / 2 - seamBleed);
+      geoms.push(holeGeom);
+
+      // Internal retention groove ring
+      const grooveR = effR + hookH + c;
+      const grooveGeom = new THREE.CylinderGeometry(grooveR, grooveR, beadLen, 24);
+      grooveGeom.rotateX(Math.PI / 2).translate(0, 0, zBeadStart + beadLen / 2);
+      geoms.push(grooveGeom);
+
+      return mergeConnectorPreviewGeometries(geoms);
+    }
+  } else {
+    // Screw Boss / Standoff
+    const rOut = Math.max(1, p.outerRadius ?? 4) + (fit === 1 ? clearance : 0);
+    const len = Math.max(1, p.length ?? 10) + (fit === 1 ? clearance : 0);
+    const geom = new THREE.CylinderGeometry(rOut, rOut, len, 24);
+    geom.rotateX(Math.PI / 2).translate(0, 0, len / 2);
+    return geom;
+  }
+}
+
+export interface DuplicateCopyInfo {
+  origId: string;
+  copyId: string;
+  childMap?: Record<string, string>;
+}
+
+export interface DuplicateResult {
+  copyId: string;
+  childMap?: Record<string, string>;
+  copies: DuplicateCopyInfo[];
+  nodes?: SceneNode[];
+}
+
 export class Scene {
   private solidMaterialCache = new Map<string, THREE.MeshStandardMaterial>();
   private placementPreview: THREE.Mesh | null = null;
@@ -742,6 +996,15 @@ export class Scene {
     depthWrite: false,
     side: THREE.DoubleSide,
   });
+  private collisionRafId: number | null = null;
+  private pendingCollisionId: string | null = null;
+  private pendingCollisionSnaps: import("../snapping/snap").ActiveSnap[] = [];
+  private worldTrianglesCache = new Map<string, {
+    pos: THREE.Vector3;
+    rot: THREE.Euler;
+    scale: THREE.Vector3;
+    triangles: THREE.Vector3[][];
+  }>();
 
   private parts = new Map<string, PartView>();
   private displayUnit: DisplayUnit = "mm";
@@ -791,6 +1054,20 @@ export class Scene {
   /** Visual bounding-box center pivots for assembly groups so gizmos sit exactly on the objects. */
   private assemblyPivots: Map<string, THREE.Object3D> = new Map();
   private assemblyDragStart: { center: THREE.Vector3; position: Vec3; rotation: Vec3 } | null = null;
+  private multiGizmoPivot = new THREE.Object3D();
+  private multiGizmoDrag: {
+    center: THREE.Vector3;
+    startGizmoPos: THREE.Vector3;
+    startGizmoQuat: THREE.Quaternion;
+    items: Array<{
+      id: string;
+      isAssembly: boolean;
+      obj: THREE.Object3D;
+      startPos: THREE.Vector3;
+      startRot: THREE.Quaternion;
+      pivot: THREE.Vector3;
+    }>;
+  } | null = null;
   /** In-progress click-and-drag-the-body move, TinkerCAD style — separate
    *  from the gizmo's own arrow-drag. See onPointerDown/onPointerMove. */
   private grab: BodyGrab | null = null;
@@ -804,6 +1081,27 @@ export class Scene {
   private navCubeFrame: HTMLDivElement;
   private navDrag: NavDrag | null = null;
   private navAnimFrame = 0;
+  private joineryPreviewGroup = new THREE.Group();
+  private joineryTransparentIds = new Set<string>();
+  private placementTransparentId: string | null = null;
+  private placementKind: PrimitiveKind | null = null;
+
+  private computeSelectionCenter(ids: string[]): THREE.Vector3 {
+    const box = new THREE.Box3();
+    for (const id of ids) {
+      const obj = this.assemblyGroups.get(id) ?? this.parts.get(id)?.group;
+      if (obj) {
+        obj.updateWorldMatrix(true, true);
+        const objBox = new THREE.Box3().setFromObject(obj);
+        if (!objBox.isEmpty()) {
+          box.union(objBox);
+        } else {
+          box.expandByPoint(obj.position);
+        }
+      }
+    }
+    return box.isEmpty() ? new THREE.Vector3() : box.getCenter(new THREE.Vector3());
+  }
 
   private computeAssemblyCenter(gId: string): THREE.Vector3 {
     const gObj = this.assemblyGroups.get(gId);
@@ -850,11 +1148,9 @@ export class Scene {
   /** Fires as a gizmo drag begins and ends, so the whole drag can become a
    *  single undo step instead of one per frame. */
   onDragChange: ((dragging: boolean) => void) | null = null;
-  /** Alt-drag: creates a document-side copy of `id` at its current position
-   *  and returns the copy's id (or null if it no longer exists), all
-   *  synchronously — the caller then drags that id instead of the original,
-   *  with no kernel rebuild to wait for. */
-  onDuplicateObject: ((id: string) => string | null) | null = null;
+  onDuplicateObject:
+    | ((target: string | string[]) => DuplicateResult | null)
+    | null = null;
   /** Push/pull: a face on `id` was pushed or pulled by `distance` (mm, along
    *  the face's own outward normal — see PushPullOp in document/types.ts). */
   onPushPullFace:
@@ -880,7 +1176,7 @@ export class Scene {
    *  to. `point` is the same anchor push/pull stores, and it lies ON the
    *  face, which is what a FaceFinder needs to re-find it after a rebuild. */
   onSelectFace: ((id: string | null, point: Vec3 | null, normal: Vec3 | null, size: number, edges: Vec3[]) => void) | null = null;
-  onPlaceSurface: ((point: Vec3, normal: Vec3) => void) | null = null;
+  onPlaceSurface: ((point: Vec3, normal: Vec3, targetId?: string) => void) | null = null;
 
   constructor(host: HTMLElement) {
     this.host = host;
@@ -922,7 +1218,8 @@ export class Scene {
     host.appendChild(this.cellCursorEl);
 
     this.pushPullLabelEl = document.createElement("input");
-    this.pushPullLabelEl.type = "number";
+    this.pushPullLabelEl.type = "text";
+    this.pushPullLabelEl.inputMode = "decimal";
     this.pushPullLabelEl.className = "push-pull-measure";
     this.pushPullLabelEl.step = "0.5";
     this.pushPullLabelEl.title = "Push/pull distance in millimetres";
@@ -930,10 +1227,13 @@ export class Scene {
     this.pushPullLabelEl.style.display = "none";
     this.pushPullLabelEl.addEventListener("input", () => {
       this.pushPullLabelEl.style.width = `${Math.max(4.2, this.pushPullLabelEl.value.length + 1.6)}ch`;
-      const displayed = Number(this.pushPullLabelEl.value);
-      if (Number.isFinite(displayed)) this.onPushPullDistanceChange?.(toMillimetres(displayed, this.displayUnit));
+      const displayed = evaluateMathExpression(this.pushPullLabelEl.value);
+      if (displayed !== null && Number.isFinite(displayed)) this.onPushPullDistanceChange?.(toMillimetres(displayed, this.displayUnit));
     });
-    this.pushPullLabelEl.addEventListener("focus", () => this.onDragChange?.(true));
+    this.pushPullLabelEl.addEventListener("focus", () => {
+      this.onDragChange?.(true);
+      this.pushPullLabelEl.select();
+    });
     this.pushPullLabelEl.addEventListener("blur", () => this.commitOrAbandonPushPull(true));
     this.pushPullLabelEl.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
@@ -957,6 +1257,7 @@ export class Scene {
     // After the scene exists — this one adds itself to it, unlike the purely
     // DOM-side overlays set up above.
     this.setupMoveReadout();
+    this.scene.add(this.joineryPreviewGroup);
 
     const savedCam = loadCameraState();
     const mode = savedCam?.mode ?? "perspective";
@@ -1003,6 +1304,8 @@ export class Scene {
     this.gizmo.addEventListener("dragging-changed", this.onDraggingChanged);
     this.gizmo.addEventListener("objectChange", this.onGizmoChange);
     this.gizmoScene.add(this.gizmo.getHelper());
+    this.multiGizmoPivot.name = "MultiGizmoPivot";
+    this.scene.add(this.multiGizmoPivot);
     this.scene.add(this.guides.group);
     this.collisionContacts.renderOrder = 10;
     this.scene.add(this.collisionContacts);
@@ -1023,6 +1326,11 @@ export class Scene {
     this.renderer.domElement.addEventListener("pointerdown", this.onPointerDown);
     this.renderer.domElement.addEventListener("pointermove", this.onPointerMove);
     this.renderer.domElement.addEventListener("pointerup", this.onPointerUp);
+    this.renderer.domElement.addEventListener("pointercancel", this.onPointerCancel);
+    this.renderer.domElement.addEventListener("pointerleave", () => {
+      if (this.placementPreview) this.placementPreview.visible = false;
+      this.setPlacementTarget(null);
+    });
     // Right-click drives the camera (orbit), never the browser's menu.
     this.renderer.domElement.addEventListener("contextmenu", this.onContextMenu);
     // Capture phase on an ANCESTOR of the canvas — this is what lets it run
@@ -1031,6 +1339,9 @@ export class Scene {
     // which of the two was constructed first. See onGlobalPointerDown.
     this.host.addEventListener("pointerdown", this.onGlobalPointerDown, { capture: true });
     this.host.addEventListener("pointerup", this.onGlobalPointerUp, { capture: true });
+    window.addEventListener("pointerup", this.onWindowPointerUp);
+    window.addEventListener("pointercancel", this.onPointerCancel);
+    window.addEventListener("blur", this.onWindowBlur);
     window.addEventListener("keydown", this.onModifierChange);
     window.addEventListener("keyup", this.onModifierChange);
 
@@ -1191,11 +1502,15 @@ export class Scene {
     pill.appendChild(axisLabel);
 
     const input = document.createElement("input");
-    input.type = "number";
+    input.type = "text";
+    input.inputMode = "decimal";
     input.title = title;
     input.setAttribute("aria-label", title);
     input.addEventListener("input", () => {
       input.style.width = `${Math.max(3.2, input.value.length + 0.6)}ch`;
+    });
+    input.addEventListener("focus", () => {
+      input.select();
     });
     pill.appendChild(input);
     return { pill, input };
@@ -1264,17 +1579,18 @@ export class Scene {
   private updateMoveReadout() {
     const readout = this.moveReadout;
     const view = readout ? this.parts.get(readout.id) : undefined;
+    const obj = readout ? (this.assemblyGroups.get(readout.id) ?? view?.group) : undefined;
     const visible =
-      !!readout && !!view && this.toolMode === "select" && !this.showResult &&
-      view.group.visible && this.selectedIds.includes(readout.id);
+      !!readout && !!obj && this.toolMode === "select" && !this.showResult &&
+      obj.visible && this.selectedIds.includes(readout.id);
     this.moveGuide.visible = !!visible;
-    if (!visible || !readout || !view) {
+    if (!visible || !readout || !obj) {
       for (const pill of this.movePills) pill.style.display = "none";
       return;
     }
 
-    view.group.updateWorldMatrix(true, true);
-    const now = view.group.position;
+    obj.updateWorldMatrix(true, true);
+    const now = obj.position;
     const dx = now.x - readout.startPos.x;
     const dy = now.y - readout.startPos.y;
 
@@ -1282,7 +1598,7 @@ export class Scene {
     // leader reads as a measurement on the ground the way TinkerCAD's does.
     // Lifted a hair off the object's base so it cannot z-fight the grid when
     // the object is sitting flat on the plate.
-    const z = new THREE.Box3().setFromObject(view.group).min.z + 0.02;
+    const z = new THREE.Box3().setFromObject(obj).min.z + 0.02;
     const to = new THREE.Vector3(now.x, now.y, z);
     const xFrom = new THREE.Vector3(readout.startPos.x, now.y, z);
     const yFrom = new THREE.Vector3(now.x, readout.startPos.y, z);
@@ -1364,7 +1680,8 @@ export class Scene {
   private applyTypedMove(input: HTMLInputElement) {
     const readout = this.moveReadout;
     const view = readout ? this.parts.get(readout.id) : undefined;
-    const typed = toMillimetres(Number(input.value), this.displayUnit);
+    const parsed = evaluateMathExpression(input.value);
+    const typed = parsed !== null ? toMillimetres(parsed, this.displayUnit) : NaN;
     if (!readout || !view || !Number.isFinite(typed)) {
       this.updateMoveReadout();
       return;
@@ -1628,7 +1945,17 @@ export class Scene {
     group.scale.copy(source.group.scale);
     group.add(mesh, wire, occluder);
     this.scene.add(group);
-    return { group, mesh, wire, occluder, geom, pivot: source.pivot.clone(), isHole: source.isHole };
+    return {
+      group,
+      mesh,
+      wire,
+      occluder,
+      geom,
+      pivot: source.pivot.clone(),
+      isHole: source.isHole,
+      lastColor: source.lastColor,
+      lastTransparent: source.lastTransparent,
+    };
   }
 
   /** Centres both render geometries around their visible bounds. The outer
@@ -1704,12 +2031,14 @@ export class Scene {
       // This mesh now represents the baked dimensions, so its document
       // transform can safely replace the held live-drag transform.
       this.pendingScaleBake.delete(part.id);
+      this.worldTrianglesCache.delete(part.id);
     }
 
     for (const [id, view] of [...this.parts]) {
       if (seen.has(id)) continue;
       this.scene.remove(view.group);
       this.parts.delete(id);
+      this.worldTrianglesCache.delete(id);
     }
     // A part that was just created above has never had a node transform
     // applied to it (that is setPlacements' job, and nothing guarantees it
@@ -1757,6 +2086,77 @@ export class Scene {
     view.occluder.geometry = view.geom[0].faces;
     view.faces = preview.faces;
     this.applyPlacements();
+    this.applyMaterials();
+  }
+
+  setJoineryPreview(preview: JoineryPreviewData | null) {
+    while (this.joineryPreviewGroup.children.length > 0) {
+      const child = this.joineryPreviewGroup.children[0];
+      this.joineryPreviewGroup.remove(child);
+      if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments) {
+        child.geometry?.dispose();
+      }
+    }
+
+    this.joineryTransparentIds.clear();
+
+    if (preview && preview.items.length > 0) {
+      if (preview.plugId) this.joineryTransparentIds.add(preview.plugId);
+      if (preview.socketId) this.joineryTransparentIds.add(preview.socketId);
+
+      for (const item of preview.items) {
+        // Plug geometry (cyan semi-transparent solid with edge wire)
+        const plugGeom = buildConnectorPreviewGeometry({ ...item.params, shape: item.shape, fit: 0 });
+        const plugMat = new THREE.MeshStandardMaterial({
+          color: 0x00d2d3,
+          transparent: true,
+          opacity: 0.85,
+          roughness: 0.35,
+          metalness: 0.1,
+          depthWrite: true,
+          side: THREE.DoubleSide,
+        });
+        const plugMesh = new THREE.Mesh(plugGeom, plugMat);
+        plugMesh.position.set(...item.position);
+        plugMesh.rotation.set(
+          (item.rotationDeg[0] * Math.PI) / 180,
+          (item.rotationDeg[1] * Math.PI) / 180,
+          (item.rotationDeg[2] * Math.PI) / 180,
+          "XYZ"
+        );
+        const plugWire = new THREE.LineSegments(
+          new THREE.EdgesGeometry(plugGeom),
+          new THREE.LineBasicMaterial({ color: 0x01579b, transparent: true, opacity: 0.9 })
+        );
+        plugMesh.add(plugWire);
+        this.joineryPreviewGroup.add(plugMesh);
+
+        // Socket cutter volume (translucent red/orange cutter with clearance)
+        const socketGeom = buildConnectorPreviewGeometry({ ...item.params, shape: item.shape, fit: 1 });
+        const socketMat = new THREE.MeshBasicMaterial({
+          color: 0xff6b6b,
+          transparent: true,
+          opacity: 0.35,
+          depthWrite: false,
+          side: THREE.DoubleSide,
+        });
+        const socketMesh = new THREE.Mesh(socketGeom, socketMat);
+        socketMesh.position.set(...item.position);
+        socketMesh.rotation.set(
+          (item.rotationDeg[0] * Math.PI) / 180,
+          (item.rotationDeg[1] * Math.PI) / 180,
+          (item.rotationDeg[2] * Math.PI) / 180,
+          "XYZ"
+        );
+        const socketWire = new THREE.LineSegments(
+          new THREE.EdgesGeometry(socketGeom),
+          new THREE.LineBasicMaterial({ color: 0xd63031, transparent: true, opacity: 0.7 })
+        );
+        socketMesh.add(socketWire);
+        this.joineryPreviewGroup.add(socketMesh);
+      }
+    }
+
     this.applyMaterials();
   }
 
@@ -1886,7 +2286,11 @@ export class Scene {
         }
 
         // Only update transform if gizmo isn't actively dragging this group
-        if (!this.gizmo.dragging || this.gizmo.object !== groupObj) {
+        const isGizmoDraggingGroup = this.gizmo.dragging && (
+          this.gizmo.object === groupObj ||
+          (this.multiGizmoDrag !== null && this.selectedIds.includes(node.id))
+        );
+        if (!isGizmoDraggingGroup) {
           if (!this.grab?.active || !this.grab.items.some((item) => item.id === node.id)) {
             groupObj.position.set(...node.position);
             groupObj.rotation.set(node.rotation[0] * DEG, node.rotation[1] * DEG, node.rotation[2] * DEG);
@@ -1916,7 +2320,11 @@ export class Scene {
         if (view.group.parent !== this.scene) {
           this.scene.add(view.group);
         }
-        if (this.gizmo.dragging && this.gizmo.object === view.group) continue;
+        const isGizmoDraggingView = this.gizmo.dragging && (
+          this.gizmo.object === view.group ||
+          (this.multiGizmoDrag !== null && this.selectedIds.includes(node.id))
+        );
+        if (isGizmoDraggingView) continue;
         if (this.grab?.active && this.grab.items.some((item) => item.id === node.id)) continue;
         if (this.pendingScaleBake.has(node.id)) continue;
 
@@ -2014,7 +2422,19 @@ export class Scene {
         // Draw after opaque solids while still respecting their depth.
         view.mesh.renderOrder = 2;
       } else {
-        const isTrans = isTransparentMode || transparent;
+        const isPlacementTarget = Boolean(
+          this.placementTransparentId && (
+            id === this.placementTransparentId ||
+            (() => {
+              const p = findNode(this.lastNodes, this.placementTransparentId);
+              if (!p || !isGroup(p)) return false;
+              const containsChild = (g: GroupNode): boolean =>
+                g.children.some((c) => c.id === id || (isGroup(c) && containsChild(c)));
+              return containsChild(p);
+            })()
+          )
+        );
+        const isTrans = isTransparentMode || transparent || this.joineryTransparentIds.has(id) || isPlacementTarget;
         const mat = this.getSolidMaterial(color, sel, isTrans);
         view.mesh.material = [mat, MATERIALS.faceHighlight];
         view.mesh.renderOrder = isTrans ? 1 : 0;
@@ -3065,10 +3485,12 @@ export class Scene {
     this.hoverFace = found;
   }
 
-  private placementAt(e: PointerEvent): { point: THREE.Vector3; normal: THREE.Vector3 } | null {
+  private placementAt(e: PointerEvent): { point: THREE.Vector3; normal: THREE.Vector3; targetId?: string } | null {
     const face = this.raycastFace(e);
     if (face) {
-      return { point: new THREE.Vector3(...face.point), normal: new THREE.Vector3(...face.normal) };
+      const hitId = [...this.parts.entries()].find(([, v]) => v === face.view)?.[0];
+      const targetId = hitId ? this.findRootOwner(hitId) : undefined;
+      return { point: new THREE.Vector3(...face.point), normal: new THREE.Vector3(...face.normal), targetId };
     }
     const rect = this.renderer.domElement.getBoundingClientRect();
     this.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
@@ -3080,22 +3502,46 @@ export class Scene {
       : null;
   }
 
+  private setPlacementTarget(targetId: string | null) {
+    const nextId = (this.placementKind === "screwHole" && targetId) ? targetId : null;
+    if (this.placementTransparentId === nextId) return;
+    this.placementTransparentId = nextId;
+    this.applyMaterials();
+  }
+
   private placeAt(e: PointerEvent) {
     const placement = this.placementAt(e);
-    if (placement) this.onPlaceSurface?.(placement.point.toArray() as Vec3, placement.normal.toArray() as Vec3);
+    if (placement) {
+      if (this.placementPreview) this.placementPreview.visible = false;
+      this.setPlacementTarget(null);
+      this.onPlaceSurface?.(
+        placement.point.toArray() as Vec3,
+        placement.normal.toArray() as Vec3,
+        placement.targetId,
+      );
+    }
   }
 
   private updatePlacementPreview(e: PointerEvent) {
-    if (!this.placementPreview) return;
+    if (!this.placementPreview) {
+      this.setPlacementTarget(null);
+      return;
+    }
     const placement = this.placementAt(e);
     this.placementPreview.visible = !!placement;
-    if (!placement) return;
+    if (!placement) {
+      this.setPlacementTarget(null);
+      return;
+    }
     const normal = placement.normal.normalize();
     this.placementPreview.position.copy(placement.point).addScaledVector(normal, 0.001);
     this.placementPreview.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), normal);
+    this.setPlacementTarget(placement.targetId ?? null);
   }
 
   setPlacementPreview(kind: PrimitiveKind | null) {
+    this.placementKind = kind;
+    this.setPlacementTarget(null);
     if (this.placementPreview) {
       this.placementPreview.removeFromParent();
       this.placementPreview.geometry.dispose();
@@ -3246,15 +3692,7 @@ export class Scene {
       const thickness = p.thickness ?? 4;
       geometry = new THREE.BoxGeometry(size * 2.5, size * 0.7, thickness).translate(0, 0, thickness / 2);
     } else if (kind === "connector") {
-      // Rough box/cylinder stand-ins, not the real keystone/tapered-tip
-      // profile — good enough for a drag-to-place ghost, and the real
-      // kernel-built mesh replaces it the instant the object is dropped.
-      if ((p.shape ?? 0) === 0) {
-        geometry = new THREE.BoxGeometry(p.width, p.length, p.height).translate(0, 0, p.height / 2);
-      } else {
-        geometry = new THREE.CylinderGeometry(p.radius, p.radius, p.length, 24);
-        geometry.rotateX(Math.PI / 2).translate(0, 0, p.length / 2);
-      }
+      geometry = buildConnectorPreviewGeometry(p);
     } else if (kind === "threadedRod") {
       const dia = p.diameter ?? 8;
       const len = p.length ?? 30;
@@ -3393,6 +3831,314 @@ export class Scene {
       geometry = new THREE.BufferGeometry();
       geometry.setAttribute("position", new THREE.BufferAttribute(Float32Array.from(positions), 3));
       geometry.computeVertexNormals();
+    } else if (kind === "gear") {
+      const z = Math.max(5, Math.min(100, Math.round(p.teeth ?? 16)));
+      const h = Math.max(p.height ?? 6, 0.1);
+      const sizeBy = p.sizeBy ?? 0;
+
+      let m: number;
+      let rp: number;
+      if (sizeBy === 1) {
+        m = Math.max(0.2, p.module ?? 1.5);
+        rp = (m * z) / 2;
+      } else {
+        rp = Math.max(1, p.radius ?? 15);
+        m = (2 * rp) / z;
+      }
+
+      // Stub factor prevents teeth from becoming gigantic spikes that cut through the hub at very low tooth counts
+      const kStub = Math.min(1.0, 0.45 + z / 22);
+      const ha = m * 0.88 * kStub;
+      const hf = m * 1.08 * kStub;
+      const ra = rp + ha;
+      const rf = Math.max(rp * 0.35, rp - hf);
+      const rootRadius = rf;
+
+      const toothPitch = (2 * Math.PI) / z;
+      // Pitch half-angle with 6% backlash for smooth 3D print clearance
+      const psiPitch = (toothPitch / 4) * 0.94;
+      // Root half-angle flares out smoothly, strictly capped so valley bottom stays wide
+      const psiRoot = Math.min(toothPitch * 0.31, psiPitch * 1.32);
+      // Tip half-angle tapers inward
+      const psiTip = psiPitch * 0.40;
+      const rMid = (rp + ra) / 2;
+      const psiMid = ((psiPitch + psiTip) / 2) * 1.03;
+      const rLow = (rf + rp) / 2;
+      const psiLow = ((psiRoot + psiPitch) / 2) * 0.98;
+
+      const pts: [number, number][] = [];
+      for (let i = 0; i < z; i++) {
+        const ca = i * toothPitch;
+        // Tooth profile (strictly CCW ascending angles)
+        pts.push([rf * Math.cos(ca - psiRoot), rf * Math.sin(ca - psiRoot)]);
+        pts.push([rLow * Math.cos(ca - psiLow), rLow * Math.sin(ca - psiLow)]);
+        pts.push([rp * Math.cos(ca - psiPitch), rp * Math.sin(ca - psiPitch)]);
+        pts.push([rMid * Math.cos(ca - psiMid), rMid * Math.sin(ca - psiMid)]);
+        pts.push([ra * Math.cos(ca - psiTip), ra * Math.sin(ca - psiTip)]);
+        pts.push([ra * Math.cos(ca + psiTip), ra * Math.sin(ca + psiTip)]);
+        pts.push([rMid * Math.cos(ca + psiMid), rMid * Math.sin(ca + psiMid)]);
+        pts.push([rp * Math.cos(ca + psiPitch), rp * Math.sin(ca + psiPitch)]);
+        pts.push([rLow * Math.cos(ca + psiLow), rLow * Math.sin(ca + psiLow)]);
+        pts.push([rf * Math.cos(ca + psiRoot), rf * Math.sin(ca + psiRoot)]);
+        // Valley bottom (root trough) between teeth
+        const vMid = ca + toothPitch * 0.5;
+        const v1 = ca + psiRoot + (vMid - (ca + psiRoot)) * 0.45;
+        const v2 = vMid + ((ca + toothPitch - psiRoot) - vMid) * 0.55;
+        pts.push([rf * Math.cos(v1), rf * Math.sin(v1)]);
+        pts.push([rf * Math.cos(v2), rf * Math.sin(v2)]);
+      }
+
+      const shape = new THREE.Shape();
+      shape.moveTo(pts[0][0], pts[0][1]);
+      for (let i = 1; i < pts.length; i++) {
+        shape.lineTo(pts[i][0], pts[i][1]);
+      }
+      shape.closePath();
+
+      const shaft = p.shaftType ?? 0;
+      const maxBore = shaft === 2 ? (rootRadius - 0.5) / Math.SQRT2 : rootRadius - 0.5;
+      const boreRadius = Math.min(Math.max(p.boreRadius ?? 0, 0), Math.max(0, maxBore));
+      if (boreRadius > 0) {
+        const hole = new THREE.Path();
+        if (shaft === 1) {
+          const flatDist = boreRadius * 0.75;
+          const halfChord = Math.sqrt(Math.max(0, boreRadius * boreRadius - flatDist * flatDist));
+          const aLeft = Math.atan2(flatDist, -halfChord);
+          const aRight = Math.atan2(flatDist, halfChord);
+          hole.moveTo(halfChord, flatDist);
+          hole.lineTo(-halfChord, flatDist);
+          hole.absarc(0, 0, boreRadius, aLeft, aRight + Math.PI * 2, false);
+          hole.closePath();
+        } else if (shaft === 2) {
+          const b = boreRadius;
+          hole.moveTo(-b, -b);
+          hole.lineTo(b, -b);
+          hole.lineTo(b, b);
+          hole.lineTo(-b, b);
+          hole.closePath();
+        } else {
+          hole.absarc(0, 0, boreRadius, 0, Math.PI * 2, true);
+        }
+        shape.holes.push(hole);
+      }
+      geometry = new THREE.ExtrudeGeometry(shape, { depth: h, bevelEnabled: false, curveSegments: 3 });
+    } else if (kind === "washer") {
+      const outerRadius = Math.max(p.outerRadius ?? 10, 0.1);
+      const innerRadius = Math.min(Math.max(p.innerRadius ?? 4, 0.01), outerRadius - 0.05);
+      const h = Math.max(p.height ?? 2, 0.1);
+      const shape = new THREE.Shape();
+      shape.absarc(0, 0, outerRadius, 0, Math.PI * 2, false);
+      const hole = new THREE.Path();
+      hole.absarc(0, 0, innerRadius, 0, Math.PI * 2, true);
+      shape.holes.push(hole);
+      geometry = new THREE.ExtrudeGeometry(shape, { depth: h, bevelEnabled: false, curveSegments: 24 });
+    } else if (kind === "bearing") {
+      const R = Math.max(p.outerRadius ?? 11, 0.5);
+      const r = Math.min(Math.max(p.innerRadius ?? 4, 0.2), R - 0.5);
+      const h = Math.max(p.height ?? 7, 0.5);
+      const span = R - r;
+      const tOut = Math.max(0.6, Math.min(span * 0.28, 4));
+      const tIn = Math.max(0.6, Math.min(span * 0.28, 4));
+      const rInnerOuter = r + tIn;
+      const rOuterInner = R - tOut;
+      const ch = Math.max(0, Math.min(p.chamfer ?? 0.5, Math.min(tIn, tOut) * 0.65, h * 0.3));
+      const chRace = Math.min(ch * 0.6, Math.min(tIn, tOut) * 0.3);
+      const isOpen = (p.style ?? 0) === 1;
+
+      const positions: number[] = [];
+
+      if (!isOpen) {
+        const rec = Math.max(0.1, Math.min(p.shieldRecess ?? 0.6, h * 0.25));
+        const profile: [number, number][] = [];
+        if (ch > 0) {
+          profile.push([r + ch, 0]);
+        } else {
+          profile.push([r, 0]);
+        }
+        profile.push([rInnerOuter, 0]);
+        profile.push([rInnerOuter, rec]);
+        profile.push([rOuterInner, rec]);
+        profile.push([rOuterInner, 0]);
+        if (ch > 0) {
+          profile.push([R - ch, 0], [R, ch], [R, h - ch], [R - ch, h]);
+        } else {
+          profile.push([R, 0], [R, h]);
+        }
+        profile.push([rOuterInner, h]);
+        profile.push([rOuterInner, h - rec]);
+        profile.push([rInnerOuter, h - rec]);
+        profile.push([rInnerOuter, h]);
+        if (ch > 0) {
+          profile.push([r + ch, h], [r, h - ch], [r, ch]);
+        } else {
+          profile.push([r, h]);
+        }
+
+        const sides = 32;
+        for (let i = 0; i < sides; i++) {
+          const a1 = (i * 2 * Math.PI) / sides;
+          const a2 = ((i + 1) * 2 * Math.PI) / sides;
+          const cos1 = Math.cos(a1), sin1 = Math.sin(a1);
+          const cos2 = Math.cos(a2), sin2 = Math.sin(a2);
+
+          for (let j = 0; j < profile.length; j++) {
+            const nextJ = (j + 1) % profile.length;
+            const [rA, zA] = profile[j];
+            const [rB, zB] = profile[nextJ];
+
+            const v1x = rA * cos1, v1y = rA * sin1, v1z = zA;
+            const v2x = rA * cos2, v2y = rA * sin2, v2z = zA;
+            const v3x = rB * cos2, v3y = rB * sin2, v3z = zB;
+            const v4x = rB * cos1, v4y = rB * sin1, v4z = zB;
+
+            positions.push(v1x, v1y, v1z, v2x, v2y, v2z, v3x, v3y, v3z);
+            positions.push(v1x, v1y, v1z, v3x, v3y, v3z, v4x, v4y, v4z);
+          }
+        }
+      } else {
+        const rPitch = (rInnerOuter + rOuterInner) / 2;
+        const channelWidth = rOuterInner - rInnerOuter;
+        const rawBallRadius = Math.min(channelWidth / 2 * 0.92, h * 0.42);
+        const clearance = Math.max(0.1, Math.min(p.clearance ?? 0.35, 1.0));
+        const ballRadius = Math.max(0.2, rawBallRadius - clearance / 2);
+        const grooveDepth = Math.max(0.1, Math.min(ballRadius * 0.35, 1.0));
+        const grooveHalfH = Math.min(ballRadius * 0.8, h * 0.35);
+
+        const revolveLoop = (profile: [number, number][], sides = 32) => {
+          for (let i = 0; i < sides; i++) {
+            const a1 = (i * 2 * Math.PI) / sides;
+            const a2 = ((i + 1) * 2 * Math.PI) / sides;
+            const cos1 = Math.cos(a1), sin1 = Math.sin(a1);
+            const cos2 = Math.cos(a2), sin2 = Math.sin(a2);
+            for (let j = 0; j < profile.length; j++) {
+              const nextJ = (j + 1) % profile.length;
+              const [rA, zA] = profile[j];
+              const [rB, zB] = profile[nextJ];
+              const v1x = rA * cos1, v1y = rA * sin1, v1z = zA;
+              const v2x = rA * cos2, v2y = rA * sin2, v2z = zA;
+              const v3x = rB * cos2, v3y = rB * sin2, v3z = zB;
+              const v4x = rB * cos1, v4y = rB * sin1, v4z = zB;
+              positions.push(v1x, v1y, v1z, v2x, v2y, v2z, v3x, v3y, v3z);
+              positions.push(v1x, v1y, v1z, v3x, v3y, v3z, v4x, v4y, v4z);
+            }
+          }
+        };
+
+        const outerProfile: [number, number][] = [];
+        if (chRace > 0) {
+          outerProfile.push([rOuterInner + chRace, 0]);
+        } else {
+          outerProfile.push([rOuterInner, 0]);
+        }
+        if (ch > 0) {
+          outerProfile.push([R - ch, 0], [R, ch], [R, h - ch], [R - ch, h]);
+        } else {
+          outerProfile.push([R, 0], [R, h]);
+        }
+        if (chRace > 0) {
+          outerProfile.push([rOuterInner + chRace, h], [rOuterInner, h - chRace]);
+        } else {
+          outerProfile.push([rOuterInner, h]);
+        }
+        outerProfile.push([rOuterInner, h / 2 + grooveHalfH]);
+        outerProfile.push([rOuterInner + grooveDepth, h / 2]);
+        outerProfile.push([rOuterInner, h / 2 - grooveHalfH]);
+        if (chRace > 0) {
+          outerProfile.push([rOuterInner, chRace]);
+        }
+
+        const innerProfile: [number, number][] = [];
+        if (ch > 0) {
+          innerProfile.push([r + ch, 0]);
+        } else {
+          innerProfile.push([r, 0]);
+        }
+        if (chRace > 0) {
+          innerProfile.push([rInnerOuter - chRace, 0], [rInnerOuter, chRace]);
+        } else {
+          innerProfile.push([rInnerOuter, 0]);
+        }
+        innerProfile.push([rInnerOuter, h / 2 - grooveHalfH]);
+        innerProfile.push([rInnerOuter - grooveDepth, h / 2]);
+        innerProfile.push([rInnerOuter, h / 2 + grooveHalfH]);
+        if (chRace > 0) {
+          innerProfile.push([rInnerOuter, h - chRace], [rInnerOuter - chRace, h]);
+        } else {
+          innerProfile.push([rInnerOuter, h]);
+        }
+        if (ch > 0) {
+          innerProfile.push([r + ch, h], [r, h - ch], [r, ch]);
+        } else {
+          innerProfile.push([r, h]);
+        }
+
+        // Outer race ring
+        revolveLoop(outerProfile);
+        // Inner race ring
+        revolveLoop(innerProfile);
+
+        // Spherical balls
+        const count = Math.max(5, Math.min(16, Math.round(p.ballCount ?? 8)));
+        const sphereGeom = new THREE.SphereGeometry(ballRadius, 12, 8);
+        const sPos = sphereGeom.getAttribute("position");
+        const sIdx = sphereGeom.getIndex();
+
+        for (let i = 0; i < count; i++) {
+          const theta = i * (2 * Math.PI / count);
+          const bx = rPitch * Math.cos(theta);
+          const by = rPitch * Math.sin(theta);
+          const bz = h / 2;
+
+          if (sIdx) {
+            for (let k = 0; k < sIdx.count; k++) {
+              const idx = sIdx.getX(k);
+              positions.push(sPos.getX(idx) + bx, sPos.getY(idx) + by, sPos.getZ(idx) + bz);
+            }
+          }
+        }
+
+        const showCage = (p.cage ?? 1) === 1;
+        if (showCage) {
+          const cageHalfWidth = Math.min(channelWidth * 0.32, ballRadius * 0.75);
+          const cageRIn = rPitch - cageHalfWidth;
+          const cageROut = rPitch + cageHalfWidth;
+          const baseH = Math.max(0.3, Math.min(ballRadius * 0.38, h * 0.14));
+          const zBase0 = Math.max(0.15, h / 2 - ballRadius * 0.92);
+          const zBase1 = zBase0 + baseH;
+
+          // Revolve cage base ring
+          revolveLoop([[cageRIn, zBase0], [cageROut, zBase0], [cageROut, zBase1], [cageRIn, zBase1]], 24);
+
+          // Crown pillars
+          const dBall = 2 * rPitch * Math.sin(Math.PI / count);
+          const gap = Math.max(0.1, dBall - 2 * ballRadius);
+          const pillarR = Math.max(0.15, Math.min(gap * 0.35, cageHalfWidth * 0.85));
+          const pillarH = (h / 2 + ballRadius * 0.45) - zBase0;
+
+          const pillarGeom = new THREE.CylinderGeometry(pillarR, pillarR, pillarH, 8);
+          pillarGeom.rotateX(Math.PI / 2);
+          const pPos = pillarGeom.getAttribute("position");
+          const pIdx = pillarGeom.getIndex();
+
+          for (let i = 0; i < count; i++) {
+            const midTheta = (i + 0.5) * (2 * Math.PI / count);
+            const px = rPitch * Math.cos(midTheta);
+            const py = rPitch * Math.sin(midTheta);
+            const pz = zBase0 + pillarH / 2;
+
+            if (pIdx) {
+              for (let k = 0; k < pIdx.count; k++) {
+                const idx = pIdx.getX(k);
+                positions.push(pPos.getX(idx) + px, pPos.getY(idx) + py, pPos.getZ(idx) + pz);
+              }
+            }
+          }
+        }
+      }
+
+      geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(Float32Array.from(positions), 3));
+      geometry.computeVertexNormals();
     } else if (kind === "tray") {
       const w = Math.max(p.width ?? 60, 2);
       const d = Math.max(p.depth ?? 30, 2);
@@ -3480,15 +4226,213 @@ export class Scene {
       const ry = Math.max(p.radiusY ?? 10, 0.1);
       const rz = Math.max(p.radiusZ ?? 10, 0.1);
       geometry = new THREE.SphereGeometry(1, 32, 20).scale(rx, ry, rz).translate(0, 0, rz);
-    } else {
+    } else if (kind === "spring") {
+      const R_bot = Math.max(p.radius ?? 12, 0.5);
+      const R_top = Math.max(p.topRadius ?? p.radius ?? 12, 0.5);
+      const rWire = Math.max(p.wireRadius ?? 1.5, 0.1);
+      const H = Math.max(p.height ?? 40, 1);
+      const turns = Math.max(p.turns ?? 6, 0.5);
+      const endStyle = p.endStyle ?? 0;
+      const wireShape = p.wireShape ?? 0;
+
+      const Theta = 2 * Math.PI * turns;
+      const K = Math.max(16, Math.min(600, Math.round(turns * 28)));
+      const M = wireShape === 1 ? 4 : 12;
+      const positions: number[] = [];
+      const ringPts: [number, number, number][][] = [];
+
+      for (let k = 0; k <= K; k++) {
+        const u = k / K;
+        const t = u * Theta;
+        const Ru = R_bot + (R_top - R_bot) * u;
+        const cx = Ru * Math.cos(t);
+        const cy = Ru * Math.sin(t);
+        const cz = u * H;
+
+        const dR_du = R_top - R_bot;
+        const dR_dt = Theta > 0 ? dR_du / Theta : 0;
+        const tx = dR_dt * Math.cos(t) - Ru * Math.sin(t);
+        const ty = dR_dt * Math.sin(t) + Ru * Math.cos(t);
+        const tz = Theta > 0 ? H / Theta : 0;
+        const tLen = Math.hypot(tx, ty, tz) || 1;
+        const Tx = tx / tLen, Ty = ty / tLen, Tz = tz / tLen;
+
+        const nx = ty;
+        const ny = -tx;
+        const nLen = Math.hypot(nx, ny) || 1;
+        const Nx = nx / nLen, Ny = ny / nLen, Nz = 0;
+
+        const Bx = Ty * Nz - Tz * Ny;
+        const By = Tz * Nx - Tx * Nz;
+        const Bz = Tx * Ny - Ty * Nx;
+
+        const currentRing: [number, number, number][] = [];
+        for (let j = 0; j < M; j++) {
+          let px: number, py: number, pz: number;
+          if (wireShape === 1) {
+            const sx = (j === 0 || j === 3 ? -1 : 1) * rWire;
+            const sy = (j === 0 || j === 1 ? -1 : 1) * rWire;
+            px = cx + sx * Nx + sy * Bx;
+            py = cy + sx * Ny + sy * By;
+            pz = cz + sx * Nz + sy * Bz;
+          } else {
+            const phi = (j * 2 * Math.PI) / M;
+            const cosPhi = Math.cos(phi);
+            const sinPhi = Math.sin(phi);
+            px = cx + rWire * (cosPhi * Nx + sinPhi * Bx);
+            py = cy + rWire * (cosPhi * Ny + sinPhi * By);
+            pz = cz + rWire * (cosPhi * Nz + sinPhi * Bz);
+          }
+          if (endStyle === 1) {
+            if (pz < 0) pz = 0;
+            if (pz > H) pz = H;
+          }
+          currentRing.push([px, py, pz]);
+        }
+        ringPts.push(currentRing);
+      }
+
+      for (let k = 0; k < K; k++) {
+        const r0 = ringPts[k];
+        const r1 = ringPts[k + 1];
+        for (let j = 0; j < M; j++) {
+          const jNext = (j + 1) % M;
+          const p00 = r0[j];
+          const p10 = r0[jNext];
+          const p01 = r1[j];
+          const p11 = r1[jNext];
+
+          positions.push(...p00, ...p10, ...p11);
+          positions.push(...p00, ...p11, ...p01);
+        }
+      }
+
+      const pStart = ringPts[0];
+      const cStartX = R_bot, cStartY = 0, cStartZ = 0;
+      for (let j = 0; j < M; j++) {
+        const jNext = (j + 1) % M;
+        positions.push(cStartX, cStartY, cStartZ, ...pStart[jNext], ...pStart[j]);
+      }
+
+      const pEnd = ringPts[K];
+      const cEndX = R_top * Math.cos(Theta), cEndY = R_top * Math.sin(Theta), cEndZ = H;
+      for (let j = 0; j < M; j++) {
+        const jNext = (j + 1) % M;
+        positions.push(cEndX, cEndY, cEndZ, ...pEnd[j], ...pEnd[jNext]);
+      }
+
+      geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(Float32Array.from(positions), 3));
+      geometry.computeVertexNormals();
+    } else if (kind === "hinge") {
+      const L = Math.max(10, p.length ?? 40);
+      const W = Math.max(5, p.leafWidth ?? 15);
+      const T = Math.max(1.2, p.leafThickness ?? 3.0);
+      const pinDia = Math.max(3.0, p.pinDiameter ?? 7.0);
+      const Rk = Math.max(T * 0.65, pinDia / 2);
+      const rawN = Math.max(3, Math.min(15, Math.round(p.knuckleCount ?? 3)));
+      const N = rawN % 2 === 0 ? rawN + 1 : rawN;
+      const c = Math.max(0.05, Math.min(2.0, p.clearance ?? 0.30));
+      const kLen = Math.max(1.0, (L - (N - 1) * c) / N);
+      const yStartAll = -L / 2;
+
+      const leftGeom = new THREE.BoxGeometry(W, L, T).translate(-(Rk + c + W / 2), 0, T / 2);
+      const rightGeom = new THREE.BoxGeometry(W, L, T).translate(+(Rk + c + W / 2), 0, T / 2);
+      const knuckleGeoms: THREE.BufferGeometry[] = [];
+      for (let i = 0; i < N; i++) {
+        const yK = yStartAll + i * (kLen + c) + kLen / 2;
+        const kGeom = new THREE.CylinderGeometry(Rk, Rk, kLen, 20).translate(0, yK, Rk);
+        knuckleGeoms.push(kGeom);
+        if (i % 2 === 0) {
+          // Leaf 1 (left) connecting finger
+          const finger = new THREE.BoxGeometry(Rk + c, kLen, T).translate(-(Rk + c) / 2, yK, T / 2);
+          knuckleGeoms.push(finger);
+        } else {
+          // Leaf 2 (right) connecting finger
+          const finger = new THREE.BoxGeometry(Rk + c, kLen, T).translate(+(Rk + c) / 2, yK, T / 2);
+          knuckleGeoms.push(finger);
+        }
+      }
+
+      const allGeoms = [leftGeom, rightGeom, ...knuckleGeoms];
+      const posArr: number[] = [];
+      for (const g of allGeoms) {
+        const pos = g.getAttribute("position");
+        const idx = g.getIndex();
+        if (idx) {
+          for (let i = 0; i < idx.count; i++) {
+            const index = idx.getX(i);
+            posArr.push(pos.getX(index), pos.getY(index), pos.getZ(index));
+          }
+        } else {
+          for (let i = 0; i < pos.count; i++) {
+            posArr.push(pos.getX(i), pos.getY(i), pos.getZ(i));
+          }
+        }
+        g.dispose();
+      }
+      geometry = new THREE.BufferGeometry();
+      geometry.setAttribute("position", new THREE.BufferAttribute(Float32Array.from(posArr), 3));
+      geometry.computeVertexNormals();
+    } else if (kind === "triangle") {
       const x = ((p.sideLeft ?? 20) ** 2 + (p.base ?? 20) ** 2 - (p.sideRight ?? 20) ** 2) / (2 * (p.base ?? 20));
       const y = Math.sqrt(Math.max(0, (p.sideLeft ?? 20) ** 2 - x ** 2));
       const b = p.base ?? 20;
       const shape = new THREE.Shape().moveTo(-b / 2, -y / 2).lineTo(b / 2, -y / 2).lineTo(x - b / 2, y / 2).closePath();
       geometry = new THREE.ExtrudeGeometry(shape, { depth: p.thickness ?? 10, bevelEnabled: false });
+    } else if (kind === "screwHole") {
+      const holeR = Math.max(0.2, (p.holeDia ?? 3.4) / 2);
+      const style = Math.round(p.headStyle ?? 0);
+      const headR = style === 2 ? holeR : Math.max(holeR + 0.1, (p.headDia ?? 6.5) / 2);
+      const pocketDepth = Math.max(0, p.pocketDepth ?? p.recess ?? 0);
+      const topZ = pocketDepth;
+      let pts: THREE.Vector2[];
+      if (style === 1) {
+        const headDepth = Math.max(0.2, p.headDepth ?? 3.4);
+        const depth = Math.max(headDepth + 0.5, p.depth ?? 15);
+        pts = [
+          new THREE.Vector2(0, topZ),
+          new THREE.Vector2(headR, topZ),
+          new THREE.Vector2(headR, 0),
+          new THREE.Vector2(headR, -headDepth),
+          new THREE.Vector2(holeR, -headDepth),
+          new THREE.Vector2(holeR, -depth),
+          new THREE.Vector2(0, -depth),
+        ];
+      } else if (style === 0) {
+        const angle = Math.max(30, Math.min(150, p.headAngle ?? 90)) * (Math.PI / 180);
+        const coneH = (headR - holeR) / Math.tan(angle / 2);
+        const depth = Math.max(coneH + 0.5, p.depth ?? 15);
+        pts = [
+          new THREE.Vector2(0, topZ),
+          new THREE.Vector2(headR, topZ),
+          new THREE.Vector2(headR, 0),
+          new THREE.Vector2(holeR, -coneH),
+          new THREE.Vector2(holeR, -depth),
+          new THREE.Vector2(0, -depth),
+        ];
+      } else {
+        const depth = Math.max(1, p.depth ?? 15);
+        pts = [
+          new THREE.Vector2(0, topZ),
+          new THREE.Vector2(holeR, topZ),
+          new THREE.Vector2(holeR, -depth),
+          new THREE.Vector2(0, -depth),
+        ];
+      }
+      geometry = new THREE.LatheGeometry(pts, 24);
+      geometry.rotateX(Math.PI / 2);
+    } else {
+      geometry = new THREE.BoxGeometry(20, 20, 20).translate(0, 0, 10);
     }
+    const isHolePreview = kind === "screwHole";
     this.placementPreview = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
-      color: 0x25b7bd, transparent: true, opacity: 0.42, depthWrite: false, roughness: 0.45, side: THREE.DoubleSide,
+      color: isHolePreview ? 0xff4433 : 0x25b7bd,
+      transparent: true,
+      opacity: isHolePreview ? 0.55 : 0.42,
+      depthWrite: false,
+      roughness: 0.45,
+      side: THREE.DoubleSide,
     }));
     this.placementPreview.renderOrder = 20;
     this.placementPreview.visible = false;
@@ -4000,7 +4944,8 @@ export class Scene {
   private applyTypedDimension(input: HTMLInputElement) {
     const id = input.dataset.nodeId;
     const current = Number(input.dataset.currentSize);
-    const desired = toMillimetres(Number(input.value), this.displayUnit);
+    const parsed = evaluateMathExpression(input.value);
+    const desired = parsed !== null ? toMillimetres(parsed, this.displayUnit) : NaN;
     if (!Number.isFinite(current) || current <= 0 || !Number.isFinite(desired) || desired <= 0) {
       this.updateResizeOverlay();
       return;
@@ -4996,7 +5941,10 @@ export class Scene {
       this.clearAlignPreview();
       this.onDragChange?.(false);
     }
-    if (mode !== "place" && this.placementPreview) this.placementPreview.visible = false;
+    if (mode !== "place") {
+      if (this.placementPreview) this.placementPreview.visible = false;
+      this.setPlacementTarget(null);
+    }
     if (mode !== "edge") {
       this.clearEdgeSelection(true);
       this.clearEdgeHover();
@@ -5050,8 +5998,27 @@ export class Scene {
   }
 
   private attachGizmo() {
+    if (this.gizmo.dragging) return;
+    if (this.selectedIds.length === 0 || this.showResult || (this.toolMode !== "move" && this.toolMode !== "rotate")) {
+      if (this.gizmo.object) this.gizmo.detach();
+      return;
+    }
+
+    if (this.selectedIds.length > 1) {
+      const center = this.computeSelectionCenter(this.selectedIds);
+      this.multiGizmoPivot.position.copy(center);
+      this.multiGizmoPivot.rotation.set(0, 0, 0);
+      this.multiGizmoPivot.quaternion.identity();
+      this.multiGizmoPivot.scale.set(1, 1, 1);
+      this.multiGizmoPivot.updateMatrixWorld(true);
+      if (this.gizmo.object !== this.multiGizmoPivot) {
+        this.gizmo.attach(this.multiGizmoPivot);
+      }
+      return;
+    }
+
     const id = this.gizmoTarget();
-    if (!id || this.showResult || (this.toolMode !== "move" && this.toolMode !== "rotate")) {
+    if (!id) {
       if (this.gizmo.object) this.gizmo.detach();
       return;
     }
@@ -5083,30 +6050,89 @@ export class Scene {
   }
 
   private onDraggingChanged = (e: { value: unknown }) => {
-    this.controls.enabled = !e.value;
-    if (!e.value) {
+    const dragging = !!e.value;
+    this.controls.enabled = !dragging;
+    if (!dragging) {
       this.guides.clear();
       this.assemblyDragStart = null;
+      this.multiGizmoDrag = null;
+      if (this.selectedIds.length > 1) {
+        const center = this.computeSelectionCenter(this.selectedIds);
+        this.multiGizmoPivot.position.copy(center);
+        this.multiGizmoPivot.rotation.set(0, 0, 0);
+        this.multiGizmoPivot.quaternion.identity();
+        this.multiGizmoPivot.scale.set(1, 1, 1);
+        this.multiGizmoPivot.updateMatrixWorld(true);
+      }
+      if (this.pendingCollisionId) {
+        if (this.collisionRafId !== null) {
+          cancelAnimationFrame(this.collisionRafId);
+          this.collisionRafId = null;
+        }
+        const pendingId = this.pendingCollisionId;
+        const pendingSnaps = this.pendingCollisionSnaps;
+        this.pendingCollisionId = null;
+        this.pendingCollisionSnaps = [];
+        if (this.showSelectedCollisionContacts) {
+          this.doRefreshCollisionContactsFor(pendingId, pendingSnaps);
+        }
+      }
     } else {
-      const id = this.gizmoTarget();
-      // TransformControls captures its handle before the canvas pointerdown
-      // path runs. Clear any marker left by the previously selected object
-      // here, at the authoritative start of every gizmo drag. Fresh contact
-      // for the object being moved is rebuilt by onGizmoChange.
       this.clearCollisionContacts();
-      if (id && this.assemblyGroups.has(id)) {
-        const node = findNode(this.lastNodes, id);
-        const pivotObj = this.assemblyPivots.get(id);
-        if (pivotObj && node) {
-          this.assemblyDragStart = {
-            center: pivotObj.position.clone(),
-            position: [...node.position],
-            rotation: [...node.rotation],
-          };
+      if (this.selectedIds.length > 1) {
+        const center = this.multiGizmoPivot.position.clone();
+        const effectiveIds = this.selectedIds.filter((id) => {
+          const root = this.findRootOwner(id);
+          return id === root || !this.selectedIds.includes(root);
+        });
+        const items: Array<{
+          id: string;
+          isAssembly: boolean;
+          obj: THREE.Object3D;
+          startPos: THREE.Vector3;
+          startRot: THREE.Quaternion;
+          pivot: THREE.Vector3;
+        }> = [];
+        for (const id of effectiveIds) {
+          const isAssembly = this.assemblyGroups.has(id);
+          const obj = this.assemblyGroups.get(id) ?? this.parts.get(id)?.group;
+          const view = this.parts.get(id);
+          if (!obj) continue;
+          items.push({
+            id,
+            isAssembly,
+            obj,
+            startPos: obj.position.clone(),
+            startRot: obj.quaternion.clone(),
+            pivot: isAssembly ? new THREE.Vector3() : (view?.pivot.clone() ?? new THREE.Vector3()),
+          });
+        }
+        this.multiGizmoDrag = {
+          center,
+          startGizmoPos: this.multiGizmoPivot.position.clone(),
+          startGizmoQuat: this.multiGizmoPivot.quaternion.clone(),
+          items,
+        };
+      } else {
+        const id = this.gizmoTarget();
+        // TransformControls captures its handle before the canvas pointerdown
+        // path runs. Clear any marker left by the previously selected object
+        // here, at the authoritative start of every gizmo drag. Fresh contact
+        // for the object being moved is rebuilt by onGizmoChange.
+        if (id && this.assemblyGroups.has(id)) {
+          const node = findNode(this.lastNodes, id);
+          const pivotObj = this.assemblyPivots.get(id);
+          if (pivotObj && node) {
+            this.assemblyDragStart = {
+              center: pivotObj.position.clone(),
+              position: [...node.position],
+              rotation: [...node.rotation],
+            };
+          }
         }
       }
     }
-    this.onDragChange?.(!!e.value);
+    this.onDragChange?.(dragging);
   };
 
   private onGizmoChange = () => {
@@ -5115,8 +6141,49 @@ export class Scene {
     // transforms or invoke smart snapping.
     if (!this.gizmo.dragging) return;
     const obj = this.gizmo.object;
+    if (!obj) return;
+
+    if (this.multiGizmoDrag && this.selectedIds.length > 1) {
+      const drag = this.multiGizmoDrag;
+      const deltaPos = this.multiGizmoPivot.position.clone().sub(drag.startGizmoPos);
+      const deltaQuat = this.multiGizmoPivot.quaternion.clone().multiply(drag.startGizmoQuat.clone().invert());
+
+      for (const item of drag.items) {
+        const offset = item.startPos.clone().sub(drag.center);
+        offset.applyQuaternion(deltaQuat);
+        const newGroupPos = drag.center.clone().add(deltaPos).add(offset);
+        item.obj.position.copy(newGroupPos);
+
+        const newQuat = deltaQuat.clone().multiply(item.startRot);
+        item.obj.quaternion.copy(newQuat);
+        item.obj.updateWorldMatrix(true, true);
+
+        const euler = new THREE.Euler().setFromQuaternion(newQuat, "XYZ");
+        const newRotDeg: Vec3 = [euler.x / DEG, euler.y / DEG, euler.z / DEG];
+
+        if (item.isAssembly) {
+          this.onTransformObject?.(item.id, {
+            position: [newGroupPos.x, newGroupPos.y, newGroupPos.z],
+            rotation: newRotDeg,
+          });
+        } else {
+          const rotatedPivot = item.pivot.clone().applyEuler(euler);
+          this.onTransformObject?.(item.id, {
+            position: [
+              newGroupPos.x - rotatedPivot.x,
+              newGroupPos.y - rotatedPivot.y,
+              newGroupPos.z - rotatedPivot.z,
+            ],
+            rotation: newRotDeg,
+          });
+        }
+      }
+      this.updateResizeOverlay();
+      return;
+    }
+
     const id = this.gizmoTarget();
-    if (!obj || !id) return;
+    if (!id) return;
     if (this.gizmo.getMode() === "translate") this.applySmartSnap(id, obj);
     if (this.assemblyGroups.has(id)) {
       const start = this.assemblyDragStart;
@@ -5220,7 +6287,7 @@ export class Scene {
       obj.position.add(new THREE.Vector3(...featureDelta));
       obj.updateWorldMatrix(true, true);
       this.guides.clear();
-      this.refreshCollisionContactsFor(id);
+      if (this.showSelectedCollisionContacts) this.refreshCollisionContactsFor(id);
       return featureDelta;
     }
     if (!result.active.length) {
@@ -5228,7 +6295,7 @@ export class Scene {
         obj.position.add(new THREE.Vector3(...featureDelta));
         obj.updateWorldMatrix(true, true);
         this.guides.clear();
-        this.refreshCollisionContactsFor(id);
+        if (this.showSelectedCollisionContacts) this.refreshCollisionContactsFor(id);
         return featureDelta;
       }
       this.guides.clear();
@@ -5243,16 +6310,38 @@ export class Scene {
     obj.updateWorldMatrix(true, true);
     const snappedBounds = this.boundsOf(obj);
     this.guides.show(result.active, snappedBounds);
-    this.refreshCollisionContactsFor(id, result.active);
+    if (this.showSelectedCollisionContacts) this.refreshCollisionContactsFor(id, result.active);
     return result.delta;
   }
 
   /** Magnetic corner/edge snapping for contacts that cannot be represented by
    * axis-aligned bounds, such as a box corner meeting a chamfered edge. */
   private meshFeatureSnap(id: string, travelling: Set<string>, tolerance: number): Vec3 | null {
+    const movingRoot = this.assemblyGroups.get(id) ?? this.parts.get(id)?.group;
+    if (!movingRoot) return null;
+    const bestLengthInit = Math.min(tolerance, 2);
+    let bestLength = bestLengthInit;
+    const movingBounds = this.boundsOf(movingRoot);
+
+    // Fast broadphase: find nearby visible targets within bestLength
+    const nearbyTargets: Array<{ id: string; view: PartView; bounds: Bounds3 }> = [];
+    for (const [targetId, view] of this.parts) {
+      if (
+        travelling.has(targetId) || !view.group.visible ||
+        (movingRoot !== view.group && !!movingRoot.getObjectById(view.group.id))
+      ) continue;
+      const targetBounds = this.boundsOf(view.group);
+      const gapX = Math.max(0, Math.max(movingBounds.min[0] - targetBounds.max[0], targetBounds.min[0] - movingBounds.max[0]));
+      const gapY = Math.max(0, Math.max(movingBounds.min[1] - targetBounds.max[1], targetBounds.min[1] - movingBounds.max[1]));
+      const gapZ = Math.max(0, Math.max(movingBounds.min[2] - targetBounds.max[2], targetBounds.min[2] - movingBounds.max[2]));
+      if (gapX <= bestLengthInit && gapY <= bestLengthInit && gapZ <= bestLengthInit) {
+        nearbyTargets.push({ id: targetId, view, bounds: targetBounds });
+      }
+    }
+    if (!nearbyTargets.length) return null;
+
     const movingTriangles = this.worldTriangles(id);
     if (!movingTriangles.length) return null;
-    const movingRoot = this.assemblyGroups.get(id) ?? this.parts.get(id)?.group;
     const pointMap = new Map<string, THREE.Vector3>();
     const edgeMap = new Map<string, [THREE.Vector3, THREE.Vector3]>();
     const collect = (
@@ -5278,7 +6367,6 @@ export class Scene {
     const allowed = axis === "X" ? [0] : axis === "Y" ? [1] : axis === "Z" ? [2] : [0, 1];
     const contactTolerance = 0.06;
     let best: Vec3 | null = null;
-    let bestLength = Math.min(tolerance, 2);
     let comparisons = 0;
     const consider = (delta: THREE.Vector3) => {
       for (let component = 0; component < 3; component++) {
@@ -5329,22 +6417,28 @@ export class Scene {
       return delta;
     };
 
-    for (const [targetId, view] of this.parts) {
-      if (
-        travelling.has(targetId) || !view.group.visible ||
-        (movingRoot && movingRoot !== view.group && !!movingRoot.getObjectById(view.group.id))
-      ) continue;
+    for (const { id: targetId, bounds: targetBounds } of nearbyTargets) {
       const targetTriangles = this.worldTriangles(targetId);
       const targetPoints = new Map<string, THREE.Vector3>();
       const targetEdges = new Map<string, [THREE.Vector3, THREE.Vector3]>();
       collect(targetTriangles, targetPoints, targetEdges);
-      // A box corner commonly meets the interior of a chamfered face rather
-      // than one of that face's boundary edges. Solve the intersection along
-      // the active movement axis so that contact is magnetic in 3D as well as
-      // visible in the collision overlay.
-      for (const point of pointMap.values()) {
+
+      const targetBoxExpanded = new THREE.Box3(
+        new THREE.Vector3(...targetBounds.min),
+        new THREE.Vector3(...targetBounds.max),
+      ).expandByScalar(bestLength);
+
+      const nearbyMovingPoints = [...pointMap.values()].filter((p) => targetBoxExpanded.containsPoint(p));
+      if (!nearbyMovingPoints.length) continue;
+
+      const movingBoxExpanded = new THREE.Box3(
+        new THREE.Vector3(...movingBounds.min),
+        new THREE.Vector3(...movingBounds.max),
+      ).expandByScalar(bestLength);
+
+      for (const point of nearbyMovingPoints) {
         for (const vertices of targetTriangles) {
-          if (++comparisons > 300000) break;
+          if (++comparisons > 5000) break;
           const triangle = new THREE.Triangle(vertices[0], vertices[1], vertices[2]);
           if (allowed.length === 1) {
             const moveAxis = allowed[0];
@@ -5365,25 +6459,26 @@ export class Scene {
             consider(contact.sub(point));
           }
         }
-        if (comparisons > 300000) break;
+        if (comparisons > 5000) break;
       }
-      for (const point of pointMap.values()) {
+      for (const point of nearbyMovingPoints) {
         for (const [a, b] of targetEdges.values()) {
-          if (++comparisons > 300000) break;
+          if (++comparisons > 5000) break;
           const delta = constrainedPointDelta(point, a, b, true);
           if (delta) consider(delta);
         }
-        if (comparisons > 300000) break;
+        if (comparisons > 5000) break;
       }
       for (const point of targetPoints.values()) {
+        if (!movingBoxExpanded.containsPoint(point)) continue;
         for (const [a, b] of edgeMap.values()) {
-          if (++comparisons > 300000) break;
+          if (++comparisons > 5000) break;
           const delta = constrainedPointDelta(point, a, b, false);
           if (delta) consider(delta);
         }
-        if (comparisons > 300000) break;
+        if (comparisons > 5000) break;
       }
-      if (comparisons > 300000) break;
+      if (comparisons > 5000) break;
     }
     return best;
   }
@@ -5393,15 +6488,28 @@ export class Scene {
    * represented by one oversized outer bounding box. */
   private surfaceSnapTargets(id: string, root: THREE.Object3D, moving: Bounds3): SnapTarget[] {
     root.updateWorldMatrix(true, true);
-    const targets: SnapTarget[] = [];
+    const targetBounds = this.boundsOf(root);
+    let overlapAxes = 0;
+    for (let axis = 0; axis < 3; axis++) {
+      if (Math.min(moving.max[axis], targetBounds.max[axis]) - Math.max(moving.min[axis], targetBounds.min[axis]) > 0.01) {
+        overlapAxes++;
+      }
+    }
+    if (overlapAxes < 2) return [];
+
+    const targetMap = new Map<string, SnapTarget>();
     const points = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+    let processed = 0;
+
     root.traverse((child) => {
+      if (processed > 2000) return;
       if (!(child instanceof THREE.Mesh) || !(child.geometry instanceof THREE.BufferGeometry)) return;
       const position = child.geometry.getAttribute("position");
       if (!position) return;
       const index = child.geometry.getIndex();
       const count = index ? index.count : position.count;
-      for (let offset = 0; offset + 2 < count; offset += 3) {
+      for (let offset = 0; offset + 2 < count && processed < 2000; offset += 3) {
+        processed++;
         for (let corner = 0; corner < 3; corner++) {
           const vertexIndex = index ? index.getX(offset + corner) : offset + corner;
           points[corner].fromBufferAttribute(position, vertexIndex).applyMatrix4(child.matrixWorld);
@@ -5427,12 +6535,21 @@ export class Scene {
           const plane = (planeMin + planeMax) / 2;
           mins[axis] = plane;
           maxs[axis] = plane;
-          targets.push({ id, bounds: { min: mins, max: maxs } });
+          const key = `${axis}:${plane.toFixed(2)}`;
+          const existing = targetMap.get(key);
+          if (existing) {
+            for (const c of others) {
+              existing.bounds.min[c] = Math.min(existing.bounds.min[c], mins[c]);
+              existing.bounds.max[c] = Math.max(existing.bounds.max[c], maxs[c]);
+            }
+          } else {
+            targetMap.set(key, { id, bounds: { min: mins, max: maxs } });
+          }
           break;
         }
       }
     });
-    return targets;
+    return Array.from(targetMap.values());
   }
 
   /** Highlights the shared patch only for opposing min/max faces that truly
@@ -5510,10 +6627,44 @@ export class Scene {
 
   /** Highlights real edge-to-face contact when there is no shared face area. */
   private showMeshEdgeContacts(id: string, targetId: string) {
+    const movingRoot = this.assemblyGroups.get(id) ?? this.parts.get(id)?.group;
+    const targetRoot = this.assemblyGroups.get(targetId) ?? this.parts.get(targetId)?.group;
+    if (!movingRoot || !targetRoot) return;
+    const movingBounds = this.boundsOf(movingRoot);
+    const targetBounds = this.boundsOf(targetRoot);
+    const tolerance = 0.06;
+    for (let axis = 0; axis < 3; axis++) {
+      if (movingBounds.min[axis] > targetBounds.max[axis] + tolerance || targetBounds.min[axis] > movingBounds.max[axis] + tolerance) {
+        return;
+      }
+    }
+
     const movingTriangles = this.worldTriangles(id);
     const targetTriangles = this.worldTriangles(targetId);
     if (!movingTriangles.length || !targetTriangles.length) return;
-    const tolerance = 0.06;
+
+    const movingBox = new THREE.Box3(new THREE.Vector3(...movingBounds.min), new THREE.Vector3(...movingBounds.max)).expandByScalar(tolerance);
+    const targetBox = new THREE.Box3(new THREE.Vector3(...targetBounds.min), new THREE.Vector3(...targetBounds.max)).expandByScalar(tolerance);
+
+    const filteredMoving: Array<{ tri: THREE.Vector3[]; box: THREE.Box3 }> = [];
+    for (const tri of movingTriangles) {
+      const box = new THREE.Box3().setFromPoints(tri);
+      if (box.intersectsBox(targetBox)) {
+        box.expandByScalar(tolerance);
+        filteredMoving.push({ tri, box });
+      }
+    }
+    if (!filteredMoving.length) return;
+
+    const filteredTarget: Array<{ tri: THREE.Vector3[]; box: THREE.Box3 }> = [];
+    for (const tri of targetTriangles) {
+      const box = new THREE.Box3().setFromPoints(tri);
+      if (box.intersectsBox(movingBox)) {
+        filteredTarget.push({ tri, box });
+      }
+    }
+    if (!filteredTarget.length) return;
+
     const segments = new Map<string, [THREE.Vector3, THREE.Vector3]>();
     const points = new Map<string, THREE.Vector3>();
     let comparisons = 0;
@@ -5540,16 +6691,14 @@ export class Scene {
       }
     };
 
-    for (const movingTriangle of movingTriangles) {
-      const movingBox = new THREE.Box3().setFromPoints(movingTriangle).expandByScalar(tolerance);
-      for (const targetTriangle of targetTriangles) {
-        if (++comparisons > 250000) break;
-        const targetBox = new THREE.Box3().setFromPoints(targetTriangle);
-        if (!movingBox.intersectsBox(targetBox)) continue;
-        inspectEdges(movingTriangle, targetTriangle);
-        inspectEdges(targetTriangle, movingTriangle);
+    for (const m of filteredMoving) {
+      for (const t of filteredTarget) {
+        if (++comparisons > 5000) break;
+        if (!m.box.intersectsBox(t.box)) continue;
+        inspectEdges(m.tri, t.tri);
+        inspectEdges(t.tri, m.tri);
       }
-      if (comparisons > 250000) break;
+      if (comparisons > 5000) break;
     }
 
     for (const [a, b] of segments.values()) {
@@ -5628,6 +6777,17 @@ export class Scene {
     const root = this.assemblyGroups.get(id) ?? this.parts.get(id)?.group;
     if (!root) return [];
     root.updateWorldMatrix(true, true);
+
+    const cached = this.worldTrianglesCache.get(id);
+    if (
+      cached &&
+      cached.pos.equals(root.position) &&
+      cached.rot.equals(root.rotation) &&
+      cached.scale.equals(root.scale)
+    ) {
+      return cached.triangles;
+    }
+
     const triangles: THREE.Vector3[][] = [];
     root.traverse((child) => {
       if (!(child instanceof THREE.Mesh) || !(child.geometry instanceof THREE.BufferGeometry)) return;
@@ -5644,6 +6804,13 @@ export class Scene {
         triangles.push(triangle);
       }
     });
+
+    this.worldTrianglesCache.set(id, {
+      pos: root.position.clone(),
+      rot: root.rotation.clone(),
+      scale: root.scale.clone(),
+      triangles,
+    });
     return triangles;
   }
 
@@ -5657,16 +6824,26 @@ export class Scene {
     const points = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
     root.traverse((child) => {
       if (!(child instanceof THREE.Mesh) || !(child.geometry instanceof THREE.BufferGeometry)) return;
+      if (!child.geometry.boundingBox) child.geometry.computeBoundingBox();
+      if (child.geometry.boundingBox) {
+        const childBox = child.geometry.boundingBox.clone().applyMatrix4(child.matrixWorld);
+        const minVal = axis === 0 ? childBox.min.x : axis === 1 ? childBox.min.y : childBox.min.z;
+        const maxVal = axis === 0 ? childBox.max.x : axis === 1 ? childBox.max.y : childBox.max.z;
+        if (plane < minVal - 0.05 || plane > maxVal + 0.05) return;
+      }
       const position = child.geometry.getAttribute("position");
       if (!position) return;
       const index = child.geometry.getIndex();
       const count = index ? index.count : position.count;
-      for (let offset = 0; offset + 2 < count; offset += 3) {
+      for (let offset = 0; offset + 2 < count && triangles.length < 500; offset += 3) {
         let coplanar = true;
         for (let corner = 0; corner < 3; corner++) {
           const vertexIndex = index ? index.getX(offset + corner) : offset + corner;
           points[corner].fromBufferAttribute(position, vertexIndex).applyMatrix4(child.matrixWorld);
-          if (Math.abs(points[corner].getComponent(axis) - plane) > 0.03) coplanar = false;
+          if (Math.abs(points[corner].getComponent(axis) - plane) > 0.03) {
+            coplanar = false;
+            break;
+          }
         }
         if (!coplanar) continue;
         triangles.push(points.map((point) => [
@@ -5730,6 +6907,34 @@ export class Scene {
     id: string,
     activeSnaps: import("../snapping/snap").ActiveSnap[] = [],
   ) {
+    if (!this.showSelectedCollisionContacts) {
+      this.clearCollisionContacts();
+      return;
+    }
+    if (this.grab?.active || this.gizmo.dragging) {
+      this.pendingCollisionId = id;
+      this.pendingCollisionSnaps = activeSnaps;
+      if (this.collisionRafId === null) {
+        this.collisionRafId = requestAnimationFrame(() => {
+          this.collisionRafId = null;
+          if (this.pendingCollisionId && this.showSelectedCollisionContacts) {
+            this.doRefreshCollisionContactsFor(this.pendingCollisionId, this.pendingCollisionSnaps);
+          }
+        });
+      }
+      return;
+    }
+    this.doRefreshCollisionContactsFor(id, activeSnaps);
+  }
+
+  private doRefreshCollisionContactsFor(
+    id: string,
+    activeSnaps: import("../snapping/snap").ActiveSnap[] = [],
+  ) {
+    if (!this.showSelectedCollisionContacts) {
+      this.clearCollisionContacts();
+      return;
+    }
     const selected = this.assemblyGroups.get(id) ?? this.parts.get(id)?.group;
     if (!selected) {
       this.clearCollisionContacts();
@@ -5753,6 +6958,11 @@ export class Scene {
     for (const [targetId, view] of this.parts) {
       if (targetId === id || !view.group.visible || selected.getObjectById(view.group.id)) continue;
       const targetBounds = this.boundsOf(view.group);
+      const gapX = Math.max(0, Math.max(moving.min[0] - targetBounds.max[0], targetBounds.min[0] - moving.max[0]));
+      const gapY = Math.max(0, Math.max(moving.min[1] - targetBounds.max[1], targetBounds.min[1] - moving.max[1]));
+      const gapZ = Math.max(0, Math.max(moving.min[2] - targetBounds.max[2], targetBounds.min[2] - moving.max[2]));
+      if (gapX > tolerance || gapY > tolerance || gapZ > tolerance) continue;
+
       const selectedSurfaces = this.surfaceSnapTargets(id, selected, targetBounds);
       const targetSurfaces = this.surfaceSnapTargets(targetId, view.group, moving);
       const targetBuckets = new Map<string, SnapTarget[]>();
@@ -5786,10 +6996,7 @@ export class Scene {
           }
         }
       }
-      // Check every real target surface, not only the target's outermost box.
-      // This is what lets selection rediscover a contact against the inside
-      // wall of a concave/L-shaped or compound object.
-      for (const surface of this.surfaceSnapTargets(targetId, view.group, moving)) {
+      for (const surface of targetSurfaces) {
         for (let axis = 0; axis < axes.length; axis++) {
           if (Math.abs(surface.bounds.max[axis] - surface.bounds.min[axis]) > 1e-4) continue;
           const plane = surface.bounds.min[axis];
@@ -5821,9 +7028,6 @@ export class Scene {
             value: targetBounds.min[axis], targetId, targetBounds,
           });
         }
-        // A freshly pasted duplicate may sit exactly over its source. Its
-        // corresponding outside faces are min-to-min and max-to-max rather
-        // than opposing, but they are still genuine coincident surfaces.
         if (Math.abs(moving.min[axis] - targetBounds.min[axis]) <= tolerance) {
           contacts.push({
             axis: axes[axis], movingAnchor: "min", targetAnchor: "min",
@@ -5846,6 +7050,12 @@ export class Scene {
   }
 
   private clearCollisionContacts() {
+    if (this.collisionRafId !== null) {
+      cancelAnimationFrame(this.collisionRafId);
+      this.collisionRafId = null;
+    }
+    this.pendingCollisionId = null;
+    this.pendingCollisionSnaps = [];
     for (const child of [...this.collisionContacts.children]) {
       this.collisionContacts.remove(child);
       (child as THREE.Mesh).geometry.dispose();
@@ -5855,7 +7065,21 @@ export class Scene {
 
   private boundsOf(object: THREE.Object3D): Bounds3 {
     object.updateWorldMatrix(true, true);
-    const box = new THREE.Box3().setFromObject(object);
+    const box = new THREE.Box3();
+    let hasMesh = false;
+    object.traverse((child) => {
+      if (child instanceof THREE.Mesh && child.geometry instanceof THREE.BufferGeometry && child.visible) {
+        if (!child.geometry.boundingBox) child.geometry.computeBoundingBox();
+        if (child.geometry.boundingBox) {
+          const meshBox = child.geometry.boundingBox.clone().applyMatrix4(child.matrixWorld);
+          box.union(meshBox);
+          hasMesh = true;
+        }
+      }
+    });
+    if (!hasMesh) {
+      box.setFromObject(object);
+    }
     return {
       min: [box.min.x, box.min.y, box.min.z],
       max: [box.max.x, box.max.y, box.max.z],
@@ -5938,6 +7162,7 @@ export class Scene {
     // Only the left button ever selects/drags — right/middle are reserved
     // for orbit/pan and must never be misread as a click on release.
     if (e.button !== 0) return;
+    this.capturePointer(e);
     this.downAt = { x: e.clientX, y: e.clientY };
     // Shape Builder owns every left click while it is running: the regions
     // are what is on screen, and selecting the (hidden) sources underneath
@@ -6022,7 +7247,10 @@ export class Scene {
     // the object in place instead of silently changing the gesture into Move.
     if (this.toolMode === "face") return;
 
-    const targetId = e.altKey ? hitId : this.findRootOwner(hitId);
+    const rootOwner = this.findRootOwner(hitId);
+    const targetId = this.selectedIds.includes(hitId) && !this.selectedIds.includes(rootOwner)
+      ? hitId
+      : rootOwner;
     const targetObj = this.assemblyGroups.get(targetId) ?? this.parts.get(targetId)?.group;
     if (!targetObj) return;
     // Collision markers live in world space and belong to the object that
@@ -6248,6 +7476,15 @@ export class Scene {
    * as before — this never changes what a non-dragging click does.
    */
   private onPointerMove = (e: PointerEvent) => {
+    // If the left mouse button is no longer pressed, any active drag gesture must finish immediately.
+    // This guards against missed pointerup events on Windows (e.g. while holding Alt or dragging off-canvas).
+    if ((e.buttons & 1) === 0) {
+      if (this.grab || this.resizeDrag || this.pushPullDrag || this.marquee || this.alignPointDrag || this.navDrag || this.downAt) {
+        this.onPointerUp(e);
+        return;
+      }
+    }
+
     if (this.toolMode === "place") {
       this.updateFaceHover(e);
       this.updatePlacementPreview(e);
@@ -6504,14 +7741,63 @@ export class Scene {
       // move. this.selectedIds is set directly (not through onSelectObject)
       // so the new id reads as selected immediately, without waiting for a
       // render round-trip back through setPlacements().
-      const source = e.altKey ? this.parts.get(g.id) : undefined;
-      const copyId = source ? this.onDuplicateObject?.(g.id) : null;
-      if (source && copyId) {
+      if (e.altKey) {
         this.onDragChange?.(true);
-        this.parts.set(copyId, this.cloneView(source));
-        g.id = copyId;
-        this.selectedIds = [copyId];
-        this.applyMaterials();
+        const idsToDuplicate = g.items.map((item) => item.id);
+        const res = this.onDuplicateObject?.(idsToDuplicate);
+        if (res && res.copies && res.copies.length > 0) {
+          const { copies, nodes } = res;
+          if (nodes) this.lastNodes = nodes;
+
+          const newSelectedIds: string[] = [];
+          for (const copyInfo of copies) {
+            const { origId, copyId, childMap } = copyInfo;
+            newSelectedIds.push(copyId);
+
+            const isAssembly = this.assemblyGroups.has(origId);
+            if (isAssembly) {
+              const origAssembly = this.assemblyGroups.get(origId)!;
+              const newAssembly = new THREE.Group();
+              newAssembly.name = `Assembly-${copyId}`;
+              newAssembly.position.copy(origAssembly.position);
+              newAssembly.rotation.copy(origAssembly.rotation);
+              newAssembly.scale.copy(origAssembly.scale);
+
+              if (childMap) {
+                for (const [origChildId, clonedChildId] of Object.entries(childMap)) {
+                  const origChildView = this.parts.get(origChildId);
+                  if (origChildView) {
+                    const clonedChildView = this.cloneView(origChildView);
+                    this.parts.set(clonedChildId, clonedChildView);
+                    newAssembly.add(clonedChildView.group);
+                  }
+                }
+              }
+              this.scene.add(newAssembly);
+              this.assemblyGroups.set(copyId, newAssembly);
+            } else {
+              const sourcePart = this.parts.get(origId);
+              if (sourcePart) {
+                this.parts.set(copyId, this.cloneView(sourcePart));
+              }
+            }
+
+            const item = g.items.find((it) => it.id === origId);
+            if (item) {
+              item.id = copyId;
+            }
+            if (g.id === origId) {
+              g.id = copyId;
+            }
+          }
+
+          this.selectedIds = newSelectedIds;
+          this.applyMaterials();
+        } else {
+          if (g.items.length <= 1) {
+            this.onSelectObject?.(g.id, false);
+          }
+        }
       } else {
         if (g.items.length <= 1) {
           this.onSelectObject?.(g.id, false);
@@ -6591,8 +7877,22 @@ export class Scene {
   };
 
   private onPointerUp = (e: PointerEvent) => {
+    this.releasePointer(e);
     const down = this.downAt;
     this.downAt = null;
+    if (this.pendingCollisionId) {
+      if (this.collisionRafId !== null) {
+        cancelAnimationFrame(this.collisionRafId);
+        this.collisionRafId = null;
+      }
+      const pendingId = this.pendingCollisionId;
+      const pendingSnaps = this.pendingCollisionSnaps;
+      this.pendingCollisionId = null;
+      this.pendingCollisionSnaps = [];
+      if (this.showSelectedCollisionContacts) {
+        this.doRefreshCollisionContactsFor(pendingId, pendingSnaps);
+      }
+    }
     if (!this.showSelectedCollisionContacts || !this.collisionContactOwnerId || !this.selectedIds.includes(this.collisionContactOwnerId)) {
       this.clearCollisionContacts();
     }
@@ -7049,6 +8349,75 @@ export class Scene {
     this.gizmo.enabled = true;
   };
 
+  private capturePointer(e: PointerEvent) {
+    try {
+      this.renderer.domElement.setPointerCapture(e.pointerId);
+    } catch {}
+  }
+
+  private releasePointer(e: PointerEvent) {
+    try {
+      if (this.renderer.domElement.hasPointerCapture(e.pointerId)) {
+        this.renderer.domElement.releasePointerCapture(e.pointerId);
+      }
+    } catch {}
+  }
+
+  private onWindowPointerUp = (e: PointerEvent) => {
+    if (this.grab || this.resizeDrag || this.pushPullDrag || this.navDrag || this.marquee || this.alignPointDrag) {
+      this.onPointerUp(e);
+    }
+  };
+
+  private onPointerCancel = (e: PointerEvent) => {
+    this.releasePointer(e);
+    this.onPointerUp(e);
+  };
+
+  private onWindowBlur = () => {
+    this.altDown = false;
+    if (this.grab || this.resizeDrag || this.pushPullDrag || this.navDrag || this.marquee || this.alignPointDrag) {
+      const g = this.grab;
+      this.grab = null;
+      if (g?.active) {
+        this.guides.clear();
+        this.onDragChange?.(false);
+      }
+      if (this.resizeDrag) {
+        this.resizeDrag = null;
+        this.controls.enabled = true;
+        this.gizmo.enabled = true;
+        this.onDragChange?.(false);
+        this.scaleHintEl.style.display = "none";
+      }
+      if (this.pushPullDrag) {
+        const drag = this.pushPullDrag;
+        this.pushPullDrag = null;
+        this.controls.enabled = true;
+        this.gizmo.enabled = true;
+        if (drag.ephemeral) {
+          this.pushPullHandles.remove(drag.handle);
+          disposeArrow(drag.handle);
+        } else {
+          drag.handle.position.copy(drag.handleBasePosition);
+        }
+        this.pushPullLabelEl.style.display = "none";
+        this.onDragChange?.(false);
+      }
+      if (this.navDrag) {
+        this.navDrag = null;
+      }
+      if (this.marquee) {
+        this.marquee = null;
+        this.marqueeEl.style.display = "none";
+      }
+      if (this.alignPointDrag) {
+        this.finishAlignPointDrag();
+      }
+      this.downAt = null;
+    }
+  };
+
   private cameraSaveTimeout: ReturnType<typeof setTimeout> | null = null;
 
   private onCameraChange = () => {
@@ -7249,14 +8618,19 @@ export class Scene {
     this.renderer.domElement.removeEventListener("pointerdown", this.onPointerDown);
     this.renderer.domElement.removeEventListener("pointermove", this.onPointerMove);
     this.renderer.domElement.removeEventListener("pointerup", this.onPointerUp);
+    this.renderer.domElement.removeEventListener("pointercancel", this.onPointerCancel);
     this.renderer.domElement.removeEventListener("contextmenu", this.onContextMenu);
     this.host.removeEventListener("pointerdown", this.onGlobalPointerDown, { capture: true });
     this.host.removeEventListener("pointerup", this.onGlobalPointerUp, { capture: true });
+    window.removeEventListener("pointerup", this.onWindowPointerUp);
+    window.removeEventListener("pointercancel", this.onPointerCancel);
+    window.removeEventListener("blur", this.onWindowBlur);
     window.removeEventListener("keydown", this.onModifierChange);
     window.removeEventListener("keyup", this.onModifierChange);
     this.gizmo.removeEventListener("dragging-changed", this.onDraggingChanged);
     this.gizmo.removeEventListener("objectChange", this.onGizmoChange);
     this.gizmo.dispose();
+    this.multiGizmoPivot.removeFromParent();
     this.controls.removeEventListener("change", this.onCameraChange);
     window.removeEventListener("beforeunload", this.onBeforeUnload);
     if (this.cameraSaveTimeout) clearTimeout(this.cameraSaveTimeout);

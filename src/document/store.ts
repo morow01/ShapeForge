@@ -450,11 +450,44 @@ const METRIC_PRESETS: Record<number, { pitch: number; headSize: number; headHeig
   20: { pitch: 2.5, headSize: 30.0, headHeight: 12.5, socketSize: 17, socketDepth: 10, nutWidth: 30.0, nutHeight: 18.0 },
 };
 
+const BEARING_PRESETS: Record<number, { outerRadius: number; innerRadius: number; height: number; shieldRecess: number }> = {
+  608: { outerRadius: 11, innerRadius: 4, height: 7, shieldRecess: 0.6 },
+  688: { outerRadius: 8, innerRadius: 4, height: 5, shieldRecess: 0.4 },
+  624: { outerRadius: 6.5, innerRadius: 2, height: 5, shieldRecess: 0.4 },
+  625: { outerRadius: 8, innerRadius: 2.5, height: 5, shieldRecess: 0.5 },
+  6000: { outerRadius: 13, innerRadius: 5, height: 8, shieldRecess: 0.7 },
+};
+
+export const SCREW_HOLE_PRESETS: Record<number, {
+  holeDia: number;
+  csHeadDia: number;
+  cbHeadDia: number;
+  cbHeadDepth: number;
+  headAngle: number;
+}> = {
+  2: { holeDia: 2.4, csHeadDia: 4.4, cbHeadDia: 4.2, cbHeadDepth: 2.2, headAngle: 90 },
+  2.5: { holeDia: 2.9, csHeadDia: 5.5, cbHeadDia: 5.0, cbHeadDepth: 2.7, headAngle: 90 },
+  3: { holeDia: 3.4, csHeadDia: 6.5, cbHeadDia: 6.0, cbHeadDepth: 3.4, headAngle: 90 },
+  4: { holeDia: 4.5, csHeadDia: 8.5, cbHeadDia: 7.5, cbHeadDepth: 4.4, headAngle: 90 },
+  5: { holeDia: 5.5, csHeadDia: 10.5, cbHeadDia: 9.0, cbHeadDepth: 5.4, headAngle: 90 },
+  6: { holeDia: 6.6, csHeadDia: 12.5, cbHeadDia: 11.0, cbHeadDepth: 6.5, headAngle: 90 },
+  8: { holeDia: 9.0, csHeadDia: 16.5, cbHeadDia: 14.5, cbHeadDepth: 8.6, headAngle: 90 },
+  10: { holeDia: 11.0, csHeadDia: 20.5, cbHeadDia: 17.5, cbHeadDepth: 10.6, headAngle: 90 },
+};
+
 /** Remembers customized parameters (e.g. corner radius, dimensions) across placements in a session. */
 export const stickyParams: Partial<Record<PrimitiveKind, Record<string, number>>> = {};
 
 export function getEffectiveDefaults(kind: PrimitiveKind): Record<string, number> {
-  return { ...PRIMITIVES[kind].defaults, ...(stickyParams[kind] ?? {}) };
+  const defaults = { ...PRIMITIVES[kind].defaults };
+  const sticky = stickyParams[kind] ?? {};
+  const merged = { ...defaults, ...sticky };
+  if (kind === "hinge") {
+    if (!merged.clearance || merged.clearance < 0.05) {
+      merged.clearance = 0.30;
+    }
+  }
+  return merged;
 }
 
 function nextParams(o: ObjectNode, key: string, value: number): Record<string, number> {
@@ -488,6 +521,60 @@ function nextParams(o: ObjectNode, key: string, value: number): Record<string, n
       };
     }
     return { ...o.params, preset: value };
+  }
+
+  if (o.kind === "bearing" && key === "preset") {
+    const p = BEARING_PRESETS[value];
+    if (p) {
+      return {
+        ...o.params,
+        preset: value,
+        outerRadius: p.outerRadius,
+        innerRadius: p.innerRadius,
+        height: p.height,
+        shieldRecess: p.shieldRecess,
+      };
+    }
+    return { ...o.params, preset: value };
+  }
+
+  if (o.kind === "screwHole" && key === "preset") {
+    const p = SCREW_HOLE_PRESETS[value];
+    if (p) {
+      const isCB = (o.params.headStyle ?? 0) === 1;
+      return {
+        ...o.params,
+        preset: value,
+        holeDia: p.holeDia,
+        headDia: isCB ? p.cbHeadDia : p.csHeadDia,
+        headAngle: p.headAngle,
+        headDepth: p.cbHeadDepth,
+      };
+    }
+    return { ...o.params, preset: value };
+  }
+
+  if (o.kind === "screwHole" && key === "headStyle") {
+    const presetVal = o.params.preset ?? 0;
+    const p = SCREW_HOLE_PRESETS[presetVal];
+    if (p) {
+      const isCB = value === 1;
+      return {
+        ...o.params,
+        headStyle: value,
+        headDia: isCB ? p.cbHeadDia : p.csHeadDia,
+        headDepth: p.cbHeadDepth,
+      };
+    }
+    return { ...o.params, headStyle: value };
+  }
+
+  if (o.kind === "screwHole" && (key === "holeDia" || key === "headDia" || key === "headDepth" || key === "headAngle")) {
+    return { ...o.params, [key]: value, preset: 0 };
+  }
+
+  if (o.kind === "screwHole" && (key === "pocketDepth" || key === "recess")) {
+    return { ...o.params, pocketDepth: value, recess: value };
   }
 
   if (o.kind !== "triangle") return { ...o.params, [key]: value };
@@ -621,7 +708,7 @@ interface DocState {
    *  button: position/rotation/scale carry over untouched (the whole point
    *  — the copy has to sit exactly where the original does), only `fit`
    *  differs. Returns the new id, or null if `id` is not an object node. */
-  duplicateWithParams: (id: string, params: Record<string, number>) => string | null;
+  duplicateWithParams: (id: string, params: Record<string, number>, overrides?: Partial<ObjectNode>) => string | null;
   /** Push/pull: turns an ordinary object or group into an EditNode the first
    *  time it is called for that id (freezing its current definition as
    *  `base`), or appends another op if it already is one.
@@ -864,7 +951,7 @@ export const useDoc = create<DocState>()(
             position: position ?? [s.nodes.length * 6, 0, 0],
             rotation: rotation ?? [0, 0, 0],
             scale: [1, 1, 1],
-            isHole: false,
+            isHole: kind === "screwHole",
             ...(randomColor ? { color: randomColor } : {}),
             ...(kind === "text" ? { text: "TEXT", fontName: "Default" } : {}),
           };
@@ -1033,12 +1120,13 @@ export const useDoc = create<DocState>()(
         return clones.map((c) => c.id);
       },
 
-      duplicateWithParams: (id, params) => {
+      duplicateWithParams: (id, params, overrides) => {
         const state = get();
         const source = findNode(state.nodes, id);
         if (!source || source.type !== "object") return null;
         const clone = cloneSubtree(source, [0, 0, 0]) as ObjectNode;
         clone.params = { ...clone.params, ...params };
+        if (overrides) Object.assign(clone, overrides);
         set((s) => ({ nodes: [...s.nodes, clone], selectedIds: [clone.id] }));
         afterBatchedMutation();
         return clone.id;

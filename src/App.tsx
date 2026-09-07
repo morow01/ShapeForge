@@ -21,6 +21,16 @@ import {
   FaceModifierIcon,
   GroupIcon,
   ImportIcon,
+  JoineryToolIcon,
+  RoundPinIcon,
+  SquarePinIcon,
+  TenonIcon,
+  DovetailRailIcon,
+  HingeJointIcon,
+  SnapJointIcon,
+  ToleranceTightIcon,
+  ToleranceStandardIcon,
+  ToleranceLooseIcon,
   MagnetIcon,
   MoveToolIcon,
   NewDesignIcon,
@@ -71,7 +81,7 @@ import { loadCameraState } from "./document/persist";
 import type { EditOp, GroupNode, PrimitiveKind, SceneNode, ShellOp, Vec3 } from "./document/types";
 import { RETRYABLE_MESH_ERROR } from "./kernel/types";
 import type { EditSpec, ExportQuality, NodeSpec, PreviewBuild, ScenePart } from "./kernel/types";
-import type { CameraMode, Scene, ToolMode, WireframeMode } from "./viewport/scene";
+import type { CameraMode, DuplicateResult, Scene, ToolMode, WireframeMode } from "./viewport/scene";
 import { APP_NAME, APP_VERSION } from "./version";
 
 /** Shown when Hollow is pressed with nothing selected; cleared as soon as a
@@ -95,6 +105,7 @@ import {
   mergeBinarySTLs,
 } from "./export/stl";
 import { findTouchingSeam, positionWithReferenceGap } from "./snapping/spacing";
+import type { TouchingSeam } from "./snapping/spacing";
 import type { SnapAnchor, SnapAxis } from "./snapping/snap";
 
 /** Only the fields the kernel cares about — so renaming or collapsing a node
@@ -609,7 +620,7 @@ export function App() {
     sceneRef.current?.zoomToFit();
   }, []);
 
-  const placePrimitive = useCallback((point: Vec3, normal: Vec3) => {
+  const placePrimitive = useCallback((point: Vec3, normal: Vec3, targetId?: string) => {
     if (!pendingPrimitive) return;
     const n = new THREE.Vector3(...normal).normalize();
     // Every kernel primitive is normalised with its base on local Z=0.
@@ -626,9 +637,22 @@ export function App() {
       base.toArray() as Vec3,
       [rotation.x / Math.PI * 180, rotation.y / Math.PI * 180, rotation.z / Math.PI * 180],
     );
+    const newId = useDoc.getState().selectedIds[0];
+    if (pendingPrimitive === "screwHole" && targetId && newId) {
+      const targetNode = findNode(useDoc.getState().nodes, targetId);
+      if (targetNode && !targetNode.isHole) {
+        selectMany([targetId, newId], false);
+        combine("union");
+        const combinedId = useDoc.getState().selectedIds[0];
+        if (combinedId) {
+          rename(combinedId, `${targetNode.name} with Hole`);
+        }
+        select(newId);
+      }
+    }
     setPendingPrimitive(null);
     setToolMode("select");
-  }, [addPrimitive, pendingPrimitive]);
+  }, [addPrimitive, pendingPrimitive, selectMany, combine, rename, select]);
 
   useEffect(() => {
     if (!wireframeMenuOpen) {
@@ -778,6 +802,19 @@ export function App() {
   // specific tool. A person who wants it clicks the header open.
   const [spacingOpen, setSpacingOpen] = useState(false);
   const [connectorSwapped, setConnectorSwapped] = useState(false);
+  const [autoJointShape, setAutoJointShape] = useState<number>(1);
+  const [autoJointCount, setAutoJointCount] = useState<number>(2);
+  const [autoJointClearance, setAutoJointClearance] = useState<number>(0.15);
+  const [autoJointDovetailStopped, setAutoJointDovetailStopped] = useState<boolean>(true);
+  const [autoJointDovetailStopEnd, setAutoJointDovetailStopEnd] = useState<number>(0);
+  const [autoJointCustomLength, setAutoJointCustomLength] = useState<number | null>(null);
+  const [autoJointCustomSize, setAutoJointCustomSize] = useState<number | null>(null);
+  const [autoJointCustomThickness, setAutoJointCustomThickness] = useState<number | null>(null);
+  const [autoJointCustomHeight, setAutoJointCustomHeight] = useState<number | null>(null);
+  const [autoJointCustomTaper, setAutoJointCustomTaper] = useState<number | null>(null);
+  const [autoJointCustomSpacing, setAutoJointCustomSpacing] = useState<number | null>(null);
+  const [autoJointHingeEdge, setAutoJointHingeEdge] = useState<"edge1" | "center" | "edge2">("edge1");
+  const [autoJointHingeSides, setAutoJointHingeSides] = useState<number>(64);
   const [error, setError] = useState<string | null>(null);
   const [sceneBusy, setSceneBusy] = useState(false);
   const busy = sceneBusy;
@@ -1015,72 +1052,578 @@ export function App() {
 
   useEffect(() => setConnectorSwapped(false), [selectedIds[0], selectedIds[1]]);
 
+  useEffect(() => {
+    setAutoJointCustomLength(null);
+    setAutoJointCustomSize(null);
+    setAutoJointCustomThickness(null);
+    setAutoJointCustomHeight(null);
+    setAutoJointCustomTaper(null);
+    setAutoJointCustomSpacing(null);
+    setAutoJointHingeEdge("edge1");
+  }, [autoJointShape, selectedIds[0], selectedIds[1], connectorSwapped]);
+
   // Builds a Plug + Socket pair centred on the shared wall between two
-  // touching objects and fuses each straight into its own part — a Group
-  // (union) around [plugNode, plug] and another around [socketNode, socket]
-  // (the socket held as isHole so that union actually subtracts it). Both
-  // connectors get the exact same position and rotation, the same trick
-  // "Copy as matching Socket/Plug" already relies on to keep a pair aligned,
-  // just computed from the wall instead of copied from an existing node.
+  // touching objects and fuses each straight into its own part.
+  const computeJoineryLayout = useCallback((
+    seam: TouchingSeam,
+    shape: number,
+    count: number,
+    clearance: number,
+    dovetailStopped = true,
+    dovetailStopEnd = 0,
+    hingeEdge: "edge1" | "center" | "edge2" = "edge1",
+  ) => {
+    const { axis, point, normal, footprint } = seam;
+
+    const zAxis = new THREE.Vector3(...normal).normalize();
+    let yAxis = Math.abs(normal[2]) < 0.9 ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(0, 1, 0);
+    const xAxis = new THREE.Vector3().crossVectors(yAxis, zAxis).normalize();
+    yAxis = new THREE.Vector3().crossVectors(zAxis, xAxis).normalize();
+
+    const rotMatrix = new THREE.Matrix4().makeBasis(xAxis, yAxis, zAxis);
+    const euler = new THREE.Euler().setFromRotationMatrix(rotMatrix, "XYZ");
+    const rotationDeg: Vec3 = [
+      (euler.x / Math.PI) * 180,
+      (euler.y / Math.PI) * 180,
+      (euler.z / Math.PI) * 180,
+    ];
+
+    const j = (axis + 1) % 3;
+    const wallHeight = axis === 2
+      ? Math.max(footprint[0], footprint[1])
+      : (j === 2 ? footprint[0] : footprint[1]);
+    const wallWidth = axis === 2
+      ? Math.min(footprint[0], footprint[1])
+      : (j === 2 ? footprint[1] : footprint[0]);
+
+    const minWallDim = Math.min(wallWidth, wallHeight);
+    let warning: string | null = null;
+    let isValid = true;
+
+    if (minWallDim < 4) {
+      warning = "Touching face is too small (< 4mm) to fit joinery.";
+      isValid = false;
+    }
+
+    const wallMargin = Math.max(1.5, minWallDim * 0.15);
+
+    const isWidthLonger = wallWidth >= wallHeight;
+    const spacingSpan = isWidthLonger ? wallWidth : wallHeight;
+    const crossSpan = isWidthLonger ? wallHeight : wallWidth;
+    const spacingVec = isWidthLonger ? xAxis : yAxis;
+
+    const effectiveCount = shape === 5
+      ? Math.max(3, Math.min(9, Math.round(count) % 2 === 0 ? Math.round(count) + 1 : Math.round(count)))
+      : Math.max(1, Math.min(8, Math.round(count)));
+    const clampSize = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+
+    // Safe depth calculation preventing punch-through on blind holes
+    const rawMaterialDepth = seam.availableDepth ?? seam.depthB;
+    const hasValidMaterialDepth = rawMaterialDepth !== undefined && Number.isFinite(rawMaterialDepth) && rawMaterialDepth >= 1.2;
+    const materialDepth = hasValidMaterialDepth ? rawMaterialDepth : undefined;
+    const safeBackWall = 1.0; // Maintain at least 1.0mm solid bottom wall
+    const maxSafeDepth = hasValidMaterialDepth
+      ? Math.max(1.0, Math.min(materialDepth! - safeBackWall - clearance, materialDepth! * 0.65))
+      : 12;
+
+    const effTaper = (autoJointCustomTaper !== undefined && autoJointCustomTaper !== null && autoJointCustomTaper >= 2)
+      ? autoJointCustomTaper
+      : 20;
+
+    const autoHeight = Math.min(maxSafeDepth * 0.75, clampSize((minWallDim - 2 * wallMargin) * 0.40, 2.0, 12));
+    const effHeight = (autoJointCustomHeight !== undefined && autoJointCustomHeight !== null && autoJointCustomHeight > 0)
+      ? autoJointCustomHeight
+      : (shape === 6 ? Math.min(0.55, Math.max(0.30, 2 * 0.12)) : autoHeight);
+
+    const autoDovetailW = effectiveCount === 1
+      ? clampSize((wallWidth - 2 * wallMargin) * 0.45, 4, 25)
+      : clampSize(((wallWidth - 2 * wallMargin) / effectiveCount) * 0.55, 3, 25);
+
+    let dimSpacing = 0;
+    let dimCross = 0;
+    let centerSpan = 0;
+    let pinRadius = 0;
+    let dovetailLen = Math.max(4, Math.round(wallHeight));
+    let dovetailShift = 0;
+    let entryExtension = 0;
+    let autoPitch = 0;
+    let minPitch = 0;
+    let maxPitch = 0;
+    let effPitch = 0;
+
+    if (shape === 0) {
+      // 0: Dovetail (Sliding Rail)
+      const baseW = (autoJointCustomSize !== undefined && autoJointCustomSize !== null && autoJointCustomSize > 0)
+        ? autoJointCustomSize
+        : autoDovetailW;
+      if (dovetailStopped) {
+        const stopThickness = Math.max(3.0, Math.min(12.0, Math.round(wallHeight * 0.25)));
+        dovetailLen = Math.max(4.0, wallHeight - stopThickness);
+        dovetailShift = dovetailStopEnd === 0 ? stopThickness / 2 : -stopThickness / 2;
+        entryExtension = dovetailStopEnd === 0
+          ? (seam.socketTopExtension ?? 0)
+          : (seam.socketBottomExtension ?? 0);
+      } else {
+        entryExtension = (seam.socketTopExtension ?? 0) + (seam.socketBottomExtension ?? 0);
+      }
+      dimSpacing = wallHeight;
+      dimCross = baseW;
+
+      // Spacing across wallWidth (along xAxis):
+      const flankFlare = 2 * effHeight * Math.tan((effTaper * Math.PI) / 180);
+      const dovetailEnvelopeW = baseW + flankFlare + 2 * clearance;
+      const maxCenterSpan = Math.max(0, wallWidth - 2 * wallMargin - dovetailEnvelopeW);
+      if (effectiveCount > 1) {
+        autoPitch = Math.round((maxCenterSpan / (effectiveCount - 1)) * 10) / 10;
+        minPitch = Math.max(2.0, Math.round((dovetailEnvelopeW + 1.0) * 10) / 10);
+        maxPitch = Math.max(minPitch, Math.round((maxCenterSpan / (effectiveCount - 1)) * 10) / 10);
+        effPitch = (autoJointCustomSpacing !== undefined && autoJointCustomSpacing !== null && autoJointCustomSpacing > 0)
+          ? Math.max(minPitch, Math.min(maxPitch, autoJointCustomSpacing))
+          : autoPitch;
+        centerSpan = effPitch * (effectiveCount - 1);
+        if (maxCenterSpan < minPitch) {
+          warning = `Face width (${Math.round(wallWidth)}mm) is tight for ${effectiveCount} dovetails. Reduce rail count or width.`;
+        }
+      } else {
+        centerSpan = 0;
+        effPitch = 0;
+        minPitch = 0;
+        maxPitch = 0;
+      }
+    } else if (shape === 5) {
+      // 5: Print-in-Place Hinge
+      dimSpacing = wallHeight;
+      dimCross = minWallDim;
+      pinRadius = clampSize(minWallDim * 0.35, 2.5, 8);
+      centerSpan = 0;
+    } else if (shape === 3) {
+      // 3: Tenon & Mortise (Domino Bullnose Tab: Width >> Thickness)
+      const baseT = clampSize(minWallDim * 0.28, 2.0, 10.0);
+      dimCross = baseT;
+      if (effectiveCount === 1) {
+        dimSpacing = clampSize((spacingSpan - 2 * wallMargin) * 0.70, 6.0, 45);
+        centerSpan = 0;
+      } else {
+        dimSpacing = clampSize(((spacingSpan - 2 * wallMargin) / effectiveCount) * 0.60, 5.0, 30);
+        const maxCenterSpan = Math.max(0, spacingSpan - 2 * wallMargin - dimSpacing);
+        autoPitch = Math.round((maxCenterSpan / (effectiveCount - 1)) * 10) / 10;
+        minPitch = Math.max(2.0, Math.round((dimSpacing + 2.0) * 10) / 10);
+        maxPitch = Math.max(minPitch, Math.round((maxCenterSpan / (effectiveCount - 1)) * 10) / 10);
+        effPitch = (autoJointCustomSpacing !== undefined && autoJointCustomSpacing !== null && autoJointCustomSpacing > 0)
+          ? Math.max(minPitch, Math.min(maxPitch, autoJointCustomSpacing))
+          : autoPitch;
+        centerSpan = effPitch * (effectiveCount - 1);
+      }
+    } else if (shape === 6) {
+      // 6: Split-Prong Snap Pin (Collet / Dowel Snap Joint)
+      const maxR = Math.min(
+        ((crossSpan - 2 * wallMargin) / 2) * 0.75,
+        ((spacingSpan - 2 * wallMargin) / (2 * effectiveCount)) * 0.70
+      );
+      pinRadius = clampSize(maxR, 1.8, 6.0);
+      dimSpacing = 2 * pinRadius;
+      dimCross = 2 * pinRadius;
+      if (effectiveCount === 1) {
+        centerSpan = 0;
+      } else {
+        const maxCenterSpan = Math.max(0, spacingSpan - 2 * wallMargin - 2 * pinRadius);
+        autoPitch = Math.round((maxCenterSpan / (effectiveCount - 1)) * 10) / 10;
+        minPitch = Math.max(2.0, Math.round((2 * pinRadius + 1.0) * 10) / 10);
+        maxPitch = Math.max(minPitch, Math.round((maxCenterSpan / (effectiveCount - 1)) * 10) / 10);
+        effPitch = (autoJointCustomSpacing !== undefined && autoJointCustomSpacing !== null && autoJointCustomSpacing > 0)
+          ? Math.max(minPitch, Math.min(maxPitch, autoJointCustomSpacing))
+          : autoPitch;
+        centerSpan = effPitch * (effectiveCount - 1);
+      }
+    } else {
+      // 1: Round Pin / Dowel or 2: Square Pin / Key
+      const maxR = Math.min(
+        ((crossSpan - 2 * wallMargin) / 2) * 0.75,
+        ((spacingSpan - 2 * wallMargin) / (2 * effectiveCount)) * 0.70
+      );
+      pinRadius = clampSize(maxR, 1.2, 12);
+      dimSpacing = 2 * pinRadius;
+      dimCross = 2 * pinRadius;
+      if (effectiveCount === 1) {
+        centerSpan = 0;
+      } else {
+        const maxCenterSpan = Math.max(0, spacingSpan - 2 * wallMargin - 2 * pinRadius);
+        autoPitch = Math.round((maxCenterSpan / (effectiveCount - 1)) * 10) / 10;
+        minPitch = Math.max(2.0, Math.round((2 * pinRadius + 1.0) * 10) / 10);
+        maxPitch = Math.max(minPitch, Math.round((maxCenterSpan / (effectiveCount - 1)) * 10) / 10);
+        effPitch = (autoJointCustomSpacing !== undefined && autoJointCustomSpacing !== null && autoJointCustomSpacing > 0)
+          ? Math.max(minPitch, Math.min(maxPitch, autoJointCustomSpacing))
+          : autoPitch;
+        centerSpan = effPitch * (effectiveCount - 1);
+
+        if (maxR < 1.2) {
+          warning = `Seam surface (${Math.round(spacingSpan)}mm) is too small for ${effectiveCount} pins. Reduce pin count.`;
+          isValid = false;
+        }
+      }
+    }
+
+    const targetPoints: Vec3[] = [];
+    if (shape === 0) {
+      if (effectiveCount === 1) {
+        targetPoints.push([
+          point[0] + yAxis.x * dovetailShift,
+          point[1] + yAxis.y * dovetailShift,
+          point[2] + yAxis.z * dovetailShift,
+        ]);
+      } else {
+        for (let i = 0; i < effectiveCount; i++) {
+          const frac = -0.5 + i / (effectiveCount - 1);
+          const offset = frac * centerSpan;
+          targetPoints.push([
+            point[0] + yAxis.x * dovetailShift + xAxis.x * offset,
+            point[1] + yAxis.y * dovetailShift + xAxis.y * offset,
+            point[2] + yAxis.z * dovetailShift + xAxis.z * offset,
+          ]);
+        }
+      }
+    } else if (shape === 5) {
+      // Position pivot axis right along the corner edge so knuckles embed deeply into walls
+      const hingeOffsetDist = wallWidth / 2;
+      const hingeOffset = hingeEdge === "edge1"
+        ? hingeOffsetDist
+        : (hingeEdge === "edge2" ? -hingeOffsetDist : 0);
+
+      targetPoints.push([
+        point[0] + xAxis.x * hingeOffset,
+        point[1] + xAxis.y * hingeOffset,
+        point[2] + xAxis.z * hingeOffset,
+      ]);
+    } else if (effectiveCount === 1) {
+      targetPoints.push(point);
+    } else {
+      for (let i = 0; i < effectiveCount; i++) {
+        const frac = -0.5 + i / (effectiveCount - 1);
+        const offset = frac * centerSpan;
+        targetPoints.push([
+          point[0] + spacingVec.x * offset,
+          point[1] + spacingVec.y * offset,
+          point[2] + spacingVec.z * offset,
+        ]);
+      }
+    }
+
+    const autoLength = shape === 0
+      ? dovetailLen
+      : (shape === 5
+          ? Math.max(8, Math.round(wallHeight))
+          : (hasValidMaterialDepth
+              ? Math.min(maxSafeDepth, clampSize(minWallDim * 0.45, 1.5, 25))
+              : clampSize(minWallDim * 0.45, 2.5, 15)));
+
+    const effLength = (autoJointCustomLength !== undefined && autoJointCustomLength !== null && autoJointCustomLength > 0)
+      ? autoJointCustomLength
+      : autoLength;
+
+    const isPunchThrough = hasValidMaterialDepth && (effLength + clearance >= materialDepth!);
+
+    // Auto diameter/width/radius:
+    const autoRadius = (shape === 5 || shape === 1 || shape === 2 || shape === 6)
+      ? pinRadius
+      : clampSize(minWallDim * 0.22, 1.0, 12);
+    const effRadius = (autoJointCustomSize !== undefined && autoJointCustomSize !== null && autoJointCustomSize > 0)
+      ? autoJointCustomSize / 2
+      : autoRadius;
+
+    const autoWidth = shape === 0
+      ? autoDovetailW
+      : (shape === 3 ? dimSpacing : (isWidthLonger ? dimSpacing : dimCross));
+    const effWidth = (autoJointCustomSize !== undefined && autoJointCustomSize !== null && autoJointCustomSize > 0 && shape !== 1 && shape !== 5 && shape !== 6)
+      ? autoJointCustomSize
+      : autoWidth;
+
+    const autoThickness = shape === 3
+      ? dimCross
+      : (shape === 6 ? 2 * effRadius : clampSize(wallHeight * 0.28, 2.5, 12));
+    const effThickness = (autoJointCustomThickness !== undefined && autoJointCustomThickness !== null && autoJointCustomThickness > 0)
+      ? autoJointCustomThickness
+      : autoThickness;
+
+    const sizeParams: Record<string, number> = {
+      shape,
+      radius: (shape === 1 || shape === 5) ? effRadius : autoRadius,
+      length: effLength,
+      width: effWidth,
+      height: effHeight,
+      thickness: effThickness,
+      hookDepth: effHeight,
+      knuckleCount: shape === 5 ? effectiveCount : 3,
+      taperAngle: effTaper,
+      chamfer: 1,
+      fillet: shape === 3 ? 99 : 1, // 99 triggers full rounded Domino bullnose for Tenon
+      clearance,
+      stopped: dovetailStopped ? 1 : 0,
+      stopEnd: dovetailStopEnd,
+      entryExtension,
+      sides: (shape === 5 || shape === 1 || shape === 4) ? autoJointHingeSides : 64,
+    };
+
+    return {
+      rotationDeg,
+      targetPoints,
+      sizeParams,
+      effectiveCount,
+      wallWidth,
+      wallHeight,
+      minWallDim,
+      materialDepth,
+      maxSafeDepth,
+      autoLength,
+      autoRadius,
+      autoWidth,
+      autoThickness,
+      autoHeight,
+      autoPitch,
+      effLength,
+      effRadius,
+      effWidth,
+      effThickness,
+      effHeight,
+      effTaper,
+      effPitch,
+      minPitch,
+      maxPitch,
+      isPunchThrough,
+      warning,
+      isValid,
+    };
+  }, [autoJointCustomLength, autoJointCustomSize, autoJointCustomThickness, autoJointCustomHeight, autoJointCustomTaper, autoJointCustomSpacing, autoJointHingeEdge, autoJointHingeSides]);
+
+  const resetAllJointSettings = useCallback(() => {
+    setAutoJointCount(autoJointShape === 0 ? 1 : (autoJointShape === 5 ? 3 : 2));
+    setAutoJointClearance(0.15);
+    setAutoJointDovetailStopped(true);
+    setAutoJointDovetailStopEnd(0);
+    setAutoJointCustomLength(null);
+    setAutoJointCustomSize(null);
+    setAutoJointCustomThickness(null);
+    setAutoJointCustomHeight(null);
+    setAutoJointCustomTaper(null);
+    setAutoJointCustomSpacing(null);
+    setAutoJointHingeEdge("edge1");
+    setAutoJointHingeSides(64);
+  }, [autoJointShape]);
+
   const addConnectorJoint = useCallback(() => {
     if (!connectorSeam) return;
     const { plugNode, socketNode, seam } = connectorSeam;
-    const { point, normal, footprint } = seam;
-
-    // Same face-normal-to-rotation convention placePrimitive uses when a
-    // shape is dropped onto a clicked face: local +Z lands on `normal`, so
-    // the connector sits flush on the plug side and protrudes toward the
-    // socket side.
-    const rotation = new THREE.Euler().setFromQuaternion(
-      new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), new THREE.Vector3(...normal)),
-      "XYZ",
+    const layout = computeJoineryLayout(
+      seam,
+      autoJointShape,
+      autoJointCount,
+      autoJointClearance,
+      autoJointDovetailStopped,
+      autoJointDovetailStopEnd,
+      autoJointHingeEdge,
     );
-    const rotationDeg: Vec3 = [
-      (rotation.x / Math.PI) * 180,
-      (rotation.y / Math.PI) * 180,
-      (rotation.z / Math.PI) * 180,
-    ];
-
-    // Round pin only — a dovetail can only be assembled by sliding it in
-    // from an open edge (the flare that stops it pulling straight out is
-    // exactly what stops it going in any other way), and a wall's centre,
-    // which is all this tool can place anything at without the user
-    // pointing at a specific edge themselves, is never that. A pin pushes
-    // straight in instead, so it has no such requirement and works
-    // anywhere on a flat wall.
-    const wallSize = Math.min(footprint[0], footprint[1]);
-    const clampSize = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
-    const sizeParams: Record<string, number> = {
-      shape: 1,
-      radius: clampSize(wallSize * 0.22, 2.5, 15),
-      length: clampSize(wallSize * 0.55, 6, 35),
-    };
+    if (!layout.isValid) return;
 
     beginHistoryBatch();
 
-    addPrimitive("connector");
-    const plugConnId = useDoc.getState().selectedIds[0];
-    if (plugConnId) {
-      setTransform(plugConnId, { position: point, rotation: rotationDeg });
-      for (const [k, v] of Object.entries(sizeParams)) setParam(plugConnId, k, v);
-      setParam(plugConnId, "fit", 0);
-      selectMany([plugNode.id, plugConnId], false);
-      group();
-    }
+    if (autoJointShape === 5) {
+      // Print-in-Place Hinge:
+      // Separate the two bodies by an automatic physical print clearance along the seam normal
+      // so facing walls never weld together during slicing or printing!
+      const seamGap = Math.max(0.08, autoJointClearance);
+      const halfGap = seamGap / 2;
+      const zAxis = new THREE.Vector3(...seam.normal).normalize();
 
-    addPrimitive("connector");
-    const socketConnId = useDoc.getState().selectedIds[0];
-    if (socketConnId) {
-      setTransform(socketConnId, { position: point, rotation: rotationDeg });
-      for (const [k, v] of Object.entries(sizeParams)) setParam(socketConnId, k, v);
-      setParam(socketConnId, "fit", 1);
-      setHole(socketConnId, true);
-      selectMany([socketNode.id, socketConnId], false);
-      group();
+      setTransform(plugNode.id, {
+        position: [
+          plugNode.position[0] - zAxis.x * halfGap,
+          plugNode.position[1] - zAxis.y * halfGap,
+          plugNode.position[2] - zAxis.z * halfGap,
+        ],
+      });
+      setTransform(socketNode.id, {
+        position: [
+          socketNode.position[0] + zAxis.x * halfGap,
+          socketNode.position[1] + zAxis.y * halfGap,
+          socketNode.position[2] + zAxis.z * halfGap,
+        ],
+      });
+
+      // Part A (plugNode) gets Leaf 2 pocket cutter (fit 2) cut from box FIRST,
+      // and THEN Leaf 1 solid knuckles (fit 0) unioned so the 45° cones are 100% preserved!
+      const plugSolidIds: string[] = [];
+      const plugCutterIds: string[] = [];
+      for (const pt of layout.targetPoints) {
+        addPrimitive("connector");
+        const sId = useDoc.getState().selectedIds[0];
+        if (sId) {
+          setTransform(sId, { position: pt, rotation: layout.rotationDeg });
+          for (const [k, v] of Object.entries(layout.sizeParams)) setParam(sId, k, v);
+          setParam(sId, "fit", 0);
+          plugSolidIds.push(sId);
+        }
+        addPrimitive("connector");
+        const cId = useDoc.getState().selectedIds[0];
+        if (cId) {
+          setTransform(cId, { position: pt, rotation: layout.rotationDeg });
+          for (const [k, v] of Object.entries(layout.sizeParams)) setParam(cId, k, v);
+          setParam(cId, "fit", 2);
+          setHole(cId, true);
+          plugCutterIds.push(cId);
+        }
+      }
+      selectMany([plugNode.id, ...plugCutterIds], false);
+      combine("union");
+      const plugCutId = useDoc.getState().selectedIds[0] ?? plugNode.id;
+      selectMany([plugCutId, ...plugSolidIds], false);
+      combine("union");
+      const plugCombinedId = useDoc.getState().selectedIds[0];
+      if (plugCombinedId) rename(plugCombinedId, `${plugNode.name} (Hinge Leaf 1)`);
+
+      // Part B (socketNode) gets Leaf 1 pocket cutter (fit 3) cut from box FIRST,
+      // and THEN Leaf 2 solid knuckle (fit 1) unioned so the 45° cone & cup are 100% preserved!
+      const sockSolidIds: string[] = [];
+      const sockCutterIds: string[] = [];
+      for (const pt of layout.targetPoints) {
+        addPrimitive("connector");
+        const sId = useDoc.getState().selectedIds[0];
+        if (sId) {
+          setTransform(sId, { position: pt, rotation: layout.rotationDeg });
+          for (const [k, v] of Object.entries(layout.sizeParams)) setParam(sId, k, v);
+          setParam(sId, "fit", 1);
+          sockSolidIds.push(sId);
+        }
+        addPrimitive("connector");
+        const cId = useDoc.getState().selectedIds[0];
+        if (cId) {
+          setTransform(cId, { position: pt, rotation: layout.rotationDeg });
+          for (const [k, v] of Object.entries(layout.sizeParams)) setParam(cId, k, v);
+          setParam(cId, "fit", 3);
+          setHole(cId, true);
+          sockCutterIds.push(cId);
+        }
+      }
+      selectMany([socketNode.id, ...sockCutterIds], false);
+      combine("union");
+      const sockCutId = useDoc.getState().selectedIds[0] ?? socketNode.id;
+      selectMany([sockCutId, ...sockSolidIds], false);
+      combine("union");
+      const socketCombinedId = useDoc.getState().selectedIds[0];
+      if (socketCombinedId) rename(socketCombinedId, `${socketNode.name} (Hinge Leaf 2)`);
+
+      if (plugCombinedId && socketCombinedId) {
+        selectMany([plugCombinedId, socketCombinedId], false);
+      }
+    } else {
+      // Standard joints (Round Pin, Square Key, Tenon, Dovetail, Snap-Fit)
+      const plugConnIds: string[] = [];
+      for (const pt of layout.targetPoints) {
+        addPrimitive("connector");
+        const id = useDoc.getState().selectedIds[0];
+        if (id) {
+          setTransform(id, { position: pt, rotation: layout.rotationDeg });
+          for (const [k, v] of Object.entries(layout.sizeParams)) setParam(id, k, v);
+          setParam(id, "fit", 0);
+          plugConnIds.push(id);
+        }
+      }
+
+      const socketConnIds: string[] = [];
+      for (const pt of layout.targetPoints) {
+        addPrimitive("connector");
+        const id = useDoc.getState().selectedIds[0];
+        if (id) {
+          setTransform(id, { position: pt, rotation: layout.rotationDeg });
+          for (const [k, v] of Object.entries(layout.sizeParams)) setParam(id, k, v);
+          setParam(id, "fit", 1);
+          setHole(id, true);
+          socketConnIds.push(id);
+        }
+      }
+
+      selectMany([plugNode.id, ...plugConnIds], false);
+      combine("union");
+      const plugCombinedId = useDoc.getState().selectedIds[0];
+      const plugSuffix = autoJointShape === 6
+        ? "Snap Tab"
+        : (autoJointShape === 3
+            ? "Tenon"
+            : (autoJointShape === 0
+                ? (layout.effectiveCount === 1 ? "Dovetail Rail" : "Dovetail Rails")
+                : (layout.effectiveCount === 1 ? "Pin" : "Pins")));
+      const socketSuffix = autoJointShape === 6
+        ? "Snap Catch"
+        : (autoJointShape === 3
+            ? "Mortise"
+            : (autoJointShape === 0
+                ? (layout.effectiveCount === 1 ? "Dovetail Slot" : "Dovetail Slots")
+                : (layout.effectiveCount === 1 ? "Socket" : "Sockets")));
+      if (plugCombinedId) rename(plugCombinedId, `${plugNode.name} (${plugSuffix})`);
+
+      selectMany([socketNode.id, ...socketConnIds], false);
+      combine("union");
+      const socketCombinedId = useDoc.getState().selectedIds[0];
+      if (socketCombinedId) rename(socketCombinedId, `${socketNode.name} (${socketSuffix})`);
+
+      if (plugCombinedId && socketCombinedId) {
+        selectMany([plugCombinedId, socketCombinedId], false);
+      }
     }
 
     endHistoryBatch();
-  }, [connectorSeam, addPrimitive, setTransform, setParam, setHole, selectMany, group]);
+
+    sceneRef.current?.setJoineryPreview(null);
+    setToolMode("select");
+  }, [connectorSeam, autoJointShape, autoJointCount, autoJointClearance, autoJointDovetailStopped, autoJointDovetailStopEnd, autoJointHingeEdge, computeJoineryLayout, addPrimitive, setTransform, setParam, setHole, selectMany, combine, rename]);
+
+  // Live Ghost Preview in 3D viewport while in "join" toolMode
+  useEffect(() => {
+    if (toolMode !== "join" || !connectorSeam) {
+      sceneRef.current?.setJoineryPreview(null);
+      return;
+    }
+    const layout = computeJoineryLayout(
+      connectorSeam.seam,
+      autoJointShape,
+      autoJointCount,
+      autoJointClearance,
+      autoJointDovetailStopped,
+      autoJointDovetailStopEnd,
+      autoJointHingeEdge,
+    );
+    sceneRef.current?.setJoineryPreview({
+      plugId: connectorSeam.plugNode.id,
+      socketId: connectorSeam.socketNode.id,
+      items: layout.targetPoints.map((pt) => ({
+        position: pt,
+        rotationDeg: layout.rotationDeg,
+        shape: autoJointShape,
+        params: layout.sizeParams,
+      })),
+    });
+    return () => {
+      sceneRef.current?.setJoineryPreview(null);
+    };
+  }, [toolMode, connectorSeam, autoJointShape, autoJointCount, autoJointClearance, autoJointDovetailStopped, autoJointDovetailStopEnd, autoJointHingeEdge, computeJoineryLayout]);
+
+  // If selection changes away from 2 objects while in "join" toolMode, return to "select"
+  useEffect(() => {
+    if (toolMode === "join" && (selectedIds.length !== 2 || !connectorSeam)) {
+      setToolMode("select");
+    }
+  }, [toolMode, selectedIds.length, connectorSeam]);
+
+  const joineryLayout = useMemo(() => {
+    if (!connectorSeam) return null;
+    return computeJoineryLayout(
+      connectorSeam.seam,
+      autoJointShape,
+      autoJointCount,
+      autoJointClearance,
+      autoJointDovetailStopped,
+      autoJointDovetailStopEnd,
+      autoJointHingeEdge,
+    );
+  }, [connectorSeam, autoJointShape, autoJointCount, autoJointClearance, autoJointDovetailStopped, autoJointDovetailStopEnd, autoJointHingeEdge, computeJoineryLayout]);
 
   // Deleting a skipped node should let its id go, not leak it for the rest
   // of the session — otherwise re-importing the same file under a new node
@@ -1354,13 +1897,49 @@ export function App() {
     [setTransform],
   );
   // Alt-drag: the viewport clones the Three.js view itself (for an instant
-  // drag start, with no rebuild to wait for) and only needs the new node's
-  // id back, to know which id to keep dragging and reporting moves for.
   const onDuplicate = useCallback(
-    (id: string) => {
-      const node = findNode(useDoc.getState().nodes, id);
-      if (!node) return null;
-      return duplicateNodes([node], [0, 0, 0])[0] ?? null;
+    (target: string | string[]): DuplicateResult | null => {
+      const idList = Array.from(new Set(Array.isArray(target) ? target : [target]));
+      if (!idList.length) return null;
+      const currentNodes = useDoc.getState().nodes;
+      const nodesToDup = idList
+        .map((id) => findNode(currentNodes, id))
+        .filter((n): n is SceneNode => n !== null);
+      if (!nodesToDup.length) return null;
+
+      const cloneIds = duplicateNodes(nodesToDup, [0, 0, 0]);
+      if (!cloneIds.length) return null;
+
+      const latestNodes = useDoc.getState().nodes;
+      const copies = nodesToDup.map((origNode, idx) => {
+        const copyId = cloneIds[idx];
+        let childMap: Record<string, string> | undefined;
+        if (isGroup(origNode)) {
+          const cloned = findNode(latestNodes, copyId);
+          if (cloned && isGroup(cloned)) {
+            childMap = {};
+            const mapChildren = (origList: SceneNode[], cloneList: SceneNode[]) => {
+              for (let i = 0; i < origList.length; i++) {
+                if (origList[i] && cloneList[i]) {
+                  childMap![origList[i].id] = cloneList[i].id;
+                  if (isGroup(origList[i]) && isGroup(cloneList[i])) {
+                    mapChildren((origList[i] as GroupNode).children, (cloneList[i] as GroupNode).children);
+                  }
+                }
+              }
+            };
+            mapChildren(origNode.children, cloned.children);
+          }
+        }
+        return { origId: origNode.id, copyId, childMap };
+      });
+
+      return {
+        copyId: copies[0]?.copyId ?? "",
+        childMap: copies[0]?.childMap,
+        copies,
+        nodes: latestNodes,
+      };
     },
     [duplicateNodes],
   );
@@ -2370,6 +2949,9 @@ export function App() {
       } else if (!mod && e.key.toLowerCase() === "b") {
         e.preventDefault();
         setToolMode("build");
+      } else if (!mod && e.key.toLowerCase() === "j") {
+        e.preventDefault();
+        setToolMode((prev) => prev === "join" ? "select" : "join");
       } else if (e.key === "Enter" && useDoc.getState().selectedIds.length >= 0 && toolModeRef.current === "build") {
         e.preventDefault();
         commitBuild();
@@ -2952,6 +3534,21 @@ export function App() {
           disabled={selectedIds.length < 2}
         >
           <ShapeBuilderIcon />
+        </button>
+        <button
+          className={toolMode === "join" ? "active" : ""}
+          onClick={() => setToolMode((m) => m === "join" ? "select" : "join")}
+          title={
+            selectedIds.length !== 2
+              ? "Joinery (J) — select 2 touching parts"
+              : !connectorSeam
+              ? "Joinery (J) — parts must touch at a flat face"
+              : "Joinery: create interlocking joints between parts (J)"
+          }
+          aria-label="Joinery tool"
+          disabled={selectedIds.length !== 2 || !connectorSeam}
+        >
+          <JoineryToolIcon />
         </button>
 
         <span className="tool-rail-sep" role="separator" />
@@ -3679,18 +4276,12 @@ export function App() {
                     <div className="shape-category-content">
                       <div className="shape-grid">
                         {cat.kinds.map((kind) => {
-                          // Parked alongside the two-object auto-connector — the whole
-                          // feature is paused, not just that one panel, so the entry
-                          // point that lets someone place a Connector at all needs to be
-                          // off too.
-                          const paused = kind === "connector";
                           return (
                             <button
                               key={kind}
-                              className={`shape-card ${pendingPrimitive === kind ? "active" : ""} ${paused ? "paused" : ""}`}
-                              disabled={paused}
+                              className={`shape-card ${pendingPrimitive === kind ? "active" : ""}`}
                               tabIndex={isOpen ? 0 : -1}
-                              title={paused ? "Paused for now — coming back to this soon" : undefined}
+                              title={PRIMITIVES[kind].label}
                               onClick={() => {
                                 setPendingPrimitive(kind);
                                 setToolMode("place");
@@ -3752,8 +4343,24 @@ export function App() {
               onResizeSelectionAxis={resizeSelectionAxis}
               onMoveSelectionAxis={moveSelectionAxis}
               error={invalid[selected.id] ?? null}
-              onParam={(k, v) => setParam(selected.id, k, v)}
-              onResetParams={() => resetParams(selected.id)}
+              onParam={(k, v) => {
+                setSkippedIds((prev) => {
+                  if (!prev.has(selected.id)) return prev;
+                  const next = new Set(prev);
+                  next.delete(selected.id);
+                  return next;
+                });
+                setParam(selected.id, k, v);
+              }}
+              onResetParams={() => {
+                setSkippedIds((prev) => {
+                  if (!prev.has(selected.id)) return prev;
+                  const next = new Set(prev);
+                  next.delete(selected.id);
+                  return next;
+                });
+                resetParams(selected.id);
+              }}
               onCreateMatchingThreadPart={() => {
                 const source = selected.type === "edit" && selected.base.type === "object" ? selected.base : selected;
                 if (source.type !== "object" || (source.kind !== "threadedRod" && source.kind !== "threadedNut")) return;
@@ -3797,7 +4404,7 @@ export function App() {
               onRename={(n) => rename(selected.id, n)}
               onDelete={removeSelected}
               onPruneDeadOps={onPruneDeadOps}
-              onDuplicateWithParams={(params) => duplicateWithParams(selected.id, params)}
+              onDuplicateWithParams={(params, overrides) => duplicateWithParams(selected.id, params, overrides)}
               onText={(t) => setText(selected.id, t)}
               onFontName={(fn) => setFontName(selected.id, fn)}
               fonts={textFonts}
@@ -3825,26 +4432,785 @@ export function App() {
          *  but-disabled rather than removed so the feature is easy to pick
          *  back up. See connectorSeam/addConnectorJoint above, still intact
          *  and unused while this stays disabled. */}
-        {selectedIds.length === 2 && (
-        <section className="tool-section connector-section paused" aria-disabled="true">
-          <div className="panel-heading compact">
-            <div><h1>Add connector</h1><p>Paused for now — coming back to this soon</p></div>
-          </div>
-          <div className="spacing-objects">
-            <div>
-              <span className="field-label">Plug goes on</span>
-              <strong>—</strong>
+        {/* Dedicated Joinery Panel when toolMode === 'join' */}
+        {toolMode === "join" && connectorSeam && joineryLayout && (
+          <section className="tool-section joinery-section">
+            <div className="panel-heading compact" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>
+                <h1>Join pieces</h1>
+                <p style={{ margin: 0, fontSize: 11, color: "#64748b" }}>Interlocking joints between touching faces</p>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <button
+                  type="button"
+                  onClick={resetAllJointSettings}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 3,
+                    fontSize: 10,
+                    fontWeight: 600,
+                    padding: "3px 8px",
+                    background: "#f1f5f9",
+                    border: "1px solid #cbd5e1",
+                    borderRadius: 5,
+                    cursor: "pointer",
+                    color: "#334155",
+                  }}
+                  title="Reset all joint settings and dimensions back to initial defaults"
+                >
+                  ↺ Reset All
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setToolMode("select")}
+                  style={{ background: "transparent", border: "none", fontSize: 18, color: "#94a3b8", cursor: "pointer", padding: "2px 6px" }}
+                  title="Close joinery tool (Esc)"
+                >
+                  ✕
+                </button>
+              </div>
             </div>
-            <button type="button" disabled>Swap</button>
-            <div>
-              <span className="field-label">Socket goes on</span>
-              <strong>—</strong>
+
+            <div className="joinery-live-badge">
+              <span style={{ fontSize: 13 }}>👁️</span>
+              <span>Live Ghost Preview (Parts are transparent)</span>
             </div>
-          </div>
-          <button className="primary" disabled onClick={addConnectorJoint}>
-            Add connector
-          </button>
-        </section>
+
+            <div className="spacing-objects" style={{ margin: "8px 0" }}>
+              <div>
+                <span className="field-label">Plug goes on</span>
+                <strong>{connectorSeam.plugNode.name}</strong>
+              </div>
+              <button type="button" onClick={() => setConnectorSwapped((v) => !v)} title="Swap plug and socket">
+                Swap
+              </button>
+              <div>
+                <span className="field-label">Socket goes on</span>
+                <strong>{connectorSeam.socketNode.name}</strong>
+              </div>
+            </div>
+
+            {/* Joint Type (5 visual icon cards) */}
+            <div style={{ marginBottom: 12 }}>
+              <span className="field-label" style={{ display: "block", marginBottom: 5, fontSize: 11, fontWeight: 600, color: "#475569" }}>
+                Joint Type
+              </span>
+              <div className="joint-type-grid">
+                {[
+                  { shape: 1, label: "Round Pin", desc: "Push-Fit Dowel", icon: <RoundPinIcon /> },
+                  { shape: 2, label: "Square Key", desc: "Anti-Rotation", icon: <SquarePinIcon /> },
+                  { shape: 3, label: "Tenon", desc: "Mortise Tab", icon: <TenonIcon /> },
+                  { shape: 0, label: "Dovetail", desc: "Alignment Rail", icon: <DovetailRailIcon /> },
+                  { shape: 5, label: "Hinge", desc: "Print-in-Place", icon: <HingeJointIcon /> },
+                  { shape: 6, label: "Snap Pin", desc: "Split-Prong Dowel", icon: <SnapJointIcon /> },
+                ].map((item) => (
+                  <button
+                    key={item.shape}
+                    type="button"
+                    className={`joint-type-card ${autoJointShape === item.shape ? "active" : ""}`}
+                    onClick={() => {
+                      setAutoJointShape(item.shape);
+                      if (item.shape === 5 && (autoJointCount < 3 || autoJointCount % 2 === 0)) {
+                        setAutoJointCount(3);
+                      }
+                    }}
+                  >
+                    {item.icon}
+                    <span style={{ fontWeight: 600 }}>{item.label}</span>
+                    <span style={{ fontSize: 9, opacity: 0.75 }}>{item.desc}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Quantity Slider (for dovetails, pins, tenons, and hinges) */}
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                <span className="field-label" style={{ fontSize: 11, fontWeight: 600, color: "#475569" }}>
+                  {autoJointShape === 5
+                    ? "Knuckle Segments"
+                    : (autoJointShape === 0
+                        ? "Dovetail Rails"
+                        : (autoJointShape === 3 ? "Tenon Quantity" : "Pin Quantity"))}
+                </span>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <span style={{ fontSize: 11, fontWeight: 600, color: "#00a7a5" }}>
+                    {autoJointShape === 5
+                      ? `${autoJointCount} knuckles`
+                      : (autoJointShape === 0
+                          ? `${autoJointCount} ${autoJointCount === 1 ? "rail" : "rails"}`
+                          : `${autoJointCount} ${autoJointCount === 1 ? "pin" : "pins"}`)}
+                  </span>
+                  {autoJointCount !== (autoJointShape === 0 ? 1 : (autoJointShape === 5 ? 3 : 2)) && (
+                    <button
+                      type="button"
+                      onClick={() => setAutoJointCount(autoJointShape === 0 ? 1 : (autoJointShape === 5 ? 3 : 2))}
+                      style={{ fontSize: 9, padding: "1px 5px", background: "#f1f5f9", border: "1px solid #cbd5e1", borderRadius: 3, cursor: "pointer", color: "#64748b" }}
+                      title={`Reset to default quantity (${autoJointShape === 0 ? 1 : (autoJointShape === 5 ? 3 : 2)})`}
+                    >
+                      ↺ Default ({autoJointShape === 0 ? 1 : (autoJointShape === 5 ? 3 : 2)})
+                    </button>
+                  )}
+                </div>
+              </div>
+              <div className="pin-slider-row">
+                <input
+                  type="range"
+                  min={autoJointShape === 5 ? 3 : 1}
+                  max={autoJointShape === 5 ? 9 : 8}
+                  step={autoJointShape === 5 ? 2 : 1}
+                  value={autoJointCount}
+                  onChange={(e) => setAutoJointCount(Number(e.target.value))}
+                />
+                <input
+                  type="number"
+                  min={autoJointShape === 5 ? 3 : 1}
+                  max={autoJointShape === 5 ? 9 : 8}
+                  step={autoJointShape === 5 ? 2 : 1}
+                  value={autoJointCount}
+                  onChange={(e) => {
+                    const minV = autoJointShape === 5 ? 3 : 1;
+                    const maxV = autoJointShape === 5 ? 9 : 8;
+                    const val = Math.max(minV, Math.min(maxV, Number(e.target.value) || minV));
+                    setAutoJointCount(val);
+                  }}
+                />
+              </div>
+              <div className="pin-quick-chips">
+                {autoJointShape === 5
+                  ? [
+                      { c: 3, text: "3 Knuckles" },
+                      { c: 5, text: "5 Knuckles" },
+                      { c: 7, text: "7 Knuckles" },
+                    ].map(({ c, text }) => (
+                      <button
+                        key={c}
+                        type="button"
+                        className={`pin-chip ${autoJointCount === c ? "active" : ""}`}
+                        onClick={() => setAutoJointCount(c)}
+                      >
+                        {text}
+                      </button>
+                    ))
+                  : (autoJointShape === 0
+                      ? [
+                          { c: 1, text: "1 Rail" },
+                          { c: 2, text: "2 Rails" },
+                          { c: 3, text: "3 Rails" },
+                          { c: 4, text: "4 Rails" },
+                        ]
+                      : [
+                          { c: 1, text: "1 Pin" },
+                          { c: 2, text: "2 Pins (Anti-Twist)" },
+                          { c: 3, text: "3 Pins" },
+                          { c: 4, text: "4 Pins" },
+                        ]
+                    ).map(({ c, text }) => (
+                      <button
+                        key={c}
+                        type="button"
+                        className={`pin-chip ${autoJointCount === c ? "active" : ""}`}
+                        onClick={() => setAutoJointCount(c)}
+                      >
+                        {text}
+                      </button>
+                    ))}
+              </div>
+            </div>
+
+            {/* Spacing Slider (when quantity > 1, for Dovetails, Pins, and Tenons) */}
+            {autoJointCount > 1 && autoJointShape !== 5 && joineryLayout && (
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                  <span className="field-label" style={{ fontSize: 11, fontWeight: 600, color: "#475569" }}>
+                    {autoJointShape === 0
+                      ? "Dovetail Spacing (Center-to-Center)"
+                      : (autoJointShape === 3
+                          ? "Tenon Spacing (Center-to-Center)"
+                          : "Pin Spacing (Center-to-Center)")}
+                  </span>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: "#00a7a5" }}>
+                      {joineryLayout.effPitch.toFixed(1)} mm
+                    </span>
+                    {autoJointCustomSpacing !== null && (
+                      <button
+                        type="button"
+                        onClick={() => setAutoJointCustomSpacing(null)}
+                        style={{ fontSize: 9, padding: "1px 5px", background: "#f1f5f9", border: "1px solid #cbd5e1", borderRadius: 3, cursor: "pointer", color: "#64748b" }}
+                        title="Reset to evenly distributed"
+                      >
+                        Auto (Even)
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <div className="pin-slider-row">
+                  <input
+                    type="range"
+                    min={Math.max(1, Number(joineryLayout.minPitch.toFixed(1)))}
+                    max={Math.max(Number(joineryLayout.minPitch.toFixed(1)) + 1, Number(joineryLayout.maxPitch.toFixed(1)))}
+                    step={0.5}
+                    value={joineryLayout.effPitch}
+                    onChange={(e) => setAutoJointCustomSpacing(Number(e.target.value))}
+                  />
+                  <input
+                    type="number"
+                    min={Math.max(1, Number(joineryLayout.minPitch.toFixed(1)))}
+                    max={Math.max(Number(joineryLayout.minPitch.toFixed(1)) + 1, Number(joineryLayout.maxPitch.toFixed(1)) + 10)}
+                    step={0.5}
+                    value={Number(joineryLayout.effPitch.toFixed(1))}
+                    onChange={(e) => setAutoJointCustomSpacing(Math.max(1, Number(e.target.value) || 1))}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Hinge Pivot Axis Alignment (Edge vs Center) */}
+            {autoJointShape === 5 && (
+              <div style={{ marginBottom: 12 }}>
+                <span className="field-label" style={{ display: "block", marginBottom: 5, fontSize: 11, fontWeight: 600, color: "#475569" }}>
+                  Hinge Pivot Alignment
+                </span>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6 }}>
+                  <button
+                    type="button"
+                    className={`tolerance-card ${autoJointHingeEdge === "edge1" ? "active" : ""}`}
+                    onClick={() => setAutoJointHingeEdge("edge1")}
+                    style={{ padding: "6px 4px", textAlign: "center" }}
+                  >
+                    <span style={{ fontWeight: 600, fontSize: 11 }}>Outer Edge</span>
+                    <span style={{ fontSize: 9, opacity: 0.8 }}>Folds 180°</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`tolerance-card ${autoJointHingeEdge === "center" ? "active" : ""}`}
+                    onClick={() => setAutoJointHingeEdge("center")}
+                    style={{ padding: "6px 4px", textAlign: "center" }}
+                  >
+                    <span style={{ fontWeight: 600, fontSize: 11 }}>Center</span>
+                    <span style={{ fontSize: 9, opacity: 0.8 }}>Flush</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`tolerance-card ${autoJointHingeEdge === "edge2" ? "active" : ""}`}
+                    onClick={() => setAutoJointHingeEdge("edge2")}
+                    style={{ padding: "6px 4px", textAlign: "center" }}
+                  >
+                    <span style={{ fontWeight: 600, fontSize: 11 }}>Opposite Edge</span>
+                    <span style={{ fontSize: 9, opacity: 0.8 }}>Folds 180°</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Dovetail Alignment Style (Stopped vs Through) */}
+            {autoJointShape === 0 && (
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+                  <span className="field-label" style={{ fontSize: 11, fontWeight: 600, color: "#475569" }}>
+                    Dovetail Alignment Style
+                  </span>
+                  {(!autoJointDovetailStopped || autoJointDovetailStopEnd !== 0) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAutoJointDovetailStopped(true);
+                        setAutoJointDovetailStopEnd(0);
+                      }}
+                      style={{ fontSize: 9, padding: "1px 5px", background: "#f1f5f9", border: "1px solid #cbd5e1", borderRadius: 3, cursor: "pointer", color: "#64748b" }}
+                      title="Reset alignment style to default (Stopped at bottom)"
+                    >
+                      ↺ Default (Stopped)
+                    </button>
+                  )}
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                  <button
+                    type="button"
+                    className={`tolerance-card ${autoJointDovetailStopped ? "active" : ""}`}
+                    onClick={() => setAutoJointDovetailStopped(true)}
+                    style={{ padding: "8px 6px", textAlign: "center" }}
+                  >
+                    <span style={{ fontWeight: 600, fontSize: 11 }}>Stopped (Align)</span>
+                    <span style={{ fontSize: 9, opacity: 0.8 }}>Bottom stop shelf</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`tolerance-card ${!autoJointDovetailStopped ? "active" : ""}`}
+                    onClick={() => setAutoJointDovetailStopped(false)}
+                    style={{ padding: "8px 6px", textAlign: "center" }}
+                  >
+                    <span style={{ fontWeight: 600, fontSize: 11 }}>Through</span>
+                    <span style={{ fontSize: 9, opacity: 0.8 }}>Continuous rail</span>
+                  </button>
+                </div>
+
+                {autoJointDovetailStopped && (
+                  <div style={{ marginTop: 8, display: "flex", gap: 6, alignItems: "center", justifyContent: "space-between" }}>
+                    <span style={{ fontSize: 10, color: "#64748b" }}>Stop Shelf:</span>
+                    <div style={{ display: "flex", gap: 4 }}>
+                      <button
+                        type="button"
+                        className={`pin-chip ${autoJointDovetailStopEnd === 0 ? "active" : ""}`}
+                        onClick={() => setAutoJointDovetailStopEnd(0)}
+                        style={{ fontSize: 10, padding: "3px 8px" }}
+                        title="Dovetail enters from top and stops at bottom shelf"
+                      >
+                        Stop at Bottom ⤓
+                      </button>
+                      <button
+                        type="button"
+                        className={`pin-chip ${autoJointDovetailStopEnd === 1 ? "active" : ""}`}
+                        onClick={() => setAutoJointDovetailStopEnd(1)}
+                        style={{ fontSize: 10, padding: "3px 8px" }}
+                        title="Dovetail enters from bottom and stops at top shelf"
+                      >
+                        Stop at Top ⤒
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Dimensions & Depth Settings */}
+            <div style={{ marginBottom: 12, padding: "10px", background: "#f8fafc", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                <span style={{ fontSize: 11, fontWeight: 700, color: "#334155", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+                  Joint Dimensions & Depth
+                </span>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  {(autoJointCustomLength !== null || autoJointCustomSize !== null || autoJointCustomThickness !== null || autoJointCustomHeight !== null || autoJointCustomTaper !== null || autoJointCustomSpacing !== null) && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAutoJointCustomLength(null);
+                        setAutoJointCustomSize(null);
+                        setAutoJointCustomThickness(null);
+                        setAutoJointCustomHeight(null);
+                        setAutoJointCustomTaper(null);
+                        setAutoJointCustomSpacing(null);
+                      }}
+                      style={{ fontSize: 9, padding: "2px 6px", background: "#f1f5f9", border: "1px solid #cbd5e1", borderRadius: 4, cursor: "pointer", color: "#334155", fontWeight: 600 }}
+                      title="Reset all dimensions to auto-calculated defaults"
+                    >
+                      ↺ Reset Dimensions
+                    </button>
+                  )}
+                  {joineryLayout.materialDepth !== undefined && joineryLayout.materialDepth >= 1.0 && (
+                    <span style={{ fontSize: 10, color: "#64748b" }}>
+                      Wall: <strong>{joineryLayout.materialDepth.toFixed(1)} mm</strong>
+                      {joineryLayout.maxSafeDepth < joineryLayout.materialDepth && (
+                        <span style={{ color: "#00a7a5", marginLeft: 4 }}>
+                          (Safe: ≤ {joineryLayout.maxSafeDepth.toFixed(1)} mm)
+                        </span>
+                      )}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* 1. Depth / Length Slider & Input (for all shapes except Hinge which uses wallHeight) */}
+              {autoJointShape !== 5 && (
+                <div style={{ marginBottom: 8 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                      <span className="field-label" style={{ fontSize: 11, color: "#475569" }}>
+                        {autoJointShape === 0 ? "Rail Length" : "Hole / Pin Depth"}
+                      </span>
+                      {autoJointCustomLength !== null && (
+                        <button
+                          type="button"
+                          onClick={() => setAutoJointCustomLength(null)}
+                          style={{ fontSize: 9, padding: "1px 5px", background: "#f1f5f9", border: "1px solid #cbd5e1", borderRadius: 3, cursor: "pointer", color: "#64748b" }}
+                          title={`Reset to auto calculated ${joineryLayout.autoLength.toFixed(1)} mm`}
+                        >
+                          ↺ Auto ({joineryLayout.autoLength.toFixed(1)}mm)
+                        </button>
+                      )}
+                    </div>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: joineryLayout.isPunchThrough ? "#dc2626" : "#00a7a5" }}>
+                      {joineryLayout.effLength.toFixed(1)} mm
+                    </span>
+                  </div>
+                  <div className="pin-slider-row" style={{ marginBottom: 2 }}>
+                    <input
+                      type="range"
+                      min={0.8}
+                      max={Math.max(20, Math.round((joineryLayout.materialDepth ?? 20) * 1.5))}
+                      step={0.2}
+                      value={joineryLayout.effLength}
+                      onChange={(e) => setAutoJointCustomLength(Number(e.target.value))}
+                    />
+                    <input
+                      type="number"
+                      min={0.5}
+                      max={60}
+                      step={0.2}
+                      value={Number(joineryLayout.effLength.toFixed(1))}
+                      onChange={(e) => setAutoJointCustomLength(Math.max(0.5, Number(e.target.value) || 1.0))}
+                    />
+                  </div>
+                  {joineryLayout.isPunchThrough && (
+                    <div style={{ fontSize: 10, color: "#dc2626", fontWeight: 600, marginTop: 4, display: "flex", alignItems: "center", justifyContent: "space-between", background: "#fef2f2", padding: "4px 6px", borderRadius: 4, border: "1px solid #fecaca" }}>
+                      <span>⚠️ Hole punches through back wall!</span>
+                      {joineryLayout.materialDepth !== undefined && joineryLayout.maxSafeDepth < joineryLayout.materialDepth && (
+                        <button
+                          type="button"
+                          onClick={() => setAutoJointCustomLength(Number(joineryLayout.maxSafeDepth.toFixed(1)))}
+                          style={{ background: "#fee2e2", border: "1px solid #fca5a5", color: "#991b1b", padding: "2px 6px", borderRadius: 4, cursor: "pointer", fontSize: 10, fontWeight: 600 }}
+                        >
+                          Set Safe {joineryLayout.maxSafeDepth.toFixed(1)}mm
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* 2. Diameter / Width */}
+              <div style={{ marginBottom: 8 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                    <span className="field-label" style={{ fontSize: 11, color: "#475569" }}>
+                      {autoJointShape === 1 || autoJointShape === 6 ? "Pin Diameter" : (autoJointShape === 5 ? "Knuckle Diameter" : (autoJointShape === 0 ? "Dovetail Base Width" : "Joint Width"))}
+                    </span>
+                    {autoJointCustomSize !== null && (
+                      <button
+                        type="button"
+                        onClick={() => setAutoJointCustomSize(null)}
+                        style={{ fontSize: 9, padding: "1px 5px", background: "#f1f5f9", border: "1px solid #cbd5e1", borderRadius: 3, cursor: "pointer", color: "#64748b" }}
+                        title={`Reset to auto calculated ${(autoJointShape === 1 || autoJointShape === 5 || autoJointShape === 6 ? joineryLayout.autoRadius * 2 : joineryLayout.autoWidth).toFixed(1)} mm`}
+                      >
+                        ↺ Auto ({(autoJointShape === 1 || autoJointShape === 5 || autoJointShape === 6 ? joineryLayout.autoRadius * 2 : joineryLayout.autoWidth).toFixed(1)}mm)
+                      </button>
+                    )}
+                  </div>
+                  <span style={{ fontSize: 11, fontWeight: 600, color: "#00a7a5" }}>
+                    {(autoJointShape === 1 || autoJointShape === 5 || autoJointShape === 6 ? joineryLayout.effRadius * 2 : joineryLayout.effWidth).toFixed(1)} mm
+                  </span>
+                </div>
+                <div className="pin-slider-row" style={{ marginBottom: 2 }}>
+                  <input
+                    type="range"
+                    min={1.5}
+                    max={Math.max(20, Math.round(joineryLayout.minWallDim * 0.9))}
+                    step={0.5}
+                    value={autoJointShape === 1 || autoJointShape === 5 || autoJointShape === 6 ? joineryLayout.effRadius * 2 : joineryLayout.effWidth}
+                    onChange={(e) => setAutoJointCustomSize(Number(e.target.value))}
+                  />
+                  <input
+                    type="number"
+                    min={1.0}
+                    max={50}
+                    step={0.5}
+                    value={Number((autoJointShape === 1 || autoJointShape === 5 || autoJointShape === 6 ? joineryLayout.effRadius * 2 : joineryLayout.effWidth).toFixed(1))}
+                    onChange={(e) => setAutoJointCustomSize(Math.max(1.0, Number(e.target.value) || 1.0))}
+                  />
+                </div>
+              </div>
+
+              {/* 3. Thickness (for Tenon) */}
+              {autoJointShape === 3 && (
+                <div style={{ marginBottom: 8 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                      <span className="field-label" style={{ fontSize: 11, color: "#475569" }}>
+                        Tenon Thickness
+                      </span>
+                      {autoJointCustomThickness !== null && (
+                        <button
+                          type="button"
+                          onClick={() => setAutoJointCustomThickness(null)}
+                          style={{ fontSize: 9, padding: "1px 5px", background: "#f1f5f9", border: "1px solid #cbd5e1", borderRadius: 3, cursor: "pointer", color: "#64748b" }}
+                          title={`Reset to auto calculated ${joineryLayout.autoThickness.toFixed(1)} mm`}
+                        >
+                          ↺ Auto ({joineryLayout.autoThickness.toFixed(1)}mm)
+                        </button>
+                      )}
+                    </div>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: "#00a7a5" }}>
+                      {joineryLayout.effThickness.toFixed(1)} mm
+                    </span>
+                  </div>
+                  <div className="pin-slider-row" style={{ marginBottom: 2 }}>
+                    <input
+                      type="range"
+                      min={1.0}
+                      max={Math.max(12, Math.round(joineryLayout.minWallDim * 0.6))}
+                      step={0.2}
+                      value={joineryLayout.effThickness}
+                      onChange={(e) => setAutoJointCustomThickness(Number(e.target.value))}
+                    />
+                    <input
+                      type="number"
+                      min={0.8}
+                      max={30}
+                      step={0.2}
+                      value={Number(joineryLayout.effThickness.toFixed(1))}
+                      onChange={(e) => setAutoJointCustomThickness(Math.max(0.8, Number(e.target.value) || 1.0))}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* 4. Dovetail Flare Depth / Snap Bead Height */}
+              {(autoJointShape === 0 || autoJointShape === 6) && (
+                <div style={{ marginBottom: 8 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                      <span className="field-label" style={{ fontSize: 11, color: "#475569" }}>
+                        {autoJointShape === 0 ? "Flare Depth (Height)" : "Snap Bead Height"}
+                      </span>
+                      {autoJointCustomHeight !== null && (
+                        <button
+                          type="button"
+                          onClick={() => setAutoJointCustomHeight(null)}
+                          style={{ fontSize: 9, padding: "1px 5px", background: "#f1f5f9", border: "1px solid #cbd5e1", borderRadius: 3, cursor: "pointer", color: "#64748b" }}
+                          title={`Reset to auto calculated ${joineryLayout.autoHeight.toFixed(1)} mm`}
+                        >
+                          ↺ Auto ({joineryLayout.autoHeight.toFixed(1)}mm)
+                        </button>
+                      )}
+                    </div>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: "#00a7a5" }}>
+                      {joineryLayout.effHeight.toFixed(1)} mm
+                    </span>
+                  </div>
+                  <div className="pin-slider-row" style={{ marginBottom: 2 }}>
+                    <input
+                      type="range"
+                      min={0.5}
+                      max={autoJointShape === 0 ? 12 : 4}
+                      step={0.2}
+                      value={joineryLayout.effHeight}
+                      onChange={(e) => setAutoJointCustomHeight(Number(e.target.value))}
+                    />
+                    <input
+                      type="number"
+                      min={0.4}
+                      max={20}
+                      step={0.2}
+                      value={Number(joineryLayout.effHeight.toFixed(1))}
+                      onChange={(e) => setAutoJointCustomHeight(Math.max(0.4, Number(e.target.value) || 0.5))}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* 5. Dovetail Taper Angle */}
+              {autoJointShape === 0 && (
+                <div style={{ marginBottom: 8 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                      <span className="field-label" style={{ fontSize: 11, color: "#475569" }}>
+                        Dovetail Taper Angle
+                      </span>
+                      {autoJointCustomTaper !== null && (
+                        <button
+                          type="button"
+                          onClick={() => setAutoJointCustomTaper(null)}
+                          style={{ fontSize: 9, padding: "1px 5px", background: "#f1f5f9", border: "1px solid #cbd5e1", borderRadius: 3, cursor: "pointer", color: "#64748b" }}
+                          title="Reset to default 20° taper angle"
+                        >
+                          ↺ Default (20°)
+                        </button>
+                      )}
+                    </div>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: "#00a7a5" }}>
+                      {joineryLayout.effTaper}°
+                    </span>
+                  </div>
+                  <div className="pin-slider-row" style={{ marginBottom: 2 }}>
+                    <input
+                      type="range"
+                      min={5}
+                      max={40}
+                      step={1}
+                      value={joineryLayout.effTaper}
+                      onChange={(e) => setAutoJointCustomTaper(Number(e.target.value))}
+                    />
+                    <input
+                      type="number"
+                      min={2}
+                      max={45}
+                      step={1}
+                      value={joineryLayout.effTaper}
+                      onChange={(e) => setAutoJointCustomTaper(Math.max(2, Math.min(45, Number(e.target.value) || 20)))}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* 6. Knuckle Smoothness (for Hinge) */}
+              {autoJointShape === 5 && (
+                <div style={{ marginBottom: 8 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                      <span className="field-label" style={{ fontSize: 11, color: "#475569" }}>
+                        Knuckle Smoothness (Roundness)
+                      </span>
+                      {autoJointHingeSides !== 64 && (
+                        <button
+                          type="button"
+                          onClick={() => setAutoJointHingeSides(64)}
+                          style={{ fontSize: 9, padding: "1px 5px", background: "#f1f5f9", border: "1px solid #cbd5e1", borderRadius: 3, cursor: "pointer", color: "#64748b" }}
+                          title="Reset to default 64 facets"
+                        >
+                          ↺ Default (64)
+                        </button>
+                      )}
+                    </div>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: "#00a7a5" }}>
+                      {autoJointHingeSides} facets
+                    </span>
+                  </div>
+                  <div className="pin-slider-row" style={{ marginBottom: 2 }}>
+                    <input
+                      type="range"
+                      min={16}
+                      max={96}
+                      step={4}
+                      value={autoJointHingeSides}
+                      onChange={(e) => setAutoJointHingeSides(Number(e.target.value))}
+                    />
+                    <input
+                      type="number"
+                      min={16}
+                      max={96}
+                      step={4}
+                      value={autoJointHingeSides}
+                      onChange={(e) => setAutoJointHingeSides(Math.max(16, Math.min(96, Number(e.target.value) || 64)))}
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* Auto Reset Button */}
+              {(autoJointCustomLength !== null || autoJointCustomSize !== null || autoJointCustomThickness !== null || autoJointCustomHeight !== null || autoJointCustomTaper !== null || autoJointCustomSpacing !== null) && (
+                <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 4 }}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAutoJointCustomLength(null);
+                      setAutoJointCustomSize(null);
+                      setAutoJointCustomThickness(null);
+                      setAutoJointCustomHeight(null);
+                      setAutoJointCustomTaper(null);
+                      setAutoJointCustomSpacing(null);
+                    }}
+                    style={{ fontSize: 10, padding: "3px 8px", background: "#e2e8f0", border: "none", borderRadius: 4, cursor: "pointer", color: "#475569" }}
+                  >
+                    ↺ Reset All Dimensions
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Fit Tolerance (3 visual icon cards) */}
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+                <span className="field-label" style={{ fontSize: 11, fontWeight: 600, color: "#475569" }}>
+                  Fit Tolerance (Clearance)
+                </span>
+                {autoJointClearance !== 0.15 && (
+                  <button
+                    type="button"
+                    onClick={() => setAutoJointClearance(0.15)}
+                    style={{ fontSize: 9, padding: "1px 5px", background: "#f1f5f9", border: "1px solid #cbd5e1", borderRadius: 3, cursor: "pointer", color: "#64748b" }}
+                    title="Reset to default standard tolerance (0.15 mm)"
+                  >
+                    ↺ Default (0.15mm)
+                  </button>
+                )}
+              </div>
+              <div className="tolerance-grid">
+                {[
+                  { val: 0.08, label: "Tight", mm: "0.08 mm", icon: <ToleranceTightIcon /> },
+                  { val: 0.15, label: "Standard", mm: "0.15 mm", icon: <ToleranceStandardIcon /> },
+                  { val: 0.22, label: "Loose", mm: "0.22 mm", icon: <ToleranceLooseIcon /> },
+                ].map((item) => (
+                  <button
+                    key={item.val}
+                    type="button"
+                    className={`tolerance-card ${autoJointClearance === item.val ? "active" : ""}`}
+                    onClick={() => setAutoJointClearance(item.val)}
+                  >
+                    {item.icon}
+                    <span style={{ fontWeight: 600 }}>{item.label}</span>
+                    <span style={{ fontSize: 9, opacity: 0.8 }}>{item.mm}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Warning if surface is too small */}
+            {joineryLayout.warning && (
+              <div className="joinery-warning">
+                <span>⚠️</span>
+                <span>{joineryLayout.warning}</span>
+              </div>
+            )}
+
+            {/* Action buttons */}
+            <div className="joinery-actions">
+              <button
+                type="button"
+                onClick={() => setToolMode("select")}
+                style={{ background: "#f1f5f9", border: "1px solid #cbd5e1", color: "#475569" }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="primary"
+                disabled={!joineryLayout.isValid}
+                onClick={addConnectorJoint}
+                style={{
+                  fontWeight: 700,
+                  ...(joineryLayout.isPunchThrough ? { background: "#d97706", borderColor: "#b45309" } : {}),
+                }}
+                title={joineryLayout.isPunchThrough ? "Warning: Hole will punch through back wall" : undefined}
+              >
+                {joineryLayout.isPunchThrough ? "⚠️ Apply (Through-Hole)" : "⚡ Apply Joint"}
+              </button>
+            </div>
+          </section>
+        )}
+
+        {/* When 2 touching pieces are selected but joinery tool is not open yet: clean launch button */}
+        {selectedIds.length === 2 && connectorSeam && toolMode !== "join" && (
+          <section className="tool-section connector-section">
+            <div className="joinery-launch-bar">
+              <button
+                type="button"
+                className="primary joinery-launch-btn"
+                onClick={() => setToolMode("join")}
+              >
+                <JoineryToolIcon /> Join Pieces... (J)
+              </button>
+              <p className="hint" style={{ marginTop: 6, fontSize: 10 }}>
+                Faces touch. Click or press J to configure alignment pins, tenons, or dovetail with live 3D preview.
+              </p>
+            </div>
+          </section>
+        )}
+
+        {/* When 2 pieces are selected but don't touch at a flat face */}
+        {selectedIds.length === 2 && !connectorSeam && (
+          <section className="tool-section connector-section paused" aria-disabled="true">
+            <div className="panel-heading compact">
+              <div>
+                <h1>Join pieces</h1>
+                <p>Pieces must touch at a flat face</p>
+              </div>
+            </div>
+            <div style={{ padding: "4px 0", color: "#6e8290", fontSize: 11 }}>
+              <p className="hint">Tip: Use the Exact Spacing tool below with Gap = 0 to snap them flush.</p>
+            </div>
+          </section>
         )}
 
         {selectedIds.length === 2 && (

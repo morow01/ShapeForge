@@ -1105,22 +1105,120 @@ export function PrimitiveShapeIcon({
     case "connector":
       return (
         <svg className={className} viewBox="0 0 32 32" aria-hidden="true" focusable="false">
-          {/* 3D Connector Socket / Peg */}
-          <path d="M10 7 L22 7 L26 14 L18 14 L18 25 L14 25 L14 14 L6 14 Z" fill="#38a7d5" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
-          <path d="M10 7 L14 4 L26 4 L22 7 Z" fill="#78d5f8" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
-          <path d="M22 7 L26 4 L30 11 L26 14 Z" fill="#2087b2" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
+          {/* Simplified 3D Interlocking Dovetail Joinery */}
+          {/* Lower Base Block with Female Dovetail Slot */}
+          <path d="M 4 20 L 16 13.5 L 28 20 L 28 25 L 16 30 L 4 25 Z" fill="#2087b2" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
+          <path d="M 16 24 L 16 30" stroke="#1d7a9f" strokeWidth="1.2" />
+          {/* Lower Block Top Surface */}
+          <path d="M 4 20 L 16 13.5 L 28 20 L 22 23 L 16 24 L 10 23 Z" fill="#38a7d5" stroke="#1d7a9f" strokeWidth="1.1" strokeLinejoin="round" />
+          {/* Dovetail Socket Recess */}
+          <path d="M 10 23 L 13.5 18.5 L 18.5 18.5 L 22 23 L 16 24 Z" fill="#156485" stroke="#1d7a9f" strokeWidth="1.1" strokeLinejoin="round" />
+          {/* Upper Mating Key Block sliding into socket */}
+          <path d="M 11 5 L 16 2.5 L 21 5 L 18.5 13 L 13.5 13 Z" fill="#78d5f8" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
+          <path d="M 11 5 L 13.5 13 L 13.5 17.5 L 11 9.5 Z" fill="#38a7d5" stroke="#1d7a9f" strokeWidth="1.1" strokeLinejoin="round" />
+          <path d="M 21 5 L 18.5 13 L 18.5 17.5 L 21 9.5 Z" fill="#186989" stroke="#1d7a9f" strokeWidth="1.1" strokeLinejoin="round" />
+          <path d="M 13.5 13 L 18.5 13 L 18.5 17.5 L 13.5 17.5 Z" fill="#38a7d5" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
+          {/* Alignment indicator */}
+          <path d="M 16 6 L 16 10" stroke="#1d7a9f" strokeWidth="1.2" strokeLinecap="round" strokeDasharray="1.5 1.5" />
         </svg>
       );
     case "threadedRod":
       return (
         <svg className={className} viewBox="0 0 32 32" aria-hidden="true" focusable="false">
-          {/* Hex Head */}
-          <path d="M16 3 L25 7.5 L16 12 L7 7.5 Z" fill="#78d5f8" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
-          <path d="M7 7.5 L16 12 V16 L7 11.5 Z" fill="#38a7d5" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
-          <path d="M25 7.5 L16 12 V16 L25 11.5 Z" fill="#2087b2" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
-          {/* Threaded Shaft with ridges */}
-          <path d="M10 16 V27 C10 28.5 16 29 16 29 C16 29 22 28.5 22 27 V16 Z" fill="#38a7d5" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
-          <path d="M10 18.5 L22 17M10 21.5 L22 20M10 24.5 L22 23M10 27.5 L22 26" stroke="#78d5f8" strokeWidth="1.2" strokeLinecap="round" />
+          {/* Isometric Hex Bolt Head */}
+          <path d="M 12 4 L 20 4 L 24.5 8 L 20 12 L 12 12 L 7.5 8 Z" fill="#78d5f8" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
+          <path d="M 7.5 8 L 12 12 L 12 16 L 7.5 12 Z" fill="#38a7d5" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
+          <path d="M 12 12 L 20 12 L 20 16 L 12 16 Z" fill="#2087b2" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
+          <path d="M 20 12 L 24.5 8 L 24.5 12 L 20 16 Z" fill="#186989" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
+          {/* Threaded Shank with Serrated Profile and Helical Grooves */}
+          <path
+            d="M 12 16 L 11.2 17.5 L 12 18.5 L 11.2 20 L 12 21 L 11.2 22.5 L 12 23.5 L 11.2 25 L 12 26 L 13.8 28.5 L 18.2 28.5 L 20 26 L 20.8 25 L 20 23.5 L 20.8 22.5 L 20 21 L 20.8 20 L 20 18.5 L 20.8 17.5 L 20 16 Z"
+            fill="#38a7d5"
+            stroke="#1d7a9f"
+            strokeWidth="1.2"
+            strokeLinejoin="round"
+          />
+          {/* Helical Thread Crests and Grooves */}
+          <path d="M 11.2 17.5 L 20.8 16 M 11.2 20 L 20.8 18.5 M 11.2 22.5 L 20.8 21 M 11.2 25 L 20.8 23.5" stroke="#78d5f8" strokeWidth="1.3" strokeLinecap="round" />
+          <path d="M 12 18.8 L 20 17.3 M 12 21.3 L 20 19.8 M 12 23.8 L 20 22.3 M 12 26.3 L 20 24.8" stroke="#186989" strokeWidth="0.8" strokeLinecap="round" />
+        </svg>
+      );
+    case "washer":
+      return (
+        <svg className={className} viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+          {/* Washer Outer Cylinder Body */}
+          <path
+            d="M 3.5 14 L 3.5 18 C 3.5 21.5 9 23.5 16 23.5 C 23 23.5 28.5 21.5 28.5 18 L 28.5 14 Z"
+            fill="#38a7d5"
+            stroke="#1d7a9f"
+            strokeWidth="1.2"
+            strokeLinejoin="round"
+          />
+          {/* Inner Bore Cavity & Shadow */}
+          <ellipse cx="16" cy="14" rx="5.5" ry="2.6" fill="#156485" stroke="#1d7a9f" strokeWidth="1" />
+          {/* Top Annular Washer Face */}
+          <path
+            fillRule="evenodd"
+            clipRule="evenodd"
+            d="M 16 8.5 C 22.9 8.5 28.5 11 28.5 14 C 28.5 17 22.9 19.5 16 19.5 C 9.1 19.5 3.5 17 3.5 14 C 3.5 11 9.1 8.5 16 8.5 Z M 16 11.4 C 19 11.4 21.5 12.6 21.5 14 C 21.5 15.4 19 16.6 16 16.6 C 13 16.6 10.5 15.4 10.5 14 C 10.5 12.6 13 11.4 16 11.4 Z"
+            fill="#78d5f8"
+            stroke="#1d7a9f"
+            strokeWidth="1.2"
+          />
+          {/* Bottom Rim Highlight */}
+          <path d="M 3.5 18 C 3.5 21.5 9 23.5 16 23.5 C 23 23.5 28.5 21.5 28.5 18" fill="none" stroke="#1d7a9f" strokeWidth="1.2" />
+        </svg>
+      );
+    case "bearing":
+      return (
+        <svg className={className} viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+          <defs>
+            <radialGradient id="bearing-ball-grad" cx="35%" cy="30%" r="65%">
+              <stop offset="0%" stopColor="#ffffff" />
+              <stop offset="40%" stopColor="#b6eaff" />
+              <stop offset="85%" stopColor="#2289b4" />
+              <stop offset="100%" stopColor="#0c3547" />
+            </radialGradient>
+          </defs>
+          {/* Outer Race Cylinder Body */}
+          <path
+            d="M 3.5 13 L 3.5 18 C 3.5 22 9 24 16 24 C 23 24 28.5 22 28.5 18 L 28.5 13 Z"
+            fill="#38a7d5"
+            stroke="#1d7a9f"
+            strokeWidth="1.2"
+            strokeLinejoin="round"
+          />
+          {/* Recessed Raceway Track */}
+          <ellipse cx="16" cy="13" rx="12.5" ry="6.2" fill="#156485" stroke="#1d7a9f" strokeWidth="1" />
+          {/* Outer Race Top Rim */}
+          <path
+            fillRule="evenodd"
+            clipRule="evenodd"
+            d="M 16 6.8 C 22.9 6.8 28.5 9.6 28.5 13 C 28.5 16.4 22.9 19.2 16 19.2 C 9.1 19.2 3.5 16.4 3.5 13 C 3.5 9.6 9.1 6.8 16 6.8 Z M 16 8.5 C 21.8 8.5 25.5 10.7 25.5 13 C 25.5 15.3 21.8 17.5 16 17.5 C 10.2 17.5 6.5 15.3 6.5 13 C 6.5 10.7 10.2 8.5 16 8.5 Z"
+            fill="#78d5f8"
+            stroke="#1d7a9f"
+            strokeWidth="1.1"
+          />
+          {/* 6 Precision Steel Balls in Raceway */}
+          <circle cx="7.5" cy="13" r="1.9" fill="url(#bearing-ball-grad)" stroke="#1d7a9f" strokeWidth="0.6" />
+          <circle cx="11.8" cy="16.4" r="1.9" fill="url(#bearing-ball-grad)" stroke="#1d7a9f" strokeWidth="0.6" />
+          <circle cx="20.2" cy="16.4" r="1.9" fill="url(#bearing-ball-grad)" stroke="#1d7a9f" strokeWidth="0.6" />
+          <circle cx="24.5" cy="13" r="1.9" fill="url(#bearing-ball-grad)" stroke="#1d7a9f" strokeWidth="0.6" />
+          <circle cx="20.2" cy="9.6" r="1.7" fill="url(#bearing-ball-grad)" stroke="#1d7a9f" strokeWidth="0.5" opacity="0.95" />
+          <circle cx="11.8" cy="9.6" r="1.7" fill="url(#bearing-ball-grad)" stroke="#1d7a9f" strokeWidth="0.5" opacity="0.95" />
+          {/* Inner Race Top Rim */}
+          <path
+            fillRule="evenodd"
+            clipRule="evenodd"
+            d="M 16 9.2 C 19.6 9.2 22.5 10.9 22.5 13 C 22.5 15.1 19.6 16.8 16 16.8 C 12.4 16.8 9.5 15.1 9.5 13 C 9.5 10.9 12.4 9.2 16 9.2 Z M 16 10.5 C 18.2 10.5 20 11.6 20 13 C 20 14.4 18.2 15.5 16 15.5 C 13.8 15.5 12 14.4 12 13 C 12 11.6 13.8 10.5 16 10.5 Z"
+            fill="#78d5f8"
+            stroke="#1d7a9f"
+            strokeWidth="1"
+          />
+          {/* Center Bore Shadow */}
+          <ellipse cx="16" cy="13" rx="4" ry="2.2" fill="#0c3547" stroke="#1d7a9f" strokeWidth="0.9" />
+          {/* Bottom Outer Rim Outline */}
+          <path d="M 3.5 18 C 3.5 22 9 24 16 24 C 23 24 28.5 22 28.5 18" fill="none" stroke="#1d7a9f" strokeWidth="1.2" />
         </svg>
       );
     case "threadedNut":
@@ -1173,6 +1271,33 @@ export function PrimitiveShapeIcon({
           <path d="M28 11 L16 17 V25 L28 19 Z" fill="#2087b2" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
         </svg>
       );
+    case "gear":
+      return (
+        <svg className={className} viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+          {/* 3D Isometric Spur Gear Extrusion Base */}
+          <path
+            d="M 3.2 13.2 L 3.2 18.2 L 7.7 18.8 L 5.4 20.9 L 8.5 22.6 L 12.6 21.3 L 13.7 23.7 L 18.3 23.7 L 19.4 21.3 L 23.5 22.6 L 26.6 20.9 L 24.3 18.8 L 28.8 18.2 L 28.8 13.2 Z"
+            fill="#2087b2"
+            stroke="#1d7a9f"
+            strokeWidth="1.2"
+            strokeLinejoin="round"
+          />
+          {/* Front Tooth Facets */}
+          <path d="M 13.7 18.7 L 13.7 23.7 L 18.3 23.7 L 18.3 18.7 Z" fill="#38a7d5" stroke="#1d7a9f" strokeWidth="1" strokeLinejoin="round" />
+          <path d="M 5.4 15.9 L 5.4 20.9 L 8.5 22.6 L 8.5 17.6 Z" fill="#38a7d5" stroke="#1d7a9f" strokeWidth="1" strokeLinejoin="round" />
+          <path d="M 19.4 16.3 L 19.4 21.3 L 23.5 22.6 L 23.5 17.6 Z" fill="#38a7d5" stroke="#1d7a9f" strokeWidth="1" strokeLinejoin="round" />
+          {/* Top Symmetrical 8-Cog Face */}
+          <path
+            d="M 13.7 5.3 L 18.3 5.3 L 19.4 7.7 L 23.5 6.4 L 26.6 8.1 L 24.3 10.2 L 28.8 10.8 L 28.8 13.2 L 24.3 13.8 L 26.6 15.9 L 23.5 17.6 L 19.4 16.3 L 18.3 18.7 L 13.7 18.7 L 12.6 16.3 L 8.5 17.6 L 5.4 15.9 L 7.7 13.8 L 3.2 13.2 L 3.2 10.8 L 7.7 10.2 L 5.4 8.1 L 8.5 6.4 L 12.6 7.7 Z"
+            fill="#78d5f8"
+            stroke="#1d7a9f"
+            strokeWidth="1.2"
+            strokeLinejoin="round"
+          />
+          {/* Center Axle Bore */}
+          <ellipse cx="16" cy="12" rx="3.6" ry="1.9" fill="#156485" stroke="#1d7a9f" strokeWidth="1" />
+        </svg>
+      );
     case "ellipsoid":
       return (
         <svg className={className} viewBox="0 0 32 32" aria-hidden="true" focusable="false">
@@ -1186,6 +1311,76 @@ export function PrimitiveShapeIcon({
           </defs>
           <ellipse cx="16" cy="16" rx="13" ry="8" fill="url(#ellipsoid-grad)" stroke="#1d7a9f" strokeWidth="1.2" />
           <path d="M3 16 C3 19 29 19 29 16" fill="none" stroke="#78d5f8" strokeWidth="1" opacity="0.6" />
+        </svg>
+      );
+    case "spring":
+      return (
+        <svg className={className} viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+          {/* Rear arcs (inside / back of coils) */}
+          <path d="M22 6.5 C22 4.5 10 4.5 10 7.5" fill="none" stroke="#1b6e8f" strokeWidth="2.5" strokeLinecap="round" opacity="0.6" />
+          <path d="M22 12.5 C22 10.5 10 10.5 10 13.5" fill="none" stroke="#1b6e8f" strokeWidth="2.5" strokeLinecap="round" opacity="0.6" />
+          <path d="M22 18.5 C22 16.5 10 16.5 10 19.5" fill="none" stroke="#1b6e8f" strokeWidth="2.5" strokeLinecap="round" opacity="0.6" />
+          <path d="M22 24.5 C22 22.5 10 22.5 10 25.5" fill="none" stroke="#1b6e8f" strokeWidth="2.5" strokeLinecap="round" opacity="0.6" />
+          {/* Front loops (foreground descending coils) */}
+          <path d="M10 7.5 C10 11 22 9.5 22 12.5" fill="none" stroke="#38a7d5" strokeWidth="3" strokeLinecap="round" />
+          <path d="M10 7.5 C10 11 22 9.5 22 12.5" fill="none" stroke="#78d5f8" strokeWidth="1.2" strokeLinecap="round" />
+          <path d="M10 13.5 C10 17 22 15.5 22 18.5" fill="none" stroke="#38a7d5" strokeWidth="3" strokeLinecap="round" />
+          <path d="M10 13.5 C10 17 22 15.5 22 18.5" fill="none" stroke="#78d5f8" strokeWidth="1.2" strokeLinecap="round" />
+          <path d="M10 19.5 C10 23 22 21.5 22 24.5" fill="none" stroke="#38a7d5" strokeWidth="3" strokeLinecap="round" />
+          <path d="M10 19.5 C10 23 22 21.5 22 24.5" fill="none" stroke="#78d5f8" strokeWidth="1.2" strokeLinecap="round" />
+          {/* Top and Bottom Ground End Rings */}
+          <ellipse cx="16" cy="5" rx="6" ry="2" fill="none" stroke="#1d7a9f" strokeWidth="2.4" />
+          <ellipse cx="16" cy="5" rx="6" ry="2" fill="none" stroke="#78d5f8" strokeWidth="1.2" />
+          <ellipse cx="16" cy="27" rx="6" ry="2" fill="none" stroke="#1d7a9f" strokeWidth="2.4" />
+          <ellipse cx="16" cy="27" rx="6" ry="2" fill="none" stroke="#38a7d5" strokeWidth="1.2" />
+        </svg>
+      );
+    case "hinge":
+      return (
+        <svg className={className} viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+          {/* Isometric Print-in-Place Hinge */}
+          {/* Left Leaf Plate */}
+          <path d="M 3 14 L 13 8.5 L 13 22.5 L 3 28 Z" fill="#78d5f8" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
+          <path d="M 3 28 L 13 22.5 V 25.5 L 3 31 Z" fill="#38a7d5" stroke="#1d7a9f" strokeWidth="1.1" strokeLinejoin="round" />
+          <ellipse cx="8" cy="19.5" rx="1.8" ry="1.0" fill="#156485" stroke="#1d7a9f" strokeWidth="0.8" />
+
+          {/* Right Leaf Plate */}
+          <path d="M 19 8.5 L 29 14 L 29 28 L 19 22.5 Z" fill="#78d5f8" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
+          <path d="M 19 22.5 L 29 28 V 31 L 19 25.5 Z" fill="#2087b2" stroke="#1d7a9f" strokeWidth="1.1" strokeLinejoin="round" />
+          <ellipse cx="24" cy="19.5" rx="1.8" ry="1.0" fill="#156485" stroke="#1d7a9f" strokeWidth="0.8" />
+
+          {/* Center Knuckle Barrels (Interlocking Barrels) */}
+          <path d="M 13 8.5 C 13 6.8 19 6.8 19 8.5 L 19 12.5 C 19 14.2 13 14.2 13 12.5 Z" fill="#38a7d5" stroke="#1d7a9f" strokeWidth="1.1" strokeLinejoin="round" />
+          <ellipse cx="16" cy="7.5" rx="3" ry="1.4" fill="#78d5f8" stroke="#1d7a9f" strokeWidth="1" />
+          <path d="M 13 13.5 C 13 11.8 19 11.8 19 13.5 L 19 17.5 C 19 19.2 13 19.2 13 17.5 Z" fill="#2087b2" stroke="#1d7a9f" strokeWidth="1.1" strokeLinejoin="round" />
+          <path d="M 13 18.5 C 13 16.8 19 16.8 19 18.5 L 19 22.5 C 19 24.2 13 24.2 13 22.5 Z" fill="#38a7d5" stroke="#1d7a9f" strokeWidth="1.1" strokeLinejoin="round" />
+          <circle cx="16" cy="7.5" r="1.1" fill="#156485" stroke="#1d7a9f" strokeWidth="0.6" />
+        </svg>
+      );
+    case "screwHole":
+      return (
+        <svg className={className} viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+          {/* Surface Plate with Hole Cutout */}
+          <path d="M 3 10 L 16 4 L 29 10 L 16 16 Z" fill="#78d5f8" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
+          <path d="M 3 10 L 16 16 V 22 L 3 16 Z" fill="#38a7d5" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
+          <path d="M 29 10 L 16 16 V 22 L 29 16 Z" fill="#2087b2" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
+
+          {/* Top Countersink Outer Rim */}
+          <ellipse cx="16" cy="10" rx="6.5" ry="3" fill="#186989" stroke="#1d7a9f" strokeWidth="1.1" />
+
+          {/* Countersunk Conical Bevel */}
+          <path d="M 9.5 10 L 12.5 14 C 12.5 15.5 19.5 15.5 19.5 14 L 22.5 10" fill="#155875" stroke="#1d7a9f" strokeWidth="0.8" />
+
+          {/* Inner Bore Throat Rim */}
+          <ellipse cx="16" cy="14" rx="3.5" ry="1.6" fill="#0c3244" stroke="#1d7a9f" strokeWidth="0.9" />
+
+          {/* Deep Hole Shaft going down */}
+          <path d="M 12.5 14 V 25.5 C 12.5 27 19.5 27 19.5 25.5 V 14" fill="#082230" stroke="#1d7a9f" strokeWidth="1" strokeDasharray="1.5 1.5" />
+          <ellipse cx="16" cy="25.5" rx="3.5" ry="1.6" fill="none" stroke="#38a7d5" strokeWidth="0.8" strokeDasharray="1.5 1.5" />
+
+          {/* 90° Countersink Indicator Accent Lines */}
+          <path d="M 11 8.5 L 14 13" fill="none" stroke="#a6e6fc" strokeWidth="0.9" strokeLinecap="round" />
+          <path d="M 21 8.5 L 18 13" fill="none" stroke="#a6e6fc" strokeWidth="0.9" strokeLinecap="round" />
         </svg>
       );
   }
@@ -1245,5 +1440,127 @@ export function PlusIcon({ className = "tool-icon" }: { className?: string }) {
     </svg>
   );
 }
+
+/** Joinery Tool Icon: clean interlocking parts with clearance seam */
+export function JoineryToolIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      {/* Left block with male interlocking tab */}
+      <path d="M 3 5 H 9 V 9 H 16 V 15 H 9 V 19 H 3 Z" fill="currentColor" fillOpacity="0.15" />
+      {/* Right block with female mating slot */}
+      <path d="M 21 5 H 11 V 7.5 H 17.5 V 16.5 H 11 V 19 H 21 Z" fill="currentColor" fillOpacity="0.08" />
+    </svg>
+  );
+}
+
+/** Round Pin / Dowel Icon */
+export function RoundPinIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <ellipse cx="12" cy="6" rx="6" ry="2.8" fill="currentColor" fillOpacity="0.15" />
+      <path d="M6 6v12c0 1.55 2.69 2.8 6 2.8s6-1.25 6-2.8V6" />
+      <path d="M6 12c0 1.55 2.69 2.8 6 2.8s6-1.25 6-2.8" strokeDasharray="1.5 2" opacity="0.6" />
+    </svg>
+  );
+}
+
+/** Square Pin / Key Icon */
+export function SquarePinIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <path d="M12 3l7 4-7 4-7-4 7-4z" fill="currentColor" fillOpacity="0.15" />
+      <path d="M5 7v10l7 4 7-4V7" />
+      <path d="M12 11v10" />
+    </svg>
+  );
+}
+
+/** Tenon & Mortise Tab Icon */
+export function TenonIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <rect x="4" y="6" width="16" height="12" rx="3" fill="currentColor" fillOpacity="0.15" />
+      <line x1="4" y1="12" x2="20" y2="12" strokeDasharray="2 2" opacity="0.6" />
+      <circle cx="8" cy="12" r="1.5" fill="currentColor" />
+      <circle cx="16" cy="12" r="1.5" fill="currentColor" />
+    </svg>
+  );
+}
+
+/** Dovetail Rail Icon */
+export function DovetailRailIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <path d="M6 19l2.5-12h7L18 19H6z" fill="currentColor" fillOpacity="0.15" />
+      <path d="M8.5 7l-2.5 12h12l-2.5-12" />
+      <line x1="6" y1="19" x2="18" y2="19" strokeWidth="2" />
+    </svg>
+  );
+}
+
+/** Tolerance Tight (0.15mm) Icon */
+export function ToleranceTightIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <path d="M4 12h5M20 12h-5" />
+      <path d="M7 9l-3 3 3 3M17 9l3 3-3 3" />
+      <rect x="10" y="7" width="4" height="10" rx="1" fill="currentColor" fillOpacity="0.2" />
+    </svg>
+  );
+}
+
+/** Tolerance Standard (0.20mm) Icon */
+export function ToleranceStandardIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <circle cx="12" cy="12" r="8" />
+      <path d="M9 12l2 2 4-4" strokeWidth="2" />
+    </svg>
+  );
+}
+
+/** Tolerance Loose (0.30mm) Icon */
+export function ToleranceLooseIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <path d="M9 12H3M15 12h6" />
+      <path d="M5 9L2 12l3 3M19 9l3 3-3 3" />
+      <rect x="10.5" y="7" width="3" height="10" rx="0.8" fill="currentColor" fillOpacity="0.2" />
+    </svg>
+  );
+}
+
+/** Print-in-Place Hinge Joint Icon */
+export function HingeJointIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      {/* Left Leaf Plate */}
+      <rect x="3" y="6" width="6" height="12" rx="1" fill="currentColor" fillOpacity="0.15" />
+      {/* Right Leaf Plate */}
+      <rect x="15" y="6" width="6" height="12" rx="1" fill="currentColor" fillOpacity="0.15" />
+      {/* Alternating Knuckles along Center Axis */}
+      <rect x="9.5" y="5" width="5" height="3.5" rx="1" fill="currentColor" fillOpacity="0.35" />
+      <rect x="9.5" y="10.2" width="5" height="3.5" rx="1" fill="currentColor" fillOpacity="0.2" />
+      <rect x="9.5" y="15.5" width="5" height="3.5" rx="1" fill="currentColor" fillOpacity="0.35" />
+      {/* Central Pivot Pin Axis */}
+      <line x1="12" y1="3.5" x2="12" y2="20.5" strokeWidth="1.4" />
+    </svg>
+  );
+}
+
+/** Cantilever Snap-Fit Joint Icon for Joinery Tool */
+export function SnapJointIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      {/* Base mounting pad on left */}
+      <rect x="3" y="8" width="4" height="8" rx="0.8" fill="currentColor" fillOpacity="0.2" />
+      {/* Cantilever flex beam extending right */}
+      <path d="M 7 9.5 H 14 L 17 12 L 14 14.5 H 7 Z" fill="currentColor" fillOpacity="0.15" />
+      {/* Female catch undercut lip on right */}
+      <path d="M 21 6 V 18 H 17 V 15.5 H 18.5 V 8.5 H 17 V 6 Z" fill="currentColor" fillOpacity="0.25" />
+    </svg>
+  );
+}
+
 
 

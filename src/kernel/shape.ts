@@ -2,6 +2,7 @@ import {
   makeBaseBox,
   makeCylinder,
   makeSphere,
+  makeCompound,
   basicFaceExtrusion,
   Vector,
   draw,
@@ -18,6 +19,8 @@ import { InvalidShapeError, solveTriangle, solveScaledTriangle } from "../geomet
 import { getBlob } from "../document/blobStore";
 import { svgMeshSolid } from "./svgSolid";
 import { makeThreadedRodSolid, makeThreadedNutSolid } from "./threads";
+import { makeSpringSolid } from "./spring";
+import { makeHingeSolid } from "./hinge";
 import type { SvgCommand } from "../svg/parse";
 import type { EditOp, OffsetExtrudeOp, PushPullOp, ResizeFaceOp, ShellOp, Vec3 } from "../document/types";
 import type { BuildSpec, EditSpec, ImportSpec, NodeSpec, ObjectSpec } from "./types";
@@ -170,6 +173,487 @@ function roundedCornerPoints(
     const at = startAngle + sweep * i / steps;
     return [centre[0] + effectiveRadius * Math.cos(at), centre[1] + effectiveRadius * Math.sin(at)];
   });
+}
+
+/**
+ * Builds joinery and connector components (dovetails, dowels/pins, keys, tenons, screw standoffs).
+ * Plug mode produces male pins/standoffs, while Socket mode produces negative mating volumes
+ * with built-in 3D printing clearance.
+ */
+function makeConnectorSolid(p: Record<string, number>): Shape3D {
+  const shape = Math.round(p.shape ?? 0);
+  const fit = Math.round(p.fit ?? 0); // 0 = Plug (male), 1 = Socket (female)
+  const clearance = fit === 1 ? Math.max(0.01, Math.min(5, p.clearance ?? 0.2)) : 0;
+
+  switch (shape) {
+    case 0: {
+      // 0: Dovetail (Sliding Rail)
+      const baseW = Math.max(1, p.width ?? 14);
+      const angleDeg = Math.min(45, Math.max(2, p.taperAngle ?? 20));
+      const angleRad = (angleDeg * Math.PI) / 180;
+      const H = Math.max(0.5, p.height ?? 6);
+      const L = Math.max(1, p.length ?? 12);
+      const seamBleed = fit === 1 ? 1.0 : 0;
+      const stopped = Math.round(p.stopped ?? 1) === 1;
+      const stopEnd = Math.round(p.stopEnd ?? 0); // 0 = bottom, 1 = top
+      const entryExtension = Math.max(0, p.entryExtension ?? 0);
+
+      // Sliding dovetails:
+      // Tight (0.05mm), Standard (0.10mm - previous tight), Loose (0.15mm - previous standard)
+      const c = fit === 1
+        ? Math.max(0.01, Math.min(2, clearance <= 0.10 ? 0.05 : (clearance <= 0.16 ? 0.10 : 0.15)))
+        : 0;
+
+      let effL: number;
+      let yShift = 0;
+
+      if (!stopped) {
+        // Through Dovetail: cutter bleeds through both ends
+        effL = fit === 1 ? L + 2 * c + 2.0 + entryExtension : L;
+        yShift = 0;
+      } else {
+        // Stopped (Blind) Dovetail:
+        // One end is open for sliding in (bleeds by 2mm + entryExtension through the open surface).
+        // The other end is a solid stop with clearance c at the floor.
+        if (fit === 1) {
+          effL = L + 2.0 + c + entryExtension;
+          // stopEnd === 0 (Stop at Bottom): top (+Y) bleeds out by +2.0 + entryExtension, bottom (-Y) stops at -L/2 - c
+          // stopEnd === 1 (Stop at Top): bottom (-Y) bleeds out by -2.0 - entryExtension, top (+Y) stops at +L/2 + c
+          yShift = stopEnd === 0 ? (2.0 - c + entryExtension) / 2 : -(2.0 - c + entryExtension) / 2;
+        } else {
+          effL = L;
+          yShift = 0;
+        }
+      }
+
+      let pts: [number, number][];
+      if (fit === 1) {
+        // Uniform normal clearance c on all flanks
+        const deltaX = c / Math.cos(angleRad);
+        const halfB_sock = baseW / 2 + deltaX;
+        const halfT_sock = halfB_sock + (H + c) * Math.tan(angleRad);
+        // Project flank line backwards through the seam (y=0) to y=-seamBleed preserving exact angleRad slope
+        const effBleed = Math.min(seamBleed, Math.max(0.1, (halfB_sock - 0.2) / Math.tan(angleRad)));
+        const halfBleed_sock = halfB_sock - effBleed * Math.tan(angleRad);
+
+        pts = [
+          [-halfBleed_sock, -effBleed],
+          [halfBleed_sock, -effBleed],
+          [halfT_sock, H + c],
+          [-halfT_sock, H + c],
+        ];
+      } else {
+        const flare = H * Math.tan(angleRad);
+        const halfB = baseW / 2;
+        const halfT = halfB + flare;
+        pts = [
+          [-halfB, 0],
+          [halfB, 0],
+          [halfT, H],
+          [-halfT, H],
+        ];
+      }
+
+      let pen = draw(pts[0]);
+      for (let i = 1; i < pts.length; i++) pen = pen.lineTo(pts[i]);
+      return (pen.close().sketchOnPlane("XZ").extrude(effL) as Shape3D).translate([0, effL / 2 + yShift, 0]);
+    }
+
+    case 1: {
+      // 1: Round Pin / Dowel
+      const baseR = Math.max(0.5, p.radius ?? 5);
+      const baseL = Math.max(1, p.length ?? 12);
+      const rawChamfer = Math.max(0, p.chamfer ?? 1);
+      const seamBleed = fit === 1 ? 1.0 : 0;
+
+      if (fit === 1) {
+        const sR = baseR + clearance;
+        const sL = baseL + clearance + seamBleed;
+        return (makeCylinder(sR, sL) as Shape3D).translate([0, 0, -seamBleed]);
+      }
+
+      const maxCh = Math.min(baseR * 0.5, baseL * 0.5);
+      const ch = Math.min(rawChamfer, maxCh);
+
+      if (ch <= 0.01) {
+        return makeCylinder(baseR, baseL) as Shape3D;
+      }
+
+      const pen = draw([0, 0])
+        .lineTo([baseR, 0])
+        .lineTo([baseR, baseL - ch])
+        .lineTo([baseR - ch, baseL])
+        .lineTo([0, baseL]);
+      return pen.close().sketchOnPlane("XZ").revolve([0, 0, 1]) as Shape3D;
+    }
+
+    case 2: {
+      // 2: Square Pin / Key
+      const baseW = Math.max(1, p.width ?? 10);
+      const baseL = Math.max(1, p.length ?? 12);
+      const rawChamfer = Math.max(0, p.chamfer ?? 1);
+      const seamBleed = fit === 1 ? 1.0 : 0;
+
+      if (fit === 1) {
+        const sW = baseW + 2 * clearance;
+        const sL = baseL + clearance + seamBleed;
+        return (makeBaseBox(sW, sW, sL) as Shape3D).translate([0, 0, -seamBleed]);
+      }
+
+      const maxCh = Math.min(baseW * 0.45, baseL * 0.5);
+      const ch = Math.min(rawChamfer, maxCh);
+
+      if (ch <= 0.01) {
+        return makeBaseBox(baseW, baseW, baseL) as Shape3D;
+      }
+
+      const bodyH = baseL - ch;
+      const halfBase = baseW / 2;
+      const skBottom = draw([-halfBase, -halfBase])
+        .lineTo([halfBase, -halfBase])
+        .lineTo([halfBase, halfBase])
+        .lineTo([-halfBase, halfBase])
+        .close()
+        .sketchOnPlane("XY", 0);
+
+      const skMid = draw([-halfBase, -halfBase])
+        .lineTo([halfBase, -halfBase])
+        .lineTo([halfBase, halfBase])
+        .lineTo([-halfBase, halfBase])
+        .close()
+        .sketchOnPlane("XY", bodyH);
+
+      const halfTip = halfBase - ch;
+      const skTop = draw([-halfTip, -halfTip])
+        .lineTo([halfTip, -halfTip])
+        .lineTo([halfTip, halfTip])
+        .lineTo([-halfTip, halfTip])
+        .close()
+        .sketchOnPlane("XY", baseL);
+
+      return (skBottom as Sketch).loftWith([skMid as Sketch, skTop as Sketch], { ruled: true }) as Shape3D;
+    }
+
+    case 3: {
+      // 3: Tenon & Mortise
+      const baseW = Math.max(1, p.width ?? 20);
+      const baseT = Math.max(0.5, p.thickness ?? 6);
+      const baseL = Math.max(1, p.length ?? 15);
+      const rawFillet = Math.max(0, p.fillet ?? 0);
+      const seamBleed = fit === 1 ? 1.0 : 0;
+
+      const effW = fit === 1 ? baseW + 2 * clearance : baseW;
+      const effT = fit === 1 ? baseT + 2 * clearance : baseT;
+      const effL = fit === 1 ? baseL + clearance + seamBleed : baseL;
+
+      const maxFillet = Math.min(effW, effT) * 0.499;
+      const effFillet = rawFillet > 0
+        ? Math.min(rawFillet + (fit === 1 ? clearance : 0), maxFillet)
+        : maxFillet; // Default to full rounded Domino ends
+
+      if (effFillet <= 0.01) {
+        const s = makeBaseBox(effW, effT, effL) as Shape3D;
+        return fit === 1 ? (s.translate([0, 0, -seamBleed]) as Shape3D) : s;
+      }
+
+      const hw = effW / 2;
+      const ht = effT / 2;
+      const rectCorners: [number, number][] = [
+        [-hw, -ht],
+        [hw, -ht],
+        [hw, ht],
+        [-hw, ht],
+      ];
+      const roundedPts = roundPolygon2D(rectCorners, effFillet, 12);
+      let pen = draw(roundedPts[0]);
+      for (let i = 1; i < roundedPts.length; i++) pen = pen.lineTo(roundedPts[i]);
+      const s = pen.close().sketchOnPlane("XY").extrude(effL) as Shape3D;
+      return fit === 1 ? (s.translate([0, 0, -seamBleed]) as Shape3D) : s;
+    }
+
+    case 4: {
+      // 4: Screw Boss / Standoff
+      const rOut = Math.max(1, p.outerRadius ?? 4);
+      const rIn = Math.min(Math.max(0.5, p.innerRadius ?? 1.5), rOut - 0.5);
+      const L = Math.max(1, p.length ?? 10);
+
+      if (fit === 1) {
+        const overshoot = 0.5;
+        const sROut = rOut + clearance;
+        const sRIn = rIn + clearance;
+        const headR = Math.min(sROut, Math.max(sRIn * 1.8, sRIn + 1.5));
+        const headH = Math.min(L * 0.5, 4);
+        const lipH = Math.min(1.5, L * 0.25);
+        const midH = Math.max(0.1, L - headH);
+
+        const pen = draw([0, -overshoot])
+          .lineTo([sROut, -overshoot])
+          .lineTo([sROut, lipH])
+          .lineTo([sRIn, lipH])
+          .lineTo([sRIn, midH])
+          .lineTo([headR, midH])
+          .lineTo([headR, L])
+          .lineTo([0, L]);
+        return pen.close().sketchOnPlane("XZ").revolve([0, 0, 1]) as Shape3D;
+      }
+
+      const pen = draw([rIn, 0])
+        .lineTo([rOut, 0])
+        .lineTo([rOut, L])
+        .lineTo([rIn, L]);
+      return pen.close().sketchOnPlane("XZ").revolve([0, 0, 1]) as Shape3D;
+    }
+
+    case 5: {
+      // 5: Print-in-Place Hinge with Self-Supporting 45° Conical Pivots (Cone & Cup)
+      // 100% self-supporting FDM design: zero horizontal sagging, zero mid-air droop, cannot weld!
+      const L = Math.max(8, p.length ?? 30);
+      const Rk = Math.max(1.5, p.radius ?? 4);
+      const rawN = Math.max(3, Math.min(15, Math.round(p.knuckleCount ?? 3)));
+      const effN = rawN % 2 === 0 ? rawN + 1 : rawN;
+      const userC = (p.clearance !== undefined && p.clearance > 0) ? p.clearance : (clearance > 0 ? clearance : 0.20);
+      const c = Math.max(0.08, Math.min(0.50, userC));
+      const totalGaps = (effN - 1) * c;
+      const kLen = Math.max(1.5, (L - totalGaps) / effN);
+      const yStartAll = -L / 2;
+
+      const Rcone = Math.max(0.8, Math.min(Rk * 0.62, kLen * 0.55));
+      const rTip = Math.max(0.3, Rcone * 0.22);
+      const Hcone = Rcone - rTip; // 45° cone slope: height = deltaR
+      const ch = Math.min(0.4, kLen * 0.1); // outer bevel chamfer to prevent perimeter welding
+
+      const buildKnuckle = (i: number): Shape3D => {
+        const yB = yStartAll + i * (kLen + c);
+        const yT = yB + kLen;
+        const hasBottomSocket = i > 0;
+        const hasTopCone = i < effN - 1;
+
+        const pts: [number, number][] = [];
+
+        if (hasBottomSocket) {
+          // Socket interior apex with snug axial clearance (c + 0.08mm):
+          pts.push([0, yB + Hcone + c + 0.08]);
+          pts.push([rTip + c, yB + Hcone + c + 0.08]);
+          pts.push([Rcone + c, yB]);
+          pts.push([Rk - ch, yB]);
+          pts.push([Rk, yB + ch]);
+        } else {
+          // Flat bottom at yB
+          pts.push([0, yB]);
+          pts.push([Rk, yB]);
+        }
+
+        // Cylindrical barrel:
+        if (hasTopCone) {
+          pts.push([Rk, yT - ch]);
+          pts.push([Rk - ch, yT]);
+          pts.push([Rcone, yT]);
+          pts.push([rTip, yT + Hcone]);
+          pts.push([0, yT + Hcone]);
+        } else {
+          // Flat top at yT
+          pts.push([Rk, yT]);
+          pts.push([0, yT]);
+        }
+
+        let pen = draw(pts[0]);
+        for (let j = 1; j < pts.length; j++) pen = pen.lineTo(pts[j]);
+        const cyl = pen.close().sketchOnPlane("XZ").revolve([0, 0, 1]) as Shape3D;
+        return cyl.rotate(-90, [0, 0, 0], [1, 0, 0]) as Shape3D;
+      };
+
+      if (fit === 0) {
+        // Plug solid: Leaf 1 knuckles (even indices: 0, 2, ...) with self-supporting 45° conical pivots
+        let solid: Shape3D = buildKnuckle(0);
+        for (let i = 2; i < effN; i += 2) {
+          solid = solid.fuse(buildKnuckle(i)) as Shape3D;
+        }
+        return solid;
+      } else if (fit === 1) {
+        // Socket solid: Leaf 2 knuckles (odd indices: 1, 3, ...) with 45° sockets and top 45° cone
+        let solid: Shape3D = buildKnuckle(1);
+        for (let i = 3; i < effN; i += 2) {
+          solid = solid.fuse(buildKnuckle(i)) as Shape3D;
+        }
+        return solid;
+      } else if (fit === 2) {
+        // Leaf 2 clearance pocket cutter for Part A: clears odd knuckles (1, 3, ...)
+        let cutter: Shape3D | null = null;
+        for (let i = 1; i < effN; i += 2) {
+          const yK = yStartAll + i * (kLen + c) - c;
+          const kPocketLen = kLen + 2 * c;
+          const outerCyl = (makeCylinder(Rk + c, kPocketLen).rotate(-90, [0, 0, 0], [1, 0, 0]) as Shape3D)
+            .translate([0, yK, 0]) as Shape3D;
+          cutter = cutter ? (cutter.fuse(outerCyl) as Shape3D) : outerCyl;
+        }
+        return cutter ?? (makeCylinder(Rk + c, kLen + 2 * c) as Shape3D);
+      } else {
+        // Leaf 1 clearance pocket cutter for Part B: clears even knuckles (0, 2, ...)
+        let cutter: Shape3D | null = null;
+        for (let i = 0; i < effN; i += 2) {
+          const isBottom = i === 0;
+          const isTop = i === effN - 1;
+          const bleed = 10; // 10mm generous bleed ensures zero razor flaps at top/bottom box faces
+          const yK = isBottom
+            ? yStartAll - bleed
+            : yStartAll + i * (kLen + c) - c;
+          const kPocketLen = isBottom
+            ? bleed + kLen + c
+            : (isTop ? kLen + c + bleed : kLen + 2 * c);
+          const outerCyl = (makeCylinder(Rk + c, kPocketLen).rotate(-90, [0, 0, 0], [1, 0, 0]) as Shape3D)
+            .translate([0, yK, 0]) as Shape3D;
+          cutter = cutter ? (cutter.fuse(outerCyl) as Shape3D) : outerCyl;
+        }
+        return cutter ?? (makeCylinder(Rk + c, L + 20) as Shape3D);
+      }
+    }
+
+    case 6: {
+      // 6: Split-Prong Snap Pin (Collet / Dowel Snap Joint)
+      // Engineered 3D-printable compliant snap joint with flexible hollow-core prongs
+      const baseD = Math.max(3.5, p.thickness ?? (p.width ? Math.min(p.width, 12) : 6.0));
+      const R = baseD / 2;
+      const L = Math.max(8.0, p.length ?? 14.0);
+      const hookH = Math.max(0.25, Math.min(0.60, p.hookDepth ?? 0.40));
+      const seamBleed = fit === 1 ? 1.0 : 0;
+      const c = fit === 1 ? Math.max(0.15, Math.min(1.0, clearance || 0.25)) : 0;
+
+      const beadLen = Math.max(3.2, hookH * 4.5);
+      const zBeadStart = L - beadLen;
+      const retL = Math.max(0.8, hookH * 1.6); // ~35°-40° return ramp for detaching
+      const zApex = zBeadStart + retL;
+      const slotW = Math.max(1.0, Math.min(2.0, R * 0.50)); // Expansion slot width
+      const rootCollar = Math.max(1.5, L * 0.15); // Solid root collar before slot starts
+      const rCore = Math.max(0.8, R * 0.52); // Central hollow core bore for spring compliance
+
+      if (fit === 0) {
+        // Male Split-Prong Snap Pin (extending along +Z from Z = 0)
+        // 1. Revolved pin with annular retention bead and gentle 18° lead-in cone
+        const pts: [number, number][] = [
+          [0, 0],
+          [R, 0],
+          [R, zBeadStart],
+          [R + hookH, zApex],
+          [Math.max(0.5, R - 0.5), L],
+          [0, L],
+        ];
+        let pen = draw(pts[0]);
+        for (let i = 1; i < pts.length; i++) pen = pen.lineTo(pts[i]);
+        let pinSolid = pen.close().sketchOnPlane("XZ").revolve([0, 0, 1]) as Shape3D;
+
+        // 2. Hollow center core to give prongs elastic spring compliance (not solid plastic)
+        const coreBore = (makeCylinder(rCore, L - rootCollar + 1) as Shape3D)
+          .translate([0, 0, rootCollar]) as Shape3D;
+        pinSolid = pinSolid.cut(coreBore) as Shape3D;
+
+        // 3. Center expansion slot splitting the pin into two compliant spring prongs
+        const slotBox = makeBaseBox(slotW, (R + hookH + 2) * 2, L - rootCollar + 2)
+          .translate([0, 0, rootCollar]) as Shape3D;
+        const reliefCyl = (makeCylinder(slotW * 0.65, (R + hookH + 2) * 2)
+          .rotate(-90, [0, 0, 0], [1, 0, 0]) as Shape3D)
+          .translate([0, -(R + hookH + 2), rootCollar]) as Shape3D;
+        const cutter = slotBox.fuse(reliefCyl) as Shape3D;
+
+        return pinSolid.cut(cutter) as Shape3D;
+      } else {
+        // Female Socket Hole with internal annular retention groove
+        const effR = R + c;
+        const effHookH = hookH + c;
+        const effL = L + c + seamBleed;
+        const zGrooveStart = zBeadStart - c;
+        const zGrooveApex = zApex;
+        const zGrooveEnd = zBeadStart + beadLen + c;
+
+        // Revolved socket cavity with generous entrance lead-in chamfer
+        const pts: [number, number][] = [
+          [0, -seamBleed],
+          [effR + 1.0, -seamBleed], // 1mm wide 45° entrance lead-in chamfer
+          [effR, 1.0],
+          [effR, zGrooveStart],
+          [effR + effHookH, zGrooveApex], // Internal retention groove
+          [effR, zGrooveEnd],
+          [effR, effL],
+          [0, effL],
+        ];
+        let pen = draw(pts[0]);
+        for (let i = 1; i < pts.length; i++) pen = pen.lineTo(pts[i]);
+        return pen.close().sketchOnPlane("XZ").revolve([0, 0, 1]) as Shape3D;
+      }
+    }
+
+    default:
+      return makeBaseBox(10, 10, 10) as Shape3D;
+  }
+}
+
+/**
+ * Parametric Screw Hole cutter solid.
+ * Anchored with Z=0 as the mounting face surface, centered in XY.
+ * Extends downwards into -Z to depth, with a 0.5mm bleed into +Z so boolean cuts
+ * never leave coplanar boundary artifacts at the surface.
+ */
+function makeScrewHoleSolid(p: Record<string, number>): Shape3D {
+  const holeDia = Math.max(0.4, p.holeDia ?? 3.4);
+  const holeR = holeDia / 2;
+  const style = Math.round(p.headStyle ?? 0); // 0 = Countersunk, 1 = Counterbored, 2 = Simple
+  const bleed = 0.5; // Top bleed above Z=0 into +Z
+  const pocketDepth = Math.max(0, p.pocketDepth ?? p.recess ?? 0);
+  const topZ = bleed + pocketDepth;
+
+  if (style === 2) {
+    // Simple clearance hole cylinder
+    const depth = Math.max(0.5, p.depth ?? 15);
+    const pts: [number, number][] = [
+      [0, topZ],
+      [holeR, topZ],
+      [holeR, 0],
+      [holeR, -depth],
+      [0, -depth],
+    ];
+    let pen = draw(pts[0]);
+    for (let i = 1; i < pts.length; i++) pen = pen.lineTo(pts[i]);
+    return pen.close().sketchOnPlane("XZ").revolve([0, 0, 1]) as Shape3D;
+  }
+
+  const headDia = Math.max(holeDia + 0.2, p.headDia ?? 6.5);
+  const headR = headDia / 2;
+
+  if (style === 1) {
+    // Counterbored (stepped socket cap)
+    const headDepth = Math.max(0.2, p.headDepth ?? 3.4);
+    const depth = Math.max(headDepth + 0.5, p.depth ?? 15);
+    const pts: [number, number][] = [
+      [0, topZ],
+      [headR, topZ],
+      [headR, 0],
+      [headR, -headDepth],
+      [holeR, -headDepth],
+      [holeR, -depth],
+      [0, -depth],
+    ];
+    let pen = draw(pts[0]);
+    for (let i = 1; i < pts.length; i++) pen = pen.lineTo(pts[i]);
+    return pen.close().sketchOnPlane("XZ").revolve([0, 0, 1]) as Shape3D;
+  }
+
+  // Style 0: Countersunk (conical flathead)
+  const headAngleDeg = Math.max(30, Math.min(150, p.headAngle ?? 90));
+  const headAngleRad = (headAngleDeg * Math.PI) / 180;
+  const coneH = (headR - holeR) / Math.tan(headAngleRad / 2);
+  const depth = Math.max(coneH + 0.5, p.depth ?? 15);
+
+  const pts: [number, number][] = [
+    [0, topZ],
+    [headR, topZ],
+    [headR, 0],
+    [holeR, -coneH],
+    [holeR, -depth],
+    [0, -depth],
+  ];
+
+  let pen = draw(pts[0]);
+  for (let i = 1; i < pts.length; i++) pen = pen.lineTo(pts[i]);
+  return pen.close().sketchOnPlane("XZ").revolve([0, 0, 1]) as Shape3D;
 }
 
 /**
@@ -767,47 +1251,15 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
       break;
     }
     case "connector": {
-      // Socket (female) is the SAME profile as plug (male), just grown by
-      // `clearance` before it's built — never modelled separately — so the
-      // two can never drift out of fit with each other as the shape is
-      // tuned. Growing width/height (not just width) keeps the gap uniform
-      // all the way up a dovetail's flare (see the derivation this relies
-      // on in the PR notes); growing radius/length the same way for a pin.
-      const isSocket = (p.fit ?? 0) === 1;
-      const clearance = isSocket ? Math.max(p.clearance ?? 0, 0) : 0;
-      if ((p.shape ?? 0) === 0) {
-        // Dovetail: a keystone trapezoid (X = width, Z = height) extruded
-        // along Y (the slide-together direction). Wider at the top than at
-        // the base means it can be slid into a matching socket but not
-        // pulled straight out — the socket's own top-heavy taper is what
-        // actually blocks the pull, plug and socket both need the SAME
-        // angle for their flat sides to stay parallel, so `angle` is never
-        // adjusted for clearance, only width/height are.
-        const width = Math.max(p.width, 0.01) + clearance * 2;
-        const height = Math.max(p.height, 0.01) + clearance;
-        const angle = Math.min(Math.max(p.taperAngle ?? 12, 0), 45);
-        const extra = height * Math.tan((angle * Math.PI) / 180);
-        const len = Math.max(p.length, 0.01) + clearance * 2;
-        s = draw([-width / 2, 0])
-          .lineTo([width / 2, 0])
-          .lineTo([width / 2 + extra, height])
-          .lineTo([-width / 2 - extra, height])
-          .close()
-          .sketchOnPlane("XZ")
-          .extrude(len) as Shape3D;
-      } else {
-        // Round pin: a cylinder that tapers to a point over the last
-        // `chamfer` mm — the same true-point revolve as the cone case
-        // above, just capped by a straight body instead of starting
-        // tapered from the base. Self-centers on the way into a socket
-        // even when the alignment is not perfect yet.
-        const r = Math.max(p.radius, 0.01) + clearance;
-        const len = Math.max(p.length, 0.01) + clearance;
-        const lead = Math.min(Math.max(p.chamfer ?? 0, 0), Math.max(len - 0.05, 0));
-        let pen = draw([0, 0]).lineTo([r, 0]).lineTo([r, len - lead]);
-        pen = pen.lineTo([0, len]);
-        s = pen.close().sketchOnPlane("XZ").revolve([0, 0, 1]) as Shape3D;
-      }
+      s = makeConnectorSolid(p);
+      break;
+    }
+    case "screwHole": {
+      s = makeScrewHoleSolid(p);
+      break;
+    }
+    case "hinge": {
+      s = makeHingeSolid(p);
       break;
     }
     case "threadedRod": {
@@ -1003,6 +1455,262 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
       s = new MeshShape(sphere);
       break;
     }
+    case "gear": {
+      const z = Math.max(4, Math.min(100, Math.round(p.teeth ?? 16)));
+      const height = Math.max(p.height ?? 6, 0.1);
+      const sizeBy = p.sizeBy ?? 0;
+
+      let m: number;
+      let rp: number;
+      if (sizeBy === 1) {
+        m = Math.max(0.2, p.module ?? 1.5);
+        rp = (m * z) / 2;
+      } else {
+        rp = Math.max(1, p.radius ?? 15);
+        m = (2 * rp) / z;
+      }
+
+      const kStub = Math.min(1.0, 0.45 + z / 22);
+      const ha = m * 0.88 * kStub;
+      const hf = m * 1.08 * kStub;
+      const ra = rp + ha;
+      const rf = Math.max(rp * 0.35, rp - hf);
+      const rootRadius = rf;
+
+      const toothPitch = (2 * Math.PI) / z;
+      const psiPitch = (toothPitch / 4) * 0.94;
+      const psiRoot = Math.min(toothPitch * 0.31, psiPitch * 1.32);
+      const psiTip = psiPitch * 0.40;
+      const rMid = (rp + ra) / 2;
+      const psiMid = ((psiPitch + psiTip) / 2) * 1.03;
+      const rLow = (rf + rp) / 2;
+      const psiLow = ((psiRoot + psiPitch) / 2) * 0.98;
+
+      const pts: [number, number][] = [];
+      for (let i = 0; i < z; i++) {
+        const ca = i * toothPitch;
+        pts.push([rf * Math.cos(ca - psiRoot), rf * Math.sin(ca - psiRoot)]);
+        pts.push([rLow * Math.cos(ca - psiLow), rLow * Math.sin(ca - psiLow)]);
+        pts.push([rp * Math.cos(ca - psiPitch), rp * Math.sin(ca - psiPitch)]);
+        pts.push([rMid * Math.cos(ca - psiMid), rMid * Math.sin(ca - psiMid)]);
+        pts.push([ra * Math.cos(ca - psiTip), ra * Math.sin(ca - psiTip)]);
+        pts.push([ra * Math.cos(ca + psiTip), ra * Math.sin(ca + psiTip)]);
+        pts.push([rMid * Math.cos(ca + psiMid), rMid * Math.sin(ca + psiMid)]);
+        pts.push([rp * Math.cos(ca + psiPitch), rp * Math.sin(ca + psiPitch)]);
+        pts.push([rLow * Math.cos(ca + psiLow), rLow * Math.sin(ca + psiLow)]);
+        pts.push([rf * Math.cos(ca + psiRoot), rf * Math.sin(ca + psiRoot)]);
+        const vMid = ca + toothPitch * 0.5;
+        const v1 = ca + psiRoot + (vMid - (ca + psiRoot)) * 0.45;
+        const v2 = vMid + ((ca + toothPitch - psiRoot) - vMid) * 0.55;
+        pts.push([rf * Math.cos(v1), rf * Math.sin(v1)]);
+        pts.push([rf * Math.cos(v2), rf * Math.sin(v2)]);
+      }
+
+      let pen = draw(pts[0]);
+      for (let i = 1; i < pts.length; i++) pen = pen.lineTo(pts[i]);
+      s = pen.close().sketchOnPlane("XY").extrude(height) as Shape3D;
+
+      const shaft = p.shaftType ?? 0;
+      const maxBore = shaft === 2 ? (rootRadius - 0.5) / Math.SQRT2 : rootRadius - 0.5;
+      const boreRadius = Math.min(Math.max(p.boreRadius ?? 0, 0), Math.max(0, maxBore));
+      if (boreRadius > 0) {
+        if (shaft === 1) {
+          const flatDist = boreRadius * 0.75;
+          const boxW = boreRadius * 4;
+          const boxD = boreRadius * 2;
+          const boxH = height * 2;
+          const flatBox = makeBaseBox(boxW, boxD, boxH).translate([
+            0,
+            flatDist + boxD / 2,
+            -height * 0.5,
+          ]);
+          const dShaftCutter = makeCylinder(boreRadius, height).cut(flatBox);
+          s = s.cut(dShaftCutter) as Shape3D;
+        } else if (shaft === 2) {
+          const side = boreRadius * 2;
+          const sqBox = makeBaseBox(side, side, height * 2).translate([0, 0, -height * 0.5]);
+          s = s.cut(sqBox) as Shape3D;
+        } else {
+          s = s.cut(makeCylinder(boreRadius, height)) as Shape3D;
+        }
+      }
+      break;
+    }
+    case "washer": {
+      const outerRadius = Math.max(p.outerRadius ?? 10, 0.1);
+      const innerRadius = Math.min(Math.max(p.innerRadius ?? 4, 0.01), outerRadius - 0.05);
+      const height = Math.max(p.height ?? 2, 0.1);
+      s = makeCylinder(outerRadius, height).cut(makeCylinder(innerRadius, height)) as Shape3D;
+      break;
+    }
+    case "bearing": {
+      const R = Math.max(p.outerRadius ?? 11, 0.5);
+      const r = Math.min(Math.max(p.innerRadius ?? 4, 0.2), R - 0.5);
+      const H = Math.max(p.height ?? 7, 0.5);
+      const span = R - r;
+      const tOut = Math.max(0.6, Math.min(span * 0.28, 4));
+      const tIn = Math.max(0.6, Math.min(span * 0.28, 4));
+      const rInnerOuter = r + tIn;
+      const rOuterInner = R - tOut;
+      const ch = Math.max(0, Math.min(p.chamfer ?? 0.5, Math.min(tIn, tOut) * 0.65, H * 0.3));
+      const chRace = Math.min(ch * 0.6, Math.min(tIn, tOut) * 0.3);
+      const isOpen = (p.style ?? 0) === 1;
+
+      if (!isOpen) {
+        const rec = Math.max(0.1, Math.min(p.shieldRecess ?? 0.6, H * 0.25));
+        let pen = draw([r + ch, 0])
+          .lineTo([rInnerOuter, 0])
+          .lineTo([rInnerOuter, rec])
+          .lineTo([rOuterInner, rec])
+          .lineTo([rOuterInner, 0])
+          .lineTo([R - ch, 0]);
+
+        if (ch > 0) {
+          pen = pen.lineTo([R, ch]).lineTo([R, H - ch]).lineTo([R - ch, H]);
+        } else {
+          pen = pen.lineTo([R, H]);
+        }
+
+        pen = pen
+          .lineTo([rOuterInner, H])
+          .lineTo([rOuterInner, H - rec])
+          .lineTo([rInnerOuter, H - rec])
+          .lineTo([rInnerOuter, H])
+          .lineTo([r + ch, H]);
+
+        if (ch > 0) {
+          pen = pen.lineTo([r, H - ch]).lineTo([r, ch]);
+        } else {
+          pen = pen.lineTo([r, 0]);
+        }
+
+        s = pen.close().sketchOnPlane("XZ").revolve([0, 0, 1]) as Shape3D;
+      } else {
+        const rPitch = (rInnerOuter + rOuterInner) / 2;
+        const channelWidth = rOuterInner - rInnerOuter;
+        const rawBallRadius = Math.min(channelWidth / 2 * 0.92, H * 0.42);
+        const clearance = Math.max(0.1, Math.min(p.clearance ?? 0.35, 1.0));
+        const ballRadius = Math.max(0.2, rawBallRadius - clearance / 2);
+        const grooveDepth = Math.max(0.1, Math.min(ballRadius * 0.35, 1.0));
+        const grooveHalfH = Math.min(ballRadius * 0.8, H * 0.35);
+
+        const outerProfile: [number, number][] = [];
+        if (chRace > 0) {
+          outerProfile.push([rOuterInner + chRace, 0]);
+        } else {
+          outerProfile.push([rOuterInner, 0]);
+        }
+        if (ch > 0) {
+          outerProfile.push([R - ch, 0], [R, ch], [R, H - ch], [R - ch, H]);
+        } else {
+          outerProfile.push([R, 0], [R, H]);
+        }
+        if (chRace > 0) {
+          outerProfile.push([rOuterInner + chRace, H], [rOuterInner, H - chRace]);
+        } else {
+          outerProfile.push([rOuterInner, H]);
+        }
+        outerProfile.push([rOuterInner, H / 2 + grooveHalfH]);
+        outerProfile.push([rOuterInner + grooveDepth, H / 2]);
+        outerProfile.push([rOuterInner, H / 2 - grooveHalfH]);
+        if (chRace > 0) {
+          outerProfile.push([rOuterInner, chRace]);
+        }
+
+        let penOut = draw(outerProfile[0]);
+        for (let i = 1; i < outerProfile.length; i++) penOut = penOut.lineTo(outerProfile[i]);
+        const outerSolid = penOut.close().sketchOnPlane("XZ").revolve([0, 0, 1]) as Shape3D;
+
+        const innerProfile: [number, number][] = [];
+        if (ch > 0) {
+          innerProfile.push([r + ch, 0]);
+        } else {
+          innerProfile.push([r, 0]);
+        }
+        if (chRace > 0) {
+          innerProfile.push([rInnerOuter - chRace, 0], [rInnerOuter, chRace]);
+        } else {
+          innerProfile.push([rInnerOuter, 0]);
+        }
+        innerProfile.push([rInnerOuter, H / 2 - grooveHalfH]);
+        innerProfile.push([rInnerOuter - grooveDepth, H / 2]);
+        innerProfile.push([rInnerOuter, H / 2 + grooveHalfH]);
+        if (chRace > 0) {
+          innerProfile.push([rInnerOuter, H - chRace], [rInnerOuter - chRace, H]);
+        } else {
+          innerProfile.push([rInnerOuter, H]);
+        }
+        if (ch > 0) {
+          innerProfile.push([r + ch, H], [r, H - ch], [r, ch]);
+        } else {
+          innerProfile.push([r, H]);
+        }
+
+        let penIn = draw(innerProfile[0]);
+        for (let i = 1; i < innerProfile.length; i++) penIn = penIn.lineTo(innerProfile[i]);
+        const innerSolid = penIn.close().sketchOnPlane("XZ").revolve([0, 0, 1]) as Shape3D;
+
+        const count = Math.max(5, Math.min(16, Math.round(p.ballCount ?? 8)));
+        const ballSolids: Shape3D[] = [];
+        for (let i = 0; i < count; i++) {
+          const theta = i * (2 * Math.PI / count);
+          const bx = rPitch * Math.cos(theta);
+          const by = rPitch * Math.sin(theta);
+          const bz = H / 2;
+          ballSolids.push(makeSphere(ballRadius).translate([bx, by, bz]));
+        }
+
+        const solids: Shape3D[] = [outerSolid, innerSolid, ...ballSolids];
+
+        const showCage = (p.cage ?? 1) === 1;
+        if (showCage) {
+          const cageHalfWidth = Math.min(channelWidth * 0.32, ballRadius * 0.75);
+          const cageRIn = rPitch - cageHalfWidth;
+          const cageROut = rPitch + cageHalfWidth;
+          const baseH = Math.max(0.3, Math.min(ballRadius * 0.38, H * 0.14));
+          const zBase0 = Math.max(0.15, H / 2 - ballRadius * 0.92);
+          const dBall = 2 * rPitch * Math.sin(Math.PI / count);
+          const gap = Math.max(0.1, dBall - 2 * ballRadius);
+          const pillarR = Math.max(0.15, Math.min(gap * 0.35, cageHalfWidth * 0.85));
+          const pillarH = (H / 2 + ballRadius * 0.45) - zBase0;
+
+          const baseRing = makeCylinder(cageROut, baseH)
+            .cut(makeCylinder(cageRIn, baseH))
+            .translate([0, 0, zBase0]) as Shape3D;
+
+          const cageParts: Shape3D[] = [baseRing];
+          for (let i = 0; i < count; i++) {
+            const midTheta = (i + 0.5) * (2 * Math.PI / count);
+            const px = rPitch * Math.cos(midTheta);
+            const py = rPitch * Math.sin(midTheta);
+            cageParts.push(makeCylinder(pillarR, pillarH).translate([px, py, zBase0]) as Shape3D);
+          }
+
+          try {
+            let fused = cageParts[0];
+            for (let k = 1; k < cageParts.length; k++) {
+              fused = fused.fuse(cageParts[k]) as Shape3D;
+            }
+            solids.push(fused);
+          } catch {
+            solids.push(...cageParts);
+          }
+        }
+
+        s = makeCompound(solids) as Shape3D;
+      }
+      break;
+    }
+    case "spring": {
+      s = makeSpringSolid(p);
+      break;
+    }
+  }
+
+  if (spec.kind === "connector" || spec.kind === "screwHole") {
+    // Connector and screwHole solids already define their exact mounting plane (z=0 is surface,
+    // centered in XY). They must never be normalized or shifted by normalise().
+    return s;
   }
 
   if (fixedXYCentre) {
@@ -2607,7 +3315,7 @@ function suspicious(
  * what makes the check mean anything. Still nowhere near OCCT's default,
  * which is the setting that can exhaust the WASM heap on a sphere.
  */
-const SEAM_CHECK_QUALITY = { tolerance: 0.05, angularTolerance: 0.4 };
+const SEAM_CHECK_QUALITY = { tolerance: 0.01, angularTolerance: 0.04 };
 
 /**
  * Tessellation used when a solid has to become a mesh so manifold can finish
@@ -2620,7 +3328,7 @@ const SEAM_CHECK_QUALITY = { tolerance: 0.05, angularTolerance: 0.4 };
  * the group empty and the model gone. The display quality is plenty for a
  * boolean whose result is about to be tessellated at that quality anyway.
  */
-const FALLBACK_MESH_QUALITY = { tolerance: 0.05, angularTolerance: 0.4 };
+const FALLBACK_MESH_QUALITY = { tolerance: 0.01, angularTolerance: 0.04 };
 
 /** World bounds of a solid, or null when it will not report any. */
 export function boundsOf(solid: AnySolid): { min: Vec3; max: Vec3 } | null {
