@@ -3255,7 +3255,7 @@ export function place(s: AnySolid, spec: NodeSpec): AnySolid {
     if (Math.abs(sx - sy) < 1e-9 && Math.abs(sx - sz) < 1e-9) {
       out = out.scale(sx, center);
     } else {
-      const mesh = out.meshShape();
+      const mesh = out.meshShape(FALLBACK_MESH_QUALITY);
       let wrapped = mesh.wrapped
         .translate([-center[0], -center[1], -center[2]])
         .scale(spec.scale)

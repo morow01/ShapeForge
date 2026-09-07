@@ -1450,7 +1450,7 @@ const api = {
       for (const spec of specs) {
         const world = await makeWorld(spec, onError, onProgress);
         if (!world) continue;
-        const mesh = isMesh(world) ? world : (world as Shape3D).meshShape();
+        const mesh = isMesh(world) ? world : (world as Shape3D).meshShape(EXPORT_QUALITY);
         kids.push({ solid: mesh, isHole: spec.isHole });
       }
 
