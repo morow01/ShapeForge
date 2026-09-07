@@ -687,6 +687,8 @@ interface DocState {
   ) => void;
   /** Extrusion depth of an imported vector artwork, in mm. */
   setSvgThickness: (id: string, thickness: number) => void;
+  /** Replace the underlying mesh blob for an imported STL (e.g. after simplification). */
+  replaceImportBlob: (id: string, blobId: string, byteSize: number) => void;
   removeSelected: () => void;
   select: (id: string | null, additive?: boolean) => void;
   selectMany: (ids: string[], additive?: boolean) => void;
@@ -1276,6 +1278,15 @@ export const useDoc = create<DocState>()(
             n.type === "import" && n.svg
               ? { ...n, svg: { ...n.svg, thickness: Math.max(0.1, thickness) } }
               : n,
+          ),
+        }));
+        afterBatchedMutation();
+      },
+
+      replaceImportBlob: (id, blobId, byteSize) => {
+        set((s) => ({
+          nodes: updateNode(s.nodes, id, (n) =>
+            n.type === "import" ? { ...n, blobId, byteSize } : n,
           ),
         }));
         afterBatchedMutation();

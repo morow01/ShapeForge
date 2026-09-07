@@ -1473,6 +1473,66 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 .connector-pair-btn { width: 100%; color: #087a79; border-style: dashed; border-color: #74c9c7; font-weight: 600; }
 .connector-pair-btn:hover { background: #eef8f7; }
 
+/* ---- Mesh Simplification Card ---- */
+.simplify-mesh-card {
+  margin: 12px 0 6px;
+  padding: 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.simplify-mesh-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: #334155;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.simplify-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.simplify-btn {
+  padding: 6px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 6px;
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  color: #0f766e;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.simplify-btn:hover:not(:disabled) {
+  background: #f0fdfa;
+  border-color: #0d9488;
+}
+.simplify-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.simplify-btn.primary {
+  background: #0d9488;
+  color: #fff;
+  border-color: #0f766e;
+}
+.simplify-btn.primary:hover:not(:disabled) {
+  background: #0f766e;
+}
+.simplify-status {
+  font-size: 11px;
+  color: #0d9488;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 /* ---- TinkerCAD-style Solid/Hole Toggle & Color Picker ---- */
 .shape-type-container {
   position: relative;

@@ -8,6 +8,9 @@ import {
   visibleFields,
 } from "../document/types";
 import { beginHistoryBatch, endHistoryBatch } from "../document/store";
+import { getBlob } from "../document/blobStore";
+import { getStlTriangleCount } from "../mesh/simplify";
+import type { SimplifyResult } from "../mesh/simplify";
 import { resolveNodeColor, resolveNodeTransparent } from "../document/tree";
 import {
   TRI_BY_ANGLES,
@@ -271,6 +274,8 @@ interface Props {
   onTransparent: (transparent: boolean) => void;
   /** Imported artwork only: how far the outlines are extruded, in mm. */
   onSvgThickness: (mm: number) => void;
+  /** Imported STL only: decimate mesh by given ratio. */
+  onSimplifyMesh?: (id: string, ratio: number) => Promise<SimplifyResult | void>;
   onOp: (op: BooleanOp) => void;
   onRename: (name: string) => void;
   onDelete: () => void;
@@ -327,6 +332,7 @@ export function Inspector({
   onColor,
   onTransparent,
   onSvgThickness,
+  onSimplifyMesh,
   onOp,
   onRename,
   onDelete,
@@ -530,9 +536,20 @@ export function Inspector({
               <p className="hint">
                 {node.children.length} {node.children.length === 1 ? "child" : "children"}
               </p>
+              {node.children.some((c) => c.type === "import" && !c.svg) && (
+                <p className="hint" style={{ marginTop: "8px", color: "#0f766e" }}>
+                  💡 Tip: This group contains an imported 3D mesh. If booleans or edits are slow, select the imported shape in the tree to simplify its triangles.
+                </p>
+              )}
             </>
           ) : node.type === "import" ? (
-            <ImportInfo node={node} onSvgThickness={onSvgThickness} displayUnit={displayUnit} decimalPlaces={decimalPlaces} />
+            <ImportInfo
+              node={node}
+              onSvgThickness={onSvgThickness}
+              onSimplifyMesh={onSimplifyMesh}
+              displayUnit={displayUnit}
+              decimalPlaces={decimalPlaces}
+            />
           ) : node.type === "edit" ? (
             <>
               <EditInfo node={node} error={error} onPruneDeadOps={onPruneDeadOps} />
@@ -789,14 +806,57 @@ export function Inspector({
 function ImportInfo({
   node,
   onSvgThickness,
+  onSimplifyMesh,
   displayUnit,
   decimalPlaces,
 }: {
   node: Extract<SceneNode, { type: "import" }>;
   onSvgThickness: (mm: number) => void;
+  onSimplifyMesh?: (id: string, ratio: number) => Promise<SimplifyResult | void>;
   displayUnit: DisplayUnit;
   decimalPlaces: number;
 }) {
+  const [triangleCount, setTriangleCount] = useState<number | null>(null);
+  const [simplifying, setSimplifying] = useState(false);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    if (!node.svg) {
+      getBlob(node.blobId)
+        .then((buffer) => {
+          if (!active || !buffer) return;
+          const count = getStlTriangleCount(buffer);
+          setTriangleCount(count);
+        })
+        .catch(() => {});
+    }
+    return () => {
+      active = false;
+    };
+  }, [node.blobId, node.svg]);
+
+  const handleSimplify = async (ratio: number) => {
+    if (simplifying || !onSimplifyMesh) return;
+    setSimplifying(true);
+    setStatusMessage(null);
+    try {
+      const res = await onSimplifyMesh(node.id, ratio);
+      if (res) {
+        setTriangleCount(res.trianglesAfter);
+        const pct = Math.round(ratio * 100);
+        setStatusMessage(
+          `✓ Reduced to ${res.trianglesAfter.toLocaleString()} triangles (-${pct}%)`,
+        );
+      }
+    } catch (err: unknown) {
+      const e = err as Error;
+      setStatusMessage(`Error: ${e?.message || "Failed to simplify mesh"}`);
+    } finally {
+      setSimplifying(false);
+    }
+  };
+
   if (node.svg) {
     const shown = (v: number) => `${formatLength(v, displayUnit, decimalPlaces)} ${displayUnit}`;
     return (
@@ -839,7 +899,49 @@ function ImportInfo({
         <dd>{node.fileName}</dd>
         <dt>Size</dt>
         <dd>{formatBytes(node.byteSize)}</dd>
+        {triangleCount !== null && (
+          <>
+            <dt>Triangles</dt>
+            <dd>{triangleCount.toLocaleString()}</dd>
+          </>
+        )}
       </dl>
+      <div className="simplify-mesh-card">
+        <div className="simplify-mesh-title">
+          <span>⚡ Simplify Mesh</span>
+        </div>
+        <p className="hint" style={{ margin: 0 }}>
+          Reduce triangle count to speed up booleans, scene edits, and 3D printing export.
+        </p>
+        <div className="simplify-actions">
+          <button
+            type="button"
+            className="simplify-btn primary"
+            disabled={simplifying || !onSimplifyMesh}
+            onClick={() => handleSimplify(0.5)}
+            title="Halves the polygon count while preserving detail"
+          >
+            {simplifying ? "Simplifying…" : "Reduce 50%"}
+          </button>
+          <button
+            type="button"
+            className="simplify-btn"
+            disabled={simplifying || !onSimplifyMesh}
+            onClick={() => handleSimplify(0.75)}
+            title="Aggressive reduction (4× fewer triangles), great for dense 3D scans"
+          >
+            {simplifying ? "Simplifying…" : "Reduce 75%"}
+          </button>
+        </div>
+        {statusMessage && (
+          <div className="simplify-status">
+            <span>{statusMessage}</span>
+          </div>
+        )}
+        <p className="hint" style={{ margin: "2px 0 0", fontSize: "10px" }}>
+          Non-destructive: use Ctrl+Z to undo anytime.
+        </p>
+      </div>
       <p className="hint">Original geometry is preserved; use Scale to resize it proportionally.</p>
     </>
   );

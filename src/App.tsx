@@ -76,7 +76,8 @@ import {
 import { MAX_BUILD_SOURCES, PRIMITIVES, PRIMITIVE_CATEGORIES, isGroup } from "./document/types";
 import { findNode, parentOf, resolveNodeTransparent, resolveNodeColor, updateNode, walk } from "./document/tree";
 import { bakeScale } from "./document/bake";
-import { putBlob } from "./document/blobStore";
+import { getBlob, putBlob } from "./document/blobStore";
+import { simplifyMesh } from "./mesh/simplify";
 import { loadCameraState } from "./document/persist";
 import type { EditOp, GroupNode, PrimitiveKind, SceneNode, ShellOp, Vec3 } from "./document/types";
 import { RETRYABLE_MESH_ERROR } from "./kernel/types";
@@ -393,6 +394,7 @@ export function App() {
     setOps,
     setHole,
     setSvgThickness,
+    replaceImportBlob,
     shapeBuild,
     setColor,
     setTransparent,
@@ -2009,6 +2011,35 @@ export function App() {
       setError(msg(e));
     }
   }, [setOps]);
+
+  const handleSimplifyMesh = useCallback(async (nodeId: string, ratio: number) => {
+    const s = useDoc.getState();
+    const targetNode = findNode(s.nodes, nodeId);
+    if (!targetNode || targetNode.type !== "import") return;
+    const buffer = await getBlob(targetNode.blobId);
+    if (!buffer) throw new Error("Imported mesh file not found in storage.");
+
+    const result = await simplifyMesh(buffer, ratio);
+    const newBlobId = crypto.randomUUID();
+    await putBlob(newBlobId, result.buffer);
+
+    replaceImportBlob(nodeId, newBlobId, result.buffer.byteLength);
+
+    // Un-skip and clear warning if it was previously timed out/skipped
+    setSkippedIds((prev) => {
+      if (!prev.has(nodeId)) return prev;
+      const next = new Set(prev);
+      next.delete(nodeId);
+      return next;
+    });
+    setInvalid((prev) => {
+      if (!prev[nodeId]) return prev;
+      const next = { ...prev };
+      delete next[nodeId];
+      return next;
+    });
+    return result;
+  }, [replaceImportBlob]);
   // A gizmo drag emits a change every frame; collapse the whole drag into one
   // undo step so undo jumps back to where the drag started.
   const onDragChange = useCallback(
@@ -4400,6 +4431,7 @@ export function App() {
               }}
               onTransparent={applyTransparent}
               onSvgThickness={(mm) => setSvgThickness(selected.id, mm)}
+              onSimplifyMesh={handleSimplifyMesh}
               onOp={(op) => setGroupOp(selected.id, op)}
               onRename={(n) => rename(selected.id, n)}
               onDelete={removeSelected}

@@ -35,8 +35,8 @@ export class KernelTimeoutError extends Error {
     super(
       nodeId
         ? "This object is very complex and was skipped after taking too long, so the rest of the scene " +
-            "could keep working. A large scanned/downloaded STL can genuinely take minutes to merge or " +
-            "export — if it keeps timing out, try simplifying it (fewer triangles) in a mesh tool first."
+            "could keep working. A large scanned/downloaded STL can take too long to merge — " +
+            "try simplifying it (fewer triangles) using the 'Simplify Mesh' button in the Inspector."
         : "The 3D kernel took too long to respond and had to be restarted.",
     );
     this.name = "KernelTimeoutError";

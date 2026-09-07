@@ -2924,37 +2924,34 @@ export function combine(
   // All the finished shape can be held to is that it stayed inside the
   // envelope, which still catches an operand that landed somewhere else.
   const cutsHoles = children.some((c) => c.isHole);
-  const boundsHold = (candidate: AnySolid, expected: { min: Vec3; max: Vec3 } | null) =>
+  const boundsHold = (candidate: AnySolid, expected: { min: Vec3; max: Vec3 } | null, tol = 0.05) =>
     op !== "union" || !expected ||
-    (cutsHoles ? withinBounds(candidate, expected) : matchesBounds(candidate, expected));
+    (cutsHoles ? withinBounds(candidate, expected, tol) : matchesBounds(candidate, expected, tol));
 
-  const usable = (candidate: AnySolid | null, expected: { min: Vec3; max: Vec3 } | null) =>
+  const usable = (candidate: AnySolid | null, expected: { min: Vec3; max: Vec3 } | null, tol = 0.05) =>
     !!candidate &&
     !isEmptySolid(candidate) &&
     !tessellatesEmpty(candidate) &&
-    boundsHold(candidate, expected);
+    boundsHold(candidate, expected, tol);
 
   // A failed manifold boolean does not necessarily throw; on this model it
   // occasionally returns a perfectly renderable union with one operand in
   // the wrong place. Every attempt needs fresh wrappers, and only a result
   // whose bounds match the immutable inputs is allowed out.
-  const retryMesh = (attempts = 8): MeshShape | null => {
+  const retryMesh = (attempts = 2): MeshShape | null => {
     for (let attempt = 0; attempt < attempts; attempt++) {
       const meshed = asMeshed();
       // Judge a MESHED result against MESHED operands. Tessellation inscribes
       // a curved surface — the triangles never quite reach it — so a meshed
       // shape is legitimately a hair smaller than the exact BRep envelope its
-      // operands report, and at FALLBACK_MESH_QUALITY that gap is far wider
-      // than the 0.05mm this is checked to. Measured on a Shape Builder
-      // region of cylinder/box/sphere: every one of these eight attempts was
-      // rejected on bounds alone and combine() returned null for a shape that
-      // was never wrong — so the object was invisible and re-attempted, at
-      // 1.3s a go, on every scene build.
+      // operands report, and at FALLBACK_MESH_QUALITY that gap is wider than
+      // 0.05mm. Attempt 0 tests strict bounds; attempt 1 allows 0.25mm facet tolerance.
       const expected = op === "union"
         ? unionBounds(meshed.filter((c) => !c.isHole).map((c) => c.solid))
         : null;
       const candidate = combineMesh(op, meshed);
-      if (usable(candidate, expected)) return candidate;
+      const tol = attempt === 0 ? 0.05 : 0.25;
+      if (usable(candidate, expected, tol)) return candidate;
     }
     return null;
   };
@@ -3356,19 +3353,19 @@ function unionBounds(operands: AnySolid[]): { min: Vec3; max: Vec3 } | null {
 
 /** A shape that never reaches OUTSIDE `expected`. All that can be asked of a
  *  union whose holes have since been cut out of it — see combine(). */
-function withinBounds(result: AnySolid, expected: { min: Vec3; max: Vec3 }): boolean {
+function withinBounds(result: AnySolid, expected: { min: Vec3; max: Vec3 }, tol = 0.05): boolean {
   const got = boundsOf(result);
   if (!got) return false;
   return [0, 1, 2].every(
-    (i) => got.min[i] > expected.min[i] - 0.05 && got.max[i] < expected.max[i] + 0.05,
+    (i) => got.min[i] > expected.min[i] - tol && got.max[i] < expected.max[i] + tol,
   );
 }
 
-function matchesBounds(result: AnySolid, expected: { min: Vec3; max: Vec3 }): boolean {
+function matchesBounds(result: AnySolid, expected: { min: Vec3; max: Vec3 }, tol = 0.05): boolean {
   const got = boundsOf(result);
   if (!got) return false;
   return [0, 1, 2].every(
-    (i) => Math.abs(got.min[i] - expected.min[i]) < 0.05 && Math.abs(got.max[i] - expected.max[i]) < 0.05,
+    (i) => Math.abs(got.min[i] - expected.min[i]) < tol && Math.abs(got.max[i] - expected.max[i]) < tol,
   );
 }
 
