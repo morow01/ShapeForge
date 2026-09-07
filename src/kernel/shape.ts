@@ -3315,7 +3315,7 @@ function suspicious(
  * what makes the check mean anything. Still nowhere near OCCT's default,
  * which is the setting that can exhaust the WASM heap on a sphere.
  */
-const SEAM_CHECK_QUALITY = { tolerance: 0.01, angularTolerance: 0.04 };
+const SEAM_CHECK_QUALITY = { tolerance: 0.03, angularTolerance: 0.12 };
 
 /**
  * Tessellation used when a solid has to become a mesh so manifold can finish
@@ -3328,7 +3328,7 @@ const SEAM_CHECK_QUALITY = { tolerance: 0.01, angularTolerance: 0.04 };
  * the group empty and the model gone. The display quality is plenty for a
  * boolean whose result is about to be tessellated at that quality anyway.
  */
-const FALLBACK_MESH_QUALITY = { tolerance: 0.01, angularTolerance: 0.04 };
+const FALLBACK_MESH_QUALITY = { tolerance: 0.03, angularTolerance: 0.12 };
 
 /** World bounds of a solid, or null when it will not report any. */
 export function boundsOf(solid: AnySolid): { min: Vec3; max: Vec3 } | null {

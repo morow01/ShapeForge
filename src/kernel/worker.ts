@@ -107,7 +107,7 @@ interface MeshQuality {
  * comfortably under 100ms even at a 100mm radius (measured), which is
  * already smoother than a viewport needs while dragging a slider live.
  */
-const EDIT_QUALITY: MeshQuality = { tolerance: 0.01, angularTolerance: 0.04 };
+const EDIT_QUALITY: MeshQuality = { tolerance: 0.04, angularTolerance: 0.14 };
 
 /**
  * Tessellation quality for an STL export, chosen per export by the user (the
@@ -118,9 +118,9 @@ const EDIT_QUALITY: MeshQuality = { tolerance: 0.01, angularTolerance: 0.04 };
  * costs roughly four times the triangles and four times the time.
  */
 const EXPORT_PRESETS: Record<ExportQuality, MeshQuality> = {
-  draft: { tolerance: 0.03, angularTolerance: 0.15 },
-  standard: { tolerance: 0.01, angularTolerance: 0.08 },
-  fine: { tolerance: 0.002, angularTolerance: 0.03 },
+  draft: { tolerance: 0.06, angularTolerance: 0.20 },
+  standard: { tolerance: 0.03, angularTolerance: 0.12 },
+  fine: { tolerance: 0.01, angularTolerance: 0.06 },
 };
 
 /** What the merged-result preview meshes at — a screen preview, so it takes

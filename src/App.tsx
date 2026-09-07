@@ -2438,7 +2438,7 @@ export function App() {
       try {
         blob = await kernel.exportSTL(currentNodes.map(toSpec), exportQuality);
       } catch (e) {
-        if (!(e instanceof KernelTimeoutError) || !e.nodeId) throw e;
+        if (!(e instanceof KernelTimeoutError)) throw e;
 
         // The high-detail merged export can spend minutes rebuilding one
         // complicated history even though its verified editing mesh is
@@ -2446,7 +2446,7 @@ export function App() {
         // instead of excluding the blamed object. Internal group holes and
         // booleans are already baked into each displayed root mesh.
         const timedOutId = e.nodeId;
-        const timedOutNode = findNode(useDoc.getState().nodes, timedOutId);
+        const timedOutNode = timedOutId ? findNode(useDoc.getState().nodes, timedOutId) : null;
         const fallbackItems = currentNodes.map((node) => {
           const part = parts.find((candidate) => candidate.id === node.id);
           return part ? { node, mesh: part.mesh } : null;
