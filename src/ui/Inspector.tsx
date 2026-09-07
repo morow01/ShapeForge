@@ -8,7 +8,7 @@ import {
   visibleFields,
 } from "../document/types";
 import { beginHistoryBatch, endHistoryBatch } from "../document/store";
-import { getBlob } from "../document/blobStore";
+import { getBlob, getAllStoredBlobs } from "../document/blobStore";
 import { getStlTriangleCount } from "../mesh/simplify";
 import type { SimplifyResult } from "../mesh/simplify";
 import { resolveNodeColor, resolveNodeTransparent } from "../document/tree";
@@ -276,6 +276,8 @@ interface Props {
   onSvgThickness: (mm: number) => void;
   /** Imported STL only: decimate mesh by given ratio. */
   onSimplifyMesh?: (id: string, ratio: number) => Promise<SimplifyResult | void>;
+  onReplaceFile?: (id: string, file: File) => Promise<void>;
+  onRestoreBlob?: (id: string, blobId: string, byteSize: number) => void;
   onOp: (op: BooleanOp) => void;
   onRename: (name: string) => void;
   onDelete: () => void;
@@ -334,6 +336,8 @@ export function Inspector({
   onTransparent,
   onSvgThickness,
   onSimplifyMesh,
+  onReplaceFile,
+  onRestoreBlob,
   onOp,
   onRename,
   onDelete,
@@ -563,6 +567,8 @@ export function Inspector({
               node={node}
               onSvgThickness={onSvgThickness}
               onSimplifyMesh={onSimplifyMesh}
+              onReplaceFile={onReplaceFile}
+              onRestoreBlob={onRestoreBlob}
               displayUnit={displayUnit}
               decimalPlaces={decimalPlaces}
             />
@@ -823,18 +829,24 @@ function ImportInfo({
   node,
   onSvgThickness,
   onSimplifyMesh,
+  onReplaceFile,
+  onRestoreBlob,
   displayUnit,
   decimalPlaces,
 }: {
   node: Extract<SceneNode, { type: "import" }>;
   onSvgThickness: (mm: number) => void;
   onSimplifyMesh?: (id: string, ratio: number) => Promise<SimplifyResult | void>;
+  onReplaceFile?: (id: string, file: File) => Promise<void>;
+  onRestoreBlob?: (id: string, blobId: string, byteSize: number) => void;
   displayUnit: DisplayUnit;
   decimalPlaces: number;
 }) {
   const [triangleCount, setTriangleCount] = useState<number | null>(null);
   const [simplifying, setSimplifying] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [largerBlob, setLargerBlob] = useState<{ id: string; byteLength: number } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     let active = true;
@@ -846,11 +858,21 @@ function ImportInfo({
           setTriangleCount(count);
         })
         .catch(() => {});
+
+      getAllStoredBlobs()
+        .then((blobs) => {
+          if (!active) return;
+          const candidate = blobs
+            .filter((b) => b.id !== node.blobId && b.byteLength > node.byteSize * 1.05)
+            .sort((a, b) => b.byteLength - a.byteLength)[0];
+          setLargerBlob(candidate || null);
+        })
+        .catch(() => {});
     }
     return () => {
       active = false;
     };
-  }, [node.blobId, node.svg]);
+  }, [node.blobId, node.byteSize, node.svg]);
 
   const handleSimplify = async (ratio: number) => {
     if (simplifying || !onSimplifyMesh) return;
@@ -922,6 +944,45 @@ function ImportInfo({
           </>
         )}
       </dl>
+
+      <div className="import-file-actions" style={{ display: "flex", flexDirection: "column", gap: "6px", margin: "10px 0" }}>
+        {largerBlob && onRestoreBlob && (
+          <button
+            type="button"
+            className="simplify-btn"
+            style={{ borderColor: "#0d9488", color: "#0d9488", background: "#f0fdfa" }}
+            onClick={() => {
+              onRestoreBlob(node.id, largerBlob.id, largerBlob.byteLength);
+              setStatusMessage("✓ Restored original version from storage!");
+            }}
+            title="Restore original unsimplified mesh found in browser storage"
+          >
+            ↺ Restore Original Version ({formatBytes(largerBlob.byteLength)})
+          </button>
+        )}
+        <input
+          type="file"
+          accept=".stl"
+          ref={fileInputRef}
+          style={{ display: "none" }}
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f && onReplaceFile) {
+              onReplaceFile(node.id, f);
+              setStatusMessage(`✓ Loaded ${f.name}!`);
+            }
+          }}
+        />
+        <button
+          type="button"
+          className="simplify-btn"
+          onClick={() => fileInputRef.current?.click()}
+          title="Reload the original STL from disk — preserves position, scale and orientation"
+        >
+          📁 Replace / Reload STL File…
+        </button>
+      </div>
+
       <div className="simplify-mesh-card">
         <div className="simplify-mesh-title">
           <span>⚡ Simplify Mesh</span>

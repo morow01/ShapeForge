@@ -2052,6 +2052,45 @@ export function App() {
       return next;
     });
   }, []);
+
+  const handleReplaceFile = useCallback(async (nodeId: string, file: File) => {
+    const buffer = await file.arrayBuffer();
+    const newBlobId = crypto.randomUUID();
+    await putBlob(newBlobId, buffer);
+    replaceImportBlob(nodeId, newBlobId, buffer.byteLength);
+
+    const parent = parentOf(useDoc.getState().nodes, nodeId);
+    setSkippedIds((prev) => {
+      const next = new Set(prev);
+      next.delete(nodeId);
+      if (parent) next.delete(parent.id);
+      return next;
+    });
+    setInvalid((prev) => {
+      const next = { ...prev };
+      delete next[nodeId];
+      if (parent) delete next[parent.id];
+      return next;
+    });
+  }, [replaceImportBlob]);
+
+  const handleRestoreBlob = useCallback((nodeId: string, blobId: string, byteSize: number) => {
+    replaceImportBlob(nodeId, blobId, byteSize);
+
+    const parent = parentOf(useDoc.getState().nodes, nodeId);
+    setSkippedIds((prev) => {
+      const next = new Set(prev);
+      next.delete(nodeId);
+      if (parent) next.delete(parent.id);
+      return next;
+    });
+    setInvalid((prev) => {
+      const next = { ...prev };
+      delete next[nodeId];
+      if (parent) delete next[parent.id];
+      return next;
+    });
+  }, [replaceImportBlob]);
   // A gizmo drag emits a change every frame; collapse the whole drag into one
   // undo step so undo jumps back to where the drag started.
   const onDragChange = useCallback(
@@ -4444,6 +4483,8 @@ export function App() {
               onTransparent={applyTransparent}
               onSvgThickness={(mm) => setSvgThickness(selected.id, mm)}
               onSimplifyMesh={handleSimplifyMesh}
+              onReplaceFile={handleReplaceFile}
+              onRestoreBlob={handleRestoreBlob}
               onOp={(op) => setGroupOp(selected.id, op)}
               onRename={(n) => rename(selected.id, n)}
               onDelete={removeSelected}

@@ -58,3 +58,28 @@ export async function deleteBlob(id: string): Promise<void> {
     db.close();
   }
 }
+
+export async function getAllStoredBlobs(): Promise<{ id: string; byteLength: number }[]> {
+  const db = await openDb();
+  try {
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE, "readonly");
+      const store = tx.objectStore(STORE);
+      const req = store.openCursor();
+      const results: { id: string; byteLength: number }[] = [];
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (cursor) {
+          const val = cursor.value as ArrayBuffer;
+          results.push({ id: String(cursor.key), byteLength: val?.byteLength ?? 0 });
+          cursor.continue();
+        } else {
+          resolve(results);
+        }
+      };
+      req.onerror = () => reject(req.error);
+    });
+  } finally {
+    db.close();
+  }
+}
