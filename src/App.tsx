@@ -2971,19 +2971,25 @@ export function App() {
     if (!pending) return;
     try {
       const surviving = await kernel.pruneDeadOps(pending.candidate);
-      if (!surviving || surviving.length !== pending.candidate.ops.length) {
+      const latestSurvived = !!surviving?.length &&
+        JSON.stringify(surviving[surviving.length - 1]) === JSON.stringify(pending.op);
+      if (!surviving || !latestSurvived) {
         setError("That edge finish cannot be applied at this size.");
         return;
       }
+      sceneRef.current?.setEdgePreview(null, null);
+      setError(null);
+      if (surviving.length < pending.candidate.ops.length) {
+        setOps(edgeSelection.id, surviving);
+      } else {
+        finishEdit(edgeSelection.id, pending.op);
+      }
+      setEdgeSelection(null);
     } catch (e) {
       setError(msg(e));
       return;
     }
-    sceneRef.current?.setEdgePreview(null, null);
-    setError(null);
-    finishEdit(edgeSelection.id, pending.op);
-    setEdgeSelection(null);
-  }, [edgeSelection, edgeCandidate, finishEdit]);
+  }, [edgeSelection, edgeCandidate, finishEdit, setOps]);
 
   const toggleHoleSelected = useCallback(() => {
     const state = useDoc.getState();
@@ -3996,12 +4002,18 @@ export function App() {
                         isHole: node!.isHole,
                       };
                   void kernel.pruneDeadOps(candidate).then((surviving) => {
-                    if (!surviving || surviving.length !== candidate.ops.length) {
+                    const latestSurvived = !!surviving?.length &&
+                      JSON.stringify(surviving[surviving.length - 1]) === JSON.stringify(op);
+                    if (!surviving || !latestSurvived) {
                       setError(`That ${faceOp} cannot be applied to this face border at ${distance} mm.`);
                       return;
                     }
                     setError(null);
-                    finishEdit(target.id, op);
+                    if (node?.type === "edit" && surviving.length < candidate.ops.length) {
+                      setOps(target.id, surviving);
+                    } else {
+                      finishEdit(target.id, op);
+                    }
                     releaseSelection();
                   }).catch((e) => setError(msg(e)));
                 } else if (faceOp === "wall") {

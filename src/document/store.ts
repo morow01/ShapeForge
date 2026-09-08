@@ -1432,16 +1432,18 @@ export const useDoc = create<DocState>()(
           removed.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
 
           // Expand any assembly groups so their children are lifted and merged directly into the combined solid
-          const expanded: SceneNode[] = [];
-          for (const n of removed) {
-            if (isGroup(n) && n.op === "assembly") {
-              for (const c of n.children) {
-                expanded.push(liftToWorld(s.nodes, c, centres));
+          const flattenAssembly = (nodeList: SceneNode[]): SceneNode[] => {
+            const out: SceneNode[] = [];
+            for (const n of nodeList) {
+              if (isGroup(n) && n.op === "assembly") {
+                out.push(...flattenAssembly(n.children.map((c) => liftToWorld(s.nodes, c, centres))));
+              } else {
+                out.push(liftToWorld(s.nodes, n, centres));
               }
-            } else {
-              expanded.push(liftToWorld(s.nodes, n, centres));
             }
-          }
+            return out;
+          };
+          const expanded = flattenAssembly(removed);
           if (expanded.length < 2) return {};
 
           const combineCount = s.nodes.filter((n) => isGroup(n) && n.op !== "assembly").length + 1;
