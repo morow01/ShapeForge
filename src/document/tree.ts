@@ -1,5 +1,5 @@
 import { DEFAULT_OBJECT_COLOR, isGroup } from "./types";
-import type { SceneNode } from "./types";
+import type { GroupNode, SceneNode } from "./types";
 
 /** Depth-first walk over the whole forest. */
 export function* walk(nodes: SceneNode[]): Generator<SceneNode> {
@@ -112,3 +112,17 @@ export function firstRootIndex(nodes: SceneNode[], ids: Set<string>): number {
   const i = nodes.findIndex((n) => ids.has(n.id));
   return i === -1 ? nodes.length : i;
 }
+
+/** Returns the highest ancestor assembly group for `id`, or the node itself if it is an assembly group. */
+export function findAssemblyOwner(nodes: SceneNode[], id: string): GroupNode | null {
+  const n = findNode(nodes, id);
+  if (!n) return null;
+  let target: GroupNode | null = isGroup(n) && n.op === "assembly" ? n : null;
+  let p = parentOf(nodes, n.id);
+  while (p && isGroup(p)) {
+    if (p.op === "assembly") target = p;
+    p = parentOf(nodes, p.id);
+  }
+  return target;
+}
+

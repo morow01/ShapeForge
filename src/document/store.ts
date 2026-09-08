@@ -3,7 +3,7 @@ import { useStore } from "zustand";
 import { temporal } from "zundo";
 import type { TemporalState } from "zundo";
 import { PRIMITIVES, TINKERCAD_COLORS, isGroup } from "./types";
-import { extractNodes, findNode, firstRootIndex, updateNode, walk } from "./tree";
+import { extractNodes, findAssemblyOwner, findNode, firstRootIndex, updateNode, walk } from "./tree";
 import { bakeScale } from "./bake";
 import {
   applyMatrix,
@@ -1422,13 +1422,23 @@ export const useDoc = create<DocState>()(
       combine: (op = "union", centres) => {
         set((s) => {
           if (!s.selectedIds.length) return {};
-          const ids = new Set(s.selectedIds);
+          let targetIds = [...s.selectedIds];
+          if (targetIds.length === 1) {
+            const owner = findAssemblyOwner(s.nodes, targetIds[0]);
+            if (owner) targetIds = [owner.id];
+          } else if (targetIds.length > 1) {
+            const owners = targetIds.map((id) => findAssemblyOwner(s.nodes, id));
+            if (owners[0] && owners.every((o) => o && o.id === owners[0]!.id)) {
+              targetIds = [owners[0]!.id];
+            }
+          }
+          const ids = new Set(targetIds);
           const at = firstRootIndex(s.nodes, ids);
           const { remaining, removed } = extractNodes(s.nodes, ids);
           if (!removed.length) return {};
           if (removed.length < 2 && (!isGroup(removed[0]) || removed[0].children.length < 2)) return {};
 
-          const order = new Map(s.selectedIds.map((id, i) => [id, i]));
+          const order = new Map(targetIds.map((id, i) => [id, i]));
           removed.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
 
           // Expand any assembly groups so their children are lifted and merged directly into the combined solid
@@ -1436,7 +1446,7 @@ export const useDoc = create<DocState>()(
             const out: SceneNode[] = [];
             for (const n of nodeList) {
               if (isGroup(n) && n.op === "assembly") {
-                out.push(...flattenAssembly(n.children.map((c) => liftToWorld(s.nodes, c, centres))));
+                out.push(...flattenAssembly(n.children));
               } else {
                 out.push(liftToWorld(s.nodes, n, centres));
               }
@@ -1468,7 +1478,12 @@ export const useDoc = create<DocState>()(
       /** Dissolves selected groups, lifting their children into their place. */
       ungroup: (centres) =>
         set((s) => {
-          const targets = s.selectedIds
+          let targetIds = [...s.selectedIds];
+          if (targetIds.length === 1) {
+            const owner = findAssemblyOwner(s.nodes, targetIds[0]);
+            if (owner) targetIds = [owner.id];
+          }
+          const targets = targetIds
             .map((id) => findNode(s.nodes, id))
             .filter((n): n is GroupNode => !!n && isGroup(n));
           if (!targets.length) return {};

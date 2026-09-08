@@ -74,7 +74,7 @@ import {
   useTemporal,
 } from "./document/store";
 import { MAX_BUILD_SOURCES, PRIMITIVES, PRIMITIVE_CATEGORIES, isGroup } from "./document/types";
-import { findNode, parentOf, resolveNodeTransparent, resolveNodeColor, updateNode, walk } from "./document/tree";
+import { findAssemblyOwner, findNode, parentOf, resolveNodeTransparent, resolveNodeColor, updateNode, walk } from "./document/tree";
 import { bakeScale } from "./document/bake";
 import { putBlob } from "./document/blobStore";
 import { loadCameraState } from "./document/persist";
@@ -975,14 +975,14 @@ export function App() {
     [setTransform],
   );
   const hasAssemblyGroup = selectedIds.some((id) => {
-    const n = findNode(nodes, id);
-    return !!n && isGroup(n) && n.op === "assembly";
+    return !!findAssemblyOwner(nodes, id);
   });
   const canGroup = selectedIds.length >= 2;
   const canCombine = selectedIds.length >= 2 || (selectedIds.length === 1 && hasAssemblyGroup);
   const canUngroup = selectedIds.some((id) => {
     const n = findNode(nodes, id);
-    return !!n && isGroup(n);
+    if (n && isGroup(n)) return true;
+    return !!findAssemblyOwner(nodes, id);
   });
   const spacingSelection = useMemo(() => {
     if (selectedIds.length !== 2) return null;
@@ -1785,7 +1785,6 @@ export function App() {
           // resolve. This is the automatic equivalent of the Inspector's
           // existing "Remove broken edit" action.
           for (const issue of res.errors) {
-            if (!issue.message.includes("could not be found after rebuilding")) continue;
             const failed = findNode(useDoc.getState().nodes, issue.id);
             if (!failed || failed.type !== "edit") continue;
             const failedSpec = toSpec(failed) as EditSpec;
@@ -2877,7 +2876,16 @@ export function App() {
   );
 
   const ungroupSelected = useCallback(
-    () => applyTreeChange((centres) => ungroup(centres)),
+    () => {
+      const state = useDoc.getState();
+      if (state.selectedIds.length === 1) {
+        const owner = findAssemblyOwner(state.nodes, state.selectedIds[0]);
+        if (owner && owner.id !== state.selectedIds[0]) {
+          state.select(owner.id);
+        }
+      }
+      return applyTreeChange((centres) => ungroup(centres));
+    },
     [ungroup, applyTreeChange],
   );
 
@@ -2887,8 +2895,21 @@ export function App() {
   );
 
   const combineSelected = useCallback(
-    (op: "union" | "subtract" | "intersect" = "union") =>
-      applyTreeChange((centres) => combine(op, centres)),
+    (op: "union" | "subtract" | "intersect" = "union") => {
+      const state = useDoc.getState();
+      if (state.selectedIds.length === 1) {
+        const owner = findAssemblyOwner(state.nodes, state.selectedIds[0]);
+        if (owner && owner.id !== state.selectedIds[0]) {
+          state.select(owner.id);
+        }
+      } else if (state.selectedIds.length > 1) {
+        const owners = state.selectedIds.map((id) => findAssemblyOwner(state.nodes, id));
+        if (owners[0] && owners.every((o) => o && o.id === owners[0]!.id)) {
+          state.select(owners[0]!.id);
+        }
+      }
+      return applyTreeChange((centres) => combine(op, centres));
+    },
     [combine, applyTreeChange],
   );
 
@@ -3856,13 +3877,7 @@ export function App() {
         )}
         {toolMode === "face" && (() => {
           const target = faceSelection ?? lastFace.current;
-          const targetNode = target ? findNode(nodes, target.id) : null;
-          const parentGroup = targetNode ? parentOf(nodes, targetNode.id) : null;
-          const assemblyGroup = (targetNode && isGroup(targetNode) && targetNode.op === "assembly")
-            ? targetNode
-            : (parentGroup && isGroup(parentGroup) && parentGroup.op === "assembly")
-            ? parentGroup
-            : null;
+          const assemblyGroup = target ? findAssemblyOwner(nodes, target.id) : null;
           return (
             <div className="edge-bar">
             <strong>
@@ -4108,13 +4123,7 @@ export function App() {
           );
         })()}
         {toolMode === "edge" && (() => {
-          const edgeTargetNode = edgeSelection ? findNode(nodes, edgeSelection.id) : null;
-          const edgeParentGroup = edgeTargetNode ? parentOf(nodes, edgeTargetNode.id) : null;
-          const assemblyGroup = (edgeTargetNode && isGroup(edgeTargetNode) && edgeTargetNode.op === "assembly")
-            ? edgeTargetNode
-            : (edgeParentGroup && isGroup(edgeParentGroup) && edgeParentGroup.op === "assembly")
-            ? edgeParentGroup
-            : null;
+          const assemblyGroup = edgeSelection ? findAssemblyOwner(nodes, edgeSelection.id) : null;
           return (
             <div className="edge-bar">
               <div className="edge-selection-summary">
