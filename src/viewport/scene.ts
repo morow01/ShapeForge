@@ -2195,6 +2195,17 @@ export class Scene {
     this.updateResizeOverlay();
   }
 
+  private isOwnerOrAncestorSelected(partId: string): boolean {
+    if (this.selectedIds.includes(partId)) return true;
+    return this.selectedIds.some((sId) => {
+      const p = findNode(this.lastNodes, sId);
+      if (!p || !isGroup(p)) return false;
+      const containsChild = (g: GroupNode): boolean =>
+        g.children.some((c) => c.id === partId || (isGroup(c) && containsChild(c)));
+      return containsChild(p);
+    });
+  }
+
   /** Cheap: placement and selection only, no kernel involvement. */
   setPlacements(objects: SceneNode[], selectedIds: string[]) {
     const previous = this.lastNodes;
@@ -2215,10 +2226,10 @@ export class Scene {
     if (this.collisionContactOwnerId && !selectedIds.includes(this.collisionContactOwnerId)) {
       this.clearCollisionContacts();
     }
-    if (this.selectedFace && !selectedIds.includes(this.selectedFace.partId)) {
+    if (this.selectedFace && !this.isOwnerOrAncestorSelected(this.selectedFace.partId)) {
       this.selectedFace = null;
     }
-    if (this.selectedEdges.length && !selectedIds.includes(this.selectedEdges[0].partId)) {
+    if (this.selectedEdges.length && !this.isOwnerOrAncestorSelected(this.selectedEdges[0].partId)) {
       this.clearEdgeSelection(true);
       this.clearEdgeHover();
     }
@@ -3370,7 +3381,7 @@ export class Scene {
     const faceIndex = this.selectedFace?.groupIndex ?? -1;
     const face = faces?.[faceIndex];
     const visible =
-      this.toolMode === "face" && this.facePushPullEnabled && !!view && !!face?.planar && face.pushPullable !== false && this.selectedIds.includes(id ?? "") &&
+      this.toolMode === "face" && this.facePushPullEnabled && !!view && !!face?.planar && face.pushPullable !== false && this.isOwnerOrAncestorSelected(id ?? "") &&
       !this.showResult && view.group.visible;
     this.pushPullHandles.visible = visible;
     if (!visible || !view || !face || !id) {
@@ -4521,7 +4532,9 @@ export class Scene {
    */
   private beginPushPull(e: PointerEvent): boolean {
     if (!this.pushPullHandles.visible) return false;
-    const id = this.selectedIds.length === 1 ? this.selectedIds[0] : null;
+    const id = (this.selectedFace && this.isOwnerOrAncestorSelected(this.selectedFace.partId))
+      ? this.selectedFace.partId
+      : (this.selectedIds.length === 1 ? this.selectedIds[0] : null);
     const view = id ? this.parts.get(id) : undefined;
     const faces = view?.faces;
     if (!id || !view || !faces) return false;

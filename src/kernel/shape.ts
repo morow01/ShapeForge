@@ -2227,13 +2227,15 @@ function hollowEditedCylinder(solid: Shape3D, op: ShellOp, baseNode?: NodeSpec):
  * 0.02 mm search is still far smaller than a modelling click target, but is
  * comfortably above display-mesh rounding and tessellation noise.
  */
-const EDGE_ANCHOR_TOLERANCE = 0.02;
+const EDGE_ANCHOR_TOLERANCE = 0.15;
+const EDGE_ANCHOR_FALLBACK_TOLERANCE = 0.35;
 
 function edgesAt(
   anchors: Vec3[],
+  tolerance = EDGE_ANCHOR_TOLERANCE,
 ): (edges: import("replicad").EdgeFinder) => import("replicad").EdgeFinder {
   return (edges) => edges.either(
-    anchors.map((point) => (finder) => finder.withinDistance(EDGE_ANCHOR_TOLERANCE, point)),
+    anchors.map((point) => (finder) => finder.withinDistance(tolerance, point)),
   );
 }
 
@@ -2616,9 +2618,21 @@ async function replayEdit(
         const edgeSelector = faceEdges
           ? (finder: import("replicad").EdgeFinder) => finder.inList(faceEdges.map((edge) => edge.clone()))
           : edgesAt(anchors);
-        const candidate = op.kind === "fillet"
-          ? solid.fillet(op.distance, edgeSelector)
-          : solid.chamfer(op.distance, edgeSelector);
+        let candidate: Shape3D;
+        try {
+          candidate = (op.kind === "fillet"
+            ? solid.fillet(op.distance, edgeSelector)
+            : solid.chamfer(op.distance, edgeSelector)) as Shape3D;
+        } catch (firstError) {
+          if (!faceEdges && /no edge was selected/i.test(firstError instanceof Error ? firstError.message : String(firstError))) {
+            const fallbackSelector = edgesAt(anchors, EDGE_ANCHOR_FALLBACK_TOLERANCE);
+            candidate = (op.kind === "fillet"
+              ? solid.fillet(op.distance, fallbackSelector)
+              : solid.chamfer(op.distance, fallbackSelector)) as Shape3D;
+          } else {
+            throw firstError;
+          }
+        }
         if (!isOcctValid(candidate) || tessellatesEmpty(candidate) || !isWatertight(candidate)) {
           onError?.(spec.id, `That ${op.kind} would create an invalid shape; the previous shape was kept.`);
         } else {
@@ -2809,9 +2823,15 @@ export async function survivingOps(
       const edgeSelector = faceEdges
         ? (finder: import("replicad").EdgeFinder) => finder.inList(faceEdges.map((edge) => edge.clone()))
         : edgesAt(anchors);
-      const candidate = settled(() => (op.kind === "fillet"
+      let candidate = settled(() => (op.kind === "fillet"
         ? solid.fillet(op.distance, edgeSelector)
         : solid.chamfer(op.distance, edgeSelector)) as Shape3D);
+      if (!candidate && !faceEdges) {
+        const fallbackSelector = edgesAt(anchors, EDGE_ANCHOR_FALLBACK_TOLERANCE);
+        candidate = settled(() => (op.kind === "fillet"
+          ? solid.fillet(op.distance, fallbackSelector)
+          : solid.chamfer(op.distance, fallbackSelector)) as Shape3D);
+      }
       if (candidate) {
         solid = candidate;
         kept.push(op);

@@ -974,7 +974,12 @@ export function App() {
     },
     [setTransform],
   );
+  const hasAssemblyGroup = selectedIds.some((id) => {
+    const n = findNode(nodes, id);
+    return !!n && isGroup(n) && n.op === "assembly";
+  });
   const canGroup = selectedIds.length >= 2;
+  const canCombine = selectedIds.length >= 2 || (selectedIds.length === 1 && hasAssemblyGroup);
   const canUngroup = selectedIds.some((id) => {
     const n = findNode(nodes, id);
     return !!n && isGroup(n);
@@ -1955,13 +1960,22 @@ export function App() {
     async (id: string, op: { point: Vec3; normal: Vec3; distance: number }): Promise<PreviewBuild | null> => {
       const node = findNode(useDoc.getState().nodes, id);
       if (!node) return null;
+      let base = toSpec(node);
+      if (node.type !== "edit") {
+        base = {
+          ...base,
+          position: [0, 0, 0] as Vec3,
+          rotation: [0, 0, 0] as Vec3,
+          scale: [1, 1, 1] as Vec3,
+        };
+      }
       const spec: EditSpec =
         node.type === "edit"
           ? { ...(toSpec(node) as EditSpec), ops: [...node.ops, op] }
           : {
               type: "edit",
               id: node.id,
-              base: toSpec(node),
+              base,
               ops: [op],
               position: node.position,
               rotation: node.rotation,
@@ -2904,12 +2918,21 @@ export function App() {
     } as const;
     const node = findNode(useDoc.getState().nodes, edgeSelection.id);
     if (!node || node.type === "import") return null;
+    let base = toSpec(node);
+    if (node.type !== "edit") {
+      base = {
+        ...base,
+        position: [0, 0, 0] as Vec3,
+        rotation: [0, 0, 0] as Vec3,
+        scale: [1, 1, 1] as Vec3,
+      };
+    }
     const candidate: EditSpec = node.type === "edit"
       ? { ...(toSpec(node) as EditSpec), ops: [...node.ops, op] }
       : {
           type: "edit",
           id: node.id,
-          base: toSpec(node),
+          base,
           ops: [op],
           position: node.position,
           rotation: node.rotation,
@@ -3264,8 +3287,14 @@ export function App() {
             <button
               className="topbar-icon-btn"
               onClick={() => combineSelected("union")}
-              disabled={!canGroup || treeChangeBusy}
-              title={canGroup ? "Combine Solid (Ctrl+Shift+B) — Fuse overlapping solids into one" : "Combine — Select 2 or more objects"}
+              disabled={!canCombine || treeChangeBusy}
+              title={
+                canCombine
+                  ? hasAssemblyGroup && selectedIds.length === 1
+                    ? "Combine Solid (Ctrl+Shift+B) — Fuse assembly group into one solid"
+                    : "Combine Solid (Ctrl+Shift+B) — Fuse overlapping solids into one"
+                  : "Combine — Select 2 or more objects, or an assembly group"
+              }
               aria-label="Combine Solid"
             >
               <CombineIcon className="topbar-icon" />
@@ -3819,8 +3848,17 @@ export function App() {
             <button onClick={() => { setPendingPrimitive(null); setToolMode("select"); }}>Cancel</button>
           </div>
         )}
-        {toolMode === "face" && (
-          <div className="edge-bar">
+        {toolMode === "face" && (() => {
+          const target = faceSelection ?? lastFace.current;
+          const targetNode = target ? findNode(nodes, target.id) : null;
+          const parentGroup = targetNode ? parentOf(nodes, targetNode.id) : null;
+          const assemblyGroup = (targetNode && isGroup(targetNode) && targetNode.op === "assembly")
+            ? targetNode
+            : (parentGroup && isGroup(parentGroup) && parentGroup.op === "assembly")
+            ? parentGroup
+            : null;
+          return (
+            <div className="edge-bar">
             <strong>
               {faceOp === "push" ? "Push/Pull"
                 : faceOp === "wall" ? "Wall"
@@ -3895,8 +3933,7 @@ export function App() {
                   }
                   setError(null);
                   if (!sceneRef.current?.pushSelectedFace(travel)) {
-                    setError("Click the face again, then set the distance.");
-                    return;
+                    pushPullFace(target.id, { point: target.point, normal: target.normal, distance: travel });
                   }
                   // Remember the selected face at its new location so a
                   // second typed Push/Pull does not require another click.
@@ -3937,12 +3974,21 @@ export function App() {
                     face: { point: target.point, normal: target.normal },
                     distance,
                   };
+                  let base = toSpec(node!);
+                  if (node!.type !== "edit") {
+                    base = {
+                      ...base,
+                      position: [0, 0, 0] as Vec3,
+                      rotation: [0, 0, 0] as Vec3,
+                      scale: [1, 1, 1] as Vec3,
+                    };
+                  }
                   const candidate: EditSpec = node?.type === "edit"
                     ? { ...(toSpec(node) as EditSpec), ops: [...node.ops, op] }
                     : {
                         type: "edit",
                         id: target.id,
-                        base: toSpec(node!),
+                        base,
                         ops: [op],
                         position: node!.position,
                         rotation: node!.rotation,
@@ -3965,12 +4011,21 @@ export function App() {
                     points: [target.point],
                     normal: target.normal,
                   };
+                  let base = toSpec(node!);
+                  if (node!.type !== "edit") {
+                    base = {
+                      ...base,
+                      position: [0, 0, 0] as Vec3,
+                      rotation: [0, 0, 0] as Vec3,
+                      scale: [1, 1, 1] as Vec3,
+                    };
+                  }
                   const candidate: EditSpec = node?.type === "edit"
                     ? { ...(toSpec(node) as EditSpec), ops: [...node.ops, op] }
                     : {
                         type: "edit",
                         id: target.id,
-                        base: toSpec(node!),
+                        base,
                         ops: [op],
                         position: node!.position,
                         rotation: node!.rotation,
@@ -4024,62 +4079,98 @@ export function App() {
                   releaseSelection();
                 }
               }}>{faceOp === "wall" ? "Hollow" : "Apply"}</button>
-          </div>
-        )}
-        {toolMode === "edge" && (
-          <div className="edge-bar">
-            <div className="edge-selection-summary">
-              <strong>{edgeSelection ? `${edgeSelection.points.length} edge${edgeSelection.points.length === 1 ? "" : "s"} selected` : "Select edges"}</strong>
-              {edgeSelection && (
+              {assemblyGroup && (
                 <button
-                  className="edge-clear-selection"
+                  type="button"
+                  className="edge-bar-fuse-btn"
                   onClick={() => {
-                    sceneRef.current?.clearSelectedEdges?.();
-                    setEdgeSelection(null);
+                    select(assemblyGroup.id);
+                    combineSelected("union");
                   }}
-                  aria-label="Clear selected edges"
-                  title="Clear selected edges"
+                  title="Fuse this assembly group into a single solid so push/pull and offsets apply across the whole solid (Ctrl+Shift+B)"
                 >
-                  <svg viewBox="0 0 16 16" aria-hidden="true">
-                    <path d="M4.5 4.5l7 7m0-7-7 7" />
-                  </svg>
+                  Fuse into Solid
                 </button>
               )}
             </div>
-            <div className="edge-kind-buttons" role="group" aria-label="Edge finish type">
-              <button
-                className={edgeKind === "fillet" ? "active" : ""}
-                onClick={() => setEdgeKind("fillet")}
-                title="Fillet — rounded edge"
-                aria-label="Fillet"
-                aria-pressed={edgeKind === "fillet"}
-              >
-                <FaceModifierIcon kind="fillet" />
-              </button>
-              <button
-                className={edgeKind === "chamfer" ? "active" : ""}
-                onClick={() => setEdgeKind("chamfer")}
-                title="Chamfer — bevelled edge"
-                aria-label="Chamfer"
-                aria-pressed={edgeKind === "chamfer"}
-              >
-                <FaceModifierIcon kind="chamfer" />
-              </button>
+          );
+        })()}
+        {toolMode === "edge" && (() => {
+          const edgeTargetNode = edgeSelection ? findNode(nodes, edgeSelection.id) : null;
+          const edgeParentGroup = edgeTargetNode ? parentOf(nodes, edgeTargetNode.id) : null;
+          const assemblyGroup = (edgeTargetNode && isGroup(edgeTargetNode) && edgeTargetNode.op === "assembly")
+            ? edgeTargetNode
+            : (edgeParentGroup && isGroup(edgeParentGroup) && edgeParentGroup.op === "assembly")
+            ? edgeParentGroup
+            : null;
+          return (
+            <div className="edge-bar">
+              <div className="edge-selection-summary">
+                <strong>{edgeSelection ? `${edgeSelection.points.length} edge${edgeSelection.points.length === 1 ? "" : "s"} selected` : "Select edges"}</strong>
+                {edgeSelection && (
+                  <button
+                    className="edge-clear-selection"
+                    onClick={() => {
+                      sceneRef.current?.clearSelectedEdges?.();
+                      setEdgeSelection(null);
+                    }}
+                    aria-label="Clear selected edges"
+                    title="Clear selected edges"
+                  >
+                    <svg viewBox="0 0 16 16" aria-hidden="true">
+                      <path d="M4.5 4.5l7 7m0-7-7 7" />
+                    </svg>
+                  </button>
+                )}
+              </div>
+              <div className="edge-kind-buttons" role="group" aria-label="Edge finish type">
+                <button
+                  className={edgeKind === "fillet" ? "active" : ""}
+                  onClick={() => setEdgeKind("fillet")}
+                  title="Fillet — rounded edge"
+                  aria-label="Fillet"
+                  aria-pressed={edgeKind === "fillet"}
+                >
+                  <FaceModifierIcon kind="fillet" />
+                </button>
+                <button
+                  className={edgeKind === "chamfer" ? "active" : ""}
+                  onClick={() => setEdgeKind("chamfer")}
+                  title="Chamfer — bevelled edge"
+                  aria-label="Chamfer"
+                  aria-pressed={edgeKind === "chamfer"}
+                >
+                  <FaceModifierIcon kind="chamfer" />
+                </button>
+              </div>
+              <label>
+                Size
+                <input type="number" min="0.1" step="0.5" value={edgeDistance}
+                  onChange={(e) => setEdgeDistance(Math.max(0.1, Number(e.target.value) || 0.1))}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      void applyEdgeFinish();
+                    }
+                  }} /> mm
+              </label>
+              <button disabled={!edgeSelection} onClick={() => void applyEdgeFinish()}>Apply</button>
+              {assemblyGroup && (
+                <button
+                  type="button"
+                  className="edge-bar-fuse-btn"
+                  onClick={() => {
+                    select(assemblyGroup.id);
+                    combineSelected("union");
+                  }}
+                  title="Fuse this assembly group into a single solid so you can chamfer or fillet intersection edges (Ctrl+Shift+B)"
+                >
+                  Fuse into Solid
+                </button>
+              )}
             </div>
-            <label>
-              Size
-              <input type="number" min="0.1" step="0.5" value={edgeDistance}
-                onChange={(e) => setEdgeDistance(Math.max(0.1, Number(e.target.value) || 0.1))}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    void applyEdgeFinish();
-                  }
-                }} /> mm
-            </label>
-            <button disabled={!edgeSelection} onClick={() => void applyEdgeFinish()}>Apply</button>
-          </div>
-        )}
+          );
+        })()}
         {toolMode === "align" && (
           <div className="edge-bar align-bar">
             <div className="edge-kind-buttons" role="group" aria-label="Align mode">

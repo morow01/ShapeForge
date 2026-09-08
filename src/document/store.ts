@@ -1170,16 +1170,14 @@ export const useDoc = create<DocState>()(
                 ops: [...source.ops, nextOp],
               };
             }
-            // Neither is parametric any more, and the UI offers push/pull on
-            // neither: an import has no face topology, and a build's shape is
-            // owned by its cell selection.
-            if (n.type === "import" || n.type === "build") return n;
+            // An import has no OCCT face topology to push or pull.
+            if (n.type === "import") return n;
             const baked = n.type === "object" ? bakeScale(n) : null;
             const source = baked ?? n;
             const nextOp = baked && baked !== n
               ? editAfterScaleBake(op, n.scale)
               : op;
-            const base: ObjectNode | GroupNode = {
+            const base: ObjectNode | GroupNode | BuildNode = {
               ...source,
               position: [0, 0, 0],
               rotation: [0, 0, 0],
@@ -1423,23 +1421,36 @@ export const useDoc = create<DocState>()(
        */
       combine: (op = "union", centres) => {
         set((s) => {
-          if (s.selectedIds.length < 2) return {};
+          if (!s.selectedIds.length) return {};
           const ids = new Set(s.selectedIds);
           const at = firstRootIndex(s.nodes, ids);
           const { remaining, removed } = extractNodes(s.nodes, ids);
-          if (removed.length < 2) return {};
+          if (!removed.length) return {};
+          if (removed.length < 2 && (!isGroup(removed[0]) || removed[0].children.length < 2)) return {};
 
           const order = new Map(s.selectedIds.map((id, i) => [id, i]));
           removed.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
 
-          const lifted = removed.map((n) => liftToWorld(s.nodes, n, centres));
+          // Expand any assembly groups so their children are lifted and merged directly into the combined solid
+          const expanded: SceneNode[] = [];
+          for (const n of removed) {
+            if (isGroup(n) && n.op === "assembly") {
+              for (const c of n.children) {
+                expanded.push(liftToWorld(s.nodes, c, centres));
+              }
+            } else {
+              expanded.push(liftToWorld(s.nodes, n, centres));
+            }
+          }
+          if (expanded.length < 2) return {};
+
           const combineCount = s.nodes.filter((n) => isGroup(n) && n.op !== "assembly").length + 1;
           const node: GroupNode = {
             type: "group",
             id: nextId(),
             name: `Combine ${combineCount}`,
             op,
-            children: lifted,
+            children: expanded,
             position: [0, 0, 0],
             rotation: [0, 0, 0],
             scale: [1, 1, 1],

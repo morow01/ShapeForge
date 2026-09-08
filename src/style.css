@@ -1144,6 +1144,8 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
    .edge-bar button selector, so hovering turned these near-white while the
    text stayed white — unreadable. Darken on hover instead. */
 .edge-bar button:hover:not(:disabled) { color:white; background:#11616f; border-color:#11616f; }
+.edge-bar .edge-bar-fuse-btn { background:#2563eb; border-color:#2563eb; margin-left:6px; }
+.edge-bar .edge-bar-fuse-btn:hover:not(:disabled) { background:#1d4ed8; border-color:#1d4ed8; }
 .edge-selection-summary { display:flex; align-items:center; gap:5px; }
 .edge-bar .edge-clear-selection {
   position:relative;
