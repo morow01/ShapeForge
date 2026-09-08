@@ -2540,16 +2540,7 @@ function findMeshFaceBoundaryAnchors(solid: MeshShape, point: Vec3, normal: Vec3
 
 /**
  * Applies a chamfer (bevel) or fillet (round) directly to feature edges of a MeshShape.
- *
- * Unlike the previous per-segment approach, this chains connected edge segments
- * into continuous polyline paths and builds a single, seamless mitered
- * polyhedral cutter per chain.  On curved features (circular slots, arcs) the
- * cross-section profiles are shared at junction vertices so the cutter sweeps
- * smoothly without sawtooth fan artifacts.
- *
- * After the Boolean operation, disconnected scrap offcuts (severed slivers,
- * floating chips) are automatically pruned by keeping only the dominant
- * volume component.
+ * Constructs exact 3D cutter prisms along the selected sharp edges and applies them via Manifold.
  */
 function finishMeshEdge(
   solid: MeshShape,
@@ -2562,7 +2553,6 @@ function finishMeshEdge(
   const numTris = raw.triVerts.length / 3;
   if (numTris === 0) return null;
 
-  // ── 1. Compute triangle normals ──────────────────────────────────────
   const triNormals: [number, number, number][] = [];
   for (let t = 0; t < numTris; t++) {
     const i0 = raw.triVerts[t * 3] * 3;
@@ -2580,7 +2570,6 @@ function finishMeshEdge(
     triNormals.push([nx / len, ny / len, nz / len]);
   }
 
-  // ── 2. Build edge→triangles adjacency ────────────────────────────────
   const edgeToTris = new Map<string, number[]>();
   for (let t = 0; t < numTris; t++) {
     const v0 = raw.triVerts[t * 3];
@@ -2601,7 +2590,6 @@ function finishMeshEdge(
     }
   }
 
-  // ── 3. Identify sharp dihedral edges ─────────────────────────────────
   interface SharpEdge {
     key: string;
     v0Idx: number;
@@ -2644,7 +2632,6 @@ function finishMeshEdge(
     }
   }
 
-  // ── 4. Match anchors to sharp edges (same as before) ─────────────────
   const matchedSegments = new Set<SharpEdge>();
   for (const anchor of anchors) {
     let bestSeg: SharpEdge | null = null;
@@ -2684,296 +2671,166 @@ function finishMeshEdge(
 
   if (matchedSegments.size === 0) return null;
 
-  // ── 5. Chain matched segments into continuous polylines ───────────────
-  // Build adjacency among matched segments (sharing a vertex).
-  const segAdj = new Map<SharpEdge, SharpEdge[]>();
-  for (const seg of matchedSegments) segAdj.set(seg, []);
+  const manifold = getManifold();
+  let currentSolid = solid;
+
   for (const seg of matchedSegments) {
-    for (const vIdx of [seg.v0Idx, seg.v1Idx]) {
-      const nbs = vertexToSharpEdges.get(vIdx) || [];
-      for (const nb of nbs) {
-        if (nb !== seg && matchedSegments.has(nb)) {
-          if (!segAdj.get(seg)!.includes(nb)) segAdj.get(seg)!.push(nb);
-        }
-      }
-    }
-  }
+    const v0 = seg.v0, v1 = seg.v1;
+    const u = seg.u;
+    const mid: [number, number, number] = [(v0[0] + v1[0]) / 2, (v0[1] + v1[1]) / 2, (v0[2] + v1[2]) / 2];
 
-  const visited = new Set<SharpEdge>();
-  const chains: SharpEdge[][] = [];
-
-  for (const startSeg of matchedSegments) {
-    if (visited.has(startSeg)) continue;
-
-    // Walk backward to find an endpoint (degree ≤ 1 unvisited neighbor).
-    let cur = startSeg;
-    let prev: SharpEdge | null = null;
-    while (true) {
-      const neighbors = segAdj.get(cur)!.filter(n => n !== prev && !visited.has(n));
-      if (neighbors.length === 1 && segAdj.get(cur)!.length <= 2) {
-        prev = cur;
-        cur = neighbors[0];
-      } else {
-        break;
-      }
-    }
-
-    // Walk forward from `cur` to build the chain.
-    const chain: SharpEdge[] = [cur];
-    visited.add(cur);
-    let walker = cur;
-    let walkerPrev: SharpEdge | null = null;
-    while (true) {
-      const neighbors = segAdj.get(walker)!.filter(n => n !== walkerPrev && !visited.has(n));
-      if (neighbors.length === 1) {
-        walkerPrev = walker;
-        walker = neighbors[0];
-        chain.push(walker);
-        visited.add(walker);
-      } else {
-        break;
-      }
-    }
-    chains.push(chain);
-  }
-
-  // ── 6. Helper: compute face directions and concavity for a segment ───
-  const getSegFaceDirs = (s: SharpEdge) => {
     const getThird = (triIdx: number): [number, number, number] | null => {
       for (let j = 0; j < 3; j++) {
         const vi = raw.triVerts[triIdx * 3 + j];
-        if (vi !== s.v0Idx && vi !== s.v1Idx) {
+        if (vi !== seg.v0Idx && vi !== seg.v1Idx) {
           return [raw.vertProperties[vi * 3], raw.vertProperties[vi * 3 + 1], raw.vertProperties[vi * 3 + 2]];
         }
       }
       return null;
     };
-    const vA3 = getThird(s.tA);
-    const vB3 = getThird(s.tB);
-    const mid: [number, number, number] = [(s.v0[0] + s.v1[0]) / 2, (s.v0[1] + s.v1[1]) / 2, (s.v0[2] + s.v1[2]) / 2];
-    const getDir = (vThird: [number, number, number] | null): [number, number, number] => {
-      if (!vThird) return [0, 0, 1];
+    const vA3 = getThird(seg.tA);
+    const vB3 = getThird(seg.tB);
+    if (!vA3 || !vB3) continue;
+
+    const getDir = (vThird: [number, number, number]): [number, number, number] => {
       const diff = [vThird[0] - mid[0], vThird[1] - mid[1], vThird[2] - mid[2]];
-      const dot = diff[0] * s.u[0] + diff[1] * s.u[1] + diff[2] * s.u[2];
-      const perp = [diff[0] - dot * s.u[0], diff[1] - dot * s.u[1], diff[2] - dot * s.u[2]];
+      const dot = diff[0] * u[0] + diff[1] * u[1] + diff[2] * u[2];
+      const perp = [diff[0] - dot * u[0], diff[1] - dot * u[1], diff[2] - dot * u[2]];
       const l = Math.hypot(perp[0], perp[1], perp[2]) || 1;
       return [perp[0] / l, perp[1] / l, perp[2] / l];
     };
     const dA = getDir(vA3);
     const dB = getDir(vB3);
-    const nAvgRaw = [s.nA[0] + s.nB[0], s.nA[1] + s.nB[1], s.nA[2] + s.nB[2]];
+
+    const signedDist = (vB3[0] - mid[0]) * seg.nA[0] + (vB3[1] - mid[1]) * seg.nA[1] + (vB3[2] - mid[2]) * seg.nA[2];
+    const isConcave = signedDist > 1e-4;
+
+    const nAvgRaw = [seg.nA[0] + seg.nB[0], seg.nA[1] + seg.nB[1], seg.nA[2] + seg.nB[2]];
     const nAvgL = Math.hypot(nAvgRaw[0], nAvgRaw[1], nAvgRaw[2]) || 1;
     const nAvg: [number, number, number] = [nAvgRaw[0] / nAvgL, nAvgRaw[1] / nAvgL, nAvgRaw[2] / nAvgL];
-    const signedDist = vB3
-      ? (vB3[0] - mid[0]) * s.nA[0] + (vB3[1] - mid[1]) * s.nA[1] + (vB3[2] - mid[2]) * s.nA[2]
-      : -1;
-    const isConcave = signedDist > 1e-4;
-    return { dA, dB, nAvg, isConcave };
-  };
 
-  // ── 7. Build a continuous mitered cutter for each chain ───────────────
-  const manifold = getManifold();
-  let currentSolid = solid;
-  const clearance = Math.max(0.6, distance * 0.35);
+    const extendEnd = Math.min(0.5, seg.len * 0.1);
+    const overshoot = isConcave ? 0 : 0.05;
 
-  for (const chain of chains) {
-    // Orient segments head-to-tail so s[i].v1Idx === s[i+1].v0Idx.
-    interface OrientedSeg {
-      key: string;
-      v0: [number, number, number]; v1: [number, number, number];
-      v0Idx: number; v1Idx: number;
-      u: [number, number, number]; len: number;
-      nA: [number, number, number]; nB: [number, number, number];
-      tA: number; tB: number;
-    }
-    const orientedSegs: OrientedSeg[] = [];
-    for (let i = 0; i < chain.length; i++) {
-      const seg = chain[i];
-      if (i === 0) {
-        if (chain.length > 1) {
-          const next = chain[1];
-          if (seg.v0Idx === next.v0Idx || seg.v0Idx === next.v1Idx) {
-            orientedSegs.push({ key: seg.key, v0: seg.v1, v1: seg.v0, v0Idx: seg.v1Idx, v1Idx: seg.v0Idx, u: [-seg.u[0], -seg.u[1], -seg.u[2]], len: seg.len, nA: seg.nA, nB: seg.nB, tA: seg.tA, tB: seg.tB });
-          } else {
-            orientedSegs.push({ ...seg });
-          }
-        } else {
-          orientedSegs.push({ ...seg });
-        }
+    const p0: [number, number, number] = [v0[0] - u[0] * extendEnd, v0[1] - u[1] * extendEnd, v0[2] - u[2] * extendEnd];
+    const p1: [number, number, number] = [v1[0] + u[0] * extendEnd, v1[1] + u[1] * extendEnd, v1[2] + u[2] * extendEnd];
+
+    if (kind === "chamfer") {
+      const C0: [number, number, number] = [p0[0] + overshoot * nAvg[0], p0[1] + overshoot * nAvg[1], p0[2] + overshoot * nAvg[2]];
+      const A0: [number, number, number] = [p0[0] + distance * dA[0], p0[1] + distance * dA[1], p0[2] + distance * dA[2]];
+      const B0: [number, number, number] = [p0[0] + distance * dB[0], p0[1] + distance * dB[1], p0[2] + distance * dB[2]];
+
+      const C1: [number, number, number] = [p1[0] + overshoot * nAvg[0], p1[1] + overshoot * nAvg[1], p1[2] + overshoot * nAvg[2]];
+      const A1: [number, number, number] = [p1[0] + distance * dA[0], p1[1] + distance * dA[1], p1[2] + distance * dA[2]];
+      const B1: [number, number, number] = [p1[0] + distance * dB[0], p1[1] + distance * dB[1], p1[2] + distance * dB[2]];
+
+      const vCB = [B0[0] - C0[0], B0[1] - C0[1], B0[2] - C0[2]];
+      const vCA = [A0[0] - C0[0], A0[1] - C0[1], A0[2] - C0[2]];
+      const crossX = vCB[1] * vCA[2] - vCB[2] * vCA[1];
+      const crossY = vCB[2] * vCA[0] - vCB[0] * vCA[2];
+      const crossZ = vCB[0] * vCA[1] - vCB[1] * vCA[0];
+      const dotU = crossX * u[0] + crossY * u[1] + crossZ * u[2];
+
+      let verts: number[];
+      if (dotU > 0) {
+        verts = [
+          C0[0], C0[1], C0[2],
+          B0[0], B0[1], B0[2],
+          A0[0], A0[1], A0[2],
+          C1[0], C1[1], C1[2],
+          B1[0], B1[1], B1[2],
+          A1[0], A1[1], A1[2],
+        ];
       } else {
-        const prev = orientedSegs[i - 1];
-        if (seg.v0Idx === prev.v1Idx) {
-          orientedSegs.push({ ...seg });
-        } else {
-          orientedSegs.push({ key: seg.key, v0: seg.v1, v1: seg.v0, v0Idx: seg.v1Idx, v1Idx: seg.v0Idx, u: [-seg.u[0], -seg.u[1], -seg.u[2]], len: seg.len, nA: seg.nA, nB: seg.nB, tA: seg.tA, tB: seg.tB });
-        }
+        verts = [
+          C0[0], C0[1], C0[2],
+          A0[0], A0[1], A0[2],
+          B0[0], B0[1], B0[2],
+          C1[0], C1[1], C1[2],
+          A1[0], A1[1], A1[2],
+          B1[0], B1[1], B1[2],
+        ];
       }
-    }
+      const tris = [
+        0, 2, 1,
+        3, 4, 5,
+        0, 1, 4, 0, 4, 3,
+        1, 2, 5, 1, 5, 4,
+        2, 0, 3, 2, 3, 5,
+      ];
 
-    // Helper to average two unit-length direction vectors.
-    const avgDir = (a: [number, number, number], b: [number, number, number]): [number, number, number] => {
-      const sx = a[0] + b[0], sy = a[1] + b[1], sz = a[2] + b[2];
-      const l = Math.hypot(sx, sy, sz) || 1;
-      return [sx / l, sy / l, sz / l];
-    };
-
-    // Build cross-section profiles (C, A, B) at each vertex.
-    interface Profile {
-      C: [number, number, number];
-      A: [number, number, number];
-      B: [number, number, number];
-      u: [number, number, number];
-      isConcave: boolean;
-    }
-    const profiles: Profile[] = [];
-
-    // Endpoint 0 (extend outward along −u).
-    const seg0 = orientedSegs[0];
-    const dirs0 = getSegFaceDirs(seg0);
-    const ext0 = Math.min(0.5, seg0.len * 0.1);
-    const p0: Vec3 = [seg0.v0[0] - seg0.u[0] * ext0, seg0.v0[1] - seg0.u[1] * ext0, seg0.v0[2] - seg0.u[2] * ext0];
-    const ov0 = dirs0.isConcave ? 0 : clearance;
-    profiles.push({
-      C: [p0[0] + ov0 * dirs0.nAvg[0], p0[1] + ov0 * dirs0.nAvg[1], p0[2] + ov0 * dirs0.nAvg[2]],
-      A: [p0[0] + distance * dirs0.dA[0], p0[1] + distance * dirs0.dA[1], p0[2] + distance * dirs0.dA[2]],
-      B: [p0[0] + distance * dirs0.dB[0], p0[1] + distance * dirs0.dB[1], p0[2] + distance * dirs0.dB[2]],
-      u: seg0.u,
-      isConcave: dirs0.isConcave,
-    });
-
-    // Intermediate vertices: miter between successive segments.
-    for (let i = 0; i < orientedSegs.length - 1; i++) {
-      const sA = orientedSegs[i];
-      const sB = orientedSegs[i + 1];
-      const pt = sA.v1;
-      const dirA = getSegFaceDirs(sA);
-      const dirB = getSegFaceDirs(sB);
-      const dA = avgDir(dirA.dA, dirB.dA);
-      const dB = avgDir(dirA.dB, dirB.dB);
-      const nAvg = avgDir(dirA.nAvg, dirB.nAvg);
-      const u = avgDir(sA.u, sB.u);
-      const isConcave = dirA.isConcave;
-      const ov = isConcave ? 0 : clearance;
-      profiles.push({
-        C: [pt[0] + ov * nAvg[0], pt[1] + ov * nAvg[1], pt[2] + ov * nAvg[2]],
-        A: [pt[0] + distance * dA[0], pt[1] + distance * dA[1], pt[2] + distance * dA[2]],
-        B: [pt[0] + distance * dB[0], pt[1] + distance * dB[1], pt[2] + distance * dB[2]],
-        u,
-        isConcave,
+      const prismMesh = new manifold.Mesh({
+        numProp: 3,
+        vertProperties: Float32Array.from(verts),
+        triVerts: Uint32Array.from(tris),
       });
-    }
+      const prism = new MeshShape(new manifold.Manifold(prismMesh));
+      currentSolid = isConcave ? currentSolid.fuse(prism) : currentSolid.cut(prism);
+    } else {
+      const arcSteps = 8;
+      const profile0: [number, number, number][] = [];
+      const profile1: [number, number, number][] = [];
 
-    // Endpoint m+1 (extend outward along +u).
-    const segEnd = orientedSegs[orientedSegs.length - 1];
-    const dirsEnd = getSegFaceDirs(segEnd);
-    const extEnd = Math.min(0.5, segEnd.len * 0.1);
-    const pEnd: Vec3 = [segEnd.v1[0] + segEnd.u[0] * extEnd, segEnd.v1[1] + segEnd.u[1] * extEnd, segEnd.v1[2] + segEnd.u[2] * extEnd];
-    const ovEnd = dirsEnd.isConcave ? 0 : clearance;
-    profiles.push({
-      C: [pEnd[0] + ovEnd * dirsEnd.nAvg[0], pEnd[1] + ovEnd * dirsEnd.nAvg[1], pEnd[2] + ovEnd * dirsEnd.nAvg[2]],
-      A: [pEnd[0] + distance * dirsEnd.dA[0], pEnd[1] + distance * dirsEnd.dA[1], pEnd[2] + distance * dirsEnd.dA[2]],
-      B: [pEnd[0] + distance * dirsEnd.dB[0], pEnd[1] + distance * dirsEnd.dB[1], pEnd[2] + distance * dirsEnd.dB[2]],
-      u: segEnd.u,
-      isConcave: dirsEnd.isConcave,
-    });
+      const C0: [number, number, number] = [p0[0] + overshoot * nAvg[0], p0[1] + overshoot * nAvg[1], p0[2] + overshoot * nAvg[2]];
+      const C1: [number, number, number] = [p1[0] + overshoot * nAvg[0], p1[1] + overshoot * nAvg[1], p1[2] + overshoot * nAvg[2]];
+      profile0.push(C0);
+      profile1.push(C1);
 
-    // Majority vote on concavity.
-    const isConcave = profiles.filter(p => p.isConcave).length > profiles.length / 2;
-
-    // ── Build the polyhedral cutter mesh ─────────────────────────────
-    // For chamfer: K = 3 vertices per profile (C, A, B).
-    // For fillet:  K = 2 + arcSteps vertices per profile (C, arc0…arcN).
-    const arcSteps = kind === "fillet" ? 8 : 1;
-    const K = 2 + arcSteps;
-    const N = profiles.length;
-    const allVerts: number[] = [];
-
-    for (let i = 0; i < N; i++) {
-      const p = profiles[i];
-      // Vertex 0: C (apex / outside corner).
-      allVerts.push(p.C[0], p.C[1], p.C[2]);
-      // Vertices 1…K-1: arc from A to B (for chamfer, just A then B).
       for (let s = 0; s <= arcSteps; s++) {
         const t = s / arcSteps;
-        if (kind === "fillet") {
-          const theta = (Math.PI / 2) * t;
-          const wA = 1 - Math.sin(theta);
-          const wB = 1 - Math.cos(theta);
-          allVerts.push(
-            p.A[0] * wA + p.B[0] * wB + (p.A[0] * (1 - wA - wB) + p.B[0] * (1 - wA - wB)) * 0,
-            p.A[1] * wA + p.B[1] * wB + (p.A[1] * (1 - wA - wB) + p.B[1] * (1 - wA - wB)) * 0,
-            p.A[2] * wA + p.B[2] * wB + (p.A[2] * (1 - wA - wB) + p.B[2] * (1 - wA - wB)) * 0,
-          );
-        } else {
-          // s=0 → A, s=1 → B
-          const pt = t === 0 ? p.A : p.B;
-          allVerts.push(pt[0], pt[1], pt[2]);
-        }
+        const theta = (Math.PI / 2) * t;
+        const wA = 1 - Math.sin(theta);
+        const wB = 1 - Math.cos(theta);
+        profile0.push([
+          p0[0] + distance * (wA * dA[0] + wB * dB[0]),
+          p0[1] + distance * (wA * dA[1] + wB * dB[1]),
+          p0[2] + distance * (wA * dA[2] + wB * dB[2]),
+        ]);
+        profile1.push([
+          p1[0] + distance * (wA * dA[0] + wB * dB[0]),
+          p1[1] + distance * (wA * dA[1] + wB * dB[1]),
+          p1[2] + distance * (wA * dA[2] + wB * dB[2]),
+        ]);
       }
-    }
 
-    // Determine winding: cross(B − C, A − C) · u.
-    const pC = profiles[0].C, pA = profiles[0].A, pB = profiles[0].B;
-    const vCB = [pB[0] - pC[0], pB[1] - pC[1], pB[2] - pC[2]];
-    const vCA = [pA[0] - pC[0], pA[1] - pC[1], pA[2] - pC[2]];
-    const crossX = vCB[1] * vCA[2] - vCB[2] * vCA[1];
-    const crossY = vCB[2] * vCA[0] - vCB[0] * vCA[2];
-    const crossZ = vCB[0] * vCA[1] - vCB[1] * vCA[0];
-    const dotU = crossX * profiles[0].u[0] + crossY * profiles[0].u[1] + crossZ * profiles[0].u[2];
+      const v01 = [profile0[1][0] - profile0[0][0], profile0[1][1] - profile0[0][1], profile0[1][2] - profile0[0][2]];
+      const v02 = [profile0[2][0] - profile0[0][0], profile0[2][1] - profile0[0][1], profile0[2][2] - profile0[0][2]];
+      const crX = v01[1] * v02[2] - v01[2] * v02[1];
+      const crY = v01[2] * v02[0] - v01[0] * v02[2];
+      const crZ = v01[0] * v02[1] - v01[1] * v02[0];
+      const dotU = crX * u[0] + crY * u[1] + crZ * u[2];
 
-    const tris: number[] = [];
+      const K = profile0.length;
+      const verts: number[] = [];
+      for (const p of profile0) verts.push(p[0], p[1], p[2]);
+      for (const p of profile1) verts.push(p[0], p[1], p[2]);
 
-    // Start cap (fan at profile 0).
-    for (let j = 1; j < K - 1; j++) {
-      if (dotU > 0) tris.push(0, j, j + 1);
-      else tris.push(0, j + 1, j);
-    }
-
-    // Side quads between successive profiles.
-    for (let i = 0; i < N - 1; i++) {
-      const base0 = i * K;
-      const base1 = (i + 1) * K;
-      for (let j = 0; j < K; j++) {
-        const nextJ = (j + 1) % K;
-        const p00 = base0 + j, p01 = base0 + nextJ;
-        const p10 = base1 + j, p11 = base1 + nextJ;
+      const tris: number[] = [];
+      for (let i = 1; i < K - 1; i++) {
+        if (dotU > 0) tris.push(0, i + 1, i);
+        else tris.push(0, i, i + 1);
+      }
+      for (let i = 1; i < K - 1; i++) {
+        if (dotU > 0) tris.push(K, K + i, K + i + 1);
+        else tris.push(K, K + i + 1, K + i);
+      }
+      for (let i = 0; i < K; i++) {
+        const next = (i + 1) % K;
         if (dotU > 0) {
-          tris.push(p00, p11, p01, p00, p10, p11);
+          tris.push(i, next, K + next, i, K + next, K + i);
         } else {
-          tris.push(p00, p01, p11, p00, p11, p10);
+          tris.push(i, K + next, next, i, K + i, K + next);
         }
       }
-    }
 
-    // End cap (fan at profile N − 1).
-    const endBase = (N - 1) * K;
-    for (let j = 1; j < K - 1; j++) {
-      if (dotU > 0) tris.push(endBase, endBase + j + 1, endBase + j);
-      else tris.push(endBase, endBase + j, endBase + j + 1);
+      const prismMesh = new manifold.Mesh({
+        numProp: 3,
+        vertProperties: Float32Array.from(verts),
+        triVerts: Uint32Array.from(tris),
+      });
+      const prism = new MeshShape(new manifold.Manifold(prismMesh));
+      currentSolid = isConcave ? currentSolid.fuse(prism) : currentSolid.cut(prism);
     }
-
-    const cutterMesh = new manifold.Mesh({
-      numProp: 3,
-      vertProperties: Float32Array.from(allVerts),
-      triVerts: Uint32Array.from(tris),
-    });
-    const cutter = new MeshShape(new manifold.Manifold(cutterMesh));
-    currentSolid = isConcave ? currentSolid.fuse(cutter) : currentSolid.cut(cutter);
-  }
-
-  // ── 8. Prune disconnected scrap offcuts ──────────────────────────────
-  const pieces = currentSolid.wrapped.decompose();
-  if (pieces.length > 1) {
-    let maxVol = -1;
-    let mainPiece = pieces[0];
-    for (const p of pieces) {
-      const v = p.volume();
-      if (v > maxVol) {
-        maxVol = v;
-        mainPiece = p;
-      }
-    }
-    currentSolid = new MeshShape(mainPiece);
   }
 
   if (currentSolid.isEmpty || currentSolid.volume() <= 1e-9) return null;
