@@ -128,18 +128,33 @@ const EXPORT_PRESETS: Record<ExportQuality, MeshQuality> = {
  *  the middle setting rather than whatever an export happens to ask for. */
 const EXPORT_QUALITY: MeshQuality = EXPORT_PRESETS.standard;
 
-/** MeshShape (imports, or anything combined with one) has no OCCT face
- *  topology to preserve, so it becomes one single pickable "face" covering
- *  the whole triangle set, and there is no separate edge/wireframe data —
- *  syncGeometries on the Three.js side treats edges as optional. */
+/**
+ * Converts a MeshShape into CAD-style meshed faces and sharp feature edges.
+ * Segments connected coplanar triangles into individual faceGroups so that each
+ * planar face can be independently hovered, selected, and pushed/pulled.
+ * Extracts sharp dihedral edges so the wireframe and edge mode can select and chamfer edges.
+ */
 function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdges } {
   const raw = m.mesh();
-  const triangleCount = raw.triangles.length / 3;
-  const numVerts = raw.vertices.length / 3;
+  const numTris = raw.triangles.length / 3;
 
-  // Ultra-fast smooth vertex normal accumulation
-  const smoothNormals = new Float32Array(raw.vertices.length);
-  for (let t = 0; t < triangleCount; t++) {
+  if (numTris === 0) {
+    return {
+      faces: {
+        vertices: Float32Array.from(raw.vertices),
+        triangles: Uint32Array.from(raw.triangles),
+        normals: new Float32Array(0),
+        faceGroups: [],
+      },
+      edges: { lines: new Float32Array(0), edgeGroups: [] },
+    };
+  }
+
+  // Calculate face normals and plane offsets for every triangle
+  const triNormals = new Float32Array(numTris * 3);
+  const triPlanes = new Float32Array(numTris);
+
+  for (let t = 0; t < numTris; t++) {
     const i0 = raw.triangles[t * 3] * 3;
     const i1 = raw.triangles[t * 3 + 1] * 3;
     const i2 = raw.triangles[t * 3 + 2] * 3;
@@ -151,33 +166,151 @@ function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdg
     const abx = bx - ax, aby = by - ay, abz = bz - az;
     const acx = cx - ax, acy = cy - ay, acz = cz - az;
 
-    const nx = aby * acz - abz * acy;
-    const ny = abz * acx - abx * acz;
-    const nz = abx * acy - aby * acx;
+    let nx = aby * acz - abz * acy;
+    let ny = abz * acx - abx * acz;
+    let nz = abx * acy - aby * acx;
+    const len = Math.hypot(nx, ny, nz) || 1;
+    nx /= len; ny /= len; nz /= len;
 
-    smoothNormals[i0] += nx; smoothNormals[i0 + 1] += ny; smoothNormals[i0 + 2] += nz;
-    smoothNormals[i1] += nx; smoothNormals[i1 + 1] += ny; smoothNormals[i1 + 2] += nz;
-    smoothNormals[i2] += nx; smoothNormals[i2 + 1] += ny; smoothNormals[i2 + 2] += nz;
+    triNormals[t * 3] = nx;
+    triNormals[t * 3 + 1] = ny;
+    triNormals[t * 3 + 2] = nz;
+    triPlanes[t] = nx * ax + ny * ay + nz * az;
   }
 
-  for (let v = 0; v < numVerts; v++) {
-    const i = v * 3;
-    const len = Math.hypot(smoothNormals[i], smoothNormals[i + 1], smoothNormals[i + 2]) || 1;
-    smoothNormals[i] /= len;
-    smoothNormals[i + 1] /= len;
-    smoothNormals[i + 2] /= len;
+  // Build edge-to-triangles adjacency
+  const edgeToTris = new Map<string, number[]>();
+  for (let t = 0; t < numTris; t++) {
+    const v0 = raw.triangles[t * 3];
+    const v1 = raw.triangles[t * 3 + 1];
+    const v2 = raw.triangles[t * 3 + 2];
+
+    const edges = [
+      v0 < v1 ? `${v0}:${v1}` : `${v1}:${v0}`,
+      v1 < v2 ? `${v1}:${v2}` : `${v2}:${v1}`,
+      v2 < v0 ? `${v2}:${v0}` : `${v0}:${v2}`,
+    ];
+
+    for (const e of edges) {
+      let list = edgeToTris.get(e);
+      if (!list) {
+        list = [];
+        edgeToTris.set(e, list);
+      }
+      list.push(t);
+    }
   }
 
-  const faceGroups = [{ start: 0, count: raw.triangles.length, faceId: 0 }];
+  // Flood-fill connected coplanar triangles into planar face groups
+  const visited = new Uint8Array(numTris);
+  const groupedTriangles: number[][] = [];
+
+  for (let t = 0; t < numTris; t++) {
+    if (visited[t]) continue;
+    const group = [t];
+    visited[t] = 1;
+    const queue = [t];
+    const targetNx = triNormals[t * 3];
+    const targetNy = triNormals[t * 3 + 1];
+    const targetNz = triNormals[t * 3 + 2];
+    const targetD = triPlanes[t];
+
+    let head = 0;
+    while (head < queue.length) {
+      const curr = queue[head++];
+      const v0 = raw.triangles[curr * 3];
+      const v1 = raw.triangles[curr * 3 + 1];
+      const v2 = raw.triangles[curr * 3 + 2];
+      const currEdges = [
+        v0 < v1 ? `${v0}:${v1}` : `${v1}:${v0}`,
+        v1 < v2 ? `${v1}:${v2}` : `${v2}:${v1}`,
+        v2 < v0 ? `${v2}:${v0}` : `${v0}:${v2}`,
+      ];
+
+      for (const e of currEdges) {
+        const neighbors = edgeToTris.get(e);
+        if (!neighbors) continue;
+        for (const n of neighbors) {
+          if (visited[n]) continue;
+          const dot = targetNx * triNormals[n * 3] + targetNy * triNormals[n * 3 + 1] + targetNz * triNormals[n * 3 + 2];
+          const distDiff = Math.abs(targetD - triPlanes[n]);
+          // Coplanar: angle < 2.5 degrees (dot > 0.999) and distance diff < 0.1 mm
+          if (dot > 0.999 && distDiff < 0.1) {
+            visited[n] = 1;
+            group.push(n);
+            queue.push(n);
+          }
+        }
+      }
+    }
+    groupedTriangles.push(group);
+  }
+
+  // Reorder triangles so each faceGroup has contiguous triangles
+  const reorderedTriangles = new Uint32Array(raw.triangles.length);
+  const faceGroups: { start: number; count: number; faceId: number }[] = [];
+  let triangleOffset = 0;
+
+  for (let g = 0; g < groupedTriangles.length; g++) {
+    const triIndices = groupedTriangles[g];
+    const start = triangleOffset;
+    for (const t of triIndices) {
+      reorderedTriangles[triangleOffset++] = raw.triangles[t * 3];
+      reorderedTriangles[triangleOffset++] = raw.triangles[t * 3 + 1];
+      reorderedTriangles[triangleOffset++] = raw.triangles[t * 3 + 2];
+    }
+    faceGroups.push({
+      start,
+      count: triIndices.length * 3,
+      faceId: g,
+    });
+  }
+
+  // Extract sharp feature edges
+  const edgeLines: number[] = [];
+  const edgeGroups: { start: number; count: number; edgeId: number }[] = [];
+
+  for (const [key, tris] of edgeToTris.entries()) {
+    let isSharp = false;
+    if (tris.length === 1) {
+      isSharp = true;
+    } else if (tris.length >= 2) {
+      const tA = tris[0], tB = tris[1];
+      const dot = triNormals[tA * 3] * triNormals[tB * 3] +
+                  triNormals[tA * 3 + 1] * triNormals[tB * 3 + 1] +
+                  triNormals[tA * 3 + 2] * triNormals[tB * 3 + 2];
+      if (dot < 0.965) {
+        isSharp = true;
+      }
+    }
+    if (isSharp) {
+      const colon = key.indexOf(":");
+      const v0 = Number(key.slice(0, colon));
+      const v1 = Number(key.slice(colon + 1));
+      const startIdx = edgeLines.length / 3;
+      edgeLines.push(
+        raw.vertices[v0 * 3], raw.vertices[v0 * 3 + 1], raw.vertices[v0 * 3 + 2],
+        raw.vertices[v1 * 3], raw.vertices[v1 * 3 + 1], raw.vertices[v1 * 3 + 2],
+      );
+      edgeGroups.push({
+        start: startIdx,
+        count: 2,
+        edgeId: edgeGroups.length,
+      });
+    }
+  }
 
   return {
     faces: {
       vertices: Float32Array.from(raw.vertices),
-      triangles: Uint32Array.from(raw.triangles),
-      normals: smoothNormals,
+      triangles: reorderedTriangles,
+      normals: new Float32Array(raw.vertices.length),
       faceGroups,
     },
-    edges: { lines: new Float32Array(0), edgeGroups: [] },
+    edges: {
+      lines: Float32Array.from(edgeLines),
+      edgeGroups,
+    },
   };
 }
 
@@ -264,7 +397,7 @@ function normalsPerCadFace(faces: MeshedFaces): MeshedFaces {
 function toMesh(name: string, s: AnySolid, quality: MeshQuality): KernelMesh {
   if (isMesh(s)) {
     const { faces, edges } = meshFromMeshShape(s);
-    return { name, faces, edges };
+    return { name, faces: normalsPerCadFace(faces), edges };
   }
   return { name, faces: normalsPerCadFace(s.mesh(quality)), edges: s.meshEdges(quality) };
 }

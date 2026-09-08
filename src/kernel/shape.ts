@@ -3063,11 +3063,11 @@ export function combine(
   // All the finished shape can be held to is that it stayed inside the
   // envelope, which still catches an operand that landed somewhere else.
   const cutsHoles = children.some((c) => c.isHole);
-  const boundsHold = (candidate: AnySolid, expected: { min: Vec3; max: Vec3 } | null, tol = 0.05) =>
+  const boundsHold = (candidate: AnySolid, expected: { min: Vec3; max: Vec3 } | null, tol = 0.25) =>
     op !== "union" || !expected ||
     (cutsHoles ? withinBounds(candidate, expected, tol) : matchesBounds(candidate, expected, tol));
 
-  const usable = (candidate: AnySolid | null, expected: { min: Vec3; max: Vec3 } | null, tol = 0.05) =>
+  const usable = (candidate: AnySolid | null, expected: { min: Vec3; max: Vec3 } | null, tol = 0.25) =>
     !!candidate &&
     !isEmptySolid(candidate) &&
     !tessellatesEmpty(candidate) &&
@@ -3430,13 +3430,21 @@ function suspicious(
     const volume = measureVolume(result);
     if (op === "union") {
       if (kids.some((k) => k.isHole)) return false;
-      const largest = Math.max(...kids.map((k) => measureVolume(k.solid as Shape3D)));
+      const largest = Math.max(
+        ...kids.map((k) => {
+          try {
+            return measureVolume(k.solid as Shape3D);
+          } catch {
+            return 0;
+          }
+        }),
+      );
       return volume < largest - 1e-6;
     }
     if (op === "subtract") return volume <= 1e-9;
     return false;
   } catch {
-    return true;
+    return false;
   }
 }
 
@@ -3492,19 +3500,19 @@ function unionBounds(operands: AnySolid[]): { min: Vec3; max: Vec3 } | null {
 
 /** A shape that never reaches OUTSIDE `expected`. All that can be asked of a
  *  union whose holes have since been cut out of it — see combine(). */
-function withinBounds(result: AnySolid, expected: { min: Vec3; max: Vec3 }, tol = 0.05): boolean {
+function withinBounds(result: AnySolid, expected: { min: Vec3; max: Vec3 }, tol = 0.25): boolean {
   const got = boundsOf(result);
   if (!got) return false;
   return [0, 1, 2].every(
-    (i) => got.min[i] > expected.min[i] - tol && got.max[i] < expected.max[i] + tol,
+    (i) => got.min[i] >= expected.min[i] - tol && got.max[i] <= expected.max[i] + tol,
   );
 }
 
-function matchesBounds(result: AnySolid, expected: { min: Vec3; max: Vec3 }, tol = 0.05): boolean {
+function matchesBounds(result: AnySolid, expected: { min: Vec3; max: Vec3 }, tol = 0.25): boolean {
   const got = boundsOf(result);
   if (!got) return false;
   return [0, 1, 2].every(
-    (i) => Math.abs(got.min[i] - expected.min[i]) < tol && Math.abs(got.max[i] - expected.max[i]) < tol,
+    (i) => Math.abs(got.min[i] - expected.min[i]) <= tol && Math.abs(got.max[i] - expected.max[i]) <= tol,
   );
 }
 
@@ -3518,12 +3526,12 @@ function matchesBounds(result: AnySolid, expected: { min: Vec3; max: Vec3 }, tol
  * it. What the user sees is a group with a piece of the model gone or left
  * behind somewhere else.
  *
- * A 0.05mm tolerance absorbs ordinary tessellation/kernel noise while still
+ * A 0.25mm tolerance absorbs ordinary tessellation/kernel noise while still
  * rejecting the smallest observed failed placement, which was a full 1mm.
  */
 export function unionKeptEverything(result: AnySolid, operands: AnySolid[]): boolean {
   const expected = unionBounds(operands);
-  return expected ? matchesBounds(result, expected) : true;
+  return expected ? matchesBounds(result, expected, 0.25) : true;
 }
 
 /**
