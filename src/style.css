@@ -1146,6 +1146,71 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 .edge-bar button:hover:not(:disabled) { color:white; background:#11616f; border-color:#11616f; }
 .edge-bar .edge-bar-fuse-btn { background:#2563eb; border-color:#2563eb; margin-left:6px; }
 .edge-bar .edge-bar-fuse-btn:hover:not(:disabled) { background:#1d4ed8; border-color:#1d4ed8; }
+.edge-bar .num-stepper-wrap {
+  width: 68px;
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+}
+.edge-bar .num-stepper-wrap input {
+  width: 100% !important;
+  padding-right: 20px !important;
+  padding-left: 7px !important;
+  height: 28px;
+  min-height: 28px;
+  line-height: 26px;
+  box-sizing: border-box;
+}
+.edge-bar .stepper-btns {
+  position: absolute;
+  right: 1px;
+  top: 1px;
+  bottom: 1px;
+  width: 17px;
+  display: flex;
+  flex-direction: column;
+  border-radius: 0 5px 5px 0;
+  overflow: hidden;
+  user-select: none;
+  background: #f4f7f9;
+  border-left: 1px solid #d8e1e7;
+  z-index: 2;
+  opacity: 0.95;
+}
+.edge-bar .stepper-btns button.stepper-btn {
+  all: unset;
+  box-sizing: border-box !important;
+  flex: 1 1 50% !important;
+  height: 50% !important;
+  width: 100% !important;
+  min-height: 0 !important;
+  max-height: none !important;
+  min-width: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  border: none !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  cursor: pointer !important;
+  color: #556571 !important;
+  line-height: 0 !important;
+  font-weight: normal !important;
+}
+.edge-bar .stepper-btns button.stepper-btn.stepper-up {
+  border-bottom: 1px solid #dce4e9 !important;
+}
+.edge-bar .stepper-btns button.stepper-btn:hover {
+  background: #e2ecf0 !important;
+  color: #167f91 !important;
+}
+.edge-bar .stepper-btns button.stepper-btn:active {
+  background: #d4e3e8 !important;
+  color: #11616f !important;
+}
 .edge-selection-summary { display:flex; align-items:center; gap:5px; }
 .edge-bar .edge-clear-selection {
   position:relative;

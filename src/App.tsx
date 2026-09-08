@@ -60,7 +60,8 @@ import { TextModal } from "./ui/TextModal";
 import { SettingsModal } from "./ui/SettingsModal";
 import type { BuildPlateSize } from "./ui/SettingsModal";
 import { ExportModal } from "./ui/ExportModal";
-import { displayStep, formatLength, fromMillimetres, toMillimetres } from "./measurement";
+import { StepperButtons } from "./ui/MathNumInput";
+import { formatLength, fromMillimetres, toMillimetres } from "./measurement";
 import type { AppearancePreference, DisplayUnit } from "./measurement";
 import type { TextConfig } from "./ui/TextModal";
 import { NO_FONT_LISTING, getCachedTextPaths, resolveTextPaths } from "./text/systemFonts";
@@ -292,42 +293,92 @@ const BUILD_PLATE_SIZE_KEY = "cad.buildPlateSize";
 
 /** What each preset costs, so the choice is not guesswork — measured on a
  *  40x30x15 box with a 10mm spherical bowl (see EXPORT_PRESETS in worker.ts). */
-function SignedMeasurementInput({ valueMm, unit, decimals, onValue, onEnter }: {
+function SignedMeasurementInput({
+  valueMm,
+  unit,
+  decimals,
+  onValue,
+  onEnter,
+  step = 0.5,
+  min,
+  max,
+  disabled,
+}: {
   valueMm: number;
   unit: DisplayUnit;
   decimals: number;
   onValue: (valueMm: number) => void;
   onEnter: () => void;
+  step?: number;
+  min?: number;
+  max?: number;
+  disabled?: boolean;
 }) {
   const [draft, setDraft] = useState(() => formatLength(valueMm, unit, decimals));
   const focused = useRef(false);
+
   useEffect(() => {
     if (!focused.current) setDraft(formatLength(valueMm, unit, decimals));
   }, [valueMm, unit, decimals]);
+
+  const stepValue = useCallback((dir: 1 | -1, shift: boolean, alt: boolean) => {
+    const parsed = Number(draft);
+    const currentDisplay = Number.isFinite(parsed) ? parsed : fromMillimetres(valueMm, unit);
+    const stp = step;
+    const delta = dir * (shift ? stp * 10 : alt ? stp / 10 : stp);
+    let nextDisplay = Math.round((currentDisplay + delta) * 1e6) / 1e6;
+    if (min !== undefined) nextDisplay = Math.max(min, nextDisplay);
+    if (max !== undefined) nextDisplay = Math.min(max, nextDisplay);
+    const nextMm = toMillimetres(nextDisplay, unit);
+    setDraft(formatLength(nextMm, unit, decimals));
+    onValue(nextMm);
+  }, [draft, valueMm, unit, decimals, step, min, max, onValue]);
+
   return (
-    <input
-      type="text"
-      inputMode="decimal"
-      value={draft}
-      onFocus={() => { focused.current = true; }}
-      onChange={(e) => {
-        const next = e.target.value;
-        setDraft(next);
-        if (["", "-", ".", "-."].includes(next.trim())) return;
-        const parsed = Number(next);
-        if (Number.isFinite(parsed)) onValue(toMillimetres(parsed, unit));
-      }}
-      onBlur={() => {
-        focused.current = false;
-        setDraft(formatLength(valueMm, unit, decimals));
-      }}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          onEnter();
-        }
-      }}
-    />
+    <div className="num-stepper-wrap edge-bar-stepper">
+      <input
+        type="text"
+        inputMode="decimal"
+        className="num"
+        disabled={disabled}
+        value={draft}
+        onFocus={() => { focused.current = true; }}
+        onChange={(e) => {
+          const next = e.target.value;
+          setDraft(next);
+          if (["", "-", ".", "-."].includes(next.trim())) return;
+          const parsed = Number(next);
+          if (Number.isFinite(parsed)) {
+            let clamped = parsed;
+            if (min !== undefined) clamped = Math.max(min, clamped);
+            if (max !== undefined) clamped = Math.min(max, clamped);
+            onValue(toMillimetres(clamped, unit));
+          }
+        }}
+        onBlur={() => {
+          focused.current = false;
+          setDraft(formatLength(valueMm, unit, decimals));
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            onEnter();
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            stepValue(1, e.shiftKey, e.altKey);
+          } else if (e.key === "ArrowDown") {
+            e.preventDefault();
+            stepValue(-1, e.shiftKey, e.altKey);
+          }
+        }}
+      />
+      {!disabled && (
+        <StepperButtons
+          onStep={stepValue}
+          disabled={disabled}
+        />
+      )}
+    </div>
   );
 }
 
@@ -3899,6 +3950,8 @@ export function App() {
                 valueMm={faceValue}
                 unit={displayUnit}
                 decimals={decimalPlaces}
+                min={faceOp === "push" || faceOp === "resize" ? undefined : 0.1}
+                step={0.5}
                 onValue={(value) => {
                   setFaceValue(value);
                 }}
@@ -3908,14 +3961,14 @@ export function App() {
             {faceOp === "offset" && (
               <label>
                 Height
-                <input type="number" step={displayStep(displayUnit, decimalPlaces)} value={fromMillimetres(faceHeight, displayUnit)}
-                  onChange={(e) => setFaceHeight(toMillimetres(Number(e.target.value) || 0, displayUnit))}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      faceApplyButtonRef.current?.click();
-                    }
-                  }} /> {displayUnit}
+                <SignedMeasurementInput
+                  valueMm={faceHeight}
+                  unit={displayUnit}
+                  decimals={decimalPlaces}
+                  step={0.5}
+                  onValue={setFaceHeight}
+                  onEnter={() => faceApplyButtonRef.current?.click()}
+                /> {displayUnit}
               </label>
             )}
             <button
@@ -4166,14 +4219,15 @@ export function App() {
               </div>
               <label>
                 Size
-                <input type="number" min="0.1" step="0.5" value={edgeDistance}
-                  onChange={(e) => setEdgeDistance(Math.max(0.1, Number(e.target.value) || 0.1))}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") {
-                      e.preventDefault();
-                      void applyEdgeFinish();
-                    }
-                  }} /> mm
+                <SignedMeasurementInput
+                  valueMm={edgeDistance}
+                  unit="mm"
+                  decimals={decimalPlaces}
+                  min={0.1}
+                  step={0.5}
+                  onValue={(v) => setEdgeDistance(Math.max(0.1, v))}
+                  onEnter={() => void applyEdgeFinish()}
+                /> mm
               </label>
               <button disabled={!edgeSelection} onClick={() => void applyEdgeFinish()}>Apply</button>
               {assemblyGroup && (
