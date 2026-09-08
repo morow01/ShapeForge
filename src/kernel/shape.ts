@@ -37,6 +37,7 @@ export { InvalidShapeError };
 export type AnySolid = Shape3D | MeshShape;
 
 const isMesh = (s: AnySolid): s is MeshShape => s instanceof MeshShape;
+const FALLBACK_MESH_QUALITY = { tolerance: 0.08, angularTolerance: 0.20 };
 
 /**
  * Rounds the 2D corners of any closed polygon using smooth tangent arcs.
@@ -2063,6 +2064,10 @@ function shellSolid(solid: Shape3D, op: ShellOp): Shape3D {
  * to work. */
 function hollowEditedBox(solid: Shape3D, op: ShellOp): Shape3D | null {
   const [min, max] = solid.boundingBox.bounds;
+  const bboxVol = (max[0] - min[0]) * (max[1] - min[1]) * (max[2] - min[2]);
+  try {
+    if (measureVolume(solid) < 0.90 * bboxVol) return null;
+  } catch { /* proceed */ }
   const t = Math.max(0.01, op.thickness);
   const innerMin: Vec3 = [min[0] + t, min[1] + t, min[2] + t];
   const innerMax: Vec3 = [max[0] - t, max[1] - t, max[2] - t];
@@ -2833,6 +2838,177 @@ function finishMeshEdge(
 }
 
 /**
+ * Creates a hollow shell with wall thickness `op.thickness` on a MeshShape.
+ * Uses Manifold's minkowskiDifference with a sphere to compute the exact inner cavity,
+ * and extrudes the selected opening face(s) outward to connect the cavity through the exterior.
+ */
+function hollowMesh(solid: MeshShape, op: ShellOp): MeshShape | null {
+  const thickness = Math.max(0.01, op.thickness);
+  const raw = solid.wrapped.getMesh();
+  const numTris = raw.triVerts.length / 3;
+  if (numTris === 0) return null;
+
+  const manifold = getManifold() as any;
+  const ball = manifold._Sphere ? manifold._Sphere(thickness, 12) : manifold.sphere(thickness, 12);
+  let inner: any;
+  try {
+    inner = solid.wrapped.minkowskiDifference(ball);
+  } catch {
+    return null;
+  }
+  if (inner.isEmpty() || inner.volume() <= 1e-6) {
+    return null;
+  }
+
+  const openingCutters: any[] = [];
+  const points = op.points?.length ? op.points : [];
+
+  for (let pIdx = 0; pIdx < points.length; pIdx++) {
+    const pt = points[pIdx];
+    let normal = op.normal;
+
+    if (!normal) {
+      let closestDist = Infinity;
+      let closestN: Vec3 = [0, 0, 1];
+      for (let t = 0; t < numTris; t++) {
+        const i0 = raw.triVerts[t * 3] * 3;
+        const i1 = raw.triVerts[t * 3 + 1] * 3;
+        const i2 = raw.triVerts[t * 3 + 2] * 3;
+        const p0 = [raw.vertProperties[i0], raw.vertProperties[i0 + 1], raw.vertProperties[i0 + 2]];
+        const p1 = [raw.vertProperties[i1], raw.vertProperties[i1 + 1], raw.vertProperties[i1 + 2]];
+        const p2 = [raw.vertProperties[i2], raw.vertProperties[i2 + 1], raw.vertProperties[i2 + 2]];
+        const c = [(p0[0] + p1[0] + p2[0]) / 3, (p0[1] + p1[1] + p2[1]) / 3, (p0[2] + p1[2] + p2[2]) / 3];
+        const dist = Math.hypot(c[0] - pt[0], c[1] - pt[1], c[2] - pt[2]);
+        if (dist < closestDist) {
+          closestDist = dist;
+          const ab = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+          const ac = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+          let nx = ab[1] * ac[2] - ab[2] * ac[1];
+          let ny = ab[2] * ac[0] - ab[0] * ac[2];
+          let nz = ab[0] * ac[1] - ab[1] * ac[0];
+          const len = Math.hypot(nx, ny, nz) || 1;
+          closestN = [nx / len, ny / len, nz / len];
+        }
+      }
+      normal = closestN;
+    }
+
+    const nLen = Math.hypot(...normal) || 1;
+    const n: Vec3 = [normal[0] / nLen, normal[1] / nLen, normal[2] / nLen];
+
+    let up: Vec3 = Math.abs(n[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0];
+    let u: Vec3 = [
+      up[1] * n[2] - up[2] * n[1],
+      up[2] * n[0] - up[0] * n[2],
+      up[0] * n[1] - up[1] * n[0],
+    ];
+    const uLen = Math.hypot(...u) || 1;
+    u = [u[0] / uLen, u[1] / uLen, u[2] / uLen];
+    const v: Vec3 = [
+      n[1] * u[2] - n[2] * u[1],
+      n[2] * u[0] - n[0] * u[2],
+      n[0] * u[1] - n[1] * u[0],
+    ];
+
+    const planeD = n[0] * pt[0] + n[1] * pt[1] + n[2] * pt[2];
+
+    const tri2DList: [number, number][][] = [];
+    for (let t = 0; t < numTris; t++) {
+      const i0 = raw.triVerts[t * 3] * 3;
+      const i1 = raw.triVerts[t * 3 + 1] * 3;
+      const i2 = raw.triVerts[t * 3 + 2] * 3;
+      const p0 = [raw.vertProperties[i0], raw.vertProperties[i0 + 1], raw.vertProperties[i0 + 2]];
+      const p1 = [raw.vertProperties[i1], raw.vertProperties[i1 + 1], raw.vertProperties[i1 + 2]];
+      const p2 = [raw.vertProperties[i2], raw.vertProperties[i2 + 1], raw.vertProperties[i2 + 2]];
+
+      const ab = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+      const ac = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+      let tnx = ab[1] * ac[2] - ab[2] * ac[1];
+      let tny = ab[2] * ac[0] - ab[0] * ac[2];
+      let tnz = ab[0] * ac[1] - ab[1] * ac[0];
+      const tlen = Math.hypot(tnx, tny, tnz) || 1;
+      tnx /= tlen; tny /= tlen; tnz /= tlen;
+
+      const dot = tnx * n[0] + tny * n[1] + tnz * n[2];
+      if (dot > 0.85) {
+        const d = tnx * p0[0] + tny * p0[1] + tnz * p0[2];
+        if (Math.abs(d - planeD) < 0.35) {
+          const to2D = (p: number[]): [number, number] => [
+            (p[0] - pt[0]) * u[0] + (p[1] - pt[1]) * u[1] + (p[2] - pt[2]) * u[2],
+            (p[0] - pt[0]) * v[0] + (p[1] - pt[1]) * v[1] + (p[2] - pt[2]) * v[2],
+          ];
+          tri2DList.push([to2D(p0), to2D(p1), to2D(p2)]);
+        }
+      }
+    }
+
+    if (tri2DList.length > 0) {
+      try {
+        const cs = new manifold.CrossSection(tri2DList);
+        if (!cs.isEmpty() && cs.area() > 1e-4) {
+          const depth = thickness + 1.5;
+          const outPad = 0.5;
+          const localExtrusion = cs.extrude(depth);
+          const origin: Vec3 = [
+            pt[0] + n[0] * outPad,
+            pt[1] + n[1] * outPad,
+            pt[2] + n[2] * outPad,
+          ];
+          const matrix = [
+            u[0], u[1], u[2], 0,
+            v[0], v[1], v[2], 0,
+            -n[0], -n[1], -n[2], 0,
+            origin[0], origin[1], origin[2], 1,
+          ];
+          const worldExtrusion = localExtrusion.transform(matrix as any);
+          if (!worldExtrusion.isEmpty()) {
+            openingCutters.push(worldExtrusion);
+          }
+        }
+      } catch { /* ignore fallback */ }
+    }
+
+    if (openingCutters.length <= pIdx) {
+      try {
+        const depth = thickness + 1.5;
+        const outPad = 0.5;
+        const radius = Math.max(thickness * 2, 5);
+        const circleCS = manifold.CrossSection.circle(radius, 16);
+        const localExtrusion = circleCS.extrude(depth);
+        const origin: Vec3 = [
+          pt[0] + n[0] * outPad,
+          pt[1] + n[1] * outPad,
+          pt[2] + n[2] * outPad,
+        ];
+        const matrix = [
+          u[0], u[1], u[2], 0,
+          v[0], v[1], v[2], 0,
+          -n[0], -n[1], -n[2], 0,
+          origin[0], origin[1], origin[2], 1,
+        ];
+        const worldExtrusion = localExtrusion.transform(matrix as any);
+        if (!worldExtrusion.isEmpty()) {
+          openingCutters.push(worldExtrusion);
+        }
+      } catch { /* ignore */ }
+    }
+  }
+
+  let fullCavity = inner;
+  for (const cutter of openingCutters) {
+    fullCavity = fullCavity.add(cutter);
+  }
+
+  try {
+    const shelled = solid.wrapped.subtract(fullCavity);
+    if (shelled.isEmpty() || shelled.volume() <= 1e-6) return null;
+    return new MeshShape(shelled);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Builds the stable portion of a live push/pull preview: the edit's base and
  * every already-committed operation, excluding the tentative final operation
  * whose distance changes on every pointer move. The worker caches this solid
@@ -3025,14 +3201,23 @@ async function replayEdit(
     }
     if (op.kind === "shell") {
       if (isMesh(solid)) {
-        onError?.(spec.id, "Hollowing is unavailable after a mesh-based edit.");
+        const candidate = hollowMesh(solid, op);
+        if (candidate) {
+          solid = candidate;
+        } else {
+          onError?.(
+            spec.id,
+            "That wall cannot fit inside this shape. Try a smaller thickness; tightly rounded corners may need a thinner wall. The previous shape was kept.",
+          );
+        }
         continue;
       }
       if (!op.points.length) {
         onError?.(spec.id, "That hollow has no opening face left after rebuilding — try redoing it.");
         continue;
       }
-      let hollow: Shape3D | null = null;
+      let hollow: AnySolid | null = null;
+      const bRepSolid = solid as Shape3D;
       // Rounded boxes are a common container workflow, but OCCT can accept
       // their offset shell and only fail later while producing the display
       // mesh. Use the bounded cavity first for every box-based edit: it is a
@@ -3040,21 +3225,27 @@ async function replayEdit(
       // solid exactly. Generic shapes still use the true offset shell below.
       if (isBoxBased(spec.base)) {
         try {
-          const candidate = hollowEditedBox(solid, op);
+          const candidate = hollowEditedBox(bRepSolid, op);
           if (candidate && isOcctValid(candidate) && !tessellatesEmpty(candidate) && isWatertight(candidate)) hollow = candidate;
         } catch { /* Keep the original shape if even the bounded cavity fails. */ }
       }
       if (isCylinderBased(spec.base)) {
         try {
-          const candidate = hollowEditedCylinder(solid, op, spec.base);
+          const candidate = hollowEditedCylinder(bRepSolid, op, spec.base);
           if (candidate && isOcctValid(candidate) && !tessellatesEmpty(candidate) && isWatertight(candidate)) hollow = candidate;
         } catch { /* Fall back to shellSolid */ }
       }
       for (let attempt = 0; attempt < 3 && !hollow; attempt++) {
         try {
-          const candidate = shellSolid(solid, op);
+          const candidate = shellSolid(bRepSolid, op);
           if (isOcctValid(candidate) && !tessellatesEmpty(candidate) && isWatertight(candidate)) hollow = candidate;
         } catch { /* OCCT occasionally needs a clean retry for offset surfaces. */ }
+      }
+      if (!hollow && op.points.length) {
+        try {
+          const candidate = hollowMesh(bRepSolid.meshShape(FALLBACK_MESH_QUALITY), op);
+          if (candidate) hollow = candidate;
+        } catch { /* Fall back to mesh kernel */ }
       }
       if (hollow) {
         solid = hollow;
@@ -3226,7 +3417,14 @@ export async function survivingOps(
       continue;
     }
     if (op.kind === "shell") {
-      if (isMesh(solid)) continue;
+      if (isMesh(solid)) {
+        const candidate = hollowMesh(solid, op);
+        if (candidate) {
+          solid = candidate;
+          kept.push(op);
+        }
+        continue;
+      }
       const bRepSolid = solid as Shape3D;
       const candidate = op.points.length ? settled(() => {
         if (isBoxBased(spec.base)) return hollowEditedBox(bRepSolid, op) ?? shellSolid(bRepSolid, op);
@@ -3236,6 +3434,14 @@ export async function survivingOps(
       if (candidate) {
         solid = candidate;
         kept.push(op);
+      } else if (op.points.length) {
+        try {
+          const meshCandidate = hollowMesh(bRepSolid.meshShape(FALLBACK_MESH_QUALITY), op);
+          if (meshCandidate) {
+            solid = meshCandidate;
+            kept.push(op);
+          }
+        } catch { /* Fall back to mesh kernel */ }
       }
       continue;
     }
@@ -3873,7 +4079,6 @@ const SEAM_CHECK_QUALITY = { tolerance: 0.08, angularTolerance: 0.20 };
  * the group empty and the model gone. The display quality is plenty for a
  * boolean whose result is about to be tessellated at that quality anyway.
  */
-const FALLBACK_MESH_QUALITY = { tolerance: 0.08, angularTolerance: 0.20 };
 
 /** World bounds of a solid, or null when it will not report any. */
 export function boundsOf(solid: AnySolid): { min: Vec3; max: Vec3 } | null {
