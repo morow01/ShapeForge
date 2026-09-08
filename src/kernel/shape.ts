@@ -2468,6 +2468,371 @@ function pushPullMesh(solid: MeshShape, op: PushPullOp): MeshShape | null {
 }
 
 /**
+ * Resolves all boundary edge midpoint anchors of a planar face on a MeshShape.
+ */
+function findMeshFaceBoundaryAnchors(solid: MeshShape, point: Vec3, normal: Vec3): Vec3[] {
+  const raw = solid.wrapped.getMesh();
+  const numTris = raw.triVerts.length / 3;
+  if (numTris === 0) return [];
+
+  const [nx, ny, nz] = normal;
+  const targetD = nx * point[0] + ny * point[1] + nz * point[2];
+  const matchingTris = new Set<number>();
+
+  for (let t = 0; t < numTris; t++) {
+    const i0 = raw.triVerts[t * 3] * 3;
+    const i1 = raw.triVerts[t * 3 + 1] * 3;
+    const i2 = raw.triVerts[t * 3 + 2] * 3;
+    const ax = raw.vertProperties[i0], ay = raw.vertProperties[i0 + 1], az = raw.vertProperties[i0 + 2];
+    const bx = raw.vertProperties[i1], by = raw.vertProperties[i1 + 1], bz = raw.vertProperties[i1 + 2];
+    const cx = raw.vertProperties[i2], cy = raw.vertProperties[i2 + 1], cz = raw.vertProperties[i2 + 2];
+    const abx = bx - ax, aby = by - ay, abz = bz - az;
+    const acx = cx - ax, acy = cy - ay, acz = cz - az;
+    let tnx = aby * acz - abz * acy;
+    let tny = abz * acx - abx * acz;
+    let tnz = abx * acy - aby * acx;
+    const len = Math.hypot(tnx, tny, tnz) || 1;
+    tnx /= len; tny /= len; tnz /= len;
+    const dot = tnx * nx + tny * ny + tnz * nz;
+    if (dot > 0.98) {
+      const d = tnx * ax + tny * ay + tnz * az;
+      if (Math.abs(d - targetD) < 0.2) {
+        matchingTris.add(t);
+      }
+    }
+  }
+
+  const edgeCounts = new Map<string, number>();
+  for (const t of matchingTris) {
+    const v0 = raw.triVerts[t * 3];
+    const v1 = raw.triVerts[t * 3 + 1];
+    const v2 = raw.triVerts[t * 3 + 2];
+    const edges = [
+      v0 < v1 ? `${v0}:${v1}` : `${v1}:${v0}`,
+      v1 < v2 ? `${v1}:${v2}` : `${v2}:${v1}`,
+      v2 < v0 ? `${v2}:${v0}` : `${v0}:${v2}`,
+    ];
+    for (const e of edges) {
+      edgeCounts.set(e, (edgeCounts.get(e) || 0) + 1);
+    }
+  }
+
+  const anchors: Vec3[] = [];
+  for (const [key, count] of edgeCounts.entries()) {
+    if (count === 1) {
+      const colon = key.indexOf(":");
+      const v0 = Number(key.slice(0, colon));
+      const v1 = Number(key.slice(colon + 1));
+      anchors.push([
+        (raw.vertProperties[v0 * 3] + raw.vertProperties[v1 * 3]) / 2,
+        (raw.vertProperties[v0 * 3 + 1] + raw.vertProperties[v1 * 3 + 1]) / 2,
+        (raw.vertProperties[v0 * 3 + 2] + raw.vertProperties[v1 * 3 + 2]) / 2,
+      ]);
+    }
+  }
+  return anchors;
+}
+
+/**
+ * Applies a chamfer (bevel) or fillet (round) directly to feature edges of a MeshShape.
+ * Constructs exact 3D cutter prisms along the selected sharp edges and applies them via Manifold.
+ */
+function finishMeshEdge(
+  solid: MeshShape,
+  anchors: Vec3[],
+  distance: number,
+  kind: "chamfer" | "fillet" = "chamfer",
+): MeshShape | null {
+  if (Math.abs(distance) < 1e-6 || !anchors.length) return solid;
+  const raw = solid.wrapped.getMesh();
+  const numTris = raw.triVerts.length / 3;
+  if (numTris === 0) return null;
+
+  const triNormals: [number, number, number][] = [];
+  for (let t = 0; t < numTris; t++) {
+    const i0 = raw.triVerts[t * 3] * 3;
+    const i1 = raw.triVerts[t * 3 + 1] * 3;
+    const i2 = raw.triVerts[t * 3 + 2] * 3;
+    const ax = raw.vertProperties[i0], ay = raw.vertProperties[i0 + 1], az = raw.vertProperties[i0 + 2];
+    const bx = raw.vertProperties[i1], by = raw.vertProperties[i1 + 1], bz = raw.vertProperties[i1 + 2];
+    const cx = raw.vertProperties[i2], cy = raw.vertProperties[i2 + 1], cz = raw.vertProperties[i2 + 2];
+    const abx = bx - ax, aby = by - ay, abz = bz - az;
+    const acx = cx - ax, acy = cy - ay, acz = cz - az;
+    let nx = aby * acz - abz * acy;
+    let ny = abz * acx - abx * acz;
+    let nz = abx * acy - aby * acx;
+    const len = Math.hypot(nx, ny, nz) || 1;
+    triNormals.push([nx / len, ny / len, nz / len]);
+  }
+
+  const edgeToTris = new Map<string, number[]>();
+  for (let t = 0; t < numTris; t++) {
+    const v0 = raw.triVerts[t * 3];
+    const v1 = raw.triVerts[t * 3 + 1];
+    const v2 = raw.triVerts[t * 3 + 2];
+    const edges = [
+      v0 < v1 ? `${v0}:${v1}` : `${v1}:${v0}`,
+      v1 < v2 ? `${v1}:${v2}` : `${v2}:${v1}`,
+      v2 < v0 ? `${v2}:${v0}` : `${v0}:${v2}`,
+    ];
+    for (const e of edges) {
+      let list = edgeToTris.get(e);
+      if (!list) {
+        list = [];
+        edgeToTris.set(e, list);
+      }
+      list.push(t);
+    }
+  }
+
+  interface SharpEdge {
+    key: string;
+    v0Idx: number;
+    v1Idx: number;
+    v0: [number, number, number];
+    v1: [number, number, number];
+    nA: [number, number, number];
+    nB: [number, number, number];
+    tA: number;
+    tB: number;
+    u: [number, number, number];
+    len: number;
+  }
+  const sharpEdges: SharpEdge[] = [];
+  const vertexToSharpEdges = new Map<number, SharpEdge[]>();
+
+  for (const [key, tris] of edgeToTris.entries()) {
+    if (tris.length >= 2) {
+      const tA = tris[0], tB = tris[1];
+      const nA = triNormals[tA], nB = triNormals[tB];
+      const dot = nA[0] * nB[0] + nA[1] * nB[1] + nA[2] * nB[2];
+      if (dot < 0.965) {
+        const colon = key.indexOf(":");
+        const v0Idx = Number(key.slice(0, colon));
+        const v1Idx = Number(key.slice(colon + 1));
+        const v0: [number, number, number] = [raw.vertProperties[v0Idx * 3], raw.vertProperties[v0Idx * 3 + 1], raw.vertProperties[v0Idx * 3 + 2]];
+        const v1: [number, number, number] = [raw.vertProperties[v1Idx * 3], raw.vertProperties[v1Idx * 3 + 1], raw.vertProperties[v1Idx * 3 + 2]];
+        const dx = v1[0] - v0[0], dy = v1[1] - v0[1], dz = v1[2] - v0[2];
+        const len = Math.hypot(dx, dy, dz);
+        if (len < 1e-6) continue;
+        const u: [number, number, number] = [dx / len, dy / len, dz / len];
+        const seg: SharpEdge = { key, v0Idx, v1Idx, v0, v1, nA, nB, tA, tB, u, len };
+        sharpEdges.push(seg);
+
+        if (!vertexToSharpEdges.has(v0Idx)) vertexToSharpEdges.set(v0Idx, []);
+        vertexToSharpEdges.get(v0Idx)!.push(seg);
+        if (!vertexToSharpEdges.has(v1Idx)) vertexToSharpEdges.set(v1Idx, []);
+        vertexToSharpEdges.get(v1Idx)!.push(seg);
+      }
+    }
+  }
+
+  const matchedSegments = new Set<SharpEdge>();
+  for (const anchor of anchors) {
+    let bestSeg: SharpEdge | null = null;
+    let bestDist = Infinity;
+    for (const seg of sharpEdges) {
+      const v0 = seg.v0, v1 = seg.v1;
+      const wx = anchor[0] - v0[0], wy = anchor[1] - v0[1], wz = anchor[2] - v0[2];
+      const vx = v1[0] - v0[0], vy = v1[1] - v0[1], vz = v1[2] - v0[2];
+      const l2 = vx * vx + vy * vy + vz * vz;
+      const t = l2 > 0 ? Math.max(0, Math.min(1, (wx * vx + wy * vy + wz * vz) / l2)) : 0;
+      const cx = v0[0] + t * vx, cy = v0[1] + t * vy, cz = v0[2] + t * vz;
+      const d = Math.hypot(anchor[0] - cx, anchor[1] - cy, anchor[2] - cz);
+      if (d < bestDist) {
+        bestDist = d;
+        bestSeg = seg;
+      }
+    }
+    if (bestSeg && bestDist < 1.5) {
+      matchedSegments.add(bestSeg);
+      const toCheck = [bestSeg];
+      while (toCheck.length > 0) {
+        const curr = toCheck.pop()!;
+        for (const vIdx of [curr.v0Idx, curr.v1Idx]) {
+          const neighbors = vertexToSharpEdges.get(vIdx) || [];
+          for (const nb of neighbors) {
+            if (matchedSegments.has(nb)) continue;
+            const dotU = Math.abs(curr.u[0] * nb.u[0] + curr.u[1] * nb.u[1] + curr.u[2] * nb.u[2]);
+            if (dotU > 0.99) {
+              matchedSegments.add(nb);
+              toCheck.push(nb);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (matchedSegments.size === 0) return null;
+
+  const manifold = getManifold();
+  let currentSolid = solid;
+
+  for (const seg of matchedSegments) {
+    const v0 = seg.v0, v1 = seg.v1;
+    const u = seg.u;
+    const mid: [number, number, number] = [(v0[0] + v1[0]) / 2, (v0[1] + v1[1]) / 2, (v0[2] + v1[2]) / 2];
+
+    const getThird = (triIdx: number): [number, number, number] | null => {
+      for (let j = 0; j < 3; j++) {
+        const vi = raw.triVerts[triIdx * 3 + j];
+        if (vi !== seg.v0Idx && vi !== seg.v1Idx) {
+          return [raw.vertProperties[vi * 3], raw.vertProperties[vi * 3 + 1], raw.vertProperties[vi * 3 + 2]];
+        }
+      }
+      return null;
+    };
+    const vA3 = getThird(seg.tA);
+    const vB3 = getThird(seg.tB);
+    if (!vA3 || !vB3) continue;
+
+    const getDir = (vThird: [number, number, number]): [number, number, number] => {
+      const diff = [vThird[0] - mid[0], vThird[1] - mid[1], vThird[2] - mid[2]];
+      const dot = diff[0] * u[0] + diff[1] * u[1] + diff[2] * u[2];
+      const perp = [diff[0] - dot * u[0], diff[1] - dot * u[1], diff[2] - dot * u[2]];
+      const l = Math.hypot(perp[0], perp[1], perp[2]) || 1;
+      return [perp[0] / l, perp[1] / l, perp[2] / l];
+    };
+    const dA = getDir(vA3);
+    const dB = getDir(vB3);
+
+    const signedDist = (vB3[0] - mid[0]) * seg.nA[0] + (vB3[1] - mid[1]) * seg.nA[1] + (vB3[2] - mid[2]) * seg.nA[2];
+    const isConcave = signedDist > 1e-4;
+
+    const nAvgRaw = [seg.nA[0] + seg.nB[0], seg.nA[1] + seg.nB[1], seg.nA[2] + seg.nB[2]];
+    const nAvgL = Math.hypot(nAvgRaw[0], nAvgRaw[1], nAvgRaw[2]) || 1;
+    const nAvg: [number, number, number] = [nAvgRaw[0] / nAvgL, nAvgRaw[1] / nAvgL, nAvgRaw[2] / nAvgL];
+
+    const extendEnd = Math.min(0.5, seg.len * 0.1);
+    const overshoot = isConcave ? 0 : 0.05;
+
+    const p0: [number, number, number] = [v0[0] - u[0] * extendEnd, v0[1] - u[1] * extendEnd, v0[2] - u[2] * extendEnd];
+    const p1: [number, number, number] = [v1[0] + u[0] * extendEnd, v1[1] + u[1] * extendEnd, v1[2] + u[2] * extendEnd];
+
+    if (kind === "chamfer") {
+      const C0: [number, number, number] = [p0[0] + overshoot * nAvg[0], p0[1] + overshoot * nAvg[1], p0[2] + overshoot * nAvg[2]];
+      const A0: [number, number, number] = [p0[0] + distance * dA[0], p0[1] + distance * dA[1], p0[2] + distance * dA[2]];
+      const B0: [number, number, number] = [p0[0] + distance * dB[0], p0[1] + distance * dB[1], p0[2] + distance * dB[2]];
+
+      const C1: [number, number, number] = [p1[0] + overshoot * nAvg[0], p1[1] + overshoot * nAvg[1], p1[2] + overshoot * nAvg[2]];
+      const A1: [number, number, number] = [p1[0] + distance * dA[0], p1[1] + distance * dA[1], p1[2] + distance * dA[2]];
+      const B1: [number, number, number] = [p1[0] + distance * dB[0], p1[1] + distance * dB[1], p1[2] + distance * dB[2]];
+
+      const vCB = [B0[0] - C0[0], B0[1] - C0[1], B0[2] - C0[2]];
+      const vCA = [A0[0] - C0[0], A0[1] - C0[1], A0[2] - C0[2]];
+      const crossX = vCB[1] * vCA[2] - vCB[2] * vCA[1];
+      const crossY = vCB[2] * vCA[0] - vCB[0] * vCA[2];
+      const crossZ = vCB[0] * vCA[1] - vCB[1] * vCA[0];
+      const dotU = crossX * u[0] + crossY * u[1] + crossZ * u[2];
+
+      let verts: number[];
+      if (dotU > 0) {
+        verts = [
+          C0[0], C0[1], C0[2],
+          B0[0], B0[1], B0[2],
+          A0[0], A0[1], A0[2],
+          C1[0], C1[1], C1[2],
+          B1[0], B1[1], B1[2],
+          A1[0], A1[1], A1[2],
+        ];
+      } else {
+        verts = [
+          C0[0], C0[1], C0[2],
+          A0[0], A0[1], A0[2],
+          B0[0], B0[1], B0[2],
+          C1[0], C1[1], C1[2],
+          A1[0], A1[1], A1[2],
+          B1[0], B1[1], B1[2],
+        ];
+      }
+      const tris = [
+        0, 2, 1,
+        3, 4, 5,
+        0, 1, 4, 0, 4, 3,
+        1, 2, 5, 1, 5, 4,
+        2, 0, 3, 2, 3, 5,
+      ];
+
+      const prismMesh = new manifold.Mesh({
+        numProp: 3,
+        vertProperties: Float32Array.from(verts),
+        triVerts: Uint32Array.from(tris),
+      });
+      const prism = new MeshShape(new manifold.Manifold(prismMesh));
+      currentSolid = isConcave ? currentSolid.fuse(prism) : currentSolid.cut(prism);
+    } else {
+      const arcSteps = 8;
+      const profile0: [number, number, number][] = [];
+      const profile1: [number, number, number][] = [];
+
+      const C0: [number, number, number] = [p0[0] + overshoot * nAvg[0], p0[1] + overshoot * nAvg[1], p0[2] + overshoot * nAvg[2]];
+      const C1: [number, number, number] = [p1[0] + overshoot * nAvg[0], p1[1] + overshoot * nAvg[1], p1[2] + overshoot * nAvg[2]];
+      profile0.push(C0);
+      profile1.push(C1);
+
+      for (let s = 0; s <= arcSteps; s++) {
+        const t = s / arcSteps;
+        const theta = (Math.PI / 2) * t;
+        const wA = 1 - Math.sin(theta);
+        const wB = 1 - Math.cos(theta);
+        profile0.push([
+          p0[0] + distance * (wA * dA[0] + wB * dB[0]),
+          p0[1] + distance * (wA * dA[1] + wB * dB[1]),
+          p0[2] + distance * (wA * dA[2] + wB * dB[2]),
+        ]);
+        profile1.push([
+          p1[0] + distance * (wA * dA[0] + wB * dB[0]),
+          p1[1] + distance * (wA * dA[1] + wB * dB[1]),
+          p1[2] + distance * (wA * dA[2] + wB * dB[2]),
+        ]);
+      }
+
+      const v01 = [profile0[1][0] - profile0[0][0], profile0[1][1] - profile0[0][1], profile0[1][2] - profile0[0][2]];
+      const v02 = [profile0[2][0] - profile0[0][0], profile0[2][1] - profile0[0][1], profile0[2][2] - profile0[0][2]];
+      const crX = v01[1] * v02[2] - v01[2] * v02[1];
+      const crY = v01[2] * v02[0] - v01[0] * v02[2];
+      const crZ = v01[0] * v02[1] - v01[1] * v02[0];
+      const dotU = crX * u[0] + crY * u[1] + crZ * u[2];
+
+      const K = profile0.length;
+      const verts: number[] = [];
+      for (const p of profile0) verts.push(p[0], p[1], p[2]);
+      for (const p of profile1) verts.push(p[0], p[1], p[2]);
+
+      const tris: number[] = [];
+      for (let i = 1; i < K - 1; i++) {
+        if (dotU > 0) tris.push(0, i + 1, i);
+        else tris.push(0, i, i + 1);
+      }
+      for (let i = 1; i < K - 1; i++) {
+        if (dotU > 0) tris.push(K, K + i, K + i + 1);
+        else tris.push(K, K + i + 1, K + i);
+      }
+      for (let i = 0; i < K; i++) {
+        const next = (i + 1) % K;
+        if (dotU > 0) {
+          tris.push(i, next, K + next, i, K + next, K + i);
+        } else {
+          tris.push(i, K + next, next, i, K + i, K + next);
+        }
+      }
+
+      const prismMesh = new manifold.Mesh({
+        numProp: 3,
+        vertProperties: Float32Array.from(verts),
+        triVerts: Uint32Array.from(tris),
+      });
+      const prism = new MeshShape(new manifold.Manifold(prismMesh));
+      currentSolid = isConcave ? currentSolid.fuse(prism) : currentSolid.cut(prism);
+    }
+  }
+
+  if (currentSolid.isEmpty || currentSolid.volume() <= 1e-9) return null;
+  return currentSolid;
+}
+
+/**
  * Builds the stable portion of a live push/pull preview: the edit's base and
  * every already-committed operation, excluding the tentative final operation
  * whose distance changes on every pointer move. The worker caches this solid
@@ -2605,7 +2970,16 @@ async function replayEdit(
   for (const op of spec.ops) {
     if (op.kind === "fillet" || op.kind === "chamfer") {
       if (isMesh(solid)) {
-        onError?.(spec.id, "Edge finishing is unavailable after a mesh-based edit.");
+        let anchors = op.points?.length ? op.points : [op.point];
+        if (op.face && !op.points?.length) {
+          anchors = findMeshFaceBoundaryAnchors(solid, op.face.point, op.face.normal);
+        }
+        const edited = finishMeshEdge(solid, anchors, op.distance, op.kind);
+        if (!edited) {
+          onError?.(spec.id, `That ${op.kind} could not be applied at this size; the previous shape was kept.`);
+        } else {
+          solid = edited;
+        }
         continue;
       }
       try {
@@ -2788,8 +3162,8 @@ export async function survivingOps(
   onProgress?: (id: string) => void,
 ): Promise<EditOp[]> {
   const base = await makeLocal(spec.base, onError, onProgress);
-  if (!base || isMesh(base)) return spec.ops; // nothing to replay against — leave as-is
-  let solid = base;
+  if (!base) return spec.ops;
+  let solid: AnySolid = base;
   const kept: EditOp[] = [];
 
   /**
@@ -2817,20 +3191,33 @@ export async function survivingOps(
 
   for (const op of spec.ops) {
     if (op.kind === "fillet" || op.kind === "chamfer") {
+      if (isMesh(solid)) {
+        let anchors = op.points?.length ? op.points : [op.point];
+        if (op.face && !op.points?.length) {
+          anchors = findMeshFaceBoundaryAnchors(solid, op.face.point, op.face.normal);
+        }
+        const candidate = finishMeshEdge(solid, anchors, op.distance, op.kind);
+        if (candidate) {
+          solid = candidate;
+          kept.push(op);
+        }
+        continue;
+      }
+      const bRepSolid = solid as Shape3D;
       const anchors = op.points?.length ? op.points : [op.point];
-      const faceEdges = op.face ? findFace(solid, op.face.point, op.face.normal)?.edges : undefined;
+      const faceEdges = op.face ? findFace(bRepSolid, op.face.point, op.face.normal)?.edges : undefined;
       if (op.face && !faceEdges?.length) continue;
       const edgeSelector = faceEdges
         ? (finder: import("replicad").EdgeFinder) => finder.inList(faceEdges.map((edge) => edge.clone()))
         : edgesAt(anchors);
       let candidate = settled(() => (op.kind === "fillet"
-        ? solid.fillet(op.distance, edgeSelector)
-        : solid.chamfer(op.distance, edgeSelector)) as Shape3D);
+        ? bRepSolid.fillet(op.distance, edgeSelector)
+        : bRepSolid.chamfer(op.distance, edgeSelector)) as Shape3D);
       if (!candidate && !faceEdges) {
         const fallbackSelector = edgesAt(anchors, EDGE_ANCHOR_FALLBACK_TOLERANCE);
         candidate = settled(() => (op.kind === "fillet"
-          ? solid.fillet(op.distance, fallbackSelector)
-          : solid.chamfer(op.distance, fallbackSelector)) as Shape3D);
+          ? bRepSolid.fillet(op.distance, fallbackSelector)
+          : bRepSolid.chamfer(op.distance, fallbackSelector)) as Shape3D);
       }
       if (candidate) {
         solid = candidate;
@@ -2839,10 +3226,12 @@ export async function survivingOps(
       continue;
     }
     if (op.kind === "shell") {
+      if (isMesh(solid)) continue;
+      const bRepSolid = solid as Shape3D;
       const candidate = op.points.length ? settled(() => {
-        if (isBoxBased(spec.base)) return hollowEditedBox(solid, op) ?? shellSolid(solid, op);
-        if (isCylinderBased(spec.base)) return hollowEditedCylinder(solid, op, spec.base) ?? shellSolid(solid, op);
-        return shellSolid(solid, op);
+        if (isBoxBased(spec.base)) return hollowEditedBox(bRepSolid, op) ?? shellSolid(bRepSolid, op);
+        if (isCylinderBased(spec.base)) return hollowEditedCylinder(bRepSolid, op, spec.base) ?? shellSolid(bRepSolid, op);
+        return shellSolid(bRepSolid, op);
       }) : null;
       if (candidate) {
         solid = candidate;
@@ -2851,9 +3240,11 @@ export async function survivingOps(
       continue;
     }
     if (op.kind === "offsetExtrude") {
+      if (isMesh(solid)) continue;
+      const bRepSolid = solid as Shape3D;
       const candidate = settled(() => {
-        const face = findFace(solid, op.point, op.normal);
-        return face ? offsetExtrudeFace(solid, face, op) : null;
+        const face = findFace(bRepSolid, op.point, op.normal);
+        return face ? offsetExtrudeFace(bRepSolid, face, op) : null;
       });
       if (candidate) {
         solid = candidate;
@@ -2862,9 +3253,11 @@ export async function survivingOps(
       continue;
     }
     if (op.kind === "resizeFace") {
+      if (isMesh(solid)) continue;
+      const bRepSolid = solid as Shape3D;
       const candidate = settled(() => {
-        const face = findFace(solid, op.point, op.normal);
-        return face ? resizePlanarFace(solid, face, op) : null;
+        const face = findFace(bRepSolid, op.point, op.normal);
+        return face ? resizePlanarFace(bRepSolid, face, op) : null;
       });
       if (candidate) {
         solid = candidate;
@@ -2880,9 +3273,17 @@ export async function survivingOps(
       continue;
     }
     const faceOp = op as PushPullOp;
-    const face = findFace(solid, faceOp.point, faceOp.normal);
+    if (isMesh(solid)) {
+      const edited = pushPullMesh(solid, faceOp);
+      if (edited) {
+        solid = edited;
+        kept.push(op);
+      }
+      continue;
+    }
+    const face = findFace(solid as Shape3D, faceOp.point, faceOp.normal);
     if (!face) continue;
-    solid = pushPullFace(solid, face, faceOp.distance);
+    solid = pushPullFace(solid as Shape3D, face, faceOp.distance);
     kept.push(op);
   }
   return kept;
