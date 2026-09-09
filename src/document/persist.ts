@@ -3,6 +3,7 @@ import type {
   BooleanOp,
   CameraMode,
   EditOp,
+  LowPoly,
   PrimitiveKind,
   ProjectData,
   ProjectFile,
@@ -33,6 +34,15 @@ const isVec3 = (v: unknown): v is Vec3 =>
  * truncated. Anything that does not match is dropped rather than crashing the
  * kernel later with a half-formed node.
  */
+/** Saved faceting settings, or undefined for anything that isn't a usable
+ *  pair of positive numbers — an absent/!malformed value means full detail. */
+function parseLowPoly(raw: unknown): LowPoly | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const { facet, even } = raw as { facet?: unknown; even?: unknown };
+  if (typeof facet !== "number" || !Number.isFinite(facet) || facet <= 0) return undefined;
+  return { facet, even: typeof even === "number" && Number.isFinite(even) && even > 0 ? even : 0 };
+}
+
 export function parseNode(raw: unknown): SceneNode | null {
   if (!raw || typeof raw !== "object") return null;
   const n = raw as Record<string, unknown>;
@@ -52,6 +62,7 @@ export function parseNode(raw: unknown): SceneNode | null {
     isHole: n.isHole === true,
     color: typeof n.color === "string" && /^#[0-9a-fA-F]{6}$/.test(n.color) ? n.color : undefined,
     transparent: typeof n.transparent === "boolean" ? n.transparent : undefined,
+    lowPoly: parseLowPoly(n.lowPoly),
     hidden: n.hidden === true,
   };
 

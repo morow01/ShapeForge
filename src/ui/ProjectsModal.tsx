@@ -48,10 +48,11 @@ export function ProjectsModal({
     p.name.toLowerCase().includes(search.toLowerCase().trim()),
   );
 
+  // No window.prompt() for the name — it throws outright in the app's own
+  // webview, which left this button dead. The project is created under the
+  // default name and renamed from the topbar title, same as New Design.
   const handleNew = () => {
-    const name = prompt("Enter project name:", "Untitled Project");
-    if (name === null) return;
-    newProject(name);
+    newProject("Untitled Project");
     onClose();
   };
 

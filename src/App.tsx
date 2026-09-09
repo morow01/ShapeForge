@@ -60,6 +60,7 @@ import { TextModal } from "./ui/TextModal";
 import { SettingsModal } from "./ui/SettingsModal";
 import type { BuildPlateSize } from "./ui/SettingsModal";
 import { ExportModal } from "./ui/ExportModal";
+import { NewDesignModal } from "./ui/NewDesignModal";
 import { StepperButtons } from "./ui/MathNumInput";
 import { formatLength, fromMillimetres, toMillimetres } from "./measurement";
 import type { AppearancePreference, DisplayUnit } from "./measurement";
@@ -128,6 +129,7 @@ const toSpec = (n: SceneNode): NodeSpec => {
       rotation: n.rotation,
       scale: n.scale,
       isHole: n.isHole,
+      lowPoly: n.lowPoly,
     };
   }
   if (n.type === "import") {
@@ -140,6 +142,7 @@ const toSpec = (n: SceneNode): NodeSpec => {
       rotation: n.rotation,
       scale: n.scale,
       isHole: n.isHole,
+      lowPoly: n.lowPoly,
     };
   }
   if (n.type === "build") {
@@ -152,6 +155,7 @@ const toSpec = (n: SceneNode): NodeSpec => {
       rotation: n.rotation,
       scale: n.scale,
       isHole: n.isHole,
+      lowPoly: n.lowPoly,
     };
   }
   if (n.type === "edit") {
@@ -164,6 +168,7 @@ const toSpec = (n: SceneNode): NodeSpec => {
       rotation: n.rotation,
       scale: n.scale,
       isHole: n.isHole,
+      lowPoly: n.lowPoly,
     };
   }
   if (n.kind === "text") {
@@ -180,6 +185,7 @@ const toSpec = (n: SceneNode): NodeSpec => {
       rotation: n.rotation,
       scale: n.scale,
       isHole: n.isHole,
+      lowPoly: n.lowPoly,
     };
   }
   return {
@@ -193,6 +199,7 @@ const toSpec = (n: SceneNode): NodeSpec => {
     rotation: n.rotation,
     scale: n.scale,
     isHole: n.isHole,
+    lowPoly: n.lowPoly,
   };
 };
 
@@ -241,6 +248,10 @@ function flattenSpecs(nodes: SceneNode[]): NodeSpec[] {
 /** Geometry-defining shape of a node, ignoring its own placement. A group's
  *  shape does depend on where its children sit, so those stay included. */
 const shapeOf = (n: SceneNode): unknown => {
+  // Faceting rebuilds the solid (see applyLowPoly in kernel/shape.ts), so it
+  // belongs in every signature below — leaving it out means changing a slider
+  // updates the document but never asks the kernel for the new shape.
+  const facets = n.lowPoly ? [n.lowPoly.facet, n.lowPoly.even] : null;
   if (isGroup(n)) {
     if (n.op === "assembly") {
       return [n.id, "assembly", n.children.filter((c) => !c.hidden).map(shapeOf)];
@@ -258,15 +269,16 @@ const shapeOf = (n: SceneNode): unknown => {
       // shapeOf, since hiding one of those is a free viewport toggle with
       // nothing for the kernel to redo.
       n.children.map((c) => [shapeOf(c), c.position, c.rotation, c.scale, c.isHole, c.hidden]),
+      facets,
     ];
   }
   // blobId never changes for an import node, so this is stable — importSTL()
   // never re-runs just because the node moved.
   // Thickness is part of the shape for artwork, so a change to it rebuilds.
-  if (n.type === "import") return [n.id, "import", n.blobId, n.svg?.thickness];
-  if (n.type === "edit") return [n.id, "edit", shapeOf(n.base), n.ops];
-  if (n.type === "build") return [n.id, "build", n.sources.map(shapeOf), n.keep];
-  return [n.id, n.kind, n.params, n.text, n.fontName];
+  if (n.type === "import") return [n.id, "import", n.blobId, n.svg?.thickness, facets];
+  if (n.type === "edit") return [n.id, "edit", shapeOf(n.base), n.ops, facets];
+  if (n.type === "build") return [n.id, "build", n.sources.map(shapeOf), n.keep, facets];
+  return [n.id, n.kind, n.params, n.text, n.fontName, facets];
 };
 
 /** Safe to rebuild independently during an export fallback. Primitive-only
@@ -401,6 +413,7 @@ export function App() {
   const [projectsModalOpen, setProjectsModalOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [exportModalOpen, setExportModalOpen] = useState(false);
+  const [newDesignPromptOpen, setNewDesignPromptOpen] = useState(false);
   const [fileMenuOpen, setFileMenuOpen] = useState(false);
   const fileMenuRef = useRef<HTMLDivElement>(null);
   const [displayUnit, setDisplayUnit] = useState<DisplayUnit>(() => {
@@ -448,6 +461,7 @@ export function App() {
     shapeBuild,
     setColor,
     setTransparent,
+    setLowPoly,
     setGroupOp,
     toggleCollapsed,
     toggleHidden,
@@ -455,7 +469,6 @@ export function App() {
     group,
     combine,
     ungroup,
-    clearAll,
     renameProject,
     newProject,
     exportCurrentProject,
@@ -2736,6 +2749,34 @@ export function App() {
     }
   };
 
+  /**
+   * Starts a new design and puts the title straight into rename mode.
+   *
+   * Deliberately no window.prompt() for the name: prompt() THROWS
+   * ("prompt() is not supported") in the app's own webview, so every New
+   * Design entry point used to die on that line with the menu already closed
+   * — which looked exactly like the button doing nothing while the old design
+   * stayed on screen. The inline title editor the topbar already has does the
+   * same job without a native dialog.
+   *
+   * Nothing is destroyed either way: the previous design stays saved in the
+   * Projects Library, which is why this needs no confirmation.
+   */
+  const createNewDesign = useCallback(() => {
+    const name = "Untitled Project";
+    newProject(name);
+    setTitleDraft(name);
+    setIsEditingTitle(true);
+    setNewDesignPromptOpen(false);
+  }, [newProject]);
+
+  /** Asks first when there is something on screen to lose track of. An empty
+   *  scene has nothing to confirm, so it just goes. */
+  const startNewDesign = useCallback(() => {
+    if (useDoc.getState().nodes.length) setNewDesignPromptOpen(true);
+    else createNewDesign();
+  }, [createNewDesign]);
+
   /** Transparency, TinkerCAD-style: every selected solid becomes see-through
    *  (or opaque again) together. Holes are skipped — they already render in
    *  their own material — and a child's group mirrors the change, so a shape
@@ -3093,8 +3134,7 @@ export function App() {
         exportCurrentProject();
       } else if (mod && e.altKey && e.key.toLowerCase() === "n") {
         e.preventDefault();
-        const name = prompt("Enter project name:", "Untitled Project");
-        if (name !== null) newProject(name);
+        startNewDesign();
       } else if (mod && e.key.toLowerCase() === "g") {
         e.preventDefault();
         if (e.shiftKey) ungroupSelected();
@@ -3284,8 +3324,7 @@ export function App() {
                   role="menuitem"
                   onClick={() => {
                     setFileMenuOpen(false);
-                    const name = prompt("Enter project name:", "Untitled Project");
-                    if (name !== null) newProject(name);
+                    startNewDesign();
                   }}
                 >
                   <NewDesignIcon className="topbar-icon" />
@@ -3854,7 +3893,7 @@ export function App() {
             <button
               className="icon-button"
               onClick={() => {
-                if (!nodes.length || confirm("Discard this design and start a new one?")) clearAll();
+                startNewDesign();
               }}
               disabled={!nodes.length}
               title="New design"
@@ -4647,6 +4686,7 @@ export function App() {
                 endHistoryBatch();
               }}
               onTransparent={applyTransparent}
+              onLowPoly={(lowPoly) => setLowPoly(selected.id, lowPoly)}
               onSvgThickness={(mm) => setSvgThickness(selected.id, mm)}
               onSimplifyMesh={handleSimplifyMesh}
               onReplaceFile={handleReplaceFile}
@@ -5606,6 +5646,14 @@ export function App() {
         onClose={() => setSettingsOpen(false)}
       />
 
+      <NewDesignModal
+        open={newDesignPromptOpen}
+        projectName={projectName}
+        objectCount={nodes.length}
+        onSaveFirst={() => { exportCurrentProject(); createNewDesign(); }}
+        onContinue={createNewDesign}
+        onClose={() => setNewDesignPromptOpen(false)}
+      />
       <ExportModal
         open={exportModalOpen}
         quality={exportQuality}

@@ -2020,6 +2020,19 @@ button.stepper-btn:disabled {
 .check { display: flex; align-items: center; gap: 7px; margin: 10px 0; color: #52616c; font-size: 11px; cursor: pointer; }
 .check input { accent-color: #00a7a5; }
 .hint { margin: 0; color: #89959d; font-size: 10px; }
+
+.lowpoly-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-bottom: 8px;
+  color: #4c5b66;
+  font-size: 11px;
+  cursor: pointer;
+}
+.lowpoly-toggle input { margin: 0; cursor: pointer; }
+/* Matches the number shown beside a primitive's own sliders. */
+.field-value { color: #6b7a85; font-size: 11px; font-variant-numeric: tabular-nums; }
 .invalid { margin: 0 0 10px; padding: 8px; color: #a7353e; background: #ffebed; border: 1px solid #efbdc1; border-radius: 5px; font-size: 10px; }
 .readout, .result-stats { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; margin: 0; padding: 8px; color: #52616c; background: #f5f8f9; border: 1px solid #dfe6ea; border-radius: 5px; font-size: 10px; }
 .readout dt { color: #87939b; }

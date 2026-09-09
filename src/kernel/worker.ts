@@ -991,11 +991,16 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 export const KERNEL_REVISION = 6;
 
 function localKey(spec: NodeSpec): string {
+  // lowPoly is part of every key: it changes the built solid, so leaving it
+  // out would serve the full-detail mesh straight back out of the cache and
+  // the faceting controls would appear to do nothing.
+  const facets = spec.lowPoly ? [spec.lowPoly.facet, spec.lowPoly.even] : null;
   if (spec.type === "group") {
     return JSON.stringify([
       spec.type,
       spec.op,
       spec.children.map((c) => [localKey(c), c.position, c.rotation, c.scale, c.isHole]),
+      facets,
       KERNEL_REVISION,
     ]);
   }
@@ -1004,19 +1009,21 @@ function localKey(spec: NodeSpec): string {
       spec.type,
       spec.blobId,
       spec.svg ? [spec.svg.thickness, SVG_IMPORT_REVISION] : null,
+      facets,
       KERNEL_REVISION,
     ]);
   }
-  if (spec.type === "edit") return JSON.stringify([spec.type, localKey(spec.base), spec.ops, KERNEL_REVISION]);
+  if (spec.type === "edit") return JSON.stringify([spec.type, localKey(spec.base), spec.ops, facets, KERNEL_REVISION]);
   if (spec.type === "build") {
     return JSON.stringify([
       spec.type,
       spec.sources.map((s) => [localKey(s), s.position, s.rotation, s.scale]),
       spec.keep,
+      facets,
       KERNEL_REVISION,
     ]);
   }
-  return JSON.stringify([spec.type, spec.kind, spec.params, spec.text, spec.fontName, spec.textPaths, KERNEL_REVISION]);
+  return JSON.stringify([spec.type, spec.kind, spec.params, spec.text, spec.fontName, spec.textPaths, facets, KERNEL_REVISION]);
 }
 
 /**

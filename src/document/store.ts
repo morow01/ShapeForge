@@ -38,6 +38,7 @@ import type {
   EditNode,
   GroupNode,
   ImportNode,
+  LowPoly,
   ObjectNode,
   PrimitiveKind,
   ProjectData,
@@ -734,6 +735,8 @@ interface DocState {
   setHole: (id: string, isHole: boolean) => void;
   setColor: (id: string, color: string) => void;
   setTransparent: (id: string, transparent: boolean) => void;
+  /** Faceted low-poly styling; undefined clears it back to full detail. */
+  setLowPoly: (id: string, lowPoly: LowPoly | undefined) => void;
   setGroupOp: (id: string, op: BooleanOp) => void;
   toggleCollapsed: (id: string) => void;
   /** Flips a node's `hidden` flag — the eye icon in the Objects panel. Works
@@ -1322,6 +1325,13 @@ export const useDoc = create<DocState>()(
             }
             return { ...n, transparent };
           }),
+        }));
+        afterBatchedMutation();
+      },
+
+      setLowPoly: (id, lowPoly) => {
+        set((s) => ({
+          nodes: updateNode(s.nodes, id, (n) => ({ ...n, lowPoly })),
         }));
         afterBatchedMutation();
       },

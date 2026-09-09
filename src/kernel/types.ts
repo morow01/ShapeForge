@@ -1,4 +1,4 @@
-import type { BooleanOp, EditOp, PrimitiveKind, Vec3 } from "../document/types";
+import type { BooleanOp, EditOp, LowPoly, PrimitiveKind, Vec3 } from "../document/types";
 import type { SvgCommand } from "../svg/parse";
 
 /** Typed arrays keep large imported scans compact while structured-cloning
@@ -29,6 +29,8 @@ interface SpecBase {
   rotation: Vec3;
   scale: Vec3;
   isHole: boolean;
+  /** Faceting is geometry, not a display concern, so it does travel here. */
+  lowPoly?: LowPoly;
 }
 
 /** The subset of a scene node the kernel needs — no display concerns, so

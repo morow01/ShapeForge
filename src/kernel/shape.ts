@@ -23,6 +23,7 @@ import { makeSpringSolid } from "./spring";
 import { makeHingeSolid } from "./hinge";
 import type { SvgCommand } from "../svg/parse";
 import type { EditOp, OffsetExtrudeOp, PushPullOp, ResizeFaceOp, ShellOp, Vec3 } from "../document/types";
+import { rotateLocalOffset } from "../document/bake";
 import type { BuildSpec, EditSpec, ImportSpec, NodeSpec, ObjectSpec } from "./types";
 
 export { InvalidShapeError };
@@ -783,9 +784,23 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
       }
       break;
     }
-    case "sphere":
-      s = makeSphere(p.radius);
+    case "sphere": {
+      // A sphere is normally an exact B-Rep ball with no side count at all.
+      // Low poly injects one (see lowPolyPrimitiveSpec) and that switches the
+      // build to a geodesic mesh: evenly sized triangles, poles included, and
+      // the radius held exactly. Decimating the smooth ball instead gave
+      // crystalline facets and a lopsided silhouette — 19.4 x 18.6 x 20 on a
+      // 20mm sphere — because simplify() keeps whichever vertices happen to
+      // fit the tolerance and knows nothing about symmetry.
+      const sides = p.sides;
+      if (typeof sides === "number" && Number.isFinite(sides) && sides < SPHERE_SMOOTH_SIDES) {
+        const n = Math.max(4, Math.min(SPHERE_SMOOTH_SIDES, Math.round(sides)));
+        s = new MeshShape(getManifold().Manifold.sphere(Math.max(p.radius, 0.1), n));
+      } else {
+        s = makeSphere(p.radius);
+      }
       break;
+    }
     case "cone": {
       const rb = Math.max(p.bottomRadius, 0);
       const rt = Math.max(p.topRadius, 0);
@@ -1960,6 +1975,151 @@ export async function simplifyImport(
   };
 }
 
+/**
+ * Rebuilds a solid as a deliberately faceted, low-poly version of itself.
+ *
+ * This is real geometry, not a shading trick: the result is what gets sliced
+ * and printed. Manifold's simplify() only ever collapses to a subset of the
+ * existing vertices and keeps every surface within `facet` of where it was,
+ * so the shape stays watertight and printable however coarse it gets.
+ *
+ * `even` first remeshes to a roughly uniform edge length. Without it a
+ * cylinder decimates into long stringy slivers — its tessellation is dense
+ * around the curve and sparse along the length, and simplify() can only work
+ * with the vertices it is given. Remeshing first spreads vertices evenly, so
+ * what survives reads as deliberate facets rather than damage. It costs
+ * triangles up front, hence its own control rather than always-on.
+ */
+export interface LowPolySettings {
+  /** How far a surface may move, in mm. Bigger means chunkier facets. */
+  facet: number;
+  /** Target edge length for the pre-pass, in mm. 0 skips it. */
+  even: number;
+}
+
+/**
+ * Faceting for a primitive that is a profile swept round an axis — anything
+ * carrying a `sides` count (cylinder, cone, tube, polygon prism …).
+ *
+ * These have an obviously correct low-poly form: a REGULAR n-sided prism.
+ * Decimating them instead gives an irregular one — simplify() collapses
+ * whichever vertices happen to fit the tolerance, with no notion of symmetry,
+ * so a cylinder came out with uneven side widths and a lopsided cap. Rebuilding
+ * the primitive at a lower side count is both prettier and cheaper, and it
+ * keeps the exact radius instead of pulling the surface inward.
+ *
+ * The side count is derived from the same "how far may a surface move"
+ * measure the slider means everywhere else: a polygon inscribed in radius r
+ * sits at most r(1 - cos(pi/n)) inside the circle, so solving that for n
+ * turns a facet size in mm into a side count.
+ *
+ * Doubly-curved surfaces come through here too, via their own knobs — a
+ * sphere's geodesic side count, an ellipsoid's surface steps, a torus's ring
+ * and tube steps. They were left on decimation at first on the theory that
+ * crystalline facets suited them; they do not. Decimation moved a 20mm
+ * sphere's silhouette by more than a millimetre and by a different amount on
+ * each axis, which is both ugly and wrong for a print.
+ */
+
+/** Sides needed for an inscribed polygon to stay within `facet` mm of a circle
+ *  of radius r: the sagitta is r(1 - cos(pi/n)), solved for n. */
+function sidesForFacet(radius: number, facet: number): number {
+  const ratio = 1 - facet / radius;
+  // A facet at or beyond the radius has no polygon solution; take the coarsest.
+  if (ratio <= -1) return 3;
+  return Math.floor(Math.PI / Math.acos(Math.max(-1, Math.min(1, ratio))));
+}
+
+/** The smooth-sphere side count. At or above this the sphere builder uses the
+ *  exact B-Rep ball rather than a geodesic mesh. */
+const SPHERE_SMOOTH_SIDES = 64;
+
+type LowPolyKnob = { name: string; current: number; radius: number; floor: number };
+
+/**
+ * The parameter(s) that coarsen a primitive's curved surface, each paired with
+ * the radius it is spread around and the lowest value its builder accepts.
+ */
+function lowPolyKnobs(spec: ObjectSpec): LowPolyKnob[] {
+  const p = spec.params;
+  const num = (v: unknown, fallback: number) =>
+    typeof v === "number" && Number.isFinite(v) ? v : fallback;
+  switch (spec.kind) {
+    case "sphere":
+      return [{
+        name: "sides",
+        current: num(p.sides, SPHERE_SMOOTH_SIDES),
+        radius: num(p.radius, 10),
+        floor: 4,
+      }];
+    case "ellipsoid":
+      return [{
+        name: "surfaceSteps",
+        current: num(p.surfaceSteps, 32),
+        radius: Math.max(num(p.radiusX, 10), num(p.radiusY, 10), num(p.radiusZ, 10)),
+        floor: 8,
+      }];
+    case "torus":
+      return [
+        {
+          name: "ringSteps",
+          current: num(p.ringSteps, 48),
+          radius: num(p.radius, 15) + num(p.tubeRadius, 5),
+          floor: 8,
+        },
+        {
+          name: "tubeSteps",
+          current: num(p.tubeSteps, 32),
+          radius: num(p.tubeRadius, 5),
+          floor: 8,
+        },
+      ];
+    default: {
+      if (typeof p.sides !== "number" || !Number.isFinite(p.sides)) return [];
+      const radius = [p.radius, p.outerRadius, p.bottomRadius, p.topRadius]
+        .find((v): v is number => typeof v === "number" && v > 0)
+        ?? Math.max(p.width ?? 0, p.depth ?? 0) / 2;
+      return [{ name: "sides", current: p.sides, radius, floor: 3 }];
+    }
+  }
+}
+
+function lowPolyPrimitiveSpec(spec: ObjectSpec, settings: LowPolySettings): ObjectSpec | null {
+  const facet = Math.max(0, settings.facet);
+  if (facet <= 1e-6) return null;
+
+  const params = { ...spec.params };
+  let coarsened = false;
+  for (const knob of lowPolyKnobs(spec)) {
+    if (!(knob.radius > 0)) continue;
+    const current = Math.round(knob.current);
+    // Never ADD detail — this control only ever coarsens.
+    const next = Math.max(knob.floor, Math.min(current, sidesForFacet(knob.radius, facet)));
+    if (next < current) {
+      params[knob.name] = next;
+      coarsened = true;
+    }
+  }
+  return coarsened ? { ...spec, params } : null;
+}
+
+function applyLowPoly(solid: AnySolid, settings: LowPolySettings): AnySolid {
+  const facet = Math.max(0, settings.facet);
+  if (facet <= 1e-6) return solid;
+  const mesh = isMesh(solid) ? solid : (solid as Shape3D).meshShape(FALLBACK_MESH_QUALITY);
+  let m = mesh.wrapped as unknown as {
+    refineToLength(l: number): unknown;
+    simplify(t: number): unknown;
+    numTri(): number;
+    volume(): number;
+  };
+  const even = Math.max(0, settings.even);
+  if (even > 1e-6) m = m.refineToLength(even) as typeof m;
+  m = m.simplify(facet) as typeof m;
+  if (m.numTri() < 4 || m.volume() <= 1e-9) return solid;
+  return new MeshShape(m as never);
+}
+
 /** True if a node or any of its descendants is an imported STL — those are
  *  MeshShapes, not Shape3Ds, so a group containing one anywhere below it must
  *  combine in MeshShape terms all the way up, not just at that one group. */
@@ -2020,6 +2180,51 @@ function findFace(solid: Shape3D, point: Vec3, normal: Vec3, tolerance = 0.05): 
     }
   }
   return best;
+}
+
+/**
+ * The border edges of `face` that are still a genuine sharp corner, dropping
+ * any that a previous fillet or chamfer has already softened.
+ *
+ * "Bevel every edge around this face" run on two touching faces in turn hits
+ * their shared edge twice: the second pass finds the boundary of the *band*
+ * the first pass left behind and bevels that too, which is where the thin
+ * ridge down a re-chamfered corner comes from. A fillet fares worse — the
+ * band's boundary is tangent, OCCT refuses it, and the whole second pass
+ * fails rather than just that one edge.
+ *
+ * An edge is judged by the angle between the two faces meeting along it:
+ * a raw box corner puts their outward normals 90 degrees apart (dot 0), a
+ * 45-degree chamfer band 45 degrees apart (dot ~0.71), and a fillet band is
+ * tangent (dot ~1). Anything at or past the halfway mark is already soft and
+ * is left alone.
+ */
+const SOFT_EDGE_NORMAL_DOT = 0.5;
+
+function sharpBorderEdges(solid: Shape3D, face: Face): import("replicad").Edge[] {
+  const border = face.edges;
+  const faceNormal = face.normalAt(face.center);
+  // Identify the selected face by where it sits, not by shape identity: the
+  // Face handed in came from its own pass over solid.faces, so it is a
+  // different wrapper than the ones iterated here.
+  const centre = face.center;
+  const isSelf = (f: Face) => {
+    const c = f.center;
+    return Math.hypot(c.x - centre.x, c.y - centre.y, c.z - centre.z) < 1e-6;
+  };
+  const others = solid.faces.filter((f) => !isSelf(f));
+  const kept = border.filter((edge) => {
+    const mid = edge.pointAt(0.5);
+    const neighbour = others.find((f) => f.edges.some((e) => e.isSame(edge)));
+    if (!neighbour) return true; // no partner found — leave the decision to OCCT
+    const n = neighbour.normalAt(neighbour.geomType === "PLANE" ? neighbour.center : mid);
+    const dot = n.x * faceNormal.x + n.y * faceNormal.y + n.z * faceNormal.z;
+    return dot < SOFT_EDGE_NORMAL_DOT;
+  });
+  // Never let the filter turn the whole operation into a no-op: if it would
+  // reject everything, this is not a shape it understands, so hand the full
+  // border back and let OCCT answer as it did before.
+  return kept.length ? kept : border;
 }
 
 /**
@@ -2482,7 +2687,16 @@ function findMeshFaceBoundaryAnchors(solid: MeshShape, point: Vec3, normal: Vec3
 
   const [nx, ny, nz] = normal;
   const targetD = nx * point[0] + ny * point[1] + nz * point[2];
-  const matchingTris = new Set<number>();
+  // Plane + normal alone: every triangle on the same infinite plane, facing
+  // the same way, anywhere in the mesh. A shape with repeated same-height
+  // features (several prongs off one base, say) has more than one of those
+  // — separate, disconnected patches that merely happen to be coplanar. Kept
+  // apart here in coplanarTris/closest-seed so the flood-fill below can walk
+  // out from only the patch actually under the click, the same distinction
+  // findFace()'s footprint check already draws for the B-Rep path.
+  const coplanarTris: number[] = [];
+  let seed = -1;
+  let seedDist = Infinity;
 
   for (let t = 0; t < numTris; t++) {
     const i0 = raw.triVerts[t * 3] * 3;
@@ -2502,7 +2716,44 @@ function findMeshFaceBoundaryAnchors(solid: MeshShape, point: Vec3, normal: Vec3
     if (dot > 0.98) {
       const d = tnx * ax + tny * ay + tnz * az;
       if (Math.abs(d - targetD) < 0.2) {
-        matchingTris.add(t);
+        coplanarTris.push(t);
+        const cx3 = (ax + bx + cx) / 3, cy3 = (ay + by + cy) / 3, cz3 = (az + bz + cz) / 3;
+        const dist = Math.hypot(cx3 - point[0], cy3 - point[1], cz3 - point[2]);
+        if (dist < seedDist) { seedDist = dist; seed = t; }
+      }
+    }
+  }
+  if (seed === -1) return [];
+
+  // Flood-fill from the triangle nearest the click, through shared edges,
+  // staying inside the coplanar set — this is what actually confines the
+  // result to the one connected patch under the cursor.
+  const coplanarSet = new Set(coplanarTris);
+  const edgeToTris = new Map<string, number[]>();
+  for (const t of coplanarTris) {
+    const v0 = raw.triVerts[t * 3];
+    const v1 = raw.triVerts[t * 3 + 1];
+    const v2 = raw.triVerts[t * 3 + 2];
+    for (const [a, b] of [[v0, v1], [v1, v2], [v2, v0]]) {
+      const key = a < b ? `${a}:${b}` : `${b}:${a}`;
+      const list = edgeToTris.get(key);
+      if (list) list.push(t); else edgeToTris.set(key, [t]);
+    }
+  }
+  const matchingTris = new Set<number>([seed]);
+  const queue = [seed];
+  while (queue.length) {
+    const t = queue.pop()!;
+    const v0 = raw.triVerts[t * 3];
+    const v1 = raw.triVerts[t * 3 + 1];
+    const v2 = raw.triVerts[t * 3 + 2];
+    for (const [a, b] of [[v0, v1], [v1, v2], [v2, v0]]) {
+      const key = a < b ? `${a}:${b}` : `${b}:${a}`;
+      for (const other of edgeToTris.get(key) ?? []) {
+        if (other !== t && coplanarSet.has(other) && !matchingTris.has(other)) {
+          matchingTris.add(other);
+          queue.push(other);
+        }
       }
     }
   }
@@ -2709,7 +2960,13 @@ function finishMeshEdge(
     const nAvgL = Math.hypot(nAvgRaw[0], nAvgRaw[1], nAvgRaw[2]) || 1;
     const nAvg: [number, number, number] = [nAvgRaw[0] / nAvgL, nAvgRaw[1] / nAvgL, nAvgRaw[2] / nAvgL];
 
-    const extendEnd = Math.min(0.5, seg.len * 0.1);
+    // Two edges meeting at a corner each cut their own straight prism; for
+    // the pair to fully remove the corner wedge between them (rather than
+    // leaving a sliver of the original sharp corner behind), each cutter has
+    // to reach at least `distance` past its own endpoint into the corner —
+    // a fixed cap here doesn't scale with the chamfer/fillet size, so it
+    // covered small bevels fine but under-ran anything a few mm deep.
+    const extendEnd = Math.min(seg.len * 0.49, Math.max(distance * 1.2, 0.5));
     const overshoot = isConcave ? 0 : 0.05;
 
     const p0: [number, number, number] = [v0[0] - u[0] * extendEnd, v0[1] - u[1] * extendEnd, v0[2] - u[2] * extendEnd];
@@ -3160,13 +3417,28 @@ async function replayEdit(
       }
       try {
         const anchors = op.points?.length ? op.points : [op.point];
-        const faceEdges = op.face ? findFace(solid, op.face.point, op.face.normal)?.edges : undefined;
-        if (op.face && !faceEdges?.length) {
+        const targetFace = op.face ? findFace(solid, op.face.point, op.face.normal) : null;
+        const faceEdges = targetFace ? sharpBorderEdges(solid, targetFace) : undefined;
+        if (op.face && !targetFace?.edges.length) {
           onError?.(spec.id, "The selected face border could not be found after rebuilding — select it again.");
           continue;
         }
+        if (op.face && !faceEdges?.length) {
+          // Every edge round this face has already been softened by an
+          // earlier pass, so there is nothing left to do rather than
+          // anything wrong.
+          continue;
+        }
+        // NOT finder.inList(faceEdges) — replicad's inList matches through
+        // OCCT's IsSame(), which ignores Location and compares only the
+        // underlying TShape. Duplicate features built by cloning the same
+        // prototype (Alt-drag duplicate, say — four identical prongs off one
+        // base box) share that TShape, so inList silently matched the same
+        // edge on every duplicate instead of just the one on the selected
+        // face. Anchoring by each edge's own 3D midpoint is Location-aware
+        // and only ever matches the edges actually on that face.
         const edgeSelector = faceEdges
-          ? (finder: import("replicad").EdgeFinder) => finder.inList(faceEdges.map((edge) => edge.clone()))
+          ? edgesAt(faceEdges.map((edge) => edge.pointAt(0.5).toTuple()))
           : edgesAt(anchors);
         let candidate: Shape3D;
         try {
@@ -3183,7 +3455,10 @@ async function replayEdit(
             throw firstError;
           }
         }
-        if (!isOcctValid(candidate) || tessellatesEmpty(candidate) || !isWatertight(candidate)) {
+        if (
+          !isOcctValid(candidate) || tessellatesEmpty(candidate) || !isWatertight(candidate) ||
+          !noNewSplit(solid, candidate)
+        ) {
           onError?.(spec.id, `That ${op.kind} would create an invalid shape; the previous shape was kept.`);
         } else {
           solid = candidate;
@@ -3396,19 +3671,24 @@ export async function survivingOps(
       }
       const bRepSolid = solid as Shape3D;
       const anchors = op.points?.length ? op.points : [op.point];
-      const faceEdges = op.face ? findFace(bRepSolid, op.face.point, op.face.normal)?.edges : undefined;
+      const targetFace = op.face ? findFace(bRepSolid, op.face.point, op.face.normal) : null;
+      const faceEdges = targetFace ? sharpBorderEdges(bRepSolid, targetFace) : undefined;
       if (op.face && !faceEdges?.length) continue;
+      // See the matching comment in makeEdit — inList() matches through
+      // Location-blind IsSame(), which is wrong for duplicated features.
       const edgeSelector = faceEdges
-        ? (finder: import("replicad").EdgeFinder) => finder.inList(faceEdges.map((edge) => edge.clone()))
+        ? edgesAt(faceEdges.map((edge) => edge.pointAt(0.5).toTuple()))
         : edgesAt(anchors);
       let candidate = settled(() => (op.kind === "fillet"
         ? bRepSolid.fillet(op.distance, edgeSelector)
         : bRepSolid.chamfer(op.distance, edgeSelector)) as Shape3D);
+      if (candidate && !noNewSplit(bRepSolid, candidate)) candidate = null;
       if (!candidate && !faceEdges) {
         const fallbackSelector = edgesAt(anchors, EDGE_ANCHOR_FALLBACK_TOLERANCE);
         candidate = settled(() => (op.kind === "fillet"
           ? bRepSolid.fillet(op.distance, fallbackSelector)
           : bRepSolid.chamfer(op.distance, fallbackSelector)) as Shape3D);
+        if (candidate && !noNewSplit(bRepSolid, candidate)) candidate = null;
       }
       if (candidate) {
         solid = candidate;
@@ -3887,8 +4167,9 @@ function bakeNonUniformScale(spec: NodeSpec): NodeSpec {
   const [sx, sy, sz] = spec.scale;
   if (sx === sy && sy === sz) return spec; // uniform — OCCT scales this directly
   if (!(sx > 0 && sy > 0 && sz > 0)) return spec;
-  const [rx, ry] = spec.rotation;
-  if (rx !== 0 || ry !== 0) return spec;
+  // Rotation is deliberately allowed here — see bakeScale in document/bake.ts
+  // for why (place() scales in the node's own frame first) and what it costs
+  // a face-snapped box when it is not.
 
   const p = spec.params;
   let params: Record<string, number>;
@@ -3929,13 +4210,16 @@ function bakeNonUniformScale(spec: NodeSpec): NodeSpec {
   }
 
   // Re-normalising puts the baked shape's base back on z = 0, while scaling
-  // about the centre would have left it at height * (1 - sz) / 2.
+  // about the centre would have left it at height * (1 - sz) / 2. That offset
+  // is along the node's own z, so it is rotated into world space the same way
+  // place() rotates the solid — identity when there is no rotation.
   const [px, py, pz] = spec.position;
+  const [ox, oy, oz] = rotateLocalOffset([0, 0, (height * (1 - sz)) / 2], spec.rotation);
   return {
     ...spec,
     params,
     scale: [1, 1, 1],
-    position: [px, py, pz + (height * (1 - sz)) / 2],
+    position: [px + ox, py + oy, pz + oz],
   };
 }
 
@@ -4190,6 +4474,81 @@ function isWatertight(s: AnySolid): boolean {
   }
 }
 
+/**
+ * Counts the shape's disconnected pieces (by triangle adjacency across
+ * shared mesh edges). Returns null when the probe itself fails, same as
+ * isWatertight's own catch-all — "unknown" rather than "broken".
+ *
+ * A fillet or chamfer edge selection that goes slightly wrong on a
+ * multi-feature shape (several prongs off one base, say) can shear a sliver
+ * off into its own closed shell instead of visibly failing: each piece is
+ * independently watertight by isWatertight's own every-edge-shared-by-two
+ * check, which is exactly why that check alone waves a split like this
+ * through. This exists to compare the piece count before and after an edit
+ * op — legitimately multi-body shapes (an assembly of loose parts, say) stay
+ * whatever count they already were; an op that *increases* it went wrong.
+ */
+function meshComponentCount(s: AnySolid): number | null {
+  if (isMesh(s)) return 1;
+  try {
+    const { vertices, triangles } = s.mesh(SEAM_CHECK_QUALITY);
+    const ids = new Map<string, number>();
+    const canon: number[] = [];
+    for (let i = 0; i < vertices.length; i += 3) {
+      const key = `${Math.round(vertices[i] * 1e4)},${Math.round(vertices[i + 1] * 1e4)},${Math.round(vertices[i + 2] * 1e4)}`;
+      let id = ids.get(key);
+      if (id === undefined) {
+        id = ids.size;
+        ids.set(key, id);
+      }
+      canon.push(id);
+    }
+    const triCount = triangles.length / 3;
+    const parent = Array.from({ length: triCount }, (_, i) => i);
+    const find = (i: number): number => {
+      while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; }
+      return i;
+    };
+    const union = (a: number, b: number) => {
+      const ra = find(a), rb = find(b);
+      if (ra !== rb) parent[ra] = rb;
+    };
+    const edgeTri = new Map<string, number>();
+    for (let t = 0; t < triangles.length; t += 3) {
+      const a = canon[triangles[t]];
+      const b = canon[triangles[t + 1]];
+      const c = canon[triangles[t + 2]];
+      if (a === b || b === c || a === c) continue;
+      const triIndex = t / 3;
+      for (const [x, y] of [[a, b], [b, c], [c, a]]) {
+        const key = x < y ? `${x}:${y}` : `${y}:${x}`;
+        const other = edgeTri.get(key);
+        if (other === undefined) edgeTri.set(key, triIndex);
+        else union(other, triIndex);
+      }
+    }
+    const roots = new Set<number>();
+    for (let t = 0; t < triCount; t++) roots.add(find(t));
+    return roots.size;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when `candidate` didn't come apart into more pieces than `before`
+ * already had. Pass-through (true) when either mesh probe fails, or when
+ * `before` itself couldn't be counted — this only ever adds a rejection on
+ * top of isWatertight's own check, never a new way to block a valid edit.
+ */
+function noNewSplit(before: AnySolid, candidate: AnySolid): boolean {
+  const beforeCount = meshComponentCount(before);
+  if (beforeCount === null) return true;
+  const afterCount = meshComponentCount(candidate);
+  if (afterCount === null) return true;
+  return afterCount <= beforeCount;
+}
+
 /** Spins a sphere about its own axis: geometrically identical, but it moves
  *  the seam meridian, which is what OCCT actually trips over. */
 function respin(spec: NodeSpec): NodeSpec {
@@ -4241,6 +4600,35 @@ async function makeBuild(
 }
 
 export async function makeLocal(
+  spec: NodeSpec,
+  onError?: (id: string, msg: string) => void,
+  onProgress?: (id: string) => void,
+): Promise<AnySolid | null> {
+  // Faceting is the last thing that happens to a node's own shape, after
+  // every edit in its history has been replayed onto it. Doing it here rather
+  // than as another EditOp is what keeps a fillet or a wall working on the
+  // real surface instead of on an already-decimated one.
+  // A round-profile primitive is rebuilt with fewer sides rather than
+  // decimated, which is what keeps its facets regular — see
+  // lowPolyPrimitiveSpec. Everything else falls through to applyLowPoly.
+  const coarse = spec.type === "object" && spec.lowPoly
+    ? lowPolyPrimitiveSpec(spec, spec.lowPoly)
+    : null;
+  if (coarse) return buildLocal(coarse, onError, onProgress);
+
+  const built = await buildLocal(spec, onError, onProgress);
+  if (!built || !spec.lowPoly) return built;
+  try {
+    return applyLowPoly(built, spec.lowPoly);
+  } catch {
+    // Faceting is styling: a shape manifold cannot chew on is still a correct
+    // shape, so keep it at full detail rather than failing the whole build.
+    onError?.(spec.id, "This shape could not be faceted — showing it at full detail.");
+    return built;
+  }
+}
+
+async function buildLocal(
   spec: NodeSpec,
   onError?: (id: string, msg: string) => void,
   onProgress?: (id: string) => void,

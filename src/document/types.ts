@@ -1323,6 +1323,16 @@ export const TINKERCAD_COLORS: ColorPreset[] = [
   { hex: "#1e272e", name: "Black" },
 ];
 
+/**
+ * Low-poly faceting for one node. `facet` is how far a surface is allowed to
+ * move (mm) — the chunkiness — and `even` is an optional uniform-remesh edge
+ * length applied first so the facets come out regular rather than stringy.
+ */
+export interface LowPoly {
+  facet: number;
+  even: number;
+}
+
 interface NodeBase {
   id: string;
   name: string;
@@ -1338,6 +1348,12 @@ interface NodeBase {
   color?: string;
   /** Whether the solid object is rendered with translucency. */
   transparent?: boolean;
+  /**
+   * Faceted low-poly styling, applied as the very last step of this node's
+   * own build. Real geometry, so it is what exports and prints — see
+   * applyLowPoly in kernel/shape.ts. Absent means full detail.
+   */
+  lowPoly?: LowPoly;
   /**
    * Hidden from the viewport, from export, and — when this node sits inside
    * a group — from the boolean that produces the group's own shape.

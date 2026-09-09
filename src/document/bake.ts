@@ -24,10 +24,15 @@ export function bakeScale(node: ObjectNode): ObjectNode | null {
   const [sx, sy, sz] = node.scale;
   if (sx === 1 && sy === 1 && sz === 1) return node;
   if (!(sx > 0 && sy > 0 && sz > 0)) return null;
-  // Rotation about X or Y turns the scale axes away from the parameter axes,
-  // so width/depth/height no longer describe what the scale stretches.
-  const [rx, ry] = node.rotation;
-  if (rx !== 0 || ry !== 0) return null;
+  // Rotation deliberately does NOT disqualify a bake. place() scales in the
+  // node's own frame and only then rotates, so the scale axes are the
+  // parameter axes whatever the rotation is. What rotation does affect is the
+  // base correction at the end of this function, which is handled there.
+  //
+  // Bailing out on rotation is what made a box snapped onto another object's
+  // face — snapping gives it a 90-degree rotation — keep a raw non-uniform
+  // scale when resized: its corner rounds came out stretched into ovals, and
+  // the solid dropped to a coarse mesh on the way through.
 
   const p = node.params;
   let params: Record<string, number>;
@@ -174,7 +179,37 @@ export function bakeScale(node: ObjectNode): ObjectNode | null {
     return null;
   }
 
+  // Rebuilding the primitive at its true size puts the base back on z = 0,
+  // while scaling about the centre had left it at height * (1 - sz) / 2. That
+  // correction is along the node's OWN z, so for a rotated node it has to be
+  // rotated the same way place() rotates the solid before being added to a
+  // world-space position. With no rotation this is exactly the plain
+  // pz + height * (1 - sz) / 2 it has always been.
   const [px, py, pz] = node.position;
-  const position: Vec3 = [px, py, pz + (height * (1 - sz)) / 2];
+  const [ox, oy, oz] = rotateLocalOffset([0, 0, (height * (1 - sz)) / 2], node.rotation);
+  const position: Vec3 = [px + ox, py + oy, pz + oz];
   return { ...node, params, scale: [1, 1, 1], position };
+}
+
+/**
+ * Rotates a vector given in a node's own frame into world space, matching the
+ * composition place() applies to the solid itself: Z first, then Y, then X,
+ * each about a global axis (which together compose to Rx·Ry·Rz).
+ */
+export function rotateLocalOffset(v: Vec3, rotation: Vec3): Vec3 {
+  const [rx, ry, rz] = rotation.map((d) => (d * Math.PI) / 180);
+  let [x, y, z] = v;
+  if (rz) {
+    const c = Math.cos(rz), s = Math.sin(rz);
+    [x, y] = [x * c - y * s, x * s + y * c];
+  }
+  if (ry) {
+    const c = Math.cos(ry), s = Math.sin(ry);
+    [x, z] = [x * c + z * s, -x * s + z * c];
+  }
+  if (rx) {
+    const c = Math.cos(rx), s = Math.sin(rx);
+    [y, z] = [y * c - z * s, y * s + z * c];
+  }
+  return [x, y, z];
 }

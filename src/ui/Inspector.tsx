@@ -20,7 +20,7 @@ import {
   solveScaledTriangle,
 } from "../geometry/triangle";
 import type { TriangleSolution } from "../geometry/triangle";
-import type { BooleanOp, ObjectNode, ParamField, PrimitiveKind, SceneNode, Vec3 } from "../document/types";
+import type { BooleanOp, LowPoly, ObjectNode, ParamField, PrimitiveKind, SceneNode, Vec3 } from "../document/types";
 import type { LocalFontData } from "../text/systemFonts";
 import { displayStep, formatLength, fromMillimetres, toMillimetres } from "../measurement";
 import type { DisplayUnit } from "../measurement";
@@ -272,6 +272,8 @@ interface Props {
   onHole: (isHole: boolean) => void;
   onColor: (color: string) => void;
   onTransparent: (transparent: boolean) => void;
+  /** Faceted low-poly styling; undefined restores full detail. */
+  onLowPoly: (lowPoly: LowPoly | undefined) => void;
   /** Imported artwork only: how far the outlines are extruded, in mm. */
   onSvgThickness: (mm: number) => void;
   /** Imported STL only: decimate mesh by given ratio. */
@@ -334,6 +336,7 @@ export function Inspector({
   onHole,
   onColor,
   onTransparent,
+  onLowPoly,
   onSvgThickness,
   onSimplifyMesh,
   onReplaceFile,
@@ -789,6 +792,8 @@ export function Inspector({
               </label>
             ))}
           </div>
+
+          <LowPolySection lowPoly={node.lowPoly} onLowPoly={onLowPoly} />
         </>
       )}
       {isMulti && selectionBounds && (
@@ -1407,6 +1412,15 @@ function ObjectParams({
             )
           : 0;
         const shown = isCornerRadius ? { ...f, max: alignedCornerMax } : f;
+        // The kernel caps a corner radius at what the current size can take
+        // (filletLimit here, and makePrimitive's own clamp when it builds).
+        // Resizing a box smaller therefore shrinks the radius it really uses
+        // while the stored number stays where it was, so the panel ends up
+        // claiming a 4 mm round on a shape that only has 3. Show the radius
+        // the shape actually has. The stored value is deliberately left
+        // alone: grow the box again and the radius originally asked for
+        // comes back, which is what makes resizing non-destructive.
+        const shownValue = isCornerRadius ? Math.min(base, shown.max) : base;
         if (!axes || !uniform || base <= 0) {
           return {
             field: shown,
@@ -1414,7 +1428,7 @@ function ObjectParams({
               <Field
                 key={f.key}
                 field={shown}
-                value={base}
+                value={shownValue}
                 lockable={isAngleField}
                 locked={isLocked}
                 onToggleLock={onToggleLock}
@@ -1955,3 +1969,83 @@ function Field({
 
 /** Gizmo drags produce long floats; keep the number inputs readable. */
 const round = (n: number) => Math.round(n * 100) / 100;
+
+/** Where the sliders start when low poly is first switched on: coarse enough
+ *  to read as faceted on a typical 20-40 mm part without erasing it. */
+const LOW_POLY_DEFAULT: LowPoly = { facet: 1.2, even: 3 };
+
+/**
+ * Faceted low-poly styling for the selected object.
+ *
+ * Both controls change real geometry — this is what exports and prints, not
+ * a shading effect — so they live with the other shape settings rather than
+ * with colour and transparency.
+ */
+function LowPolySection({
+  lowPoly,
+  onLowPoly,
+}: {
+  lowPoly?: LowPoly;
+  onLowPoly: (lowPoly: LowPoly | undefined) => void;
+}) {
+  const on = !!lowPoly;
+  const value = lowPoly ?? LOW_POLY_DEFAULT;
+  const set = (patch: Partial<LowPoly>) => onLowPoly({ ...value, ...patch });
+
+  return (
+    <>
+      <h2>Low poly</h2>
+      <label className="lowpoly-toggle">
+        <input
+          type="checkbox"
+          checked={on}
+          onChange={(e) => onLowPoly(e.target.checked ? LOW_POLY_DEFAULT : undefined)}
+        />
+        <span>Faceted (affects the print)</span>
+      </label>
+
+      {on && (
+        <>
+          <div className="field">
+            <div className="field-header">
+              <span className="field-label">Facet size</span>
+              <span className="field-value">{value.facet.toFixed(2)} mm</span>
+            </div>
+            <input
+              type="range"
+              min={0.1}
+              max={6}
+              step={0.1}
+              value={value.facet}
+              onPointerDown={beginHistoryBatch}
+              onPointerUp={endHistoryBatch}
+              onChange={(e) => set({ facet: Number(e.target.value) })}
+            />
+          </div>
+
+          <div className="field">
+            <div className="field-header">
+              <span className="field-label">Evenness</span>
+              <span className="field-value">{value.even > 0 ? `${value.even.toFixed(1)} mm` : "off"}</span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={10}
+              step={0.5}
+              value={value.even}
+              onPointerDown={beginHistoryBatch}
+              onPointerUp={endHistoryBatch}
+              onChange={(e) => set({ even: Number(e.target.value) })}
+            />
+            <p className="hint">
+              Spreads the mesh out evenly before faceting, so facets come out
+              regular instead of stringy. Costs rebuild time — turn it down to
+              0 if a shape is slow.
+            </p>
+          </div>
+        </>
+      )}
+    </>
+  );
+}
