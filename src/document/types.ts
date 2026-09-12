@@ -1445,6 +1445,8 @@ export interface EdgeOp {
 export interface ShellOp {
   kind: "shell";
   thickness: number;
+  bottomThickness?: number;
+  openingInset?: number;
   /** One point on each face to open. Empty means a fully closed hollow. */
   points: Vec3[];
   /** Actual outward direction of the selected opening face. Older saved

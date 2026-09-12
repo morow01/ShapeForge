@@ -934,7 +934,10 @@ export const useDoc = create<DocState>()(
           const def = PRIMITIVES[kind];
           let randomColor: string | undefined;
           try {
-            if (localStorage.getItem("cad.randomNewObjectColors") === "on") {
+            // Random colours are enabled by default; only an explicit "off"
+            // preference disables them. This also covers first-run sessions
+            // before the preference effect has persisted a value.
+            if (localStorage.getItem("cad.randomNewObjectColors") !== "off") {
               randomColor = TINKERCAD_COLORS[Math.floor(Math.random() * TINKERCAD_COLORS.length)]?.hex;
             }
           } catch {

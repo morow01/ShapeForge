@@ -33,6 +33,7 @@ import {
   ToleranceLooseIcon,
   MagnetIcon,
   MoveToolIcon,
+  MirrorToolIcon,
   NewDesignIcon,
   ObjectsIcon,
   OrthographicIcon,
@@ -294,6 +295,7 @@ const SNAP_KEY = "cad.smartGuides";
 const GRID_SNAP_KEY = "cad.gridSnap";
 const SELECTED_COLLISIONS_KEY = "cad.showSelectedCollisions";
 const RANDOM_NEW_OBJECT_COLORS_KEY = "cad.randomNewObjectColors";
+const RANDOM_NEW_OBJECT_COLORS_MIGRATED_KEY = "cad.randomNewObjectColors.v2";
 const OBJECTS_PANEL_KEY = "cad.objectsPanelOpen";
 const VIEW_STYLE_KEY = "cad.viewStyle";
 const RESIZE_CONSTRAINED_KEY = "cad.resizeConstrained";
@@ -535,6 +537,10 @@ export function App() {
   const [skippedIds, setSkippedIds] = useState<Set<string>>(new Set());
   const [cameraMode, setCameraMode] = useState<CameraMode>(() => loadCameraState()?.mode ?? "perspective");
   const [toolMode, setToolMode] = useState<ToolMode>("select");
+  const [mirrorMenuOpen, setMirrorMenuOpen] = useState(false);
+  const mirrorMenuRef = useRef<HTMLDivElement>(null);
+  const mirrorFlyoutRef = useRef<HTMLDivElement>(null);
+  const [mirrorFlyoutPos, setMirrorFlyoutPos] = useState<{ top: number; left: number } | null>(null);
   const [pendingPrimitive, setPendingPrimitive] = useState<PrimitiveKind | null>(null);
   const [openCategories, setOpenCategories] = useState<Record<string, boolean>>(() => {
     try {
@@ -678,6 +684,35 @@ export function App() {
       setAlignMenuOpen(true);
     }, 400);
   }, [cancelAlignPressTimer]);
+
+  useEffect(() => {
+    if (!mirrorMenuOpen) {
+      setMirrorFlyoutPos(null);
+      return;
+    }
+    const updatePosition = () => {
+      const button = mirrorMenuRef.current?.querySelector("button");
+      if (!button) return;
+      const rect = button.getBoundingClientRect();
+      setMirrorFlyoutPos({ top: rect.top + rect.height / 2, left: rect.right + 10 });
+    };
+    updatePosition();
+    const onDocClick = (event: PointerEvent | MouseEvent) => {
+      const target = event.target as Node;
+      if (
+        mirrorMenuRef.current && !mirrorMenuRef.current.contains(target) &&
+        mirrorFlyoutRef.current && !mirrorFlyoutRef.current.contains(target)
+      ) setMirrorMenuOpen(false);
+    };
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    document.addEventListener("pointerdown", onDocClick);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+      document.removeEventListener("pointerdown", onDocClick);
+    };
+  }, [mirrorMenuOpen]);
   const cycleWireframe = useCallback(() => {
     setWireframe((curr) => NEXT_WIREFRAME[curr]);
   }, []);
@@ -808,7 +843,17 @@ export function App() {
     () => localStorage.getItem(SELECTED_COLLISIONS_KEY) !== "off",
   );
   const [randomNewObjectColors, setRandomNewObjectColors] = useState(
-    () => localStorage.getItem(RANDOM_NEW_OBJECT_COLORS_KEY) === "on",
+    // v0.4.19 accidentally persisted the old disabled default. Migrate that
+    // legacy value once so existing sessions get the restored random colours.
+    () => {
+      const migrated = localStorage.getItem(RANDOM_NEW_OBJECT_COLORS_MIGRATED_KEY) === "on";
+      if (!migrated) {
+        localStorage.setItem(RANDOM_NEW_OBJECT_COLORS_KEY, "on");
+        localStorage.setItem(RANDOM_NEW_OBJECT_COLORS_MIGRATED_KEY, "on");
+        return true;
+      }
+      return localStorage.getItem(RANDOM_NEW_OBJECT_COLORS_KEY) !== "off";
+    },
   );
   const [plateVisible, setPlateVisible] = useState(
     () => localStorage.getItem(BUILD_PLATE_VISIBLE_KEY) !== "off",
@@ -990,10 +1035,10 @@ export function App() {
   // cage already draws around a multi-selection (see Scene.
   // getSelectionBounds) — so this is that same computation done in plain
   // React state instead of read off the live viewport, to stay reactive the
-  // same way selectedLocalSize above already is. Null below 2 selected, or
+  // same way selectedLocalSize above already is. Null with no selected mesh, or
   // once none of them have a built mesh yet.
   const selectionBounds = useMemo((): { min: Vec3; max: Vec3 } | null => {
-    if (selectedIds.length < 2) return null;
+    if (selectedIds.length < 1) return null;
     const min: Vec3 = [Infinity, Infinity, Infinity];
     const max: Vec3 = [-Infinity, -Infinity, -Infinity];
     let count = 0;
@@ -1038,6 +1083,36 @@ export function App() {
     },
     [setTransform],
   );
+  const mirrorSelection = useCallback((axes: [boolean, boolean, boolean]) => {
+    if (!selectionBounds || !selectedIds.length) return;
+    const centre: Vec3 = [
+      (selectionBounds.min[0] + selectionBounds.max[0]) / 2,
+      (selectionBounds.min[1] + selectionBounds.max[1]) / 2,
+      (selectionBounds.min[2] + selectionBounds.max[2]) / 2,
+    ];
+    beginHistoryBatch();
+    for (const id of selectedIds) {
+      const node = findNode(useDoc.getState().nodes, id);
+      const part = parts.find((candidate) => candidate.id === id);
+      if (!node || node.hidden || !part) continue;
+      const bounds = displayedMeshBounds(part.mesh, node);
+      const objectCentre: Vec3 = [
+        (bounds.min[0] + bounds.max[0]) / 2,
+        (bounds.min[1] + bounds.max[1]) / 2,
+        (bounds.min[2] + bounds.max[2]) / 2,
+      ];
+      const position: Vec3 = [...node.position];
+      const scale: Vec3 = [...node.scale];
+      for (let axis = 0; axis < 3; axis++) {
+        if (!axes[axis]) continue;
+        position[axis] += 2 * (centre[axis] - objectCentre[axis]);
+        scale[axis] = -scale[axis];
+      }
+      setTransform(id, { position, scale });
+    }
+    endHistoryBatch();
+    setMirrorMenuOpen(false);
+  }, [parts, selectionBounds, selectedIds, setTransform]);
   const hasAssemblyGroup = selectedIds.some((id) => {
     return !!findAssemblyOwner(nodes, id);
   });
@@ -3055,6 +3130,56 @@ export function App() {
     return { op, candidate };
   }, [edgeSelection, edgeKind, edgeDistance]);
 
+  const [wallBottom, setWallBottom] = useState<number | null>(null);
+  const [wallInset, setWallInset] = useState<number | null>(null);
+  const [wallPreview, setWallPreview] = useState(true);
+  const [wallTransparency, setWallTransparency] = useState(true);
+  useEffect(() => {
+    sceneRef.current?.setHollowTransparency(
+      toolMode === "face" && faceOp === "wall" && wallTransparency ? faceSelection?.id ?? null : null,
+    );
+    return () => { sceneRef.current?.setHollowTransparency(null); };
+  }, [toolMode, faceOp, faceSelection?.id, wallTransparency]);
+  const [wallPreviewStatus, setWallPreviewStatus] = useState("");
+  // Clear only when leaving this face/preview session, not when a numeric
+  // input changes. Keep the last valid geometry during the next rebuild.
+  const wallPreviewFaceKey = faceSelection
+    ? JSON.stringify([faceSelection.id, faceSelection.point, faceSelection.normal]) : null;
+  useEffect(() => {
+    return () => { sceneRef.current?.setHollowPreview(null, null); };
+  }, [toolMode, faceOp, wallPreviewFaceKey, wallPreview]);
+  useEffect(() => {
+    let cancelled = false;
+    if (toolMode !== "face" || faceOp !== "wall" || !faceSelection || !wallPreview) {
+      sceneRef.current?.setHollowPreview(null, null);
+      setWallPreviewStatus("");
+      return;
+    }
+    setWallPreviewStatus("BUILDING — showing the last available preview.");
+    const timer = window.setTimeout(async () => {
+      try {
+        const node = findNode(nodes, faceSelection.id);
+        if (!node || node.type === "import" || node.type === "build") throw new Error("Preview is unavailable for this object.");
+        const op: ShellOp = { kind: "shell", thickness: Math.max(0.1, faceValue),
+          bottomThickness: Math.max(faceValue, wallBottom ?? faceValue),
+          openingInset: wallInset ?? faceValue,
+          points: [faceSelection.point], normal: faceSelection.normal };
+        let base = toSpec(node);
+        if (node.type !== "edit") base = { ...base, position: [0,0,0], rotation: [0,0,0], scale: [1,1,1] };
+        const candidate: EditSpec = node.type === "edit"
+          ? { ...(toSpec(node) as EditSpec), ops: [...node.ops, op] }
+          : { type: "edit", id: node.id, base, ops: [op], position: node.position, rotation: node.rotation, scale: node.scale, isHole: node.isHole };
+        const preview = await kernel.previewLocal(candidate);
+        if (!preview) throw new Error("Preview could not be built. Try smaller values.");
+        if (cancelled) return;
+        sceneRef.current?.setHollowPreview(faceSelection.id, preview);
+        setWallPreviewStatus("Preview only — Apply to keep changes.");
+      } catch (e) {
+        if (!cancelled) setWallPreviewStatus(`${msg(e)} Last available preview retained.`);
+      }
+    }, 450);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [toolMode, faceOp, faceSelection, faceValue, wallBottom, wallInset, wallPreview, nodes]);
   // Edge finishing can be expensive, so wait until the value has paused for
   // a moment and coalesce stale requests. The preview never touches history.
   useEffect(() => {
@@ -3598,6 +3723,35 @@ export function App() {
           title="Rotate (R)"
           aria-label="Rotate tool"
         ><RotateToolIcon /></button>
+        <div className="tool-rail-item-container mirror-tool" ref={mirrorMenuRef}>
+          <button
+            className={mirrorMenuOpen ? "active" : ""}
+            onClick={() => setMirrorMenuOpen((open) => !open)}
+            title={selectedIds.length ? "Mirror selected objects" : "Mirror (select an object first)"}
+            aria-label="Mirror tool"
+            disabled={!selectedIds.length}
+          ><MirrorToolIcon /></button>
+          {mirrorMenuOpen && mirrorFlyoutPos && selectedIds.length > 0 && createPortal(
+            <div
+              ref={mirrorFlyoutRef}
+              className="tool-rail-flyout mirror-flyout"
+              role="menu"
+              aria-label="Mirror axis"
+              style={{ position: "fixed", top: mirrorFlyoutPos.top, left: mirrorFlyoutPos.left, transform: "translateY(-50%)" }}
+            >
+              <span className="flyout-label">Mirror across</span>
+              {(["X", "Y", "Z"] as const).map((axis, index) => (
+                <button
+                  key={axis}
+                  onClick={() => mirrorSelection([index === 0, index === 1, index === 2])}
+                  title={"Mirror across " + axis + " axis"}
+                >{axis}</button>
+              ))}
+              <button onClick={() => mirrorSelection([true, true, true])} title="Mirror across all axes">All</button>
+            </div>,
+            document.body,
+          )}
+        </div>
         <div className="tool-rail-item-container align-tool" ref={alignMenuRef}>
           <button
             className={toolMode === "align" ? "active" : ""}
@@ -3965,255 +4119,6 @@ export function App() {
             <button onClick={() => { setPendingPrimitive(null); setToolMode("select"); }}>Cancel</button>
           </div>
         )}
-        {toolMode === "face" && (() => {
-          const target = faceSelection ?? lastFace.current;
-          const assemblyGroup = target ? findAssemblyOwner(nodes, target.id) : null;
-          return (
-            <div className="edge-bar">
-            <strong>
-              {faceOp === "push" ? "Push/Pull"
-                : faceOp === "wall" ? "Wall"
-                : faceOp === "resize" ? "Resize Face"
-                : faceOp === "offset" ? "Offset & Extrude"
-                : faceOp === "fillet" ? "Fillet Face Border"
-                : "Chamfer Face Border"}
-            </strong>
-            <span className="face-selection-state">{faceSelection ? "Face selected" : "Select a face"}</span>
-            <label>
-              {faceOp === "wall" ? "Thickness"
-                : faceOp === "resize" ? "Inset / outset"
-                : faceOp === "offset" ? "Inset"
-                : faceOp === "fillet" || faceOp === "chamfer" ? "Size"
-                : "Distance"}
-              <SignedMeasurementInput
-                valueMm={faceValue}
-                unit={displayUnit}
-                decimals={decimalPlaces}
-                min={faceOp === "push" || faceOp === "resize" ? undefined : 0.1}
-                step={0.5}
-                onValue={(value) => {
-                  setFaceValue(value);
-                }}
-                onEnter={() => faceApplyButtonRef.current?.click()}
-              /> {displayUnit}
-            </label>
-            {faceOp === "offset" && (
-              <label>
-                Height
-                <SignedMeasurementInput
-                  valueMm={faceHeight}
-                  unit={displayUnit}
-                  decimals={decimalPlaces}
-                  step={0.5}
-                  onValue={setFaceHeight}
-                  onEnter={() => faceApplyButtonRef.current?.click()}
-                /> {displayUnit}
-              </label>
-            )}
-            <button
-              ref={faceApplyButtonRef}
-              title={faceOp === "wall"
-                ? "Hollow this object out, leaving a wall of this thickness and opening the selected face"
-                : faceOp === "resize"
-                ? "Resize the selected face in its own plane: positive grows it, negative insets it"
-                : faceOp === "offset"
-                ? "Inset the face's own outline, then extrude it: positive height raises a rim, negative sinks a pocket"
-                : faceOp === "fillet"
-                ? "Round every edge around the selected face"
-                : faceOp === "chamfer"
-                ? "Bevel every edge around the selected face"
-                : "Move this face out (positive) or in (negative)"}
-              // Keep focus where it is: without this the press blurs the
-              // push/pull pill, which drops the face selection out from
-              // under the very click trying to use it.
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => {
-                // Deliberately NOT disabled without a face. A greyed-out
-                // button that does nothing when clicked is indistinguishable
-                // from a broken one; say what is missing instead.
-                const target = faceSelection ?? lastFace.current;
-                if (!target) {
-                  setError(NEEDS_FACE);
-                  return;
-                }
-                if (faceOp === "push") {
-                  const travel = faceValue;
-                  // The kernel ignores anything under half a millimetre, so
-                  // say that rather than letting the press look ignored.
-                  if (Math.abs(travel) < 0.5) {
-                    setError("Type a distance of at least 0.5 mm.");
-                    return;
-                  }
-                  setError(null);
-                  if (!sceneRef.current?.pushSelectedFace(travel)) {
-                    pushPullFace(target.id, { point: target.point, normal: target.normal, distance: travel });
-                  }
-                  // Remember the selected face at its new location so a
-                  // second typed Push/Pull does not require another click.
-                  const grown = { ...target, size: target.size + travel };
-                  lastFace.current = grown;
-                  setFaceSelection(grown);
-                  return;
-                }
-                const node = findNode(nodes, target.id);
-                if (node && (node.type === "import" || node.type === "build")) {
-                  // finishEdit returns these unchanged, which is the other
-                  // way this button can look broken.
-                  setError(faceOp === "wall"
-                    ? node.type === "import"
-                      ? "An imported shape cannot be hollowed — build the container from a box instead."
-                      : "A Shape Builder result cannot be hollowed yet."
-                    : "An imported or Shape Builder result cannot resize individual faces yet.");
-                  return;
-                }
-                // Close the typed-distance pill FIRST. Left open it resolves
-                // later and restores its pre-edit snapshot over the top of
-                // the new shape, which looked like the wall disappearing
-                // until the face was pushed or pulled.
-                sceneRef.current?.dismissFaceInput();
-                setError(null);
-                // These three change the face's identity rather than just
-                // moving it, so nothing may keep pointing at the old one.
-                const releaseSelection = () => {
-                  sceneRef.current?.releaseFace();
-                  lastFace.current = null;
-                  setFaceSelection(null);
-                };
-                if (faceOp === "fillet" || faceOp === "chamfer") {
-                  const distance = Math.max(0.1, Math.abs(faceValue));
-                  const op: EditOp = {
-                    kind: faceOp,
-                    point: target.point,
-                    face: { point: target.point, normal: target.normal },
-                    distance,
-                  };
-                  let base = toSpec(node!);
-                  if (node!.type !== "edit") {
-                    base = {
-                      ...base,
-                      position: [0, 0, 0] as Vec3,
-                      rotation: [0, 0, 0] as Vec3,
-                      scale: [1, 1, 1] as Vec3,
-                    };
-                  }
-                  const candidate: EditSpec = node?.type === "edit"
-                    ? { ...(toSpec(node) as EditSpec), ops: [...node.ops, op] }
-                    : {
-                        type: "edit",
-                        id: target.id,
-                        base,
-                        ops: [op],
-                        position: node!.position,
-                        rotation: node!.rotation,
-                        scale: node!.scale,
-                        isHole: node!.isHole,
-                      };
-                  void kernel.pruneDeadOps(candidate).then((surviving) => {
-                    const latestSurvived = !!surviving?.length &&
-                      JSON.stringify(surviving[surviving.length - 1]) === JSON.stringify(op);
-                    if (!surviving || !latestSurvived) {
-                      setError(`That ${faceOp} cannot be applied to this face border at ${distance} mm.`);
-                      return;
-                    }
-                    setError(null);
-                    if (node?.type === "edit" && surviving.length < candidate.ops.length) {
-                      setOps(target.id, surviving);
-                    } else {
-                      finishEdit(target.id, op);
-                    }
-                    releaseSelection();
-                  }).catch((e) => setError(msg(e)));
-                } else if (faceOp === "wall") {
-                  const op: ShellOp = {
-                    kind: "shell",
-                    thickness: Math.max(0.1, faceValue),
-                    points: [target.point],
-                    normal: target.normal,
-                  };
-                  let base = toSpec(node!);
-                  if (node!.type !== "edit") {
-                    base = {
-                      ...base,
-                      position: [0, 0, 0] as Vec3,
-                      rotation: [0, 0, 0] as Vec3,
-                      scale: [1, 1, 1] as Vec3,
-                    };
-                  }
-                  const candidate: EditSpec = node?.type === "edit"
-                    ? { ...(toSpec(node) as EditSpec), ops: [...node.ops, op] }
-                    : {
-                        type: "edit",
-                        id: target.id,
-                        base,
-                        ops: [op],
-                        position: node!.position,
-                        rotation: node!.rotation,
-                        scale: node!.scale,
-                        isHole: node!.isHole,
-                      };
-                  void kernel.pruneDeadOps(candidate).then((surviving) => {
-                    const latestSurvived = !!surviving?.length &&
-                      JSON.stringify(surviving[surviving.length - 1]) === JSON.stringify(op);
-                    if (!surviving || !latestSurvived) {
-                      setError("That wall cannot be created on this face at the selected thickness.");
-                      return;
-                    }
-                    setError(null);
-                    setEditPending(target.id);
-                    if (node?.type === "edit" && surviving.length < candidate.ops.length) {
-                      // A successful new wall should not keep replaying stale
-                      // edge edits that the same validation proved dead.
-                      setOps(target.id, surviving);
-                    } else {
-                      finishEdit(target.id, op);
-                    }
-                    releaseSelection();
-                  }).catch((e) => setError(msg(e)));
-                } else if (faceOp === "offset") {
-                  if (Math.abs(faceHeight) < 0.1) {
-                    setError("Type a height of at least 0.1 mm — that is how far the offset face is extruded.");
-                    return;
-                  }
-                  setEditPending(target.id);
-                  finishEdit(target.id, {
-                    kind: "offsetExtrude",
-                    inset: faceValue,
-                    height: faceHeight,
-                    point: target.point,
-                    normal: target.normal,
-                  });
-                  releaseSelection();
-                } else {
-                  if (Math.abs(faceValue) < 0.1) {
-                    setError("Type an inset or outset of at least 0.1 mm.");
-                    return;
-                  }
-                  setEditPending(target.id);
-                  finishEdit(target.id, {
-                    kind: "resizeFace",
-                    offset: faceValue,
-                    point: target.point,
-                    normal: target.normal,
-                  });
-                  releaseSelection();
-                }
-              }}>{faceOp === "wall" ? "Hollow" : "Apply"}</button>
-              {assemblyGroup && (
-                <button
-                  type="button"
-                  className="edge-bar-fuse-btn"
-                  onClick={() => {
-                    select(assemblyGroup.id);
-                    combineSelected("union");
-                  }}
-                  title="Fuse this assembly group into a single solid so push/pull and offsets apply across the whole solid (Ctrl+Shift+B)"
-                >
-                  Fuse into Solid
-                </button>
-              )}
-            </div>
-          );
-        })()}
         {toolMode === "edge" && (() => {
           const assemblyGroup = edgeSelection ? findAssemblyOwner(nodes, edgeSelection.id) : null;
           return (
@@ -4511,7 +4416,7 @@ export function App() {
             role="tab"
             aria-selected={rightPanelTab === "shapes"}
             className={`tools-panel-tab ${rightPanelTab === "shapes" ? "active" : ""}`}
-            onClick={() => setRightPanelTab("shapes")}
+            onClick={() => { setToolMode("select"); setRightPanelTab("shapes"); }}
           >
             <span>Shapes</span>
           </button>
@@ -4520,7 +4425,7 @@ export function App() {
             role="tab"
             aria-selected={rightPanelTab === "properties"}
             className={`tools-panel-tab ${rightPanelTab === "properties" ? "active" : ""}`}
-            onClick={() => setRightPanelTab("properties")}
+            onClick={() => { setToolMode("select"); setRightPanelTab("properties"); }}
           >
             <span>Properties</span>
             {selectedIds.length > 0 && (
@@ -4529,7 +4434,277 @@ export function App() {
           </button>
         </div>
 
-        {rightPanelTab === "shapes" && (
+        {toolMode === "face" && (() => {
+          const target = faceSelection ?? lastFace.current;
+          const assemblyGroup = target ? findAssemblyOwner(nodes, target.id) : null;
+          return (
+            <div className="face-settings-panel">
+            <strong>
+              {faceOp === "push" ? "Push/Pull"
+                : faceOp === "wall" ? "Hollow"
+                : faceOp === "resize" ? "Resize Face"
+                : faceOp === "offset" ? "Offset & Extrude"
+                : faceOp === "fillet" ? "Fillet Face Border"
+                : "Chamfer Face Border"}
+            </strong>
+            <button className="face-settings-cancel" onClick={() => { sceneRef.current?.setHollowPreview(null, null); sceneRef.current?.releaseFace(); lastFace.current = null; setFaceSelection(null); setToolMode("select"); }}>Cancel</button>
+            <span className="face-selection-state">{faceSelection ? "Face selected" : "Select a face"}</span>
+            <label>
+              {faceOp === "wall" ? "Thickness"
+                : faceOp === "resize" ? "Inset / outset"
+                : faceOp === "offset" ? "Inset"
+                : faceOp === "fillet" || faceOp === "chamfer" ? "Size"
+                : "Distance"}
+              <SignedMeasurementInput
+                valueMm={faceValue}
+                unit={displayUnit}
+                decimals={decimalPlaces}
+                min={faceOp === "push" || faceOp === "resize" ? undefined : 0.1}
+                step={0.5}
+                onValue={(value) => {
+                  setFaceValue(value);
+                }}
+                onEnter={() => faceApplyButtonRef.current?.click()}
+              /> {displayUnit}
+            </label>
+            {faceOp === "wall" && <>
+              <label>Bottom thickness
+                <SignedMeasurementInput valueMm={Math.max(faceValue, wallBottom ?? faceValue)} unit={displayUnit} decimals={decimalPlaces} min={faceValue} step={0.5} onValue={setWallBottom} onEnter={() => faceApplyButtonRef.current?.click()} /> {displayUnit}
+              </label>
+              <small>At least the wall thickness. Increase it for a stronger floor.</small>
+              <label>Opening inset
+                <SignedMeasurementInput valueMm={wallInset ?? faceValue} unit={displayUnit} decimals={decimalPlaces} min={0} step={0.5} onValue={setWallInset} onEnter={() => faceApplyButtonRef.current?.click()} /> {displayUnit}
+              </label>
+              <label><input type="checkbox" checked={wallPreview} onChange={e => setWallPreview(e.target.checked)} /> Live preview</label>
+              <label><input type="checkbox" checked={wallTransparency} onChange={e => setWallTransparency(e.target.checked)} /> Transparency</label>
+              <p role="status" aria-live="polite">
+                {wallPreviewStatus.startsWith("BUILDING")
+                  ? <span className="status-pill busy hollow-building-status" title="Showing the last available preview while recalculating">Building…</span>
+                  : !wallPreview ? "Preview off — Apply to create the hollow."
+                  : wallPreviewStatus || "Select a flat face to preview the opening."}
+              </p>
+            </>}
+            {faceOp === "offset" && (
+              <label>
+                Height
+                <SignedMeasurementInput
+                  valueMm={faceHeight}
+                  unit={displayUnit}
+                  decimals={decimalPlaces}
+                  step={0.5}
+                  onValue={setFaceHeight}
+                  onEnter={() => faceApplyButtonRef.current?.click()}
+                /> {displayUnit}
+              </label>
+            )}
+            <button
+              ref={faceApplyButtonRef}
+              title={faceOp === "wall"
+                ? "Hollow this object out, leaving a wall of this thickness and opening the selected face"
+                : faceOp === "resize"
+                ? "Resize the selected face in its own plane: positive grows it, negative insets it"
+                : faceOp === "offset"
+                ? "Inset the face's own outline, then extrude it: positive height raises a rim, negative sinks a pocket"
+                : faceOp === "fillet"
+                ? "Round every edge around the selected face"
+                : faceOp === "chamfer"
+                ? "Bevel every edge around the selected face"
+                : "Move this face out (positive) or in (negative)"}
+              // Keep focus where it is: without this the press blurs the
+              // push/pull pill, which drops the face selection out from
+              // under the very click trying to use it.
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                // Deliberately NOT disabled without a face. A greyed-out
+                // button that does nothing when clicked is indistinguishable
+                // from a broken one; say what is missing instead.
+                const target = faceSelection ?? lastFace.current;
+                if (!target) {
+                  setError(NEEDS_FACE);
+                  return;
+                }
+                if (faceOp === "push") {
+                  const travel = faceValue;
+                  // The kernel ignores anything under half a millimetre, so
+                  // say that rather than letting the press look ignored.
+                  if (Math.abs(travel) < 0.5) {
+                    setError("Type a distance of at least 0.5 mm.");
+                    return;
+                  }
+                  setError(null);
+                  if (!sceneRef.current?.pushSelectedFace(travel)) {
+                    pushPullFace(target.id, { point: target.point, normal: target.normal, distance: travel });
+                  }
+                  // Remember the selected face at its new location so a
+                  // second typed Push/Pull does not require another click.
+                  const grown = { ...target, size: target.size + travel };
+                  lastFace.current = grown;
+                  setFaceSelection(grown);
+                  return;
+                }
+                const node = findNode(nodes, target.id);
+                if (node && (node.type === "import" || node.type === "build")) {
+                  // finishEdit returns these unchanged, which is the other
+                  // way this button can look broken.
+                  setError(faceOp === "wall"
+                    ? node.type === "import"
+                      ? "An imported shape cannot be hollowed — build the container from a box instead."
+                      : "A Shape Builder result cannot be hollowed yet."
+                    : "An imported or Shape Builder result cannot resize individual faces yet.");
+                  return;
+                }
+                // Close the typed-distance pill FIRST. Left open it resolves
+                // later and restores its pre-edit snapshot over the top of
+                // the new shape, which looked like the wall disappearing
+                // until the face was pushed or pulled.
+                sceneRef.current?.setHollowPreview(null, null);
+                sceneRef.current?.dismissFaceInput();
+                setError(null);
+                // These three change the face's identity rather than just
+                // moving it, so nothing may keep pointing at the old one.
+                const releaseSelection = () => {
+                  sceneRef.current?.releaseFace();
+                  lastFace.current = null;
+                  setFaceSelection(null);
+                };
+                if (faceOp === "fillet" || faceOp === "chamfer") {
+                  const distance = Math.max(0.1, Math.abs(faceValue));
+                  const op: EditOp = {
+                    kind: faceOp,
+                    point: target.point,
+                    face: { point: target.point, normal: target.normal },
+                    distance,
+                  };
+                  let base = toSpec(node!);
+                  if (node!.type !== "edit") {
+                    base = {
+                      ...base,
+                      position: [0, 0, 0] as Vec3,
+                      rotation: [0, 0, 0] as Vec3,
+                      scale: [1, 1, 1] as Vec3,
+                    };
+                  }
+                  const candidate: EditSpec = node?.type === "edit"
+                    ? { ...(toSpec(node) as EditSpec), ops: [...node.ops, op] }
+                    : {
+                        type: "edit",
+                        id: target.id,
+                        base,
+                        ops: [op],
+                        position: node!.position,
+                        rotation: node!.rotation,
+                        scale: node!.scale,
+                        isHole: node!.isHole,
+                      };
+                  void kernel.pruneDeadOps(candidate).then((surviving) => {
+                    const latestSurvived = !!surviving?.length &&
+                      JSON.stringify(surviving[surviving.length - 1]) === JSON.stringify(op);
+                    if (!surviving || !latestSurvived) {
+                      setError(`That ${faceOp} cannot be applied to this face border at ${distance} mm.`);
+                      return;
+                    }
+                    setError(null);
+                    if (node?.type === "edit" && surviving.length < candidate.ops.length) {
+                      setOps(target.id, surviving);
+                    } else {
+                      finishEdit(target.id, op);
+                    }
+                    releaseSelection();
+                  }).catch((e) => setError(msg(e)));
+                } else if (faceOp === "wall") {
+                  const op: ShellOp = {
+                    kind: "shell",
+                    thickness: Math.max(0.1, faceValue),
+                    bottomThickness: Math.max(faceValue, wallBottom ?? faceValue),
+                    openingInset: wallInset ?? faceValue,
+                    points: [target.point],
+                    normal: target.normal,
+                  };
+                  let base = toSpec(node!);
+                  if (node!.type !== "edit") {
+                    base = {
+                      ...base,
+                      position: [0, 0, 0] as Vec3,
+                      rotation: [0, 0, 0] as Vec3,
+                      scale: [1, 1, 1] as Vec3,
+                    };
+                  }
+                  const candidate: EditSpec = node?.type === "edit"
+                    ? { ...(toSpec(node) as EditSpec), ops: [...node.ops, op] }
+                    : {
+                        type: "edit",
+                        id: target.id,
+                        base,
+                        ops: [op],
+                        position: node!.position,
+                        rotation: node!.rotation,
+                        scale: node!.scale,
+                        isHole: node!.isHole,
+                      };
+                  void kernel.pruneDeadOps(candidate).then((surviving) => {
+                    const latestSurvived = !!surviving?.length &&
+                      JSON.stringify(surviving[surviving.length - 1]) === JSON.stringify(op);
+                    if (!surviving || !latestSurvived) {
+                      setError("That wall cannot be created on this face at the selected thickness.");
+                      return;
+                    }
+                    setError(null);
+                    setEditPending(target.id);
+                    if (node?.type === "edit" && surviving.length < candidate.ops.length) {
+                      // A successful new wall should not keep replaying stale
+                      // edge edits that the same validation proved dead.
+                      setOps(target.id, surviving);
+                    } else {
+                      finishEdit(target.id, op);
+                    }
+                    releaseSelection();
+                  }).catch((e) => setError(msg(e)));
+                } else if (faceOp === "offset") {
+                  if (Math.abs(faceHeight) < 0.1) {
+                    setError("Type a height of at least 0.1 mm — that is how far the offset face is extruded.");
+                    return;
+                  }
+                  setEditPending(target.id);
+                  finishEdit(target.id, {
+                    kind: "offsetExtrude",
+                    inset: faceValue,
+                    height: faceHeight,
+                    point: target.point,
+                    normal: target.normal,
+                  });
+                  releaseSelection();
+                } else {
+                  if (Math.abs(faceValue) < 0.1) {
+                    setError("Type an inset or outset of at least 0.1 mm.");
+                    return;
+                  }
+                  setEditPending(target.id);
+                  finishEdit(target.id, {
+                    kind: "resizeFace",
+                    offset: faceValue,
+                    point: target.point,
+                    normal: target.normal,
+                  });
+                  releaseSelection();
+                }
+              }}>{faceOp === "wall" ? "Hollow" : "Apply"}</button>
+              {assemblyGroup && (
+                <button
+                  type="button"
+                  className="edge-bar-fuse-btn"
+                  onClick={() => {
+                    select(assemblyGroup.id);
+                    combineSelected("union");
+                  }}
+                  title="Fuse this assembly group into a single solid so push/pull and offsets apply across the whole solid (Ctrl+Shift+B)"
+                >
+                  Fuse into Solid
+                </button>
+              )}
+            </div>
+          );
+        })()}
+        {toolMode !== "face" && rightPanelTab === "shapes" && (
           <section className="tool-section shape-library">
           <div className="panel-heading compact shape-library-header">
             <div><h1>Shape library</h1><p>Drag or click to add</p></div>
@@ -4612,7 +4787,7 @@ export function App() {
             if (file) void importSTLFile(file);
           }}
         />
-        {rightPanelTab === "properties" && (
+        {toolMode !== "face" && rightPanelTab === "properties" && (
           <div className="tools-panel-inspector-wrap">
             <section className="tool-section inspector-section">
           <div className="panel-heading compact">
@@ -4712,7 +4887,7 @@ export function App() {
               <p className="inspector-empty-desc">
                 Click an object on the plate or in the Objects tree to view and edit its dimensions, hole toggle, and colors.
               </p>
-              <button type="button" className="inspector-empty-action" onClick={() => setRightPanelTab("shapes")}>
+              <button type="button" className="inspector-empty-action" onClick={() => { setToolMode("select"); setRightPanelTab("shapes"); }}>
                 Browse Shapes
               </button>
             </div>
@@ -5696,3 +5871,6 @@ function timeAgo(then: number, now: number): string {
   const mins = Math.round(secs / 60);
   return mins < 60 ? `${mins}m ago` : `${Math.round(mins / 60)}h ago`;
 }
+
+
+

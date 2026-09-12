@@ -155,13 +155,28 @@ function parseOp(raw: unknown): EditOp | null {
   if (o.kind === "fillet" || o.kind === "chamfer") {
     if (!isVec3(o.point) || typeof o.distance !== "number" || !Number.isFinite(o.distance) || o.distance <= 0) return null;
     const points = Array.isArray(o.points) ? o.points.filter(isVec3) : undefined;
-    return { kind: o.kind, point: o.point, points: points?.length ? points : undefined, distance: o.distance };
+    // A fillet or chamfer made by selecting a FACE is anchored by that face,
+    // and its `point` is only the click in the middle of it — not on any
+    // edge. Dropping `face` here left the op pointing at no edge at all, so
+    // after a refresh it failed, and the automatic dead-op cleanup then
+    // deleted it from the document for good.
+    const f = o.face as Record<string, unknown> | undefined;
+    const face = f && isVec3(f.point) && isVec3(f.normal) ? { point: f.point, normal: f.normal } : undefined;
+    return {
+      kind: o.kind,
+      point: o.point,
+      points: points?.length ? points : undefined,
+      ...(face ? { face } : {}),
+      distance: o.distance,
+    };
   }
   if (o.kind === "shell") {
     if (typeof o.thickness !== "number" || !Number.isFinite(o.thickness) || o.thickness <= 0) return null;
     const points = Array.isArray(o.points) ? o.points.filter(isVec3) : [];
     const normal = isVec3(o.normal) ? o.normal : undefined;
-    return { kind: "shell", thickness: o.thickness, points, normal };
+    const bottomThickness = typeof o.bottomThickness === "number" && Number.isFinite(o.bottomThickness) && o.bottomThickness > 0 ? o.bottomThickness : undefined;
+    const openingInset = typeof o.openingInset === "number" && Number.isFinite(o.openingInset) && o.openingInset >= 0 ? o.openingInset : undefined;
+    return { kind: "shell", thickness: o.thickness, points, normal, bottomThickness, openingInset };
   }
   if (o.kind === "resizeFace") {
     if (!isVec3(o.point) || !isVec3(o.normal)) return null;

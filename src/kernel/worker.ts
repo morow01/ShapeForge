@@ -2072,7 +2072,7 @@ const api = {
     try {
       let solid: AnySolid | null;
       if (spec.type === "edit" && spec.ops.length > 0 && !hasImport(spec.base) &&
-          spec.ops[spec.ops.length - 1].kind !== "fillet" && spec.ops[spec.ops.length - 1].kind !== "chamfer") {
+          spec.ops[spec.ops.length - 1].kind === "pushPull") {
         const finalOp = spec.ops[spec.ops.length - 1];
         const key = JSON.stringify({ base: spec.base, ops: spec.ops.slice(0, -1) });
         if (pushPullPreviewCache?.key !== key) {
@@ -2081,7 +2081,9 @@ const api = {
         }
         solid = pushPullPreviewCache ? applyPushPullPreview(pushPullPreviewCache.solid, finalOp as PushPullOp) : null;
       } else {
-        solid = await makeLocal(spec);
+        let previewError = false;
+        solid = await makeLocal(spec, () => { previewError = true; });
+        if (previewError) return null;
       }
       if (!solid) return null;
       // Faces ride along too — not just for completeness: without this, the
@@ -2139,3 +2141,5 @@ Comlink.expose(api);
 // Re-exported so a future caller can decide up front whether a build will
 // need manifold-3d at all, without duplicating the recursive check.
 export { hasImport };
+
+

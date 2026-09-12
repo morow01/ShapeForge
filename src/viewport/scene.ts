@@ -1083,6 +1083,19 @@ export class Scene {
   private navAnimFrame = 0;
   private joineryPreviewGroup = new THREE.Group();
   private joineryTransparentIds = new Set<string>();
+  private hollowPreviewId: string | null = null;
+  private hollowTransparentId: string | null = null;
+
+  setHollowTransparency(id: string | null) {
+    this.hollowTransparentId = id;
+    this.applyMaterials();
+  }
+
+  setHollowPreview(id: string | null, preview: PreviewBuild | null) {
+    this.hollowPreviewId = id;
+    this.setEdgePreview(id, preview);
+    this.applyMaterials();
+  }
   private placementTransparentId: string | null = null;
   private placementKind: PrimitiveKind | null = null;
 
@@ -2463,9 +2476,9 @@ export class Scene {
             })()
           )
         );
-        const isTrans = isTransparentMode || transparent || this.joineryTransparentIds.has(id) || isPlacementTarget;
+        const isTrans = isTransparentMode || transparent || this.joineryTransparentIds.has(id) || this.hollowTransparentId === id || isPlacementTarget;
         const mat = this.getSolidMaterial(color, sel, isTrans);
-        view.mesh.material = [mat, MATERIALS.faceHighlight];
+        view.mesh.material = [mat, this.hollowPreviewId === id ? mat : MATERIALS.faceHighlight];
         view.mesh.renderOrder = isTrans ? 1 : 0;
       }
       const wireBase = isOutlined
@@ -2639,13 +2652,21 @@ export class Scene {
     // from the same screen-space helper the handles size themselves by, so it
     // stays constant on screen at any zoom.
     const gap = Math.max(1, this.worldSnapTolerance(centre) * 2.1);
+    // The lines go on whichever sides of the cage face the camera, re-chosen
+    // every frame as it orbits. Fixed to the -Y and +X sides, they were only
+    // in front from the default view; from anywhere else the width and depth
+    // lines ran along the back of the object, behind the thing they measure.
+    // The path still runs end to end: width along the near Y side, depth up
+    // the near X side, height at the far end of that — a silhouette corner, so
+    // the height line never crosses the object either.
+    const eye = this.camera.position;
+    const nearX = eye.x >= centre.x ? max.x + gap : min.x - gap;
+    const nearY = eye.y >= centre.y ? max.y + gap : min.y - gap;
+    const farY = eye.y >= centre.y ? min.y - gap : max.y + gap;
     const edges: [THREE.Vector3, THREE.Vector3][] = [
-      [new THREE.Vector3(min.x, min.y - gap, min.z), new THREE.Vector3(max.x, min.y - gap, min.z)],
-      [new THREE.Vector3(max.x + gap, min.y, min.z), new THREE.Vector3(max.x + gap, max.y, min.z)],
-      [
-        new THREE.Vector3(max.x + gap, max.y + gap, min.z),
-        new THREE.Vector3(max.x + gap, max.y + gap, max.z),
-      ],
+      [new THREE.Vector3(min.x, nearY, min.z), new THREE.Vector3(max.x, nearY, min.z)],
+      [new THREE.Vector3(nearX, min.y, min.z), new THREE.Vector3(nearX, max.y, min.z)],
+      [new THREE.Vector3(nearX, farY, min.z), new THREE.Vector3(nearX, farY, max.z)],
     ];
     const edgePos = this.dimensionEdges.geometry.getAttribute("position") as THREE.BufferAttribute;
     const edgeCol = this.dimensionEdges.geometry.getAttribute("color") as THREE.BufferAttribute;
@@ -6169,6 +6190,130 @@ export class Scene {
       }
     } else {
       this.clearCollisionContacts();
+
+      // ── Alt-drag duplication for gizmo (move/rotate tool) ──
+      // Same Adobe-style alt-drag as the body-grab path: the originals stay
+      // put, freshly duplicated copies become the drag targets.  The
+      // duplication and the drag that follows land in the same undo batch
+      // because onDragChange(true) fires first.
+      if (this.altDown) {
+        const idsToDuplicate = [...this.selectedIds];
+        this.onDragChange?.(true);                     // open undo batch early
+        const res = this.onDuplicateObject?.(idsToDuplicate);
+        if (res && res.copies && res.copies.length > 0) {
+          const { copies, nodes } = res;
+          if (nodes) this.lastNodes = nodes;
+
+          const newSelectedIds: string[] = [];
+          for (const copyInfo of copies) {
+            const { origId, copyId, childMap } = copyInfo;
+            newSelectedIds.push(copyId);
+
+            const isAssembly = this.assemblyGroups.has(origId);
+            if (isAssembly) {
+              const origAssembly = this.assemblyGroups.get(origId)!;
+              const newAssembly = new THREE.Group();
+              newAssembly.name = `Assembly-${copyId}`;
+              newAssembly.position.copy(origAssembly.position);
+              newAssembly.rotation.copy(origAssembly.rotation);
+              newAssembly.scale.copy(origAssembly.scale);
+
+              if (childMap) {
+                for (const [origChildId, clonedChildId] of Object.entries(childMap)) {
+                  const origChildView = this.parts.get(origChildId);
+                  if (origChildView) {
+                    const clonedChildView = this.cloneView(origChildView);
+                    this.parts.set(clonedChildId, clonedChildView);
+                    newAssembly.add(clonedChildView.group);
+                  }
+                }
+              }
+              this.scene.add(newAssembly);
+              this.assemblyGroups.set(copyId, newAssembly);
+            } else {
+              const sourcePart = this.parts.get(origId);
+              if (sourcePart) {
+                this.parts.set(copyId, this.cloneView(sourcePart));
+              }
+            }
+          }
+
+          // Switch selection to the copies so the gizmo drives them.
+          this.selectedIds = newSelectedIds;
+          this.applyMaterials();
+
+          // Re-attach the gizmo to the newly created copies.
+          if (newSelectedIds.length > 1) {
+            const center = this.computeSelectionCenter(newSelectedIds);
+            this.multiGizmoPivot.position.copy(center);
+            this.multiGizmoPivot.rotation.set(0, 0, 0);
+            this.multiGizmoPivot.quaternion.identity();
+            this.multiGizmoPivot.scale.set(1, 1, 1);
+            this.multiGizmoPivot.updateMatrixWorld(true);
+            // Rebuild multiGizmoDrag for the copies
+            const effectiveIds = newSelectedIds.filter((id) => {
+              const root = this.findRootOwner(id);
+              return id === root || !newSelectedIds.includes(root);
+            });
+            const items: Array<{
+              id: string;
+              isAssembly: boolean;
+              obj: THREE.Object3D;
+              startPos: THREE.Vector3;
+              startRot: THREE.Quaternion;
+              pivot: THREE.Vector3;
+            }> = [];
+            for (const id of effectiveIds) {
+              const isAssembly = this.assemblyGroups.has(id);
+              const obj = this.assemblyGroups.get(id) ?? this.parts.get(id)?.group;
+              const view = this.parts.get(id);
+              if (!obj) continue;
+              items.push({
+                id,
+                isAssembly,
+                obj,
+                startPos: obj.position.clone(),
+                startRot: obj.quaternion.clone(),
+                pivot: isAssembly ? new THREE.Vector3() : (view?.pivot.clone() ?? new THREE.Vector3()),
+              });
+            }
+            this.multiGizmoDrag = {
+              center,
+              startGizmoPos: this.multiGizmoPivot.position.clone(),
+              startGizmoQuat: this.multiGizmoPivot.quaternion.clone(),
+              items,
+            };
+          } else {
+            // Single object: re-attach gizmo to the copy
+            const copyId = newSelectedIds[0];
+            if (copyId) {
+              if (this.assemblyGroups.has(copyId)) {
+                const pivotObj = this.assemblyPivots.get(copyId);
+                const node = findNode(this.lastNodes, copyId);
+                if (pivotObj && node) {
+                  this.assemblyDragStart = {
+                    center: pivotObj.position.clone(),
+                    position: [...node.position],
+                    rotation: [...node.rotation],
+                  };
+                }
+                const asmGroup = this.assemblyGroups.get(copyId);
+                if (asmGroup) this.gizmo.attach(asmGroup);
+              } else {
+                const view = this.parts.get(copyId);
+                if (view) this.gizmo.attach(view.group);
+              }
+            }
+          }
+          // Notify React so the tree/selection updates.
+          this.onSelectObject?.(newSelectedIds[0], false);
+          for (let i = 1; i < newSelectedIds.length; i++) {
+            this.onSelectObject?.(newSelectedIds[i], true);
+          }
+          return;  // onDragChange was already called above
+        }
+      }
+
       if (this.selectedIds.length > 1) {
         const center = this.multiGizmoPivot.position.clone();
         const effectiveIds = this.selectedIds.filter((id) => {
@@ -8624,7 +8769,13 @@ export class Scene {
   private emitFaceSelection() {
     const selected = this.selectedFace;
     const view = selected ? this.parts.get(selected.partId) : undefined;
-    const face = selected && view ? view.faces?.[selected.groupIndex] : undefined;
+    // Preview faces have different indices and centres. Selection still
+    // belongs to the unedited shape until Apply; publishing preview faces
+    // here makes the app cancel and rebuild its own preview every frame.
+    const faces = selected && this.edgePreview?.id === selected.partId
+      ? this.edgePreview.originalFaces
+      : view?.faces;
+    const face = selected && view ? faces?.[selected.groupIndex] : undefined;
     const id = face ? selected!.partId : null;
     const point = face?.point ?? null;
     // Deliberately NOT cleared just because selectedFace went null: applying

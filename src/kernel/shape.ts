@@ -4,14 +4,16 @@ import {
   makeSphere,
   makeCompound,
   basicFaceExtrusion,
+  cast,
   Vector,
   draw,
   importSTLAsMesh,
+  loft,
+  makeFace,
   measureVolume,
   MeshShape,
   getManifold,
   getOC,
-  Plane,
   sketchFaceOffset,
 } from "replicad";
 import type { Face, Shape3D, Sketch } from "replicad";
@@ -21,6 +23,7 @@ import { svgMeshSolid } from "./svgSolid";
 import { makeThreadedRodSolid, makeThreadedNutSolid } from "./threads";
 import { makeSpringSolid } from "./spring";
 import { makeHingeSolid } from "./hinge";
+import { meshShellOpening, offsetExtrudeMesh, resizeMeshFace } from "./meshFace";
 import type { SvgCommand } from "../svg/parse";
 import type { EditOp, OffsetExtrudeOp, PushPullOp, ResizeFaceOp, ShellOp, Vec3 } from "../document/types";
 import { rotateLocalOffset } from "../document/bake";
@@ -2458,6 +2461,10 @@ function edgesAt(
  * its connecting faces become sloped. `offset` is per edge: +2 mm makes a
  * rectangular face 4 mm wider and 4 mm deeper.
  */
+/** Below this many radians OCCT's draft may leave a face untouched (see
+ *  resizePlanarFace): 0.0001 was ignored, 0.001 applied accurately. */
+const NEAR_UPRIGHT_DRAFT = 0.001;
+
 function resizePlanarFace(solid: Shape3D, face: Face, op: ResizeFaceOp): Shape3D {
   if (Math.abs(op.offset) < 1e-6) return solid;
   const center = face.center;
@@ -2491,29 +2498,169 @@ function resizePlanarFace(solid: Shape3D, face: Face, op: ResizeFaceOp): Shape3D
   if (!Number.isFinite(height) || height < 0.1) {
     throw new Error("The opposite side of this face could not be found.");
   }
-  // Positive OCCT draft angles taper IN, so negate the angle to make the
-  // user-facing positive value mean grow/outset.
-  const angle = -Math.atan(op.offset / height) * 180 / Math.PI;
-  if (!Number.isFinite(angle) || Math.abs(angle) >= 80) {
-    throw new Error("That resize is too large for this face.");
+  // OCCT's draft only tilts PLANAR neighbours: on a cylinder's round side it
+  // throws from inside the WASM module, so the top of a plain cylinder could
+  // never be resized. Where the neighbours are ruled walls of one slope (a
+  // cylinder, or the cone an earlier resize made), the same result is built
+  // directly as a loft instead.
+  if (adjoining.some((candidate) => candidate.geomType !== "PLANE")) {
+    const lofted = resizeRuledFace(solid, face, adjoining, normal, faceProjection, op.offset);
+    if (lofted) return lofted;
   }
-  const origin: Vec3 = [
+  // OCCT's draft angle is ABSOLUTE — the tilt a wall ends up with, measured
+  // from the pull direction — not an amount to tilt it by. Handing every wall
+  // the same atan(offset/height) therefore did nothing at all to a face that
+  // had already been resized once: the walls were already at that angle, so
+  // the second +2 left a box unchanged, and a +2 then -2 came out as a -2
+  // on the original cube. Each wall's angle is its current lean plus the new
+  // offset, so repeated resizes add up.
+  //
+  // Positive OCCT draft angles taper IN, so the angle is negated to make a
+  // positive offset mean grow/outset.
+  const tilts = adjoining.map((wall) => {
+    const n = wall.normalAt(wall.center);
+    const s = (n.x * normal.x + n.y * normal.y + n.z * normal.z) / Math.hypot(n.x, n.y, n.z);
+    if (!(Math.abs(s) < 0.99)) throw new Error("That resize is too large for this face.");
+    // How far this wall already leans out per mm of height: an outward normal
+    // tipped down (s < 0) means the face is already wider than the far end.
+    const lean = -s / Math.sqrt(1 - s * s);
+    const angle = -Math.atan(lean + op.offset / height);
+    if (!Number.isFinite(angle) || Math.abs(angle) >= (80 * Math.PI) / 180) {
+      throw new Error("That resize is too large for this face.");
+    }
+    return { wall, angle };
+  });
+
+  // OCCT silently ignores a draft angle this close to upright — measured:
+  // 0.0001 rad leaves a tilted wall exactly where it was, 0.001 rad applies —
+  // so taking a resized face back to straight walls did nothing at all. Those
+  // are built as a loft instead, which lands exactly on vertical.
+  if (tilts.some(({ angle }) => Math.abs(angle) < NEAR_UPRIGHT_DRAFT)) {
+    const lofted = resizeRuledFace(solid, face, adjoining, normal, faceProjection, op.offset);
+    if (lofted) return lofted;
+    throw new Error("These walls cannot be brought back exactly upright with a resize.");
+  }
+
+  const oc = getOC();
+  const originVector = new Vector([
     center.x - normal.x * height,
     center.y - normal.y * height,
     center.z - normal.z * height,
-  ];
-  const helper = Math.abs(normal.z) < 0.9 ? new Vector([0, 0, 1]) : new Vector([1, 0, 0]);
-  const xDirection = helper.cross(normal).normalized();
-  const neutral = new Plane(origin, [xDirection.x, xDirection.y, xDirection.z], [normal.x, normal.y, normal.z]);
+  ]);
+  const origin = originVector.toPnt();
+  const direction = normal.toDir();
+  const neutral = new oc.gp_Pln(origin, direction);
+  // replicad's draft() takes a single angle for every face, which is exactly
+  // what cannot work here, so the OCCT builder is driven directly.
+  const drafter = new oc.BRepOffsetAPI_DraftAngle(solid.wrapped);
   try {
-    return solid.draft(
-      angle,
-      (finder) => finder.inList(adjoining.map((candidate) => candidate.clone())),
-      neutral,
-    ).asShape3D();
+    for (const { wall, angle } of tilts) drafter.Add(wall.wrapped, direction, angle, neutral, false);
+    drafter.Build();
+    return (cast(drafter.ModifiedShape(solid.wrapped)) as Shape3D).asShape3D();
   } finally {
+    drafter.delete();
     neutral.delete();
+    direction.delete();
+    origin.delete();
+    originVector.delete();
   }
+}
+
+/**
+ * resizePlanarFace for a face whose neighbours include curved walls.
+ *
+ * Applies where every neighbour is a ruled wall of one constant slope running
+ * up to the selected face: a cylinder's side, or the cone a previous resize
+ * left behind (so a face can be resized again), or flat walls sharing one
+ * draft. The section above the pivot is swapped for a ruled loft whose outline
+ * at the pivot is unchanged and whose outline at the face is offset — what the
+ * draft produces on flat walls: a cylinder's top grows into a cone frustum.
+ *
+ * The pivot is where the walls meet the rest of the part, not the bottom of
+ * the feature. A cylinder combined into a box with its lower part sunk inside
+ * used to pivot at its buried bottom: the replacement cut through the box
+ * there and left a groove round the cylinder in the box's top face.
+ *
+ * Returns null whenever the section is not like that (a rounded rim, a barrel
+ * side, walls of differing slope, a hole through it, a face with holes), so
+ * nothing is ever silently filled in or reshaped beyond what was selected.
+ */
+function resizeRuledFace(
+  solid: Shape3D,
+  face: Face,
+  adjoining: Face[],
+  normal: Vector,
+  faceProjection: number,
+  offset: number,
+): Shape3D | null {
+  // replicad's innerWires(), outerWire(), offset2D() and translate() DELETE
+  // the shape they are called on, so each is asked of its own clone.
+  if (face.clone().innerWires().length) return null;
+  const along = (p: { x: number; y: number; z: number }) => p.x * normal.x + p.y * normal.y + p.z * normal.z;
+  const TOLERANCE = 0.01;
+
+  // Heights come from the walls' own edges rather than bounding boxes, which
+  // OCCT pads on curved faces. Normals are sampled along those edges, never at
+  // wall.center: a full cylinder's centroid lies ON its axis, where
+  // normalAt() throws trying to project it.
+  let slope: number | null = null;
+  let pivot = -Infinity;
+  for (const wall of adjoining) {
+    if (wall.geomType !== "PLANE" && wall.geomType !== "CYLINDRE" && wall.geomType !== "CONE") return null;
+    let reachesFace = false;
+    for (const edge of wall.edges) {
+      const points = [0, 0.25, 0.5, 0.75, 1].map((t) => edge.pointAt(t));
+      const top = Math.max(...points.map(along));
+      if (Math.abs(top - faceProjection) <= TOLERANCE) reachesFace = true;
+      // An edge lying wholly below the face is where this wall meets the
+      // rest of the part; the highest such point is as low as the taper can
+      // pivot without cutting into that other material.
+      else pivot = Math.max(pivot, top);
+      for (const point of points.slice(1, 4)) {
+        // normalAt() is NOT unit length on a cone — its size changes with
+        // height — so it has to be normalised before slopes are compared.
+        const n = wall.normalAt(point);
+        const s = along(n) / Math.hypot(n.x, n.y, n.z);
+        if (slope === null) slope = s;
+        else if (Math.abs(s - slope) > 1e-4) return null;
+      }
+    }
+    if (!reachesFace) return null;
+  }
+  if (slope === null || Math.abs(slope) > 0.99 || !Number.isFinite(pivot)) return null;
+  const height = faceProjection - pivot;
+  if (!(height > 0.1)) return null;
+
+  // How much wider the outline is at the pivot than at the face, from the
+  // walls' slope: 0 for a cylinder, positive for a cone narrowing upwards.
+  const spread = (height * slope) / Math.sqrt(1 - slope * slope);
+  const back = normal.multiply(-height);
+  const outline = face.clone().outerWire();
+  const atPivot = (Math.abs(spread) > 1e-6
+    ? outline.clone().offset2D(spread, "intersection")
+    : outline.clone()
+  ).translate([back.x, back.y, back.z]);
+
+  const current = loft([atPivot.clone(), outline.clone()], { ruled: true });
+  const currentVolume = measureVolume(current);
+  if (!(currentVolume > 1e-6)) return null;
+  // Also catches a wall that is not what it seemed: if the loft does not lie
+  // wholly inside the solid, or a hole crosses the section, stop here.
+  const filled = measureVolume(solid.intersect(current) as Shape3D);
+  if (Math.abs(filled - currentVolume) > currentVolume * 1e-4) return null;
+
+  // Walls that end up exactly upright are extruded rather than lofted. A loft
+  // between two polygons makes each flat wall a BSPLINE_SURFACE, which every
+  // face tool afterwards — including the next resize — refuses as not flat.
+  const upright = Math.abs(offset - spread) < 1e-6;
+  const resizedOutline = outline.offset2D(offset, "intersection");
+  const resized = upright
+    ? (basicFaceExtrusion(makeFace(resizedOutline), back) as Shape3D)
+    : loft([atPivot, resizedOutline], { ruled: true });
+  const rest = solid.cut(current) as Shape3D;
+  // The whole solid was that section (a plain cylinder): nothing to join.
+  if (measureVolume(rest) < 1e-6) return resized;
+  return rest.fuse(resized) as Shape3D;
 }
 
 /**
@@ -2922,6 +3069,67 @@ function finishMeshEdge(
 
   if (matchedSegments.size === 0) return null;
 
+  // Boolean triangulation can split a straight border very near a corner.
+  // Miter the whole straight run: mitering the tiny last fragment can turn
+  // its cutter inside out and leave a notch or a square-ended strip.
+  const dot3 = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const sameFaces = (a: SharpEdge, b: SharpEdge) =>
+    (dot3(a.nA, b.nA) > 0.99999 && dot3(a.nB, b.nB) > 0.99999) ||
+    (dot3(a.nA, b.nB) > 0.99999 && dot3(a.nB, b.nA) > 0.99999);
+  let merged = true;
+  while (merged) {
+    merged = false;
+    for (const a of matchedSegments) {
+      for (const b of matchedSegments) {
+        if (a === b || !sameFaces(a, b) || Math.abs(dot3(a.u, b.u)) < 0.99999) continue;
+        const shared = [a.v0Idx, a.v1Idx].find((id) => id === b.v0Idx || id === b.v1Idx);
+        if (shared === undefined) continue;
+        const v0Idx = a.v0Idx === shared ? a.v1Idx : a.v0Idx;
+        const v1Idx = b.v0Idx === shared ? b.v1Idx : b.v0Idx;
+        const v0 = a.v0Idx === shared ? a.v1 : a.v0;
+        const v1 = b.v0Idx === shared ? b.v1 : b.v0;
+        const len = Math.hypot(...v1.map((value, i) => value - v0[i]));
+        if (len < 1e-6) continue;
+        matchedSegments.delete(a);
+        matchedSegments.delete(b);
+        matchedSegments.add({ ...a, v0Idx, v1Idx, v0, v1, len,
+          u: v1.map((value, i) => (value - v0[i]) / len) as Vec3 });
+        merged = true;
+        break;
+      }
+      if (merged) break;
+    }
+  }
+  vertexToSharpEdges.clear();
+  for (const edge of matchedSegments) {
+    for (const id of [edge.v0Idx, edge.v1Idx]) {
+      const edges = vertexToSharpEdges.get(id) ?? [];
+      edges.push(edge);
+      vertexToSharpEdges.set(id, edges);
+    }
+  }
+
+  // Opposite borders on a narrow planar strip consume material from both
+  // sides. Reject overlapping profiles instead of silently removing the
+  // entire top face and leaving corner-dependent steps.
+  for (const a of matchedSegments) for (const b of matchedSegments) {
+    if (a === b || Math.abs(dot3(a.u, b.u)) < 0.99999) continue;
+    for (const [faceA, sideA] of [[a.nA, a.nB], [a.nB, a.nA]]) {
+      for (const [faceB, sideB] of [[b.nA, b.nB], [b.nB, b.nA]]) {
+        if (dot3(faceA, faceB) < 0.99999 || dot3(sideA, sideB) > -0.99999) continue;
+        if (Math.abs(dot3(faceA, sideA)) > 1e-5) continue;
+        const offset = b.v0.map((value, i) => value - a.v0[i]) as Vec3;
+        if (Math.abs(dot3(offset, faceA)) > 1e-4) continue;
+        // The other edge must lie inside this face, not across an opening.
+        const width = -dot3(offset, sideA);
+        if (width <= 1e-5 || width >= 2 * distance + 1e-5) continue;
+        const start = dot3(offset, a.u);
+        const end = start + dot3(b.u, a.u) * b.len;
+        if (Math.min(a.len, Math.max(start, end)) - Math.max(0, Math.min(start, end)) > 1e-5) return null;
+      }
+    }
+  }
+
   const manifold = getManifold();
   let currentSolid = solid;
 
@@ -2934,7 +3142,10 @@ function finishMeshEdge(
       for (let j = 0; j < 3; j++) {
         const vi = raw.triVerts[triIdx * 3 + j];
         if (vi !== seg.v0Idx && vi !== seg.v1Idx) {
-          return [raw.vertProperties[vi * 3], raw.vertProperties[vi * 3 + 1], raw.vertProperties[vi * 3 + 2]];
+          const point: Vec3 = [raw.vertProperties[vi * 3], raw.vertProperties[vi * 3 + 1], raw.vertProperties[vi * 3 + 2]];
+          const offset = point.map((value, i) => value - v0[i]) as Vec3;
+          const along = dot3(offset, u);
+          if (Math.hypot(...offset.map((value, i) => value - along * u[i])) > 1e-6) return point;
         }
       }
       return null;
@@ -2960,13 +3171,34 @@ function finishMeshEdge(
     const nAvgL = Math.hypot(nAvgRaw[0], nAvgRaw[1], nAvgRaw[2]) || 1;
     const nAvg: [number, number, number] = [nAvgRaw[0] / nAvgL, nAvgRaw[1] / nAvgL, nAvgRaw[2] / nAvgL];
 
-    // Two edges meeting at a corner each cut their own straight prism; for
-    // the pair to fully remove the corner wedge between them (rather than
-    // leaving a sliver of the original sharp corner behind), each cutter has
-    // to reach at least `distance` past its own endpoint into the corner —
-    // a fixed cap here doesn't scale with the chamfer/fillet size, so it
-    // covered small bevels fine but under-ran anything a few mm deep.
-    const extendEnd = Math.min(seg.len * 0.49, Math.max(distance * 1.2, 0.5));
+    // Adjacent selected borders must share a miter plane. Square caps leave
+    // an uncut wedge at reentrant face corners; uniform extensions overcut
+    // other corners. Move each profile vertex along this edge to the angle
+    // bisector instead, so both profiles end at the same cross-section.
+    const miterProfile = (point: Vec3, atStart: boolean): Vec3 => {
+      const vertex = atStart ? v0 : v1;
+      const vertexIdx = atStart ? seg.v0Idx : seg.v1Idx;
+      const sign = atStart ? 1 : -1;
+      const dot = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+      const neighbors = (vertexToSharpEdges.get(vertexIdx) ?? []).filter((other) =>
+        other !== seg && matchedSegments.has(other) &&
+        [seg.nA, seg.nB].some((normal) =>
+          [other.nA, other.nB].some((otherNormal) => dot(normal, otherNormal) > 0.99999)),
+      );
+      // Multi-edge junctions need a corner patch, not an arbitrary pairing.
+      if (neighbors.length !== 1) return point;
+      const other = neighbors[0];
+      const otherSign = other.v0Idx === vertexIdx ? 1 : -1;
+      // Difference of directions pointing away from the shared endpoint is
+      // normal to the miter plane (also handles collinear mesh subdivisions).
+      const normal: Vec3 = u.map((value, i) => sign * value - otherSign * other.u[i]) as Vec3;
+      const denominator = dot(u, normal);
+      if (Math.abs(denominator) < 1e-6) return point;
+      const offset: Vec3 = point.map((value, i) => value - vertex[i]) as Vec3;
+      const shift = -dot(offset, normal) / denominator;
+      return point.map((value, i) => value + shift * u[i]) as Vec3;
+    };
+    const extendEnd = 0;
     const overshoot = isConcave ? 0 : 0.05;
 
     const p0: [number, number, number] = [v0[0] - u[0] * extendEnd, v0[1] - u[1] * extendEnd, v0[2] - u[2] * extendEnd];
@@ -3016,6 +3248,11 @@ function finishMeshEdge(
         2, 0, 3, 2, 3, 5,
       ];
 
+      for (let i = 0; i < 6; i++) {
+        const point = miterProfile(verts.slice(i * 3, i * 3 + 3) as Vec3, i < 3);
+        verts.splice(i * 3, 3, ...point);
+      }
+
       const prismMesh = new manifold.Mesh({
         numProp: 3,
         vertProperties: Float32Array.from(verts),
@@ -3059,8 +3296,8 @@ function finishMeshEdge(
 
       const K = profile0.length;
       const verts: number[] = [];
-      for (const p of profile0) verts.push(p[0], p[1], p[2]);
-      for (const p of profile1) verts.push(p[0], p[1], p[2]);
+      for (const p of profile0) verts.push(...miterProfile(p, true));
+      for (const p of profile1) verts.push(...miterProfile(p, false));
 
       const tris: number[] = [];
       for (let i = 1; i < K - 1; i++) {
@@ -3091,6 +3328,27 @@ function finishMeshEdge(
   }
 
   if (currentSolid.isEmpty || currentSolid.volume() <= 1e-9) return null;
+
+  // Boolean cuts at a corner can leave a detached offcut component.  Keep
+  // the principal body so a thin floating strip cannot survive the finish.
+  try {
+    const parts = (currentSolid.wrapped as any).decompose?.() as any[] | undefined;
+    if (parts && parts.length > 1) {
+      let largest = parts[0];
+      let largestVolume = typeof largest.volume === "function" ? largest.volume() : 0;
+      for (let i = 1; i < parts.length; i++) {
+        const candidateVolume = typeof parts[i].volume === "function" ? parts[i].volume() : 0;
+        if (candidateVolume > largestVolume) {
+          largest = parts[i];
+          largestVolume = candidateVolume;
+        }
+      }
+      currentSolid = new MeshShape(largest);
+    }
+  } catch {
+    // Decomposition is a cleanup pass; retain the valid boolean result if
+    // the backend does not expose it for this manifold version.
+  }
   return currentSolid;
 }
 
@@ -3117,140 +3375,22 @@ function hollowMesh(solid: MeshShape, op: ShellOp): MeshShape | null {
     return null;
   }
 
-  const openingCutters: any[] = [];
-  const points = op.points?.length ? op.points : [];
-
-  for (let pIdx = 0; pIdx < points.length; pIdx++) {
-    const pt = points[pIdx];
-    let normal = op.normal;
-
-    if (!normal) {
-      let closestDist = Infinity;
-      let closestN: Vec3 = [0, 0, 1];
-      for (let t = 0; t < numTris; t++) {
-        const i0 = raw.triVerts[t * 3] * 3;
-        const i1 = raw.triVerts[t * 3 + 1] * 3;
-        const i2 = raw.triVerts[t * 3 + 2] * 3;
-        const p0 = [raw.vertProperties[i0], raw.vertProperties[i0 + 1], raw.vertProperties[i0 + 2]];
-        const p1 = [raw.vertProperties[i1], raw.vertProperties[i1 + 1], raw.vertProperties[i1 + 2]];
-        const p2 = [raw.vertProperties[i2], raw.vertProperties[i2 + 1], raw.vertProperties[i2 + 2]];
-        const c = [(p0[0] + p1[0] + p2[0]) / 3, (p0[1] + p1[1] + p2[1]) / 3, (p0[2] + p1[2] + p2[2]) / 3];
-        const dist = Math.hypot(c[0] - pt[0], c[1] - pt[1], c[2] - pt[2]);
-        if (dist < closestDist) {
-          closestDist = dist;
-          const ab = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
-          const ac = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
-          let nx = ab[1] * ac[2] - ab[2] * ac[1];
-          let ny = ab[2] * ac[0] - ab[0] * ac[2];
-          let nz = ab[0] * ac[1] - ab[1] * ac[0];
-          const len = Math.hypot(nx, ny, nz) || 1;
-          closestN = [nx / len, ny / len, nz / len];
-        }
-      }
-      normal = closestN;
+  if (op.normal && op.bottomThickness !== undefined) {
+    const n = op.normal;
+    let lowest = Infinity;
+    for (let i = 0; i < raw.vertProperties.length; i += raw.numProp) {
+      lowest = Math.min(lowest, n[0] * raw.vertProperties[i] + n[1] * raw.vertProperties[i + 1] + n[2] * raw.vertProperties[i + 2]);
     }
-
-    const nLen = Math.hypot(...normal) || 1;
-    const n: Vec3 = [normal[0] / nLen, normal[1] / nLen, normal[2] / nLen];
-
-    let up: Vec3 = Math.abs(n[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0];
-    let u: Vec3 = [
-      up[1] * n[2] - up[2] * n[1],
-      up[2] * n[0] - up[0] * n[2],
-      up[0] * n[1] - up[1] * n[0],
-    ];
-    const uLen = Math.hypot(...u) || 1;
-    u = [u[0] / uLen, u[1] / uLen, u[2] / uLen];
-    const v: Vec3 = [
-      n[1] * u[2] - n[2] * u[1],
-      n[2] * u[0] - n[0] * u[2],
-      n[0] * u[1] - n[1] * u[0],
-    ];
-
-    const planeD = n[0] * pt[0] + n[1] * pt[1] + n[2] * pt[2];
-
-    const tri2DList: [number, number][][] = [];
-    for (let t = 0; t < numTris; t++) {
-      const i0 = raw.triVerts[t * 3] * 3;
-      const i1 = raw.triVerts[t * 3 + 1] * 3;
-      const i2 = raw.triVerts[t * 3 + 2] * 3;
-      const p0 = [raw.vertProperties[i0], raw.vertProperties[i0 + 1], raw.vertProperties[i0 + 2]];
-      const p1 = [raw.vertProperties[i1], raw.vertProperties[i1 + 1], raw.vertProperties[i1 + 2]];
-      const p2 = [raw.vertProperties[i2], raw.vertProperties[i2 + 1], raw.vertProperties[i2 + 2]];
-
-      const ab = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
-      const ac = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
-      let tnx = ab[1] * ac[2] - ab[2] * ac[1];
-      let tny = ab[2] * ac[0] - ab[0] * ac[2];
-      let tnz = ab[0] * ac[1] - ab[1] * ac[0];
-      const tlen = Math.hypot(tnx, tny, tnz) || 1;
-      tnx /= tlen; tny /= tlen; tnz /= tlen;
-
-      const dot = tnx * n[0] + tny * n[1] + tnz * n[2];
-      if (dot > 0.85) {
-        const d = tnx * p0[0] + tny * p0[1] + tnz * p0[2];
-        if (Math.abs(d - planeD) < 0.35) {
-          const to2D = (p: number[]): [number, number] => [
-            (p[0] - pt[0]) * u[0] + (p[1] - pt[1]) * u[1] + (p[2] - pt[2]) * u[2],
-            (p[0] - pt[0]) * v[0] + (p[1] - pt[1]) * v[1] + (p[2] - pt[2]) * v[2],
-          ];
-          tri2DList.push([to2D(p0), to2D(p1), to2D(p2)]);
-        }
-      }
-    }
-
-    if (tri2DList.length > 0) {
-      try {
-        const cs = new manifold.CrossSection(tri2DList);
-        if (!cs.isEmpty() && cs.area() > 1e-4) {
-          const depth = thickness + 1.5;
-          const outPad = 0.5;
-          const localExtrusion = cs.extrude(depth);
-          const origin: Vec3 = [
-            pt[0] + n[0] * outPad,
-            pt[1] + n[1] * outPad,
-            pt[2] + n[2] * outPad,
-          ];
-          const matrix = [
-            u[0], u[1], u[2], 0,
-            v[0], v[1], v[2], 0,
-            -n[0], -n[1], -n[2], 0,
-            origin[0], origin[1], origin[2], 1,
-          ];
-          const worldExtrusion = localExtrusion.transform(matrix as any);
-          if (!worldExtrusion.isEmpty()) {
-            openingCutters.push(worldExtrusion);
-          }
-        }
-      } catch { /* ignore fallback */ }
-    }
-
-    if (openingCutters.length <= pIdx) {
-      try {
-        const depth = thickness + 1.5;
-        const outPad = 0.5;
-        const radius = Math.max(thickness * 2, 5);
-        const circleCS = manifold.CrossSection.circle(radius, 16);
-        const localExtrusion = circleCS.extrude(depth);
-        const origin: Vec3 = [
-          pt[0] + n[0] * outPad,
-          pt[1] + n[1] * outPad,
-          pt[2] + n[2] * outPad,
-        ];
-        const matrix = [
-          u[0], u[1], u[2], 0,
-          v[0], v[1], v[2], 0,
-          -n[0], -n[1], -n[2], 0,
-          origin[0], origin[1], origin[2], 1,
-        ];
-        const worldExtrusion = localExtrusion.transform(matrix as any);
-        if (!worldExtrusion.isEmpty()) {
-          openingCutters.push(worldExtrusion);
-        }
-      } catch { /* ignore */ }
-    }
+    inner = inner.trimByPlane(n, lowest + Math.max(thickness, op.bottomThickness));
+    if (inner.isEmpty()) return null;
   }
-
+  const openingCutters = [];
+  for (const point of op.points ?? []) {
+    if (!op.normal) return null;
+    const cutter = meshShellOpening(solid, point, op.normal, thickness, op.openingInset ?? thickness);
+    if (!cutter || cutter.intersect(inner).volume() <= 1e-8) return null;
+    openingCutters.push(cutter);
+  }
   let fullCavity = inner;
   for (const cutter of openingCutters) {
     fullCavity = fullCavity.add(cutter);
@@ -3475,8 +3615,8 @@ async function replayEdit(
       continue;
     }
     if (op.kind === "shell") {
-      if (isMesh(solid)) {
-        const candidate = hollowMesh(solid, op);
+      if (isMesh(solid) || op.bottomThickness !== undefined || op.openingInset !== undefined) {
+        const candidate = hollowMesh(isMesh(solid) ? solid : solid.meshShape(FALLBACK_MESH_QUALITY), op);
         if (candidate) {
           solid = candidate;
         } else {
@@ -3534,7 +3674,10 @@ async function replayEdit(
     }
     if (op.kind === "resizeFace") {
       if (isMesh(solid)) {
-        onError?.(spec.id, "Face resize is unavailable after a mesh-based edit.");
+        let reason = "That face cannot be resized by this amount; the previous shape was kept.";
+        const candidate = resizeMeshFace(solid, op, (message) => { reason = message; });
+        if (candidate) solid = candidate;
+        else onError?.(spec.id, reason);
         continue;
       }
       const face = findFace(solid, op.point, op.normal);
@@ -3556,7 +3699,9 @@ async function replayEdit(
     }
     if (op.kind === "offsetExtrude") {
       if (isMesh(solid)) {
-        onError?.(spec.id, "Offset and extrude is unavailable after a mesh-based edit.");
+        const candidate = offsetExtrudeMesh(solid, op);
+        if (candidate) solid = candidate;
+        else onError?.(spec.id, "That offset cannot be extruded on this face; try a smaller inset. The previous shape was kept.");
         continue;
       }
       const face = findFace(solid, op.point, op.normal);
@@ -3697,8 +3842,8 @@ export async function survivingOps(
       continue;
     }
     if (op.kind === "shell") {
-      if (isMesh(solid)) {
-        const candidate = hollowMesh(solid, op);
+      if (isMesh(solid) || op.bottomThickness !== undefined || op.openingInset !== undefined) {
+        const candidate = hollowMesh(isMesh(solid) ? solid : solid.meshShape(FALLBACK_MESH_QUALITY), op);
         if (candidate) {
           solid = candidate;
           kept.push(op);
@@ -3726,7 +3871,11 @@ export async function survivingOps(
       continue;
     }
     if (op.kind === "offsetExtrude") {
-      if (isMesh(solid)) continue;
+      if (isMesh(solid)) {
+        const candidate = offsetExtrudeMesh(solid, op);
+        if (candidate) { solid = candidate; kept.push(op); }
+        continue;
+      }
       const bRepSolid = solid as Shape3D;
       const candidate = settled(() => {
         const face = findFace(bRepSolid, op.point, op.normal);
@@ -3739,7 +3888,11 @@ export async function survivingOps(
       continue;
     }
     if (op.kind === "resizeFace") {
-      if (isMesh(solid)) continue;
+      if (isMesh(solid)) {
+        const candidate = resizeMeshFace(solid, op);
+        if (candidate) { solid = candidate; kept.push(op); }
+        continue;
+      }
       const bRepSolid = solid as Shape3D;
       const candidate = settled(() => {
         const face = findFace(bRepSolid, op.point, op.normal);
@@ -4751,3 +4904,4 @@ export async function makeWorld(
 }
 
 export { hasImport, isMesh };
+

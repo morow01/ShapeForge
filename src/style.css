@@ -172,6 +172,7 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 
 .status-pill { padding: 4px 9px; color: #3f7e59; background: #eaf7ef; border-radius: 999px; font-size: 11px; font-weight: 700; }
 .status-pill.busy { color: #94651c; background: #fff3d8; }
+.face-settings-panel .hollow-building-status { display: inline-block; }
 .status-pill.error { color: #aa3540; background: #ffeaec; }
 
 .panel { min-height: 0; overflow: auto; background: #fff; }
@@ -533,6 +534,21 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
   display: grid;
   grid-template-columns: repeat(2, 58px);
   gap: 4px;
+}
+
+.mirror-flyout {
+  display: grid;
+  grid-template-columns: repeat(4, 52px);
+  align-items: center;
+}
+.mirror-flyout .flyout-label {
+  grid-column: 1 / -1;
+  text-align: center;
+  padding: 2px 4px 4px;
+}
+.mirror-flyout button {
+  width: 52px;
+  min-width: 52px;
 }
 .drop-direction-flyout button {
   width: 58px;
@@ -3020,3 +3036,11 @@ button.stepper-btn:disabled {
   cursor: pointer;
 }
 
+.face-settings-panel { display:flex; flex-direction:column; gap:16px; padding:20px 16px; overflow:auto; }
+.face-settings-panel > strong { font-size:18px; }
+.face-settings-panel > label { display:flex; align-items:center; flex-wrap:wrap; gap:8px; font-size:13px; }
+.face-settings-panel > label .num-stepper-wrap { margin-left:auto; }
+.face-settings-panel > small,.face-settings-panel > p { color:var(--text-muted,#64748b); font-size:12px; line-height:1.5; margin:0; }
+.face-settings-panel > button { padding:10px 14px; border-radius:8px; border:1px solid #d3dfe3; cursor:pointer; }
+.face-settings-panel > button:not(.face-settings-cancel) { background:#308294; color:white; }
+.face-settings-panel .face-settings-cancel { align-self:flex-end; background:transparent; }

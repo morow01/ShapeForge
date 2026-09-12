@@ -122,6 +122,18 @@ export function MoveToolIcon({ className = "tool-icon" }: { className?: string }
   );
 }
 
+/** Mirror tool: opposing shapes around a center plane. */
+export function MirrorToolIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <g fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 3v18" strokeDasharray="2 2" />
+        <path d="M9 6 4 12l5 6M15 6l5 6-5 6" />
+      </g>
+    </svg>
+  );
+}
+
 /** Rotate tool: a pivot arc ending in a small chevron arrowhead, with a
  *  pivot-point dot at the object's centre. */
 export function RotateToolIcon({ className = "tool-icon" }: { className?: string }) {
@@ -1561,6 +1573,4 @@ export function SnapJointIcon({ className = "tool-icon" }: { className?: string 
     </svg>
   );
 }
-
-
 
