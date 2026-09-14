@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import type { BlueprintGeometry } from "../document/blueprint";
+import { cellColour, DEFAULT_CELL_DISPLAY, type CellDisplay } from "./cellColours";
 import { FaceResizeHandles, type FaceBounds, type FaceResizeFrame } from "./FaceResizeHandles";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
@@ -78,6 +79,8 @@ const PUSH_PULL_HANDLE_SCALE = 1.7;
  * axes needs nothing further explained; these are muted versions of it so
  * three of them can sit over a model without shouting.
  */
+// Mirrored as --axis-x/-y/-z in style.css, which colours the Properties panel's
+// matching fields. Change both together or the panel stops matching the view.
 const AXIS_COLOR = ["#d2544c", "#3f9a55", "#4079d0"] as const;
 const AXIS_COLOR_HEX = [0xd2544c, 0x3f9a55, 0x4079d0] as const;
 
@@ -372,14 +375,8 @@ const MATERIALS = {
    *  cursor" looks the same everywhere in the app. */
   // See-through for the whole session: every region has to be visible while
   // you decide about it, including the ones buried inside the overlap.
-  cellKept: new THREE.MeshStandardMaterial({
-    color: 0x43aede,
-    metalness: 0.04,
-    roughness: 0.55,
-    transparent: true,
-    opacity: 0.55,
-    depthWrite: false,
-  }),
+  // Kept and hovered regions each get their own material (see setCells), so
+  // every region can carry its own colour. Only the removed looks are shared.
   cellRemoved: new THREE.MeshStandardMaterial({
     color: 0x9fb0bb,
     transparent: true,
@@ -387,17 +384,8 @@ const MATERIALS = {
     depthWrite: false,
     roughness: 0.6,
   }),
-  // Hover tints rather than repaints: a region already in the shape keeps
-  // reading as part of it, and one that is still out reads as a preview of
-  // what clicking would add.
-  cellHover: new THREE.MeshStandardMaterial({
-    color: 0x2bb3ba,
-    metalness: 0.04,
-    roughness: 0.5,
-    transparent: true,
-    opacity: 0.85,
-    depthWrite: false,
-  }),
+  // A removed region under the pointer reads as a preview of what clicking
+  // would add back.
   cellHoverRemoved: new THREE.MeshStandardMaterial({
     color: 0xffc46b,
     transparent: true,
@@ -1178,7 +1166,20 @@ export class Scene {
   private gridSnapEnabled = false;
   /** Shape Builder: one view per region of the selection's arrangement, keyed
    *  by cell mask. Empty whenever the tool is not active. */
-  private cellViews = new Map<number, { group: THREE.Group; mesh: THREE.Mesh; wire: THREE.LineSegments; kept: boolean }>();
+  private cellViews = new Map<number, {
+    group: THREE.Group;
+    mesh: THREE.Mesh;
+    /** Every mesh line the kernel produced — facets of curved faces included. */
+    wire: THREE.LineSegments;
+    /** Only the real edges: box corners, circle rims. What "Outline" draws. */
+    outline: THREE.LineSegments;
+    /** This region's own look while kept, and while hovered. */
+    body: THREE.MeshStandardMaterial;
+    hover: THREE.MeshStandardMaterial;
+    index: number;
+    kept: boolean;
+  }>();
+  private cellDisplay: CellDisplay = DEFAULT_CELL_DISPLAY;
   private hoverCell: number | null = null;
   /** Every region the current gesture would act on. Clicking a region that
    *  belongs to ONE shape acts on that whole shape — see cellGroup(). */
@@ -6111,6 +6112,9 @@ export class Scene {
       this.scene.remove(view.group);
       view.mesh.geometry.dispose();
       view.wire.geometry.dispose();
+      view.outline.geometry.dispose();
+      view.body.dispose();
+      view.hover.dispose();
     }
     this.cellViews.clear();
     this.hoverCell = null;
@@ -6118,20 +6122,24 @@ export class Scene {
     this.cellCursorEl.style.display = "none";
 
     if (cells) {
-      for (const cell of cells) {
+      cells.forEach((cell, index) => {
         const geom = syncKernelGeometry(cell.mesh);
-        const mesh = new THREE.Mesh(geom[0].faces, MATERIALS.cellKept);
+        const body = new THREE.MeshStandardMaterial({ metalness: 0.04, roughness: 0.55 });
+        const hover = new THREE.MeshStandardMaterial({ metalness: 0.04, roughness: 0.5 });
+        const mesh = new THREE.Mesh(geom[0].faces, body);
         const wire = new THREE.LineSegments(geom[0].lines, MATERIALS.wire);
+        // The kernel's own lines trace every facet of a curved face, which on
+        // a torus or cylinder is a dense hatch that hides the shape. A bend
+        // of 30° or more is a real edge; the facets of a smooth surface fall
+        // well under it.
+        const outline = new THREE.LineSegments(new THREE.EdgesGeometry(geom[0].faces, 30), MATERIALS.wire);
         const group = new THREE.Group();
-        group.add(mesh, wire);
+        group.add(mesh, wire, outline);
         this.scene.add(group);
         // Regions start IN, so alt-click — "take this one out", the gesture
         // subtract is made of — does something the moment the tool opens.
-        // They are drawn see-through rather than solid, which is what stops
-        // that from looking identical to the shapes you started with: you can
-        // see the interior regions, and taking one out is visible immediately.
-        this.cellViews.set(cell.mask, { group, mesh, wire, kept: true });
-      }
+        this.cellViews.set(cell.mask, { group, mesh, wire, outline, body, hover, index, kept: true });
+      });
     }
     // The sources would otherwise sit exactly on top of their own regions,
     // z-fighting them and swallowing every click.
@@ -6179,20 +6187,47 @@ export class Scene {
     return this.cellViews.size > 0;
   }
 
+  /** How the builder's regions are drawn — see CellDisplay. */
+  setCellDisplay(display: CellDisplay) {
+    this.cellDisplay = display;
+    this.applyCellMaterials();
+  }
+
   private applyCellMaterials() {
+    const { style, lines, colours, showRemoved } = this.cellDisplay;
+    const solid = style === "solid";
     for (const [mask, view] of this.cellViews) {
       const hovered = this.hoverGroup.has(mask);
+      const colour = cellColour(view.index, colours);
+
+      view.body.color.set(colour);
+      view.body.transparent = !solid;
+      view.body.opacity = solid ? 1 : 0.5;
+      view.body.depthWrite = solid;
+      view.body.needsUpdate = true;
+
+      // Hovering lifts a region above everything else. In solid view that is
+      // the only way to see a region buried inside another while pointing at
+      // it in the list; the viewport alone cannot show it.
+      view.hover.color.set(colour).offsetHSL(0, 0.08, 0.1);
+      view.hover.transparent = true;
+      view.hover.opacity = 0.9;
+      view.hover.depthTest = !solid;
+      view.hover.depthWrite = false;
+      view.hover.needsUpdate = true;
+
       view.mesh.material = view.kept
-        ? hovered
-          ? MATERIALS.cellHover
-          : MATERIALS.cellKept
-        : hovered
-          ? MATERIALS.cellHoverRemoved
-          : MATERIALS.cellRemoved;
+        ? hovered ? view.hover : view.body
+        : hovered ? MATERIALS.cellHoverRemoved : MATERIALS.cellRemoved;
       // Removed regions draw after the kept ones so their ghost reads as
-      // "in front of, but not part of" the solid.
-      view.mesh.renderOrder = view.kept ? 0 : 2;
-      view.wire.visible = view.kept || hovered;
+      // "in front of, but not part of" the solid; a hovered region draws last.
+      view.mesh.renderOrder = hovered && solid ? 5 : view.kept ? 0 : 2;
+      // A hidden ghost stays hidden until pointed at in the list.
+      view.mesh.visible = view.kept || showRemoved || hovered;
+
+      const lined = view.kept || hovered;
+      view.wire.visible = lined && lines === "all";
+      view.outline.visible = lined && lines === "outline";
     }
   }
 
@@ -6239,7 +6274,10 @@ export class Scene {
     this.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
     this.raycaster.setFromCamera(this.pointer, this.camera);
-    const meshes = [...this.cellViews.values()].map((v) => v.mesh);
+    // A raycast does not care whether a mesh is drawn, so a removed region
+    // hidden from view would still catch clicks aimed at empty space and
+    // quietly put itself back. Only what can be seen can be clicked.
+    const meshes = [...this.cellViews.values()].filter((v) => v.mesh.visible).map((v) => v.mesh);
     const hits = this.raycaster.intersectObjects(meshes, false);
     if (!hits.length) return null;
 

@@ -73,6 +73,19 @@ const thickFloor=hollow(mesh(box),{kind:'shell',points:[[10,10,10]],normal:[0,0,
 assert.ok(thickFloor);
 assert.ok(Math.abs(thickFloor.volume()-(4000-256*6))<0.01);
 console.log('Independent thicker floor passed');
+// Bottom 0: the far face opens with the same rim, leaving a sleeve open at
+// both ends — the 16x16 cavity runs the full 10 height.
+const sleeve=hollow(mesh(box),{kind:'shell',points:[[10,10,10]],normal:[0,0,1],thickness:2,bottomThickness:0,openingInset:2});
+assert.ok(sleeve,'open-ended hollow builds');
+assert.ok(Math.abs(sleeve.volume()-(4000-256*10))<0.01,`sleeve volume ${sleeve.volume()}`);
+assert.ok(m.Manifold.cube([1,1,12]).translate([9.5,9.5,-1]).intersect(sleeve.wrapped).isEmpty(),'nothing left across the middle, top to bottom');
+assert.ok(!m.Manifold.cube([1,20,1]).translate([0,0,0]).intersect(sleeve.wrapped).isEmpty(),'the wall is still there at the bottom edge');
+// With no flat face opposite the opening — a flat top over a V-shaped ridge —
+// it is refused rather than guessed at.
+const keel=m.Manifold.cube([20,20,20],true).rotate([0,45,0]).trimByPlane([0,0,-1],-5);
+assert.ok(hollow(mesh(keel),{kind:'shell',points:[[0,0,5]],normal:[0,0,1],thickness:1,bottomThickness:2,openingInset:1}),'the same shape hollows with a floor');
+assert.equal(hollow(mesh(keel),{kind:'shell',points:[[0,0,5]],normal:[0,0,1],thickness:1,bottomThickness:0,openingInset:1}),null,'no flat far face, no open-ended hollow');
+console.log('Open-ended hollow (Bottom 0) passed');
 const tray=m.Manifold.cube([40,40,20]).subtract(m.Manifold.cube([32,40,20]).translate([4,4,4]));
 // An inside wall: its floor runs out in FRONT of it, not behind. That used to
 // be rejected outright for every pocket or tray.

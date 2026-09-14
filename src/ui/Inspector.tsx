@@ -648,7 +648,7 @@ export function Inspector({
         return (
           <>
             <div className="h2-row">
-              <h2>{isMulti ? `Size (${displayUnit})` : showMm ? `Size (${displayUnit})` : "Size"}</h2>
+              <h2>{isMulti || showMm ? `Size (${displayUnit})` : "Size (%)"}</h2>
               {showLockHere && (
                 <button
                   type="button"
@@ -674,7 +674,7 @@ export function Inspector({
                   const currentMm = selectionBounds.max[i] - selectionBounds.min[i];
                   const currentVal = formatLength(currentMm, displayUnit, decimalPlaces);
                   return (
-                    <label key={label}>
+                    <label key={label} className={`axis-${i}`}>
                       <span className="field-label">{label}</span>
                       <MathNumInput
                         className="num"
@@ -703,7 +703,7 @@ export function Inspector({
                 {WDH_LABELS.map((label, i) => {
                   const currentVal = formatLength(localSize[i] * node.scale[i], displayUnit, decimalPlaces);
                   return (
-                    <label key={label}>
+                    <label key={label} className={`axis-${i}`}>
                       <span className="field-label">{label}</span>
                       <MathNumInput
                         className="num"
@@ -729,7 +729,7 @@ export function Inspector({
             {!isMulti && !showMm && (
               <div className="triple">
                 {AXES.map((axis, i) => (
-                  <label key={axis}>
+                  <label key={axis} className={`axis-${i}`}>
                     <span className="field-label">{axis} %</span>
                     <MathNumInput
                       className="num"
@@ -765,7 +765,7 @@ export function Inspector({
           <h2>Position ({displayUnit})</h2>
           <div className="triple">
             {AXES.map((axis, i) => (
-              <label key={axis}>
+              <label key={axis} className={`axis-${i}`}>
                 <span className="field-label">{axis}</span>
                 <MathNumInput
                   className="num"
@@ -782,7 +782,7 @@ export function Inspector({
           <h2>Rotation (deg)</h2>
           <div className="triple">
             {AXES.map((axis, i) => (
-              <label key={axis}>
+              <label key={axis} className={`axis-${i}`}>
                 <span className="field-label">{axis}</span>
                 <MathNumInput
                   className="num"
@@ -820,7 +820,7 @@ export function Inspector({
           <h2>Position ({displayUnit})</h2>
           <div className="triple">
             {AXES.map((axis, i) => (
-              <label key={axis}>
+              <label key={axis} className={`axis-${i}`}>
                 <span className="field-label">{axis}</span>
                 <MathNumInput
                   className="num"
@@ -1296,7 +1296,10 @@ function ObjectParams({
         </div>
       )}
       <div className="h2-row">
-        <h2>Dimensions</h2>
+        {/* Length fields here carry no unit of their own (angles and counts
+            label themselves), so the heading says which unit they are in —
+            the same way Position and Rotation already do. */}
+        <h2>Dimensions ({displayUnit})</h2>
         <div className="h2-actions">
           <button
             type="button"
@@ -1399,6 +1402,10 @@ function ObjectParams({
           : undefined;
 
         const axes = axesByKey[f.key];
+        // Width, Depth, Height and the like each run along one axis and take
+        // its colour. A radius spans two or three at once, so it takes none —
+        // painting it one of them would claim a direction it does not have.
+        const singleAxis = axes?.length === 1 ? (axes[0] as 0 | 1 | 2) : undefined;
         const uniform = !!axes && axes.every((a) => Math.abs(node.scale[a] - node.scale[axes[0]]) < 1e-9);
         // A corner radius has to turn through the shape, so it can never
         // exceed half the smallest side; past that OCCT refuses and the
@@ -1448,6 +1455,7 @@ function ObjectParams({
                 lockDisabled={lockDisabled}
                 disabled={isConstrained3rdAngle || (node.kind === "threadedNut" && f.key === "clearance" && (node.params.fit ?? 1) !== 3)}
                 dotColorClass={dotColorClass}
+                axis={singleAxis}
                 onChange={(v) => onParam(f.key, Math.min(v, shown.max))}
                 displayUnit={displayUnit}
                 decimalPlaces={decimalPlaces}
@@ -1475,6 +1483,7 @@ function ObjectParams({
               locked={isLocked}
               onToggleLock={onToggleLock}
               lockDisabled={lockDisabled}
+              axis={singleAxis}
               onChange={(v) => {
                 if (!Number.isFinite(v) || v <= 0) return;
                 if (node.kind === "triangle" && (node.params.lockAngleLeft || node.params.lockAngleRight || node.params.lockAngleApex)) {
@@ -1506,7 +1515,7 @@ function ObjectParams({
         };
       }))}
       {node.kind === "triangle" && (
-        <TriangleReadout params={node.params} scale={node.scale} />
+        <TriangleReadout params={node.params} scale={node.scale} displayUnit={displayUnit} />
       )}
     </>
   );
@@ -1519,9 +1528,11 @@ function ObjectParams({
 function TriangleReadout({
   params,
   scale = [1, 1, 1],
+  displayUnit,
 }: {
   params: Record<string, number>;
   scale?: Vec3;
+  displayUnit: DisplayUnit;
 }) {
   let solved: TriangleSolution;
   try {
@@ -1531,7 +1542,10 @@ function TriangleReadout({
   }
 
   const deg = (n: number) => `${fmt(n)}°`;
-  const mm = (n: number) => `${fmt(n)} mm`;
+  // Read out in the unit the rest of the panel uses. These were always
+  // labelled mm, so with inches selected the sides you did not type came back
+  // in a different unit from the ones you did.
+  const mm = (n: number) => `${fmt(fromMillimetres(n, displayUnit))} ${displayUnit}`;
 
   const isScaled =
     Math.abs((scale[0] ?? 1) - 1) > 1e-4 || Math.abs((scale[1] ?? 1) - 1) > 1e-4;
@@ -1584,7 +1598,7 @@ function TriangleReadout({
           </Fragment>
         ))}
         <dt>Area</dt>
-        <dd>{fmt(solved.area)} mm²</dd>
+        <dd>{fmt(fromMillimetres(fromMillimetres(solved.area, displayUnit), displayUnit))} {displayUnit}²</dd>
       </dl>
     </>
   );
@@ -1633,6 +1647,7 @@ function Field({
   lockDisabled,
   disabled,
   dotColorClass,
+  axis,
   displayUnit,
   decimalPlaces,
   isLength = false,
@@ -1646,6 +1661,9 @@ function Field({
   lockDisabled?: boolean;
   disabled?: boolean;
   dotColorClass?: string;
+  /** The one axis this field measures along, if it measures along exactly
+   *  one: it is then shown in that axis's viewport colour. */
+  axis?: 0 | 1 | 2;
   displayUnit: DisplayUnit;
   decimalPlaces: number;
   isLength?: boolean;
@@ -1870,7 +1888,7 @@ function Field({
   };
 
   return (
-    <div className="field">
+    <div className={axis === undefined ? "field" : `field axis-${axis}`}>
       <div className="field-header">
         <span className="field-label">
           {dotColorClass && <span className={`corner-dot ${dotColorClass}`}></span>}

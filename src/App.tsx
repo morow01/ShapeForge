@@ -90,6 +90,7 @@ import type { EditOp, GroupNode, PrimitiveKind, SceneNode, ShellOp, ResizeFaceOp
 import { RETRYABLE_MESH_ERROR } from "./kernel/types";
 import type { EditSpec, ExportQuality, NodeSpec, PreviewBuild, ScenePart } from "./kernel/types";
 import type { CameraMode, DuplicateResult, Scene, ToolMode, WireframeMode } from "./viewport/scene";
+import { cellColour, DEFAULT_CELL_DISPLAY, type CellDisplay } from "./viewport/cellColours";
 import { APP_NAME, APP_VERSION } from "./version";
 
 /** Shown when Hollow is pressed with nothing selected; cleared as soon as a
@@ -309,6 +310,7 @@ const OBJECTS_PANEL_KEY = "cad.objectsPanelOpen";
 const VIEW_STYLE_KEY = "cad.viewStyle";
 const RESIZE_CONSTRAINED_KEY = "cad.resizeConstrained";
 const DISPLAY_UNIT_KEY = "cad.displayUnit";
+const CELL_DISPLAY_KEY = "cad.shapeBuilderDisplay";
 const DECIMAL_PLACES_KEY = "cad.decimalPlaces.v2";
 const APPEARANCE_KEY = "cad.appearance";
 const BUILD_PLATE_VISIBLE_KEY = "cad.buildPlateVisible";
@@ -920,6 +922,24 @@ export function App() {
   const [buildBusy, setBuildBusy] = useState(false);
   const [treeChangeBusy, setTreeChangeBusy] = useState(false);
   const [buildCells, setBuildCells] = useState<{ mask: number; kept: boolean }[]>([]);
+  // How Shape Builder draws its regions, remembered between sessions: it is a
+  // preference about seeing the model, not part of any one build.
+  const [cellDisplay, setCellDisplay] = useState<CellDisplay>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(CELL_DISPLAY_KEY) ?? "null") as Partial<CellDisplay> | null;
+      return { ...DEFAULT_CELL_DISPLAY, ...(saved ?? {}) };
+    } catch {
+      return DEFAULT_CELL_DISPLAY;
+    }
+  });
+  const updateCellDisplay = (change: Partial<CellDisplay>) => setCellDisplay((current) => ({ ...current, ...change }));
+  useEffect(() => {
+    try {
+      localStorage.setItem(CELL_DISPLAY_KEY, JSON.stringify(cellDisplay));
+    } catch {
+      // Private mode / blocked storage: the view just won't be remembered.
+    }
+  }, [cellDisplay]);
   // Remembered across sessions: which quality you want is a property of how
   // you print, not of one export.
   /** STL states no units at all, so a slicer has to guess; 3MF says
@@ -3047,6 +3067,13 @@ export function App() {
     };
   }, [toolMode]);
 
+  // The viewport draws regions the way the panel's view options say. Also
+  // re-sent when a session's regions arrive, so a scene that was not ready on
+  // mount still picks up the remembered view.
+  useEffect(() => {
+    sceneRef.current?.setCellDisplay(cellDisplay);
+  }, [cellDisplay, buildCells.length]);
+
   /** "Box 1", "Sphere 1", "Box 1 + Sphere 1" — a region named by which of the
    *  source shapes contain it, which is exactly what its mask records. */
   const cellLabel = useCallback(
@@ -3300,6 +3327,10 @@ export function App() {
     return ()=>{cancelled=true; window.clearTimeout(timer);};
   },[resizeFaceKey,resizeValueKey,nodes]);
   const [wallBottom, setWallBottom] = useState<number | null>(null);
+  // The floor opposite a hollow's opening. 0 opens that end too; anything else
+  // is at least the wall, since the cavity cannot come closer to the far face
+  // than it does to every other face.
+  const hollowBottom = wallBottom === 0 ? 0 : Math.max(faceValue, wallBottom ?? faceValue);
   const [wallInset, setWallInset] = useState<number | null>(null);
   const [wallPreview, setWallPreview] = useState(true);
   const [wallTransparency, setWallTransparency] = useState(true);
@@ -3330,7 +3361,7 @@ export function App() {
         const node = findNode(nodes, faceSelection.id);
         if (!node || node.type === "import" || node.type === "build") throw new Error("Preview is unavailable for this object.");
         const op: ShellOp = { kind: "shell", thickness: Math.max(0.1, faceValue),
-          bottomThickness: Math.max(faceValue, wallBottom ?? faceValue),
+          bottomThickness: hollowBottom,
           openingInset: wallInset ?? faceValue,
           points: [faceSelection.point], normal: faceSelection.normal };
         let base = toSpec(node);
@@ -4545,44 +4576,6 @@ export function App() {
             </button>
           </div>
         )}
-        {toolMode === "build" && !buildBusy && buildCells.length > 0 && (
-          // Finishing has to be visible. Enter alone was not: Esc is the key
-          // people reach for to get out of a mode, and Esc throws the session
-          // away — so the work looked like it had simply not applied.
-          <div className="build-bar">
-            <div className="build-regions">
-              <span className="build-count">
-                <strong>{keptCount}</strong> of {buildCells.length} regions kept
-              </span>
-              {/* One toggle per region. A region enclosed inside another — the
-                  half of a sphere buried in the box around it — has no visible
-                  surface to click in the viewport, so this list is the only way
-                  to reach it. Hovering highlights it in 3D. */}
-              <div className="build-chips">
-                {buildCells.map((cell) => (
-                  <button
-                    key={cell.mask}
-                    className={`build-chip ${cell.kept ? "on" : ""}`}
-                    onClick={() => sceneRef.current?.setCellKept(cell.mask, !cell.kept)}
-                    onMouseEnter={() => sceneRef.current?.previewCell(cell.mask)}
-                    onMouseLeave={() => sceneRef.current?.previewCell(null)}
-                    title={cell.kept ? "In the shape — click to remove" : "Removed — click to put back"}
-                  >
-                    {cellLabel(cell.mask)}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div className="build-actions">
-              <button className="build-cancel" onClick={() => setToolMode("select")}>
-                Cancel (Esc)
-              </button>
-              <button className="build-apply" onClick={commitBuild} disabled={!keptCount}>
-                Build shape (Enter)
-              </button>
-            </div>
-          </div>
-        )}
         {workingLabel && (
           <div className="canvas-working" role="status">
             <span className="canvas-working-dot" aria-hidden="true" />
@@ -4593,7 +4586,7 @@ export function App() {
           {toolMode === "build"
             ? buildBusy
               ? "Working out the regions…"
-              : "Alt-click a shape to subtract it · Click to add it back · Use the region chips below for one region at a time"
+              : "Alt-click a shape to subtract it · Click to add it back · Use the region list on the right for one region at a time"
             : toolMode === "align"
             ? alignSubMode === "points"
               ? "Drag a coloured node onto a node on the other object · yellow marks the current target · release to align · Esc Select"
@@ -4686,6 +4679,88 @@ export function App() {
           </button>
         </div>
 
+        {toolMode === "build" && (
+          <div className="face-settings-panel build-settings-panel">
+            <strong>Shape Builder</strong>
+            {buildBusy ? (
+              <p>Working out the regions…</p>
+            ) : !buildCells.length ? (
+              <p>Select two or more overlapping shapes, then open Shape Builder.</p>
+            ) : (
+              <>
+                <p>Click a region to put it in the shape, Alt-click to take it out — or use the list.</p>
+
+                <div className="build-panel-section">
+                  <div className="build-panel-heading">
+                    <span className="field-label">Regions</span>
+                    <span className="build-count"><strong>{keptCount}</strong> of {buildCells.length} kept</span>
+                  </div>
+                  {/* One row per region. A region enclosed inside another — the
+                      half of a sphere buried in the box around it — has no
+                      visible surface to click in the viewport, so this list is
+                      the only way to reach it. Hovering lifts it into view. */}
+                  <div className="build-region-list">
+                    {buildCells.map((cell, index) => (
+                      <button
+                        key={cell.mask}
+                        type="button"
+                        className={`build-region ${cell.kept ? "on" : ""}`}
+                        aria-pressed={cell.kept}
+                        onClick={() => sceneRef.current?.setCellKept(cell.mask, !cell.kept)}
+                        onMouseEnter={() => sceneRef.current?.previewCell(cell.mask)}
+                        onMouseLeave={() => sceneRef.current?.previewCell(null)}
+                        title={cell.kept ? "In the shape — click to take it out" : "Taken out — click to put it back"}
+                      >
+                        <span className="build-swatch" style={{ background: cellColour(index, cellDisplay.colours) }} aria-hidden="true" />
+                        <span className="build-region-name">{cellLabel(cell.mask)}</span>
+                        <span className="build-region-state">{cell.kept ? "In" : "Out"}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="build-panel-section">
+                  <span className="field-label">View</span>
+                  <div className="binary-choice" role="group" aria-label="Region display">
+                    {(["transparent", "solid"] as const).map((style) => (
+                      <button key={style} type="button" className={cellDisplay.style === style ? "on" : ""}
+                        aria-pressed={cellDisplay.style === style} onClick={() => updateCellDisplay({ style })}>
+                        {style === "transparent" ? "Transparent" : "Solid"}
+                      </button>
+                    ))}
+                  </div>
+                  <span className="field-label">Lines</span>
+                  <div className="binary-choice three" role="group" aria-label="Region lines">
+                    {(["outline", "all", "none"] as const).map((lines) => (
+                      <button key={lines} type="button" className={cellDisplay.lines === lines ? "on" : ""}
+                        aria-pressed={cellDisplay.lines === lines} onClick={() => updateCellDisplay({ lines })}
+                        title={lines === "outline" ? "Only real edges, like corners and rims"
+                          : lines === "all" ? "Every mesh line, including the facets of curved faces" : "No lines"}>
+                        {lines === "outline" ? "Outline" : lines === "all" ? "All lines" : "None"}
+                      </button>
+                    ))}
+                  </div>
+                  <label className="build-toggle">
+                    <input type="checkbox" checked={cellDisplay.colours} onChange={(e) => updateCellDisplay({ colours: e.target.checked })} />
+                    Colour each region
+                  </label>
+                  <label className="build-toggle">
+                    <input type="checkbox" checked={cellDisplay.showRemoved} onChange={(e) => updateCellDisplay({ showRemoved: e.target.checked })} />
+                    Show removed regions
+                  </label>
+                </div>
+
+                {/* Finishing has to be visible. Enter alone was not: Esc is the
+                    key people reach for to get out of a mode, and Esc throws the
+                    session away — so the work looked like it had not applied. */}
+                <div className="face-settings-actions">
+                  <button className="face-settings-cancel" type="button" onClick={() => setToolMode("select")}>Cancel</button>
+                  <button type="button" onClick={commitBuild} disabled={!keptCount}>Build shape</button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
         {toolMode === "face" && (() => {
           const target = faceSelection ?? lastFace.current;
           const assemblyGroup = target ? findAssemblyOwner(nodes, target.id) : null;
@@ -4773,13 +4848,41 @@ export function App() {
                 </div>
               </>
             )}
-            {faceOp !== "resize" && faceOp !== "wall" && faceOp !== "fillet" && faceOp !== "chamfer" && <label>
-              {faceOp === "offset" ? "Inset" : "Distance"} <span>({displayUnit})</span>
+            {faceOp === "offset" && (
+              // Inset and Height describe one operation, so they sit on one row
+              // like Resize Face's Width and Height, each labelled with its unit.
+              <div className="face-resize-dimensions">
+                <label>
+                  Inset ({displayUnit})
+                  <SignedMeasurementInput
+                    valueMm={faceValue}
+                    unit={displayUnit}
+                    decimals={decimalPlaces}
+                    min={0.1}
+                    step={0.5}
+                    onValue={setFaceValue}
+                    onEnter={() => faceApplyButtonRef.current?.click()}
+                  />
+                </label>
+                <label>
+                  Height ({displayUnit})
+                  <SignedMeasurementInput
+                    valueMm={faceHeight}
+                    unit={displayUnit}
+                    decimals={decimalPlaces}
+                    step={0.5}
+                    onValue={setFaceHeight}
+                    onEnter={() => faceApplyButtonRef.current?.click()}
+                  />
+                </label>
+              </div>
+            )}
+            {faceOp === "push" && <label>
+              Distance <span>({displayUnit})</span>
               <SignedMeasurementInput
                 valueMm={faceValue}
                 unit={displayUnit}
                 decimals={decimalPlaces}
-                min={faceOp === "push" ? undefined : 0.1}
                 step={0.5}
                 onValue={(value) => {
                   setFaceValue(value);
@@ -4824,14 +4927,29 @@ export function App() {
                 <label>Wall <span>({displayUnit})</span>
                   <SignedMeasurementInput valueMm={faceValue} unit={displayUnit} decimals={decimalPlaces} min={0.1} step={0.5} onValue={setFaceValue} onEnter={() => faceApplyButtonRef.current?.click()} />
                 </label>
-                <label title="Thickness opposite the opening, at least the wall thickness">Bottom <span>({displayUnit})</span>
-                  <SignedMeasurementInput valueMm={Math.max(faceValue, wallBottom ?? faceValue)} unit={displayUnit} decimals={decimalPlaces} min={faceValue} step={0.5} onValue={setWallBottom} onEnter={() => faceApplyButtonRef.current?.click()} />
+                <label title="Thickness opposite the opening: at least the wall thickness, or 0 to open that end too">Bottom <span>({displayUnit})</span>
+                  <SignedMeasurementInput
+                    valueMm={hollowBottom}
+                    unit={displayUnit}
+                    decimals={decimalPlaces}
+                    min={0}
+                    step={0.5}
+                    onValue={(value) => {
+                      // Between 0 and the wall there is no valid floor, so a
+                      // step down from the wall lands on 0 (open) and a step up
+                      // from 0 lands on the wall, rather than sticking in place.
+                      if (value <= 1e-6) setWallBottom(0);
+                      else if (value >= faceValue) setWallBottom(value);
+                      else setWallBottom(hollowBottom === 0 ? faceValue : 0);
+                    }}
+                    onEnter={() => faceApplyButtonRef.current?.click()}
+                  />
                 </label>
                 <label title="Distance from the face border to the opening">Inset <span>({displayUnit})</span>
                   <SignedMeasurementInput valueMm={wallInset ?? faceValue} unit={displayUnit} decimals={decimalPlaces} min={0} step={0.5} onValue={setWallInset} onEnter={() => faceApplyButtonRef.current?.click()} />
                 </label>
               </div>
-              <small>Bottom is opposite the opening and cannot be thinner than the wall. Inset controls the opening’s rim.</small>              <label><input type="checkbox" checked={wallPreview} onChange={e => setWallPreview(e.target.checked)} /> Live preview</label>
+              <small>Bottom is opposite the opening and cannot be thinner than the wall — set it to 0 to open that end too. Inset controls the opening’s rim.</small>              <label><input type="checkbox" checked={wallPreview} onChange={e => setWallPreview(e.target.checked)} /> Live preview</label>
               <label><input type="checkbox" checked={wallTransparency} onChange={e => setWallTransparency(e.target.checked)} /> Transparency</label>
               <p role="status" aria-live="polite">
                 {wallPreviewStatus.startsWith("BUILDING")
@@ -4856,19 +4974,6 @@ export function App() {
                   : borderPreviewStatus || `Select a flat face to preview its ${faceOp === "fillet" ? "rounded" : "bevelled"} border.`}
               </p>
             </>}
-            {faceOp === "offset" && (
-              <label>
-                Height
-                <SignedMeasurementInput
-                  valueMm={faceHeight}
-                  unit={displayUnit}
-                  decimals={decimalPlaces}
-                  step={0.5}
-                  onValue={setFaceHeight}
-                  onEnter={() => faceApplyButtonRef.current?.click()}
-                /> {displayUnit}
-              </label>
-            )}
             <div className="face-settings-actions">
             <button
               className="face-settings-cancel"
@@ -5007,7 +5112,7 @@ export function App() {
                   const op: ShellOp = {
                     kind: "shell",
                     thickness: Math.max(0.1, faceValue),
-                    bottomThickness: Math.max(faceValue, wallBottom ?? faceValue),
+                    bottomThickness: hollowBottom,
                     openingInset: wallInset ?? faceValue,
                     points: [target.point],
                     normal: target.normal,
@@ -5231,7 +5336,7 @@ export function App() {
             </div>
           );
         })()}
-        {toolMode !== "face" && toolMode !== "edge" && rightPanelTab === "shapes" && (
+        {toolMode !== "face" && toolMode !== "edge" && toolMode !== "build" && rightPanelTab === "shapes" && (
           <section className="tool-section shape-library">
           <div className="panel-heading compact shape-library-header">
             <div><h1>Shape library</h1><p>Drag or click to add</p></div>
@@ -5314,7 +5419,7 @@ export function App() {
             if (file) void importSTLFile(file);
           }}
         />
-        {toolMode !== "face" && toolMode !== "edge" && rightPanelTab === "properties" && (
+        {toolMode !== "face" && toolMode !== "edge" && toolMode !== "build" && rightPanelTab === "properties" && (
           <div className="tools-panel-inspector-wrap">
             <section className="tool-section inspector-section">
           <div className="panel-heading compact">
@@ -6516,14 +6621,18 @@ export function App() {
           </button>
           </div>
           <label className="field">
-          <span className="field-label">Gap (mm)</span>
-          <input
-            className="num"
-            type="number"
+          {/* In the chosen unit like every other length in the app: this was
+              fixed to mm, so with inches selected a gap had to be typed in a
+              different unit from the positions it was measured against. */}
+          <span className="field-label">Gap ({displayUnit})</span>
+          <SignedMeasurementInput
+            valueMm={gapMm}
+            unit={displayUnit}
+            decimals={decimalPlaces}
             min={0}
             step={0.5}
-            value={gapMm}
-            onChange={(e) => setGapMm(Number(e.target.value))}
+            onValue={(value) => setGapMm(Math.max(0, value))}
+            onEnter={applyGap}
           />
           </label>
           <button className="primary" disabled={!spacingSelection} onClick={applyGap}>Set exact gap</button>

@@ -3525,13 +3525,18 @@ function hollowMesh(solid: MeshShape, op: ShellOp): MeshShape | null {
     return null;
   }
 
-  if (op.normal && op.bottomThickness !== undefined) {
+  // The far side of the part along the opening's normal: where the bottom is.
+  let lowest = Infinity;
+  if (op.normal) {
     const n = op.normal;
-    let lowest = Infinity;
     for (let i = 0; i < raw.vertProperties.length; i += raw.numProp) {
       lowest = Math.min(lowest, n[0] * raw.vertProperties[i] + n[1] * raw.vertProperties[i + 1] + n[2] * raw.vertProperties[i + 2]);
     }
-    inner = inner.trimByPlane(n, lowest + Math.max(thickness, op.bottomThickness));
+  }
+  // A bottom of 0 leaves nothing there at all: the cavity runs out through
+  // the far face too. Below that, a floor is never thinner than the wall.
+  if (op.normal && op.bottomThickness !== undefined && op.bottomThickness > 0) {
+    inner = inner.trimByPlane(op.normal, lowest + Math.max(thickness, op.bottomThickness));
     if (inner.isEmpty()) return null;
   }
   const openingCutters = [];
@@ -3540,6 +3545,21 @@ function hollowMesh(solid: MeshShape, op: ShellOp): MeshShape | null {
     const cutter = meshShellOpening(solid, point, op.normal, thickness, op.openingInset ?? thickness);
     if (!cutter || cutter.intersect(inner).volume() <= 1e-8) return null;
     openingCutters.push(cutter);
+  }
+  // Open-ended: the far face gets the same opening, with the same rim, cut
+  // from directly opposite each chosen opening — a sleeve rather than a cup.
+  // It needs a flat face there to cut from; without one this is refused
+  // rather than guessed at.
+  if (op.normal && op.bottomThickness === 0) {
+    const n = op.normal;
+    const back: Vec3 = [-n[0], -n[1], -n[2]];
+    for (const point of op.points ?? []) {
+      const depth = n[0] * point[0] + n[1] * point[1] + n[2] * point[2] - lowest;
+      const opposite = point.map((value, i) => value - n[i] * depth) as Vec3;
+      const cutter = meshShellOpening(solid, opposite, back, thickness, op.openingInset ?? thickness);
+      if (!cutter || cutter.intersect(inner).volume() <= 1e-8) return null;
+      openingCutters.push(cutter);
+    }
   }
   let fullCavity = inner;
   for (const cutter of openingCutters) {
@@ -3786,7 +3806,9 @@ async function replayEdit(
         } else {
           onError?.(
             spec.id,
-            "That wall cannot fit inside this shape. Try a smaller thickness; tightly rounded corners may need a thinner wall. The previous shape was kept.",
+            op.bottomThickness === 0
+              ? "That hollow cannot be opened right through: Bottom 0 needs a flat face directly opposite the opening, and the wall must fit inside. Try a Bottom above 0 or a thinner wall. The previous shape was kept."
+              : "That wall cannot fit inside this shape. Try a smaller thickness; tightly rounded corners may need a thinner wall. The previous shape was kept.",
           );
         }
         continue;

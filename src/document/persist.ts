@@ -178,7 +178,9 @@ function parseOp(raw: unknown): EditOp | null {
     if (typeof o.thickness !== "number" || !Number.isFinite(o.thickness) || o.thickness <= 0) return null;
     const points = Array.isArray(o.points) ? o.points.filter(isVec3) : [];
     const normal = isVec3(o.normal) ? o.normal : undefined;
-    const bottomThickness = typeof o.bottomThickness === "number" && Number.isFinite(o.bottomThickness) && o.bottomThickness > 0 ? o.bottomThickness : undefined;
+    // 0 is a real value — an open-ended hollow — so it must survive a reload
+    // rather than quietly turning back into a closed bottom.
+    const bottomThickness = typeof o.bottomThickness === "number" && Number.isFinite(o.bottomThickness) && o.bottomThickness >= 0 ? o.bottomThickness : undefined;
     const openingInset = typeof o.openingInset === "number" && Number.isFinite(o.openingInset) && o.openingInset >= 0 ? o.openingInset : undefined;
     return { kind: "shell", thickness: o.thickness, points, normal, bottomThickness, openingInset };
   }
