@@ -3,11 +3,16 @@ import type { ScenePart } from "../kernel/types";
 import * as THREE from "three";
 import { resolveNodeColor } from "./tree";
 
+/** A mesh edge and the normals of the triangles either side of it; the second
+ *  is null for an edge with only one triangle (an open boundary). */
+export type Crease = [Vec3, Vec3, Vec3, Vec3 | null];
+
 export interface BlueprintGeometry {
   id: string;
   vertices: Vec3[];
   localSize: Vec3;
   edges?: [Vec3,Vec3][];
+  creases?: Crease[];
 }
 
 export interface BlueprintPart {
@@ -25,7 +30,38 @@ export interface BlueprintPart {
   isHole?: boolean;
   corners: Vec3[];
   vertices?: Vec3[];
+  /** Every outline edge down to a 1° bend. Right for measuring — pocket
+   *  floors, mortise flats — but too much to draw: see `creases`. */
   edges?: [Vec3,Vec3][];
+  creases?: Crease[];
+}
+
+/** Two faces meeting more sharply than this are an edge a drawing shows. */
+const SHARP_BEND = Math.cos((20 * Math.PI) / 180);
+/** Faces this close to parallel are one flat face split into triangles. */
+const COPLANAR = 0.99999;
+
+/**
+ * The edges one view should draw: sharp edges, plus the silhouette of curved
+ * surfaces as seen from that side.
+ *
+ * Drawing every mesh edge is what filled the Purple Box's mortises in solid:
+ * a rounded slot end is dozens of 7.5° facets, and seen side-on their crease
+ * lines stack into a black block that exists nowhere on the part. A drawing
+ * shows a slot as its outline. So a gentle facet crease is dropped unless it
+ * is where that surface turns away from the viewer — its silhouette — which is
+ * exactly the outline a draughtsman would draw for that view.
+ */
+export function viewEdges(part: BlueprintPart, view: Vec3): [Vec3, Vec3][] | undefined {
+  if (!part.creases?.length) return part.edges;
+  const dot = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const drawn: [Vec3, Vec3][] = [];
+  for (const [a, b, first, second] of part.creases) {
+    if (!second) { drawn.push([a, b]); continue; }
+    const bend = dot(first, second);
+    if (bend < SHARP_BEND || (bend < COPLANAR && dot(first, view) * dot(second, view) <= 1e-9)) drawn.push([a, b]);
+  }
+  return drawn;
 }
 
 export interface BlueprintDimension {
@@ -437,6 +473,7 @@ export function extractBlueprintParts(nodes: SceneNode[], parts: ScenePart[], ge
           new THREE.Vector3().fromBufferAttribute(positions,i+1).toArray() as Vec3]);
         outline.dispose();mesh.dispose();
       }
+      let creases=live?.creases;
       let box=new THREE.Box3(); vertices.forEach(p=>box.expandByPoint(new THREE.Vector3(...p)));
       // Tenons fused into this board are scheduled as pieces of their own, so
       // they must not also make the board measure — or draw — thicker than it is.
@@ -448,13 +485,15 @@ export function extractBlueprintParts(nodes: SceneNode[], parts: ScenePart[], ge
           const trimmedBox=new THREE.Box3(); vertices.forEach(p=>trimmedBox.expandByPoint(new THREE.Vector3(...p)));
           localSize=trimLocalSize(localSize,box,trimmedBox);
           box=trimmedBox;
+          const inside=(p:Vec3)=>p.every((v,i)=>v>=trimmedBox.min.getComponent(i)-TRIM_TOLERANCE && v<=trimmedBox.max.getComponent(i)+TRIM_TOLERANCE);
+          creases=creases?.filter(([a,b])=>inside(a)&&inside(b));
         }
       }
       const min=box.min.toArray() as Vec3,max=box.max.toArray() as Vec3;
       result.push({id:node.id,name:node.name || `Part ${result.length+1}`,color:resolveNodeColor(node),
         kind:partKind(node),min,max,center:box.getCenter(new THREE.Vector3()).toArray() as Vec3,
         worldSize:box.getSize(new THREE.Vector3()).toArray() as Vec3,localSize,
-        position:node.position,rotation:node.rotation,corners:vertices,vertices,edges});
+        position:node.position,rotation:node.rotation,corners:vertices,vertices,edges,creases});
     }
   };
   traverse(nodes); return result;
@@ -545,6 +584,56 @@ export function partSpans(parts: BlueprintPart[], axis: 0|1|2,
     spans.push({ min, max, kind: "part" });
   }
   return spans.sort((a, b) => a.min - b.min || a.max - b.max);
+}
+
+/**
+ * The steps inside one part along one axis — pocket walls, a rebate, the sides
+ * of a mortise — as a chain from face to face: 12 | 84.6 | 12 across a tray,
+ * 13 | 27 down through its pocket and floor. The outside size alone says
+ * nothing about any of these, and they are exactly what gets set on a router.
+ *
+ * A step is a plane holding a closed face of the part: a pocket wall, a floor,
+ * the flat side of a mortise. Outline lines alone are not enough — every facet
+ * of a round hole or a rounded slot end is a long straight line at its own
+ * height, and counting those buried a tray's pocket depth under a comb of
+ * 0.5 mm steps. A facet line sits alone in its plane and closes no face, so it
+ * never qualifies.
+ *
+ * Steps are weighted by the area of that face, and only those at least a
+ * quarter the size of the largest are kept: a pocket floor outranks the flats
+ * of the mortises beside it, while on a leg whose only features are its
+ * mortises, those mortises are the largest faces there are and are dimensioned.
+ */
+export function featureSpans(part: BlueprintPart, axis: 0|1|2): RailSpan[] {
+  if (!part.edges?.length) return [];
+  const low = part.min[axis], high = part.max[axis], extent = high - low;
+  if (extent <= 0) return [];
+  const [u, v] = ([0, 1, 2] as const).filter(a => a !== axis);
+  const section = (part.max[u] - part.min[u]) * (part.max[v] - part.min[v]);
+  const merge = Math.max(0.5, extent * 0.01);
+  const plane = (value: number) => Math.round(value * 1000) / 1000;
+  const onPlane = new Map<number, [Vec3, Vec3][]>();
+  for (const edge of part.edges) {
+    const at = plane(edge[0][axis]);
+    if (at !== plane(edge[1][axis])) continue;
+    // The outer faces are the overall dimension already.
+    if (at - low < merge || high - at < merge) continue;
+    (onPlane.get(at) ?? onPlane.set(at, []).get(at)!).push(edge);
+  }
+  const faces: Array<[number, number]> = [];
+  for (const [at, edges] of onPlane) {
+    const area = largestLoopArea(edges, u, v);
+    if (area < section * 0.002) continue;
+    const near = faces.find(([position]) => Math.abs(position - at) < merge);
+    if (near) near[1] = Math.max(near[1], area); else faces.push([at, area]);
+  }
+  const largest = Math.max(0, ...faces.map(([, area]) => area));
+  const steps = faces.filter(([, area]) => area >= largest * 0.25).map(([position]) => position);
+  // Past a dozen steps the chain is a comb of numbers nobody can read; the
+  // drawing's outline is the better record of a part that busy.
+  if (!steps.length || steps.length > 12) return [];
+  const stops = [low, ...steps.sort((p, q) => p - q), high];
+  return stops.slice(1).map((end, i) => ({ min: stops[i], max: end, kind: "part" as const }));
 }
 
 /** Openings and element sizes measured on dedicated outside rails, one set per
@@ -687,7 +776,7 @@ export function buildViews(solidParts: BlueprintPart[]): ViewSet {
       name: p.name,
       color: p.color,
       outline: projectedHull((p.vertices ?? p.corners).map(v=>[v[0],v[2]])),
-      edges: p.edges?.map(edge=>edge.map(v=>[v[0],v[2]]) as [[number,number],[number,number]]),
+      edges: viewEdges(p,[0,1,0])?.map(edge=>edge.map(v=>[v[0],v[2]]) as [[number,number],[number,number]]),
       rect: {
         x: p.min[0],
         y: p.min[2],
@@ -738,7 +827,7 @@ export function buildViews(solidParts: BlueprintPart[]): ViewSet {
       name: p.name,
       color: p.color,
       outline: projectedHull((p.vertices ?? p.corners).map(v=>[v[0],v[1]])),
-      edges: p.edges?.map(edge=>edge.map(v=>[v[0],v[1]]) as [[number,number],[number,number]]),
+      edges: viewEdges(p,[0,0,1])?.map(edge=>edge.map(v=>[v[0],v[1]]) as [[number,number],[number,number]]),
       rect: {
         x: p.min[0],
         y: p.min[1],
@@ -789,7 +878,7 @@ export function buildViews(solidParts: BlueprintPart[]): ViewSet {
       name: p.name,
       color: p.color,
       outline: projectedHull((p.vertices ?? p.corners).map(v=>[v[1],v[2]])),
-      edges: p.edges?.map(edge=>edge.map(v=>[v[1],v[2]]) as [[number,number],[number,number]]),
+      edges: viewEdges(p,[1,0,0])?.map(edge=>edge.map(v=>[v[1],v[2]]) as [[number,number],[number,number]]),
       rect: {
         x: p.min[1],
         y: p.min[2],
@@ -861,7 +950,7 @@ export function buildViews(solidParts: BlueprintPart[]): ViewSet {
       const hull=projectedHull(projCorners);
       return {id:p.id,name:p.name,color:p.color,
         rect:{x:isoMinX,y:isoMinY,width:isoMaxX-isoMinX,height:isoMaxY-isoMinY},
-        outline:hull,isoPolys:[hull],edges:p.edges?.map(edge=>edge.map(v=>projectIso(...v)) as [[number,number],[number,number]])};    });
+        outline:hull,isoPolys:[hull],edges:viewEdges(p,[1,1,-1])?.map(edge=>edge.map(v=>projectIso(...v)) as [[number,number],[number,number]])};    });
 
     return {
       viewType: "iso",
@@ -883,11 +972,16 @@ export function buildViews(solidParts: BlueprintPart[]): ViewSet {
     [...openings[axis].map(s=>({...s,kind:"clearance" as const})),...sizes[axis]];
   const dimensioned=(view:OrthoViewData,spans:[RailSpan[],RailSpan[]])=>
     ({...view,dimensions:[...view.dimensions,...railDimensions(view,spans)]});
+  // A part on its own page is dimensioned inside as well as out. On a sheet of
+  // several parts the same chains for every part at once would bury the
+  // drawing, and each part's page already carries its own.
+  const single=solidParts.length===1?solidParts[0]:null;
+  const along=(axis:0|1|2):RailSpan[]=>[...rail(axis),...(single?featureSpans(single,axis):[])];
   return {
     overallSize,
-    frontView: dimensioned(buildFrontView(),[rail(0),rail(2)]),
-    topView: dimensioned(buildTopView(),[rail(0),rail(1)]),
-    sideView: dimensioned(buildSideView(),[rail(1),rail(2)]),
+    frontView: dimensioned(buildFrontView(),[along(0),along(2)]),
+    topView: dimensioned(buildTopView(),[along(0),along(1)]),
+    sideView: dimensioned(buildSideView(),[along(1),along(2)]),
     isoView: buildIsoView(),
   };
 }

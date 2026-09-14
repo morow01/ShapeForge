@@ -883,7 +883,30 @@ export class Scene {
         new THREE.Vector3().fromBufferAttribute(edgePositions,i).applyMatrix4(matrix).toArray() as Vec3,
         new THREE.Vector3().fromBufferAttribute(edgePositions,i+1).applyMatrix4(matrix).toArray() as Vec3]);
       edgeGeometry.dispose();
-      result.push({id,vertices,edges,localSize:localSize.toArray() as Vec3});
+      // Every mesh edge with the facing of the triangles either side of it, so
+      // each blueprint view can draw only what a drawing shows: sharp edges and
+      // that view's silhouette. Measured in world space, where a non-uniform
+      // scale has already bent the normals the way the drawing will see them.
+      const creases=new Map<string,[Vec3,Vec3,Vec3,Vec3|null]>();
+      const index=geometry.getIndex();
+      const corner=(i:number)=>new THREE.Vector3().fromBufferAttribute(position,index?index.getX(i):i).applyMatrix4(matrix);
+      const key=(v:THREE.Vector3)=>`${Math.round(v.x*1e4)},${Math.round(v.y*1e4)},${Math.round(v.z*1e4)}`;
+      const count=index?index.count:position.count;
+      for(let t=0;t+2<count;t+=3) {
+        const p=[corner(t),corner(t+1),corner(t+2)];
+        const normal=new THREE.Vector3().subVectors(p[1],p[0]).cross(new THREE.Vector3().subVectors(p[2],p[0]));
+        if(normal.lengthSq()<1e-12) continue;
+        const n=normal.normalize().toArray() as Vec3;
+        for(const [i,j] of [[0,1],[1,2],[2,0]]) {
+          const ka=key(p[i]),kb=key(p[j]);
+          if(ka===kb) continue;
+          const k=ka<kb?`${ka}|${kb}`:`${kb}|${ka}`;
+          const known=creases.get(k);
+          if(known) { if(!known[3]) known[3]=n; }
+          else creases.set(k,[p[i].toArray() as Vec3,p[j].toArray() as Vec3,n,null]);
+        }
+      }
+      result.push({id,vertices,edges,creases:[...creases.values()],localSize:localSize.toArray() as Vec3});
     }
     return result;
   }

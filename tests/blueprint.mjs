@@ -5,7 +5,7 @@ import * as THREE from 'three';
 const source=readFileSync(new URL('../src/document/blueprint.ts',import.meta.url),'utf8')
   .replace(/^import .*;\r?\n/gm,'').replaceAll('export ','');
 const api=new Function('THREE','resolveNodeColor',ts.transpile(source,{target:ts.ScriptTarget.ES2023,module:ts.ModuleKind.None})+
-  ';return {generateBlueprintData,extractBlueprintParts,generateCutList,projectedHull,railDimensions,openingSpans,partSpans,partFamilyName,generatePartSheets,buildViews,extractConnectorParts,connectorStockSize,trimFusedPlugs};')(THREE,node=>node.color ?? '#43aede');
+  ';return {generateBlueprintData,extractBlueprintParts,generateCutList,projectedHull,railDimensions,openingSpans,partSpans,partFamilyName,generatePartSheets,buildViews,extractConnectorParts,connectorStockSize,trimFusedPlugs,featureSpans,viewEdges};')(THREE,node=>node.color ?? '#43aede');
 const node=(id,more={})=>({type:'object',id,name:'Board',kind:'box',color:'#abcdef',position:[0,0,0],rotation:[0,0,0],scale:[1,1,1],params:{},...more});
 const geometry=(id,min,max)=>({id,localSize:max.map((v,i)=>v-min[i]),vertices:
   [0,1].flatMap(x=>[0,1].flatMap(y=>[0,1].map(z=>[x?max[0]:min[0],y?max[1]:min[1],z?max[2]:min[2]])))});
@@ -226,3 +226,51 @@ const grey=node('gb',{type:'group',name:'Gray Box',children:[node('in',{type:'gr
 const scaledRow=api.generateBlueprintData('Scaled',[grey],[],[scaledGeometry]).cutList.find(i=>i.name==='Gray Box');
 assert.deepEqual([scaledRow.lengthMm,scaledRow.widthMm,scaledRow.thicknessMm],[90,50,40],'scaled tenons trimmed at their scaled length');
 console.log('Blueprint: board as thick as its tenons, no-outline safety, chamfered dowels and scaled groups passed');
+
+// A tray: 108.6 x 90 x 40 with a pocket inset 12mm from every edge, 13mm deep.
+// Its outside size says nothing about the walls, the pocket or the floor.
+const outer=[[0,0,0],[108.6,90,40]], pocket=[[12,12,27],[96.6,78,40]];
+const trayGeometry={id:'tray',localSize:[108.6,90,40],
+  vertices:[outer,pocket].flatMap(([mn,mx])=>geometry('x',mn,mx).vertices),
+  edges:[outer,pocket].flatMap(([mn,mx])=>boxEdges(mn,mx))};
+const trayPage=api.generateBlueprintData('Tray',[node('tray',{name:'Purple Box'})],[],[trayGeometry]).partSheets[0];
+const chain=(view,type)=>view.dimensions.filter(d=>d.kind==='part'&&d.type===type).map(d=>+d.valueMm.toFixed(1));
+assert.deepEqual(chain(trayPage.topView,'horizontal'),[12,84.6,12],'wall | pocket | wall along the length');
+assert.deepEqual(chain(trayPage.topView,'vertical'),[12,66,12],'wall | pocket | wall across the width');
+assert.deepEqual(chain(trayPage.frontView,'vertical'),[27,13],'floor | pocket depth');
+assert.ok(trayPage.frontView.dimensions.some(d=>d.kind==='overall'&&d.valueMm===108.6),'overall size still stated');
+// The assembly sheet with several parts is not buried under every part's chains.
+const pair=api.generateBlueprintData('Pair',[node('tray',{name:'Purple Box'}),node('lid',{name:'Lid'})],[],
+  [trayGeometry,geometry('lid',[0,0,50],[108.6,90,56])]);
+assert.equal(pair.topView.dimensions.filter(d=>d.kind==='part'&&[12,84.6,66].includes(+d.valueMm.toFixed(1))).length,0,
+  'inside chains belong on the part page, not the assembly');
+// Fillet facets and slot ends are short segments, not steps of their own.
+const facets=[...Array(12)].map((_,i)=>[[100+i*0.3,0,39],[100+i*0.3,0.3,39.3]]);
+assert.deepEqual(api.featureSpans({...pair.parts[0],edges:[...trayGeometry.edges,...facets]},0).map(s=>+(s.max-s.min).toFixed(1)),[12,84.6,12]);
+// Rounded mortise ends facet into long lines at dozens of slightly different
+// heights. They must neither bury the pocket depth nor wipe the chain out.
+const mortiseFacets=[...Array(20)].map((_,i)=>[[0,30+i*0.5,15+i*0.6],[20,30+i*0.5,15+i*0.6]]);
+const busyTray={...pair.parts[0],edges:[...trayGeometry.edges,...mortiseFacets]};
+assert.deepEqual(api.featureSpans(busyTray,2).map(s=>+(s.max-s.min).toFixed(1)),[27,13],'pocket depth survives mortise facets');
+// A part whose only features are mortises still gets them dimensioned.
+const leg={...pair.parts[0],min:[0,0,0],max:[50,50,500],edges:[...boxEdges([0,0,0],[50,50,500]),...boxEdges([10,21,460],[40,29,500])]};
+assert.deepEqual(api.featureSpans(leg,1).map(s=>+(s.max-s.min).toFixed(1)),[21,8,21],'mortise position and width on a leg');
+console.log('Blueprint: inside features chained on part pages, kept off the assembly, weighted over facets passed');
+
+// Which edges a view draws. A rounded slot end is 7.5-degree facets; drawing
+// all their creases stacked them into solid black blocks side-on.
+const deg=d=>d*Math.PI/180, tilt=d=>[0,Math.sin(deg(d)),Math.cos(deg(d))];
+const crease=(first,second,label)=>({label,c:[[0,0,0],[20,0,0],first,second]});
+const cases=[
+  crease([0,0,1],tilt(7.5),'flat face into the curve'),
+  crease(tilt(7.5),tilt(15),'facet into facet'),
+  crease([0,0,1],[1,0,0],'square edge'),
+  crease([0,1,0],[0,1,0],'diagonal across one flat face'),
+  crease([0,0,1],null,'open boundary'),
+];
+const drawnIn=view=>cases.filter(({c})=>api.viewEdges({creases:[c]},view).length).map(({label})=>label);
+assert.deepEqual(drawnIn([0,0,1]),['square edge','open boundary'],'from above, facets and the tangent line are not edges');
+assert.deepEqual(drawnIn([0,1,0]),['flat face into the curve','square edge','open boundary'],
+  'side-on, the tangent line is the silhouette; facets and flat-face diagonals still are not');
+assert.deepEqual(api.viewEdges({edges:[[[0,0,0],[1,0,0]]]},[0,0,1]),[[[0,0,0],[1,0,0]]],'without crease data, every edge is drawn as before');
+console.log('Blueprint: sharp edges and per-view silhouettes drawn, facet creases dropped passed');

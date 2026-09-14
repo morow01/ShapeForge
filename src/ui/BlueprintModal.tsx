@@ -456,8 +456,12 @@ function ViewSvg({
   // sizing the padding from the span alone crops the numbers off the sheet.
   const span = Math.max(b.width, b.height);
   const sf = Math.max(0.6, Math.min(3, Math.max(20, span) / 100));
+  // A full label width, not half: a dimension too short to break around its
+  // label moves the label clear of the line (see DimensionLineItem), which
+  // carries it a further half-width outward — a 13 mm pocket depth lost its
+  // "mm" off the frame edge when only the half was allowed for.
   const reach = activeDims.reduce((furthest, d) =>
-    Math.max(furthest, Math.abs(d.offset) + (d.label.length * 3.6 + 6) * sf / 2), 0);
+    Math.max(furthest, Math.abs(d.offset) + (d.label.length * 3.6 + 6) * sf + 2 * sf), 0);
   const pad = Math.max(45, span * 0.35 + 18, reach + 10 * sf);
   const vbWidth = Math.max(80, b.width + pad * 2);
   const vbHeight = Math.max(80, b.height + pad * 2);
