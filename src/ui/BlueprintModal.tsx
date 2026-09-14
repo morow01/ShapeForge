@@ -1,8 +1,27 @@
 import { useEffect, useMemo, useState, useRef } from "react";
 import type { SceneNode } from "../document/types";
 import type { ScenePart } from "../kernel/types";
-import { generateBlueprintData, type BlueprintData, type OrthoViewData, type BlueprintDimension, type BlueprintGeometry } from "../document/blueprint";
+import { drawingScale, generateBlueprintData, type BlueprintData, type OrthoViewData, type BlueprintDimension, type BlueprintGeometry } from "../document/blueprint";
 import { BlueprintIcon, ExportIcon } from "./icons";
+
+/** A dimension label's badge, in drawing units. Shared by the drawing and by
+ *  the fitting that frames it, so the frame always leaves room for exactly
+ *  the labels that get drawn. */
+function badgeSize(label: string, sf: number) {
+  return { width: Math.max(24 * sf, (label.length * 3.6 + 6) * sf), height: 8 * sf };
+}
+
+/** Where a short dimension's label goes when the line is too short to break
+ *  around it: lifted clear, away from the part. Zero when it fits in line. */
+function labelShift(dim: BlueprintDimension, sf: number) {
+  const badge = badgeSize(dim.label, sf);
+  if (dim.type === "horizontal") {
+    const length = Math.abs(dim.end[0] - dim.start[0]);
+    return length > badge.width + 4 * sf ? 0 : Math.sign(dim.offset || 1) * badge.height * 1.1;
+  }
+  const length = Math.abs(dim.end[1] - dim.start[1]);
+  return length > badge.height + 4 * sf ? 0 : Math.sign(dim.offset || 1) * (badge.width / 2 + 2 * sf);
+}
 
 interface Props {
   open: boolean;
@@ -23,13 +42,15 @@ interface Enlarged { title: string; view: OrthoViewData; iso: boolean }
  * each is small — clicking opens it full size, which is the only way to read a
  * 22 mm tenon on a sheet scaled to fit a 1000 mm table.
  */
-function ViewCell({ title, of, view, iso, showClearances, showPartLabels, highContrast, onOpen }: {
+function ViewCell({ title, of, view, iso, sheet, showClearances, showPartLabels, highContrast, onOpen }: {
   /** Shown in the cell header, so it stays short. */
   title: string;
   /** Which part this view belongs to, added only to the enlarged title —
    *  once a drawing fills the screen, its own header is the only label left. */
   of?: string;
   view: OrthoViewData; iso?: boolean;
+  /** The sheet's orthographic views, so they share one scale in the grid. */
+  sheet?: OrthoViewData[];
   showClearances: boolean; showPartLabels: boolean; highContrast: boolean;
   onOpen: (enlarged: Enlarged) => void;
 }) {
@@ -47,7 +68,7 @@ function ViewCell({ title, of, view, iso, showClearances, showPartLabels, highCo
       </div>
       {iso
         ? <IsoSvg viewData={view} highContrast={highContrast} />
-        : <ViewSvg viewData={view} showClearances={showClearances} showPartLabels={showPartLabels} highContrast={highContrast} />}
+        : <ViewSvg viewData={view} sheet={sheet} showClearances={showClearances} showPartLabels={showPartLabels} highContrast={highContrast} />}
     </button>
   );
 }
@@ -89,9 +110,12 @@ function EnlargedView({ enlarged, showClearances, showPartLabels, highContrast, 
 function ProjectedPart({part,highContrast}:{part:OrthoViewData["parts"][number];highContrast:boolean}) {
   // Boundary/crease edges preserve holes and concave profiles. They are
   // deliberately unfilled, so one component cannot hide another's outline.
-  return <g fill="none" stroke={highContrast?"#000":"#334155"} strokeWidth={0.65}>
-    {part.edges?.length ? part.edges.map(([a,b],i)=><line key={i} x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} />)
-      : <polygon points={(part.outline ?? []).map(p=>p.join(",")).join(" ")} />}
+  // A steady line on screen whatever the part's size: each view is scaled to
+  // fill its cell, so a width in drawing units drew a 20 mm part's outline
+  // five times heavier than a 100 mm one's.
+  return <g fill="none" stroke={highContrast?"#000":"#334155"} strokeWidth={1.25}>
+    {part.edges?.length ? part.edges.map(([a,b],i)=><line key={i} x1={a[0]} y1={a[1]} x2={b[0]} y2={b[1]} vectorEffect="non-scaling-stroke" />)
+      : <polygon points={(part.outline ?? []).map(p=>p.join(",")).join(" ")} vectorEffect="non-scaling-stroke" />}
   </g>;
 }
 
@@ -335,14 +359,15 @@ function MultiViewSheet({
   highContrast: boolean;
   onOpen: (enlarged: Enlarged) => void;
 }) {
+  const sheet = [data.topView, data.frontView, data.sideView];
   const shared = { showClearances, showPartLabels, highContrast, onOpen };
   return (
     <div className="blueprint-sheet">
       <div className="blueprint-grid-layout">
-        <ViewCell title="Top View (Plan)" view={data.topView} {...shared} />
+        <ViewCell title="Top View (Plan)" view={data.topView} sheet={sheet} {...shared} />
         <ViewCell title="Isometric 3D Assembly" view={data.isoView} iso {...shared} />
-        <ViewCell title="Front View (Elevation)" view={data.frontView} {...shared} />
-        <ViewCell title="Right Side View (Profile)" view={data.sideView} {...shared} />
+        <ViewCell title="Front View (Elevation)" view={data.frontView} sheet={sheet} {...shared} />
+        <ViewCell title="Right Side View (Profile)" view={data.sideView} sheet={sheet} {...shared} />
       </div>
 
       {/* Workshop Title Block */}
@@ -409,10 +434,12 @@ function IsoSvg({
   viewData: OrthoViewData;
   highContrast: boolean;
 }) {
-  const pad = 40;
   const b = viewData.bounds;
-  const vbWidth = Math.max(100, b.width + pad * 2);
-  const vbHeight = Math.max(100, b.height + pad * 2);
+  // A margin in proportion to the drawing, so a small part fills its cell as
+  // a large one does (see drawingScale).
+  const pad = Math.max(b.width, b.height, 1e-3) * 0.04;
+  const vbWidth = b.width + pad * 2;
+  const vbHeight = b.height + pad * 2;
   const vbMinX = b.minX - pad;
   const vbMinY = b.minY - pad;
 
@@ -431,46 +458,129 @@ function IsoSvg({
 /**
  * Orthographic View SVG with Dimensions (matching user sketch media_1789324562864.png).
  */
+/** Width and height, in drawing units, that every view of a sheet is framed to. */
+interface FrameSize { width: number; height: number }
+
+/** On-screen height of a dimension label's text, in CSS pixels. */
+const LABEL_TEXT_PX = 11;
+
+const dimensionsShown = (viewData: OrthoViewData, showClearances: boolean) =>
+  viewData.dimensions.filter((d) => showClearances || d.kind !== "clearance");
+
+/**
+ * The box a view occupies at label scale sf: its drawing and every dimension
+ * actually drawn beside it, labels included. Offsets are set from the part's
+ * largest dimension rather than this view's, so this measures where each
+ * dimension really lands instead of assuming a margin.
+ */
+function viewExtent(viewData: OrthoViewData, showClearances: boolean, sf: number) {
+  const b = viewData.bounds;
+  let left = b.minX, right = b.maxX, bottom = b.minY, top = b.maxY;
+  for (const dim of dimensionsShown(viewData, showClearances)) {
+    const badge = badgeSize(dim.label, sf);
+    const shift = labelShift(dim, sf);
+    if (dim.type === "horizontal") {
+      const line = dim.start[1] + dim.offset + shift;
+      const middle = (dim.start[0] + dim.end[0]) / 2;
+      left = Math.min(left, dim.start[0], dim.end[0], middle - badge.width / 2);
+      right = Math.max(right, dim.start[0], dim.end[0], middle + badge.width / 2);
+      bottom = Math.min(bottom, dim.start[1], line - badge.height / 2);
+      top = Math.max(top, dim.start[1], line + badge.height / 2);
+    } else {
+      const line = dim.start[0] + dim.offset + shift;
+      const middle = (dim.start[1] + dim.end[1]) / 2;
+      left = Math.min(left, dim.start[0], line - badge.width / 2);
+      right = Math.max(right, dim.start[0], line + badge.width / 2);
+      bottom = Math.min(bottom, dim.start[1], dim.end[1], middle - badge.height / 2);
+      top = Math.max(top, dim.start[1], dim.end[1], middle + badge.height / 2);
+    }
+  }
+  return { left, right, bottom, top };
+}
+
+/**
+ * One frame for all the orthographic views of a sheet, big enough for the
+ * largest. Cells are the same size, so an equal frame in each means an equal
+ * scale: the plan, elevation and profile are drawn at one size, the way a
+ * drawing sheet is, instead of each being blown up separately to fill its cell.
+ */
+function sheetFrame(views: OrthoViewData[], showClearances: boolean, sf: number): FrameSize {
+  const extents = views.map((view) => viewExtent(view, showClearances, sf));
+  const width = Math.max(...extents.map((e) => e.right - e.left));
+  const height = Math.max(...extents.map((e) => e.top - e.bottom));
+  const margin = Math.max(width, height) * 0.03;
+  return { width: width + margin * 2, height: height + margin * 2 };
+}
+
+/**
+ * Label scale that draws dimension text at LABEL_TEXT_PX on screen. Labels
+ * sized in drawing units grew with the drawing — small in a sheet cell, huge
+ * once enlarged. The frame depends on the labels it has to fit, so this
+ * settles over a few rounds. It never goes past 1.45× the sheet's own label
+ * scale, where labels would outgrow the lanes the dimensions are packed in.
+ */
+function screenLabelScale(views: OrthoViewData[], showClearances: boolean, base: number, px: { width: number; height: number }) {
+  if (px.width < 1 || px.height < 1) return base;
+  let sf = base;
+  for (let round = 0; round < 4; round++) {
+    const frame = sheetFrame(views, showClearances, sf);
+    const unitsPerPx = Math.max(frame.width / px.width, frame.height / px.height);
+    sf = Math.min(Math.max((LABEL_TEXT_PX * unitsPerPx) / 5, base * 0.05), base * 1.45);
+  }
+  return sf;
+}
+
+/** CSS pixel size of an element, kept current as it resizes. */
+function useElementSize<T extends Element>() {
+  const ref = useRef<T>(null);
+  const [size, setSize] = useState({ width: 0, height: 0 });
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const observer = new ResizeObserver(([entry]) => {
+      const { width, height } = entry.contentRect;
+      setSize((old) => (Math.abs(old.width - width) < 1 && Math.abs(old.height - height) < 1 ? old : { width, height }));
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  return [ref, size] as const;
+}
+
 function ViewSvg({
   viewData,
   showClearances,
   showPartLabels,
   highContrast,
+  sheet,
 }: {
   viewData: OrthoViewData;
   showClearances: boolean;
   showPartLabels: boolean;
   highContrast: boolean;
+  /** Every orthographic view of this view's sheet, this one included, so they
+   *  share one frame; without it the view fills its own space. */
+  sheet?: OrthoViewData[];
 }) {
   const b = viewData.bounds;
+  const activeDims = dimensionsShown(viewData, showClearances);
+  const [svgRef, px] = useElementSize<SVGSVGElement>();
+  const views = sheet ?? [viewData];
+  const sf = screenLabelScale(views, showClearances, viewData.scale ?? drawingScale(b), px);
 
-  // Filter dimensions
-  const activeDims = viewData.dimensions.filter((d) => {
-    if (!showClearances && d.kind === "clearance") return false;
-    return true;
-  });
-
-  // Room for the drawing *and* the dimensions standing off it. Offsets are
-  // set from the part's largest dimension, not this view's, so a long leg's
-  // 50 x 50 plan gets rails further out than its own span would suggest —
-  // sizing the padding from the span alone crops the numbers off the sheet.
-  const span = Math.max(b.width, b.height);
-  const sf = Math.max(0.6, Math.min(3, Math.max(20, span) / 100));
-  // A full label width, not half: a dimension too short to break around its
-  // label moves the label clear of the line (see DimensionLineItem), which
-  // carries it a further half-width outward — a 13 mm pocket depth lost its
-  // "mm" off the frame edge when only the half was allowed for.
-  const reach = activeDims.reduce((furthest, d) =>
-    Math.max(furthest, Math.abs(d.offset) + (d.label.length * 3.6 + 6) * sf + 2 * sf), 0);
-  const pad = Math.max(45, span * 0.35 + 18, reach + 10 * sf);
-  const vbWidth = Math.max(80, b.width + pad * 2);
-  const vbHeight = Math.max(80, b.height + pad * 2);
-  const vbMinX = b.minX - pad;
-  const vbMinY = b.minY - pad;
+  // Centred in the sheet's shared frame, so all its views sit at one scale.
+  const extent = viewExtent(viewData, showClearances, sf);
+  const frame = sheetFrame(views, showClearances, sf);
+  const vbWidth = frame.width, vbHeight = frame.height;
+  const centreX = (extent.left + extent.right) / 2, centreY = (extent.bottom + extent.top) / 2;
+  const vbMinX = centreX - vbWidth / 2;
+  // The drawing is flipped so +Y points up (see the group's transform below):
+  // a drawing-space height y lands at 2·minY + height − y on the SVG canvas.
+  const vbMinY = 2 * b.minY + b.height - (centreY + vbHeight / 2);
   const labelIds=new Set<string>();
   const occupied:Array<[number,number,number,number]>=[];
   for(const part of viewData.parts) {
-    const width=part.name.length*2.8+4, height=7;
+    const width=(part.name.length*2.8+4)*sf, height=7*sf;
     if(part.rect.width<width || part.rect.height<height) continue;
     const x=part.rect.x+part.rect.width/2,y=part.rect.y+part.rect.height/2;
     const box:[number,number,number,number]=[x-width/2,y-height/2,x+width/2,y+height/2];
@@ -480,6 +590,7 @@ function ViewSvg({
 
   return (
     <svg
+      ref={svgRef}
       className={`blueprint-svg ${highContrast ? "high-contrast" : ""}`}
       viewBox={`${vbMinX} ${vbMinY} ${vbWidth} ${vbHeight}`}
       preserveAspectRatio="xMidYMid meet"
@@ -525,7 +636,7 @@ function ViewSvg({
                   transform="scale(1, -1)"
                   textAnchor="middle"
                   dominantBaseline="central"
-                  fontSize="4.5"
+                  fontSize={4.5 * sf}
                   fill="#1e293b"
                   fontWeight="600"
                   style={{ pointerEvents: "none" }}
@@ -539,7 +650,7 @@ function ViewSvg({
 
         {/* Dimension Lines */}
         {activeDims.map((dim) => (
-          <DimensionLineItem key={dim.id} dim={dim} bounds={b} />
+          <DimensionLineItem key={dim.id} dim={dim} sf={sf} />
         ))}
       </g>
     </svg>
@@ -549,17 +660,13 @@ function ViewSvg({
 /**
  * Renders extension lines, dimension line, arrows, and mm label text with adaptive scaling.
  */
-function DimensionLineItem({ dim, bounds }: { dim: BlueprintDimension; bounds: { width: number; height: number } }) {
+function DimensionLineItem({ dim, sf }: { dim: BlueprintDimension; sf: number }) {
   const isHoriz = dim.type === "horizontal";
   const [x1, y1] = dim.start;
   const [x2, y2] = dim.end;
 
-  const maxSpan = Math.max(20, Math.max(bounds.width, bounds.height));
-  const sf = Math.max(0.6, Math.min(3.0, maxSpan / 100));
-
   const fontSize = 5.0 * sf;
-  const badgeW = Math.max(24 * sf, (dim.label.length * 3.6 + 6) * sf);
-  const badgeH = 8.0 * sf;
+  const { width: badgeW, height: badgeH } = badgeSize(dim.label, sf);
   const strokeW = 0.65 * sf;
   const arrowL = 4.5 * sf;
   const arrowW = 2.4 * sf;
@@ -572,11 +679,11 @@ function DimensionLineItem({ dim, bounds }: { dim: BlueprintDimension; bounds: {
     // label rather than running behind it. An opaque badge alone still shows
     // the line through its edges at print resolution.
     const lo = Math.min(x1, x2), hi = Math.max(x1, x2);
-    const fits = hi - lo > badgeW + 4 * sf;
     const gapLo = midX - badgeW / 2 - 1.5 * sf, gapHi = midX + badgeW / 2 + 1.5 * sf;
     // Too narrow to break (a 50 mm leg is thinner than "50.0 mm"): keep the
     // line whole and lift the label clear of it instead.
-    const shift = fits ? 0 : Math.sign(dim.offset || 1) * badgeH * 1.1;
+    const shift = labelShift(dim, sf);
+    const fits = shift === 0;
     return (
       <g className={`dimension-line-item ${dim.kind}`}>
         {/* Extension lines from workpiece to dimension line */}
@@ -659,9 +766,9 @@ function DimensionLineItem({ dim, bounds }: { dim: BlueprintDimension; bounds: {
   const midY = (y1 + y2) / 2;
   const dir = Math.sign(y2 - y1) || 1;
   const lo = Math.min(y1, y2), hi = Math.max(y1, y2);
-  const fits = hi - lo > badgeH + 4 * sf;
   const gapLo = midY - badgeH / 2 - 1.5 * sf, gapHi = midY + badgeH / 2 + 1.5 * sf;
-  const shift = fits ? 0 : Math.sign(dim.offset || 1) * (badgeW / 2 + 2 * sf);
+  const shift = labelShift(dim, sf);
+  const fits = shift === 0;
   return (
     <g className={`dimension-line-item ${dim.kind}`}>
       {/* Extension lines */}
@@ -758,7 +865,9 @@ function PartDetailSheets({ data, showClearances, showPartLabels, highContrast, 
   const shared = { showClearances, showPartLabels, highContrast, onOpen };
   return (
     <div className="part-detail-stack">
-      {data.partSheets.map((sheet, index) => (
+      {data.partSheets.map((sheet, index) => {
+        const views = [sheet.frontView, sheet.topView, sheet.sideView];
+        return (
         <section className="part-detail-page" key={sheet.id}>
           <header className="part-detail-header">
             <div className="pd-identity">
@@ -773,9 +882,9 @@ function PartDetailSheets({ data, showClearances, showPartLabels, highContrast, 
           </header>
 
           <div className="part-detail-grid">
-            <ViewCell title="Front Elevation" of={sheet.name} view={sheet.frontView} {...shared} />
-            <ViewCell title="Top Plan" of={sheet.name} view={sheet.topView} {...shared} />
-            <ViewCell title="Right Side Profile" of={sheet.name} view={sheet.sideView} {...shared} />
+            <ViewCell title="Front Elevation" of={sheet.name} view={sheet.frontView} sheet={views} {...shared} />
+            <ViewCell title="Top Plan" of={sheet.name} view={sheet.topView} sheet={views} {...shared} />
+            <ViewCell title="Right Side Profile" of={sheet.name} view={sheet.sideView} sheet={views} {...shared} />
             <ViewCell title="Isometric" of={sheet.name} view={sheet.isoView} iso {...shared} />
           </div>
 
@@ -789,7 +898,8 @@ function PartDetailSheets({ data, showClearances, showPartLabels, highContrast, 
             <div className="pd-spec"><span className="tb-label">PROJECT</span><span className="tb-val">{data.projectName}</span></div>
           </footer>
         </section>
-      ))}
+        );
+      })}
     </div>
   );
 }

@@ -274,3 +274,49 @@ assert.deepEqual(drawnIn([0,1,0]),['flat face into the curve','square edge','ope
   'side-on, the tangent line is the silhouette; facets and flat-face diagonals still are not');
 assert.deepEqual(api.viewEdges({edges:[[[0,0,0],[1,0,0]]]},[0,0,1]),[[[0,0,0],[1,0,0]]],'without crease data, every edge is drawn as before');
 console.log('Blueprint: sharp edges and per-view silhouettes drawn, facet creases dropped passed');
+
+// A real mesh captured the way the viewport does: every edge with the normals
+// of the triangles either side (see captureBlueprintGeometry in scene.ts).
+const captured=(geometry)=>{
+  const pos=geometry.getAttribute('position'), index=geometry.getIndex();
+  const corner=i=>new THREE.Vector3().fromBufferAttribute(pos,index?index.getX(i):i);
+  const key=v=>`${Math.round(v.x*1e4)},${Math.round(v.y*1e4)},${Math.round(v.z*1e4)}`;
+  const creases=new Map(), count=index?index.count:pos.count, vertices=[];
+  for(let t=0;t+2<count;t+=3){
+    const p=[corner(t),corner(t+1),corner(t+2)]; p.forEach(v=>vertices.push(v.toArray()));
+    const n=new THREE.Vector3().subVectors(p[1],p[0]).cross(new THREE.Vector3().subVectors(p[2],p[0]));
+    if(n.lengthSq()<1e-12) continue; const nn=n.normalize().toArray();
+    for(const [i,j] of [[0,1],[1,2],[2,0]]){const ka=key(p[i]),kb=key(p[j]); if(ka===kb) continue;
+      const k=ka<kb?ka+'|'+kb:kb+'|'+ka, known=creases.get(k);
+      if(known){ if(!known[3]) known[3]=nn; } else creases.set(k,[p[i].toArray(),p[j].toArray(),nn,null]);}
+  }
+  const outline=new THREE.EdgesGeometry(geometry,1), ep=outline.getAttribute('position'), edges=[];
+  for(let i=0;i<ep.count;i+=2) edges.push([new THREE.Vector3().fromBufferAttribute(ep,i).toArray(),new THREE.Vector3().fromBufferAttribute(ep,i+1).toArray()]);
+  geometry.computeBoundingBox(); const b=geometry.boundingBox;
+  return {min:b.min.toArray(),max:b.max.toArray(),vertices,edges,creases:[...creases.values()]};
+};
+// A torus lying flat: every ring of facets is a closed loop in a plane of its
+// own. Seen side-on it was dimensioned as a comb of 0.5mm "steps".
+const torus=captured(new THREE.TorusGeometry(5,1.65,16,48));
+assert.deepEqual(api.featureSpans(torus,2),[],'no steps up the side of a torus');
+assert.deepEqual(api.featureSpans(torus,0),[],'nor across it');
+assert.ok(api.featureSpans({...torus,creases:undefined},2).length>0,'(without face directions the rings do still read as steps — the case this fixes)');
+// A real flat step still counts: a 20x20x10 block with a 10x20x10 block on
+// half of its top leaves a flat ledge at z=10.
+const ledge=new THREE.BufferGeometry();
+const P=(x,y,z)=>[x,y,z], quad=(a,b,c,d)=>[a,b,c,a,c,d];
+const tris=[
+  ...quad(P(0,0,0),P(0,20,0),P(20,20,0),P(20,0,0)),            // bottom, facing -z
+  ...quad(P(0,0,0),P(20,0,0),P(20,0,20),P(0,0,20)),            // front y=0, full height
+  ...quad(P(20,0,0),P(20,20,0),P(20,20,10),P(20,0,10)),        // right x=20, lower
+  ...quad(P(20,0,10),P(20,10,10),P(20,10,20),P(20,0,20)),      // right x=20, upper
+  ...quad(P(0,20,0),P(0,0,0),P(0,0,20),P(0,10,20)),            // left x=0 (lower + upper as one outline)
+  ...quad(P(0,20,0),P(0,10,20),P(0,10,10),P(0,20,10)),
+  ...quad(P(20,20,0),P(0,20,0),P(0,20,10),P(20,20,10)),        // back y=20, lower
+  ...quad(P(0,10,10),P(20,10,10),P(20,20,10),P(0,20,10)),      // the ledge, facing +z
+  ...quad(P(20,10,10),P(0,10,10),P(0,10,20),P(20,10,20)),      // riser y=10, upper
+  ...quad(P(0,0,20),P(20,0,20),P(20,10,20),P(0,10,20)),        // top, facing +z
+].flat();
+ledge.setAttribute('position',new THREE.Float32BufferAttribute(tris,3));
+assert.deepEqual(api.featureSpans(captured(ledge),2).map(s=>s.max-s.min),[10,10],'a real flat ledge is still a step');
+console.log('Blueprint: turned shapes give no false steps, flat ledges still do passed');

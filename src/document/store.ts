@@ -1043,15 +1043,19 @@ export const useDoc = create<DocState>()(
         }),
 
       /** Marquee (rubber-band) select — replaces the selection with `ids` in
-       *  one atomic update, or unions it into the current one when additive
-       *  (shift/ctrl held). Order matters (the LAST id drives the gizmo), so
-       *  additive appends newly-caught ids after the ones already selected. */
+       *  one atomic update, or toggles each of them when additive (shift/ctrl
+       *  held): an object caught that was already selected comes out, one
+       *  that was not goes in. The same rule shift-click follows for a single
+       *  object, so dragging a box over something already selected is a way
+       *  to deselect it. Order matters (the LAST id drives the gizmo), so
+       *  newly-caught ids are appended after the ones kept. */
       selectMany: (ids, additive = false) =>
         set((s) => {
           if (!additive) return { selectedIds: ids };
-          const merged = [...s.selectedIds];
-          for (const id of ids) if (!merged.includes(id)) merged.push(id);
-          return { selectedIds: merged };
+          const caught = new Set(ids);
+          const kept = s.selectedIds.filter((id) => !caught.has(id));
+          const added = ids.filter((id) => !s.selectedIds.includes(id));
+          return { selectedIds: [...kept, ...added] };
         }),
 
       setParam: (id, key, value) => {

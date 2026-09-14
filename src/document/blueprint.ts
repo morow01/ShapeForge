@@ -79,6 +79,9 @@ export interface OrthoViewData {
   viewType: "front" | "top" | "side" | "iso";
   title: string;
   bounds: { minX: number; maxX: number; minY: number; maxY: number; width: number; height: number };
+  /** The sheet's unit of scale (see drawingScale), the same for every view of
+   *  one sheet so text, arrows and offsets match from view to view. */
+  scale?: number;
   parts: Array<{
     id: string;
     name: string;
@@ -605,7 +608,8 @@ export function partSpans(parts: BlueprintPart[], axis: 0|1|2,
  * mortises, those mortises are the largest faces there are and are dimensioned.
  */
 export function featureSpans(part: BlueprintPart, axis: 0|1|2): RailSpan[] {
-  if (!part.edges?.length) return [];
+  const outline = faceBoundaries(part, axis);
+  if (!outline.length) return [];
   const low = part.min[axis], high = part.max[axis], extent = high - low;
   if (extent <= 0) return [];
   const [u, v] = ([0, 1, 2] as const).filter(a => a !== axis);
@@ -613,7 +617,7 @@ export function featureSpans(part: BlueprintPart, axis: 0|1|2): RailSpan[] {
   const merge = Math.max(0.5, extent * 0.01);
   const plane = (value: number) => Math.round(value * 1000) / 1000;
   const onPlane = new Map<number, [Vec3, Vec3][]>();
-  for (const edge of part.edges) {
+  for (const edge of outline) {
     const at = plane(edge[0][axis]);
     if (at !== plane(edge[1][axis])) continue;
     // The outer faces are the overall dimension already.
@@ -636,17 +640,62 @@ export function featureSpans(part: BlueprintPart, axis: 0|1|2): RailSpan[] {
   return stops.slice(1).map((end, i) => ({ min: stops[i], max: end, kind: "part" as const }));
 }
 
+/** A face this close to square-on to an axis is flat across it. */
+const FLAT_FACING = Math.cos((0.5 * Math.PI) / 180);
+
+/**
+ * The outline edges of faces lying flat across `axis`: the rim of a pocket
+ * floor, the edge of a mortise's flat side, the border of a hole's bottom.
+ *
+ * A closed loop in a plane is not enough on its own. A torus, a sphere or any
+ * turned shape is built from rings of facets, and every ring is a closed loop
+ * lying in a plane of its own — so a torus seen side-on was dimensioned as a
+ * comb of 0.5 mm "steps", one per ring. What sets a real step apart is the
+ * surface beside it: a flat face square-on to the axis on one side of the
+ * edge. A facet ring has tilted facets on both sides, so it never qualifies.
+ * An edge with flat faces on both sides is only a triangle diagonal inside one
+ * face, and is left out too, so the loop walked is the face's true border.
+ *
+ * Without per-edge face normals there is nothing to tell those apart, so every
+ * outline edge is used, as before.
+ */
+function faceBoundaries(part: BlueprintPart, axis: 0|1|2): [Vec3, Vec3][] {
+  if (!part.creases?.length) return part.edges ?? [];
+  const flat = (normal: Vec3 | null) => !!normal && Math.abs(normal[axis]) >= FLAT_FACING;
+  const boundary: [Vec3, Vec3][] = [];
+  for (const [a, b, first, second] of part.creases) {
+    const onFlat = flat(first), otherFlat = flat(second);
+    if (second ? onFlat !== otherFlat : onFlat) boundary.push([a, b]);
+  }
+  return boundary;
+}
+
 /** Openings and element sizes measured on dedicated outside rails, one set per
  * view axis. A label gets a separate lane when its text interval would collide.
  *
  * Small elements are dimensioned out here rather than across the element
  * itself: on a 1000 mm drawing a 50 mm leg is narrower than its own label, so
  * the number sits on the rail and its extension lines point back to the leg. */
+/**
+ * A view's unit of scale. Every dimension's text, arrows and offsets, and the
+ * margin round the view, are sized as a fraction of the view itself.
+ *
+ * They used to be clamped to fixed millimetres, which is why a 13 mm torus sat
+ * shrunk in a corner of its cell: the minimum margins and label sizes were
+ * several times the part, and fitting the whole lot into the cell shrank the
+ * drawing to make room for them. At the other end a metre-long table had
+ * labels too small to read. Proportional sizing gives every drawing the same
+ * layout at any size, so each one fills its cell.
+ */
+export function drawingScale(bounds: { width: number; height: number }): number {
+  return Math.max(bounds.width, bounds.height, 1e-3) / 100;
+}
+
 export function railDimensions(view:OrthoViewData,spans:[RailSpan[],RailSpan[]]=[[],[]]):BlueprintDimension[] {
   if(view.viewType==='iso') return [];
   const result:BlueprintDimension[]=[];
-  const span=Math.max(view.bounds.width,view.bounds.height,20);
-  const sf=Math.max(0.6,Math.min(3,span/100));
+  const sf=view.scale ?? drawingScale(view.bounds);
+  const span=sf*100;
   for(const axis of [0,1]) {
     const lanes:number[][]=[[],[],[],[],[]];
     spans[axis].forEach((entry,i)=>{
@@ -658,7 +707,7 @@ export function railDimensions(view:OrthoViewData,spans:[RailSpan[],RailSpan[]]=
       if(lane<0) return;
       lanes[lane].push(middle-half,middle+half);
       // Overall dimensions occupy top/left (right for the side view).
-      const offset=Math.max(14,span*0.08)+(lane*12*sf);
+      const offset=span*0.08+(lane*12*sf);
       result.push({id:`${view.viewType}-${entry.kind}-${axis}-${i}`,type:axis===0?'horizontal':'vertical',
         start:axis===0?[a,view.bounds.minY]:[view.viewType==='side'?view.bounds.minX:view.bounds.maxX,a],
         end:axis===0?[b,view.bounds.minY]:[view.viewType==='side'?view.bounds.minX:view.bounds.maxX,b],
@@ -767,7 +816,8 @@ export function buildViews(solidParts: BlueprintPart[]): ViewSet {
   ];
 
   const maxModelDim = Math.max(overallSize[0], overallSize[1], overallSize[2]);
-  const viewMargin = Math.max(18, maxModelDim * 0.14);
+  // In proportion to the part, like everything else drawn round it (see drawingScale).
+  const viewMargin = Math.max(maxModelDim * 0.14, 1e-3);
 
   // Helper to build Front View (X horizontal, Z vertical)
   const buildFrontView = (): OrthoViewData => {
@@ -970,8 +1020,15 @@ export function buildViews(solidParts: BlueprintPart[]): ViewSet {
   const sizes=[0,1,2].map(axis=>partSpans(solidParts,axis as 0|1|2,range[axis],openings[axis].map(s=>s.max-s.min)));
   const rail=(axis:number):RailSpan[]=>
     [...openings[axis].map(s=>({...s,kind:"clearance" as const})),...sizes[axis]];
-  const dimensioned=(view:OrthoViewData,spans:[RailSpan[],RailSpan[]])=>
-    ({...view,dimensions:[...view.dimensions,...railDimensions(view,spans)]});
+  // One scale for the whole sheet, set by the part's largest dimension, so a
+  // label reads the same size in the front view as in the top view. Scaled
+  // per view, a wide flat front elevation drew its numbers several times the
+  // size of the square plan's beside it.
+  const scale=Math.max(maxModelDim,1e-3)/100;
+  const dimensioned=(built:OrthoViewData,spans:[RailSpan[],RailSpan[]])=>{
+    const view={...built,scale};
+    return {...view,dimensions:[...view.dimensions,...railDimensions(view,spans)]};
+  };
   // A part on its own page is dimensioned inside as well as out. On a sheet of
   // several parts the same chains for every part at once would bury the
   // drawing, and each part's page already carries its own.
@@ -982,7 +1039,7 @@ export function buildViews(solidParts: BlueprintPart[]): ViewSet {
     frontView: dimensioned(buildFrontView(),[along(0),along(2)]),
     topView: dimensioned(buildTopView(),[along(0),along(1)]),
     sideView: dimensioned(buildSideView(),[along(1),along(2)]),
-    isoView: buildIsoView(),
+    isoView: {...buildIsoView(),scale},
   };
 }
 

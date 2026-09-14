@@ -121,6 +121,7 @@ interface NavDrag {
 interface Marquee {
   downScreen: { x: number; y: number };
   active: boolean;
+  /** Shift/Ctrl held: toggle each caught object instead of replacing the selection. */
   additive: boolean;
 }
 
@@ -7989,6 +7990,7 @@ export class Scene {
       this.marquee = {
         downScreen: { x: e.clientX, y: e.clientY },
         active: false,
+        // Shift/Ctrl toggle what the box catches, as they do for a click.
         additive: e.ctrlKey || e.metaKey || e.shiftKey,
       };
       return;
