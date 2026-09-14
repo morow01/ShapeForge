@@ -103,10 +103,19 @@ export function meshShellOpening(solid: MeshShape, point: Vec3, normal: Vec3, th
 export function resizeMeshFace(solid: MeshShape, op: ResizeFaceOp, onError?: (reason: string) => void): MeshShape | null {
   try {
     const patch=planarPatch(solid,op.point,op.normal);
-    if(!patch || !Number.isFinite(op.offset)) throw new Error("Resize check 1 failed.");
+    if(!patch || !Number.isFinite(op.offset)) throw new Error("Select a flat face before resizing.");
     const {vertices,triangles,normals,edges,n,selected,boundary,section,flood}=patch;
-    const target=section.offset(op.offset,'Miter',8);
-    if(target.isEmpty() || target.numContour()!==section.numContour()) throw new Error("Resize check 2 failed.");
+    const stretch = op.stretch;
+    if (stretch && (!Object.values(stretch).flat().every(Number.isFinite) || stretch.scale.some(v => v <= 0))) {
+      throw new Error("Width and height must be greater than zero.");
+    }
+    const transformPoint = (p: [number, number]): [number, number] => stretch
+      ? p.map((v,i) => stretch.origin[i] + (v-stretch.origin[i])*stretch.scale[i] + stretch.translation[i]) as [number,number]
+      : p;
+    const target=stretch
+      ? new (getManifold().CrossSection)(Array.from(selected,t=>triangles[t].map(id=>transformPoint(patch.project(vertices[id])))), 'NonZero')
+      : section.offset(op.offset,'Miter',8);
+    if(target.isEmpty() || target.numContour()!==section.numContour()) throw new Error("This amount would collapse or split the face outline. Try a smaller amount.");
     const constraints=new Map<number,Vec3[]>();
     for(const [a,b] of boundary) {
       const outward=unit(cross(sub(vertices[b],vertices[a]),n));
@@ -114,9 +123,14 @@ export function resizeMeshFace(solid: MeshShape, op: ResizeFaceOp, onError?: (re
     }
     const shifts=new Map<number,Vec3>();
     for(const [id,list] of constraints) {
-      if(list.length!==2) throw new Error("Resize check 3 failed.");
+      if (stretch) {
+        const p=patch.project(vertices[id]), q=transformPoint(p);
+        shifts.set(id, patch.x.map((v,i)=>v*(q[0]-p[0])+patch.y[i]*(q[1]-p[1])) as Vec3);
+        continue;
+      }
+      if(list.length!==2) throw new Error("This face has an ambiguous border and cannot be resized.");
       const denominator=1+dot(list[0],list[1]);
-      if(denominator<1e-5) throw new Error("Resize check 4 failed.");
+      if(denominator<1e-5) throw new Error("This face has a border corner too narrow to resize.");
       shifts.set(id,list[0].map((v,i)=>op.offset*(v+list[1][i])/denominator) as Vec3);
     }
     // Each adjoining planar face has its own fixed far edge. A shoulder on a
@@ -146,6 +160,10 @@ export function resizeMeshFace(solid: MeshShape, op: ResizeFaceOp, onError?: (re
     for(const [id,weight] of weights) {
       if(weight<1e-8) continue;
       let shift=shifts.get(id);
+      if (stretch) {
+        const p=patch.project(vertices[id]), q=transformPoint(p);
+        shift=patch.x.map((v,i)=>v*(q[0]-p[0])+patch.y[i]*(q[1]-p[1])) as Vec3;
+      }
       if(!shift) {
         let best=Infinity;
         for(const [a,b] of boundary) {
@@ -177,11 +195,10 @@ export function resizeMeshFace(solid: MeshShape, op: ResizeFaceOp, onError?: (re
     }
     const manifold=getManifold();
     const actual=new manifold.CrossSection(Array.from(selected,t=>triangles[t].map(id=>patch.project(moved[id]))),'NonZero');
-    if(actual.subtract(target).area()+target.subtract(actual).area()>Math.max(1e-4,target.area()*1e-5)) throw new Error("Resize check 6 failed.");
+    if(actual.subtract(target).area()+target.subtract(actual).area()>Math.max(1e-4,target.area()*1e-5)) throw new Error("This amount would distort the face outline. Try a smaller amount.");
     const result=new manifold.Manifold(new manifold.Mesh({numProp:3,vertProperties:Float32Array.from(moved.flat()),triVerts:Uint32Array.from(triangles.flat())}));
-    if(result.status()!=='NoError'||result.isEmpty()||result.volume()<=0) throw new Error("Resize check 7 failed.");
+    if(result.status()!=='NoError'||result.isEmpty()||result.volume()<=0) throw new Error("The resized surface could not form a valid solid; the previous shape was kept.");
     return new MeshShape(result);
   } catch (error) { onError?.(error instanceof Error ? error.message : "Face resize failed."); return null; }
 }
-
 

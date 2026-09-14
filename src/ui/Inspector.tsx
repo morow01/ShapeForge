@@ -11,7 +11,7 @@ import { beginHistoryBatch, endHistoryBatch } from "../document/store";
 import { getBlob, getAllStoredBlobs } from "../document/blobStore";
 import { getStlTriangleCount } from "../mesh/simplify";
 import type { SimplifyResult } from "../mesh/simplify";
-import { resolveNodeColor, resolveNodeTransparent } from "../document/tree";
+import { resolveNodeColor, resolveNodeHideLines, resolveNodeTransparent } from "../document/tree";
 import {
   TRI_BY_ANGLES,
   TRI_BY_SIDE_ANGLE,
@@ -272,6 +272,8 @@ interface Props {
   onHole: (isHole: boolean) => void;
   onColor: (color: string) => void;
   onTransparent: (transparent: boolean) => void;
+  /** Display only: hide this object's edge lines in the shaded view. */
+  onHideLines: (hideLines: boolean) => void;
   /** Faceted low-poly styling; undefined restores full detail. */
   onLowPoly: (lowPoly: LowPoly | undefined) => void;
   /** Imported artwork only: how far the outlines are extruded, in mm. */
@@ -336,6 +338,7 @@ export function Inspector({
   onHole,
   onColor,
   onTransparent,
+  onHideLines,
   onLowPoly,
   onSvgThickness,
   onSimplifyMesh,
@@ -792,6 +795,16 @@ export function Inspector({
               </label>
             ))}
           </div>
+
+          <h2>Display</h2>
+          <label className="lowpoly-toggle">
+            <input
+              type="checkbox"
+              checked={resolveNodeHideLines(node)}
+              onChange={(e) => onHideLines(e.target.checked)}
+            />
+            <span>Hide lines on this object</span>
+          </label>
 
           <LowPolySection lowPoly={node.lowPoly} onLowPoly={onLowPoly} />
         </>

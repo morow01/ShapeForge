@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import * as THREE from "three";
-import { EXPORT_MESHES_WATCHDOG_MS, EXPORT_WATCHDOG_MS, kernel, KernelTimeoutError, WATCHDOG_MS } from "./kernel/client";
+import { EXPORT_MESHES_WATCHDOG_MS, EXPORT_WATCHDOG_MS, kernel, KernelTimeoutError, SCENE_TOTAL_MS } from "./kernel/client";
 import { Viewport } from "./viewport/Viewport";
+import type { FaceBounds, FaceResizeFrame } from "./viewport/FaceResizeHandles";
 import { Inspector } from "./ui/Inspector";
 import { Tree } from "./ui/Tree";
 import { ProjectsModal } from "./ui/ProjectsModal";
@@ -24,7 +25,7 @@ import {
   JoineryToolIcon,
   RoundPinIcon,
   SquarePinIcon,
-  TenonIcon,
+  DominoJointIcon,
   DovetailRailIcon,
   HingeJointIcon,
   SnapJointIcon,
@@ -54,13 +55,17 @@ import {
   UngroupIcon,
   WireframeIcon,
   ZoomToFitIcon,
+  BlueprintIcon,
+  ExplodeIcon,
 } from "./ui/icons";
+import type { DropDirection } from "./ui/icons";
 import { buildThreeMF } from "./export/threemf";
 import { SvgImportModal } from "./ui/SvgImportModal";
 import { TextModal } from "./ui/TextModal";
 import { SettingsModal } from "./ui/SettingsModal";
 import type { BuildPlateSize } from "./ui/SettingsModal";
 import { ExportModal } from "./ui/ExportModal";
+import { BlueprintModal } from "./ui/BlueprintModal";
 import { NewDesignModal } from "./ui/NewDesignModal";
 import { StepperButtons } from "./ui/MathNumInput";
 import { formatLength, fromMillimetres, toMillimetres } from "./measurement";
@@ -81,7 +86,7 @@ import { findAssemblyOwner, findNode, parentOf, resolveNodeTransparent, resolveN
 import { bakeScale } from "./document/bake";
 import { putBlob } from "./document/blobStore";
 import { loadCameraState } from "./document/persist";
-import type { EditOp, GroupNode, PrimitiveKind, SceneNode, ShellOp, Vec3 } from "./document/types";
+import type { EditOp, GroupNode, PrimitiveKind, SceneNode, ShellOp, ResizeFaceOp, Vec3 } from "./document/types";
 import { RETRYABLE_MESH_ERROR } from "./kernel/types";
 import type { EditSpec, ExportQuality, NodeSpec, PreviewBuild, ScenePart } from "./kernel/types";
 import type { CameraMode, DuplicateResult, Scene, ToolMode, WireframeMode } from "./viewport/scene";
@@ -204,6 +209,10 @@ const toSpec = (n: SceneNode): NodeSpec => {
   };
 };
 
+/** How many wedged nodes may be set aside automatically before the build
+ *  stops and reports, rather than carrying on emptying the scene. */
+const MAX_AUTO_SKIPS = 3;
+
 /** Removes a skipped node from anywhere in the tree, not just the top level —
  *  a timed-out import nested inside a group must actually come out of that
  *  group's children, or the group (still top-level, so not itself excluded)
@@ -307,6 +316,11 @@ const BUILD_PLATE_SIZE_KEY = "cad.buildPlateSize";
 
 /** What each preset costs, so the choice is not guesswork — measured on a
  *  40x30x15 box with a 10mm spherical bowl (see EXPORT_PRESETS in worker.ts). */
+/** Round / Bevel Face Border: the slider's range and the quick-pick sizes, in
+ *  mm. Larger values can still be typed into the field. */
+const BORDER_SLIDER_MAX_MM = 10;
+const BORDER_QUICK_SIZES_MM = [0.5, 1, 2, 3, 5] as const;
+
 function SignedMeasurementInput({
   valueMm,
   unit,
@@ -463,6 +477,7 @@ export function App() {
     shapeBuild,
     setColor,
     setTransparent,
+    setHideLines,
     setLowPoly,
     setGroupOp,
     toggleCollapsed,
@@ -535,6 +550,13 @@ export function App() {
    *  render again; the node itself stays visible in the tree with a warning
    *  so the user can delete or replace it. */
   const [skippedIds, setSkippedIds] = useState<Set<string>>(new Set());
+  /** Skipping one wedged node lets the rest of the scene render. Skipping
+   *  without limit empties it: every timeout sets one more object aside and
+   *  starts over, so a scene simply too heavy for the budget was dismantled an
+   *  object at a time — 45s each — until nothing was left and the viewport
+   *  went blank with no explanation. Past this many, the build stops and says
+   *  which node it is waiting on instead of quietly removing more. */
+  const autoSkipRef = useRef({ shapeKey: "", count: 0 });
   const [cameraMode, setCameraMode] = useState<CameraMode>(() => loadCameraState()?.mode ?? "perspective");
   const [toolMode, setToolMode] = useState<ToolMode>("select");
   const [mirrorMenuOpen, setMirrorMenuOpen] = useState(false);
@@ -579,6 +601,10 @@ export function App() {
   const [edgeSelection, setEdgeSelection] = useState<{ id: string; points: Vec3[] } | null>(null);
   const [edgeKind, setEdgeKind] = useState<"fillet" | "chamfer">("fillet");
   const [edgeDistance, setEdgeDistance] = useState(2);
+  /** The edge tool's live-preview status line, and whether it reports a
+   *  refusal (shown in red). */
+  const [edgePreviewStatus, setEdgePreviewStatus] = useState("");
+  const [edgePreviewFailed, setEdgePreviewFailed] = useState(false);
   /** The face the Face tool has selected, for Hollow. Held here rather than
    *  read from the scene so the bar re-renders when the selection changes. */
   const [faceSelection, setFaceSelection] = useState<{ id: string; point: Vec3; normal: Vec3; size: number; edges: Vec3[] } | null>(null);
@@ -608,6 +634,11 @@ export function App() {
    *  bar only configures and applies that one operation; it must never act as
    *  a second, conflicting tool picker. */
   const [faceOp, setFaceOp] = useState<"push" | "wall" | "resize" | "offset" | "fillet" | "chamfer">("push");
+  /** Which finish the Round / Bevel Face Border tool last used. */
+  const [borderKind, setBorderKind] = useState<"fillet" | "chamfer">("fillet");
+  useEffect(() => {
+    if (faceOp === "fillet" || faceOp === "chamfer") setBorderKind(faceOp);
+  }, [faceOp]);
   /** Offset & extrude is the one face operation that needs two numbers: how
    *  far in from the edge, and how far out from there. */
   const [faceHeight, setFaceHeight] = useState(3);
@@ -738,14 +769,15 @@ export function App() {
       [rotation.x / Math.PI * 180, rotation.y / Math.PI * 180, rotation.z / Math.PI * 180],
     );
     const newId = useDoc.getState().selectedIds[0];
-    if (pendingPrimitive === "screwHole" && targetId && newId) {
+    if ((pendingPrimitive === "screwHole" || pendingPrimitive === "domino") && targetId && newId) {
       const targetNode = findNode(useDoc.getState().nodes, targetId);
-      if (targetNode && !targetNode.isHole) {
+      const newNode = findNode(useDoc.getState().nodes, newId);
+      if (targetNode && !targetNode.isHole && newNode?.isHole) {
         selectMany([targetId, newId], false);
         combine("union");
         const combinedId = useDoc.getState().selectedIds[0];
         if (combinedId) {
-          rename(combinedId, `${targetNode.name} with Hole`);
+          rename(combinedId, `${targetNode.name} with ${pendingPrimitive === "domino" ? "Mortise" : "Hole"}`);
         }
         select(newId);
       }
@@ -923,9 +955,27 @@ export function App() {
   const [autoJointCustomHeight, setAutoJointCustomHeight] = useState<number | null>(null);
   const [autoJointCustomTaper, setAutoJointCustomTaper] = useState<number | null>(null);
   const [autoJointCustomSpacing, setAutoJointCustomSpacing] = useState<number | null>(null);
+  const [autoJointCustomVerticalSpacing, setAutoJointCustomVerticalSpacing] = useState<number | null>(null);
+  const [autoJointVerticalOffset, setAutoJointVerticalOffset] = useState<number>(0);
+  const [autoJointOrientation, setAutoJointOrientation] = useState<"horizontal" | "vertical" | "grid">("horizontal");
+  const [autoJointDominoRotation, setAutoJointDominoRotation] = useState<number>(0);
   const [autoJointHingeEdge, setAutoJointHingeEdge] = useState<"edge1" | "center" | "edge2">("edge1");
   const [autoJointHingeSides, setAutoJointHingeSides] = useState<number>(64);
+  const [blueprintOpen, setBlueprintOpen] = useState(false);
+  const [explodeAmount, setExplodeAmount] = useState<number>(0);
   const [error, setError] = useState<string | null>(null);
+  /**
+   * Why the edit just applied was refused. Kept apart from `error` because
+   * every build result clears `error`, and a refused edit is followed at once
+   * by a rebuild — the dead-op cleanup drops the failed op — so the reason was
+   * on screen for about 140ms. This one stays until it times out.
+   */
+  const [editNotice, setEditNotice] = useState<string | null>(null);
+  useEffect(() => {
+    if (!editNotice) return;
+    const timer = window.setTimeout(() => setEditNotice(null), 8000);
+    return () => window.clearTimeout(timer);
+  }, [editNotice]);
   const [sceneBusy, setSceneBusy] = useState(false);
   const busy = sceneBusy;
   // Timestamp sceneBusy last turned true, so the "still working" hint (below)
@@ -1202,6 +1252,8 @@ export function App() {
     setAutoJointCustomHeight(null);
     setAutoJointCustomTaper(null);
     setAutoJointCustomSpacing(null);
+    setAutoJointCustomVerticalSpacing(null);
+    setAutoJointVerticalOffset(0);
     setAutoJointHingeEdge("edge1");
   }, [autoJointShape, selectedIds[0], selectedIds[1], connectorSwapped]);
 
@@ -1215,6 +1267,9 @@ export function App() {
     dovetailStopped = true,
     dovetailStopEnd = 0,
     hingeEdge: "edge1" | "center" | "edge2" = "edge1",
+    orientation: "horizontal" | "vertical" | "grid" = "horizontal",
+    dominoRotation: number = 0,
+    verticalOffset: number = 0,
   ) => {
     const { axis, point, normal, footprint } = seam;
 
@@ -1225,10 +1280,14 @@ export function App() {
 
     const rotMatrix = new THREE.Matrix4().makeBasis(xAxis, yAxis, zAxis);
     const euler = new THREE.Euler().setFromRotationMatrix(rotMatrix, "XYZ");
+    let rotZDeg = (euler.z / Math.PI) * 180;
+    if (shape === 3 && dominoRotation === 90) {
+      rotZDeg = (rotZDeg + 90) % 360;
+    }
     const rotationDeg: Vec3 = [
       (euler.x / Math.PI) * 180,
       (euler.y / Math.PI) * 180,
-      (euler.z / Math.PI) * 180,
+      rotZDeg,
     ];
 
     const j = (axis + 1) % 3;
@@ -1251,8 +1310,6 @@ export function App() {
     const wallMargin = Math.max(1.5, minWallDim * 0.15);
 
     const isWidthLonger = wallWidth >= wallHeight;
-    const spacingSpan = isWidthLonger ? wallWidth : wallHeight;
-    const crossSpan = isWidthLonger ? wallHeight : wallWidth;
     const spacingVec = isWidthLonger ? xAxis : yAxis;
 
     const effectiveCount = shape === 5
@@ -1282,20 +1339,24 @@ export function App() {
       ? clampSize((wallWidth - 2 * wallMargin) * 0.45, 4, 25)
       : clampSize(((wallWidth - 2 * wallMargin) / effectiveCount) * 0.55, 3, 25);
 
-    let dimSpacing = 0;
-    let dimCross = 0;
-    let centerSpan = 0;
     let pinRadius = 0;
     let dovetailLen = Math.max(4, Math.round(wallHeight));
     let dovetailShift = 0;
     let entryExtension = 0;
-    let autoPitch = 0;
-    let minPitch = 0;
-    let maxPitch = 0;
-    let effPitch = 0;
+
+    // Feature sizes in local plane
+    const isUpright = (shape === 3 && dominoRotation === 90);
+    const effDominoW = (autoJointCustomSize !== undefined && autoJointCustomSize !== null && autoJointCustomSize > 0)
+      ? autoJointCustomSize
+      : 22;
+    const effDominoT = (autoJointCustomThickness !== undefined && autoJointCustomThickness !== null && autoJointCustomThickness > 0)
+      ? autoJointCustomThickness
+      : 8;
+
+    let itemWidth = 0;
+    let itemHeight = 0;
 
     if (shape === 0) {
-      // 0: Dovetail (Sliding Rail)
       const baseW = (autoJointCustomSize !== undefined && autoJointCustomSize !== null && autoJointCustomSize > 0)
         ? autoJointCustomSize
         : autoDovetailW;
@@ -1309,144 +1370,131 @@ export function App() {
       } else {
         entryExtension = (seam.socketTopExtension ?? 0) + (seam.socketBottomExtension ?? 0);
       }
-      dimSpacing = wallHeight;
-      dimCross = baseW;
-
-      // Spacing across wallWidth (along xAxis):
       const flankFlare = 2 * effHeight * Math.tan((effTaper * Math.PI) / 180);
-      const dovetailEnvelopeW = baseW + flankFlare + 2 * clearance;
-      const maxCenterSpan = Math.max(0, wallWidth - 2 * wallMargin - dovetailEnvelopeW);
-      if (effectiveCount > 1) {
-        autoPitch = Math.round((maxCenterSpan / (effectiveCount - 1)) * 10) / 10;
-        minPitch = Math.max(2.0, Math.round((dovetailEnvelopeW + 1.0) * 10) / 10);
-        maxPitch = Math.max(minPitch, Math.round((maxCenterSpan / (effectiveCount - 1)) * 10) / 10);
-        effPitch = (autoJointCustomSpacing !== undefined && autoJointCustomSpacing !== null && autoJointCustomSpacing > 0)
-          ? Math.max(minPitch, Math.min(maxPitch, autoJointCustomSpacing))
-          : autoPitch;
-        centerSpan = effPitch * (effectiveCount - 1);
-        if (maxCenterSpan < minPitch) {
-          warning = `Face width (${Math.round(wallWidth)}mm) is tight for ${effectiveCount} dovetails. Reduce rail count or width.`;
-        }
-      } else {
-        centerSpan = 0;
-        effPitch = 0;
-        minPitch = 0;
-        maxPitch = 0;
-      }
-    } else if (shape === 5) {
-      // 5: Print-in-Place Hinge
-      dimSpacing = wallHeight;
-      dimCross = minWallDim;
-      pinRadius = clampSize(minWallDim * 0.35, 2.5, 8);
-      centerSpan = 0;
+      itemWidth = baseW + flankFlare + 2 * clearance;
+      itemHeight = dovetailLen;
     } else if (shape === 3) {
-      // 3: Tenon & Mortise (Domino Bullnose Tab: Width >> Thickness)
-      const baseT = clampSize(minWallDim * 0.28, 2.0, 10.0);
-      dimCross = baseT;
-      if (effectiveCount === 1) {
-        dimSpacing = clampSize((spacingSpan - 2 * wallMargin) * 0.70, 6.0, 45);
-        centerSpan = 0;
-      } else {
-        dimSpacing = clampSize(((spacingSpan - 2 * wallMargin) / effectiveCount) * 0.60, 5.0, 30);
-        const maxCenterSpan = Math.max(0, spacingSpan - 2 * wallMargin - dimSpacing);
-        autoPitch = Math.round((maxCenterSpan / (effectiveCount - 1)) * 10) / 10;
-        minPitch = Math.max(2.0, Math.round((dimSpacing + 2.0) * 10) / 10);
-        maxPitch = Math.max(minPitch, Math.round((maxCenterSpan / (effectiveCount - 1)) * 10) / 10);
-        effPitch = (autoJointCustomSpacing !== undefined && autoJointCustomSpacing !== null && autoJointCustomSpacing > 0)
-          ? Math.max(minPitch, Math.min(maxPitch, autoJointCustomSpacing))
-          : autoPitch;
-        centerSpan = effPitch * (effectiveCount - 1);
-      }
-    } else if (shape === 6) {
-      // 6: Split-Prong Snap Pin (Collet / Dowel Snap Joint)
+      itemWidth = isUpright ? effDominoT : effDominoW;
+      itemHeight = isUpright ? effDominoW : effDominoT;
+    } else if (shape === 6 || shape === 1 || shape === 2) {
       const maxR = Math.min(
-        ((crossSpan - 2 * wallMargin) / 2) * 0.75,
-        ((spacingSpan - 2 * wallMargin) / (2 * effectiveCount)) * 0.70
-      );
-      pinRadius = clampSize(maxR, 1.8, 6.0);
-      dimSpacing = 2 * pinRadius;
-      dimCross = 2 * pinRadius;
-      if (effectiveCount === 1) {
-        centerSpan = 0;
-      } else {
-        const maxCenterSpan = Math.max(0, spacingSpan - 2 * wallMargin - 2 * pinRadius);
-        autoPitch = Math.round((maxCenterSpan / (effectiveCount - 1)) * 10) / 10;
-        minPitch = Math.max(2.0, Math.round((2 * pinRadius + 1.0) * 10) / 10);
-        maxPitch = Math.max(minPitch, Math.round((maxCenterSpan / (effectiveCount - 1)) * 10) / 10);
-        effPitch = (autoJointCustomSpacing !== undefined && autoJointCustomSpacing !== null && autoJointCustomSpacing > 0)
-          ? Math.max(minPitch, Math.min(maxPitch, autoJointCustomSpacing))
-          : autoPitch;
-        centerSpan = effPitch * (effectiveCount - 1);
-      }
-    } else {
-      // 1: Round Pin / Dowel or 2: Square Pin / Key
-      const maxR = Math.min(
-        ((crossSpan - 2 * wallMargin) / 2) * 0.75,
-        ((spacingSpan - 2 * wallMargin) / (2 * effectiveCount)) * 0.70
+        ((wallHeight - 2 * wallMargin) / 2) * 0.75,
+        ((wallWidth - 2 * wallMargin) / 2) * 0.75
       );
       pinRadius = clampSize(maxR, 1.2, 12);
-      dimSpacing = 2 * pinRadius;
-      dimCross = 2 * pinRadius;
-      if (effectiveCount === 1) {
-        centerSpan = 0;
-      } else {
-        const maxCenterSpan = Math.max(0, spacingSpan - 2 * wallMargin - 2 * pinRadius);
-        autoPitch = Math.round((maxCenterSpan / (effectiveCount - 1)) * 10) / 10;
-        minPitch = Math.max(2.0, Math.round((2 * pinRadius + 1.0) * 10) / 10);
-        maxPitch = Math.max(minPitch, Math.round((maxCenterSpan / (effectiveCount - 1)) * 10) / 10);
-        effPitch = (autoJointCustomSpacing !== undefined && autoJointCustomSpacing !== null && autoJointCustomSpacing > 0)
-          ? Math.max(minPitch, Math.min(maxPitch, autoJointCustomSpacing))
-          : autoPitch;
-        centerSpan = effPitch * (effectiveCount - 1);
-
-        if (maxR < 1.2) {
-          warning = `Seam surface (${Math.round(spacingSpan)}mm) is too small for ${effectiveCount} pins. Reduce pin count.`;
-          isValid = false;
-        }
-      }
+      itemWidth = 2 * pinRadius;
+      itemHeight = 2 * pinRadius;
     }
+
+    // Horizontal Spacing calculation (along xAxis)
+    const maxCenterSpanX = Math.max(0, wallWidth - 2 * wallMargin - itemWidth);
+    const autoPitchX = effectiveCount > 1 ? Math.round((maxCenterSpanX / (effectiveCount - 1)) * 10) / 10 : 0;
+    const minPitchX = Math.max(2.0, Math.round((itemWidth + 2.0) * 10) / 10);
+    const maxPitchX = Math.max(minPitchX, autoPitchX);
+    const effPitchX = (autoJointCustomSpacing !== undefined && autoJointCustomSpacing !== null && autoJointCustomSpacing > 0)
+      ? Math.max(minPitchX, Math.min(maxPitchX, autoJointCustomSpacing))
+      : autoPitchX;
+    const centerSpanX = effectiveCount > 1 ? effPitchX * (effectiveCount - 1) : 0;
+
+    // Vertical Spacing calculation (along yAxis)
+    const maxCenterSpanY = Math.max(0, wallHeight - 2 * wallMargin - itemHeight);
+    const autoPitchY = effectiveCount > 1 ? Math.round((maxCenterSpanY / (effectiveCount - 1)) * 10) / 10 : 0;
+    const minPitchY = Math.max(2.0, Math.round((itemHeight + 2.0) * 10) / 10);
+    const maxPitchY = Math.max(minPitchY, autoPitchY);
+    const effPitchY = (autoJointCustomVerticalSpacing !== undefined && autoJointCustomVerticalSpacing !== null && autoJointCustomVerticalSpacing > 0)
+      ? Math.max(minPitchY, Math.min(maxPitchY, autoJointCustomVerticalSpacing))
+      : autoPitchY;
+    const centerSpanY = effectiveCount > 1 ? effPitchY * (effectiveCount - 1) : 0;
+
+    // Grid 2x2 spacing (when orientation === "grid")
+    const gridPitchX = (autoJointCustomSpacing !== undefined && autoJointCustomSpacing !== null && autoJointCustomSpacing > 0)
+      ? Math.max(minPitchX, Math.min(maxPitchX, autoJointCustomSpacing))
+      : Math.round(maxCenterSpanX * 10) / 10;
+    const gridPitchY = (autoJointCustomVerticalSpacing !== undefined && autoJointCustomVerticalSpacing !== null && autoJointCustomVerticalSpacing > 0)
+      ? Math.max(minPitchY, Math.min(maxPitchY, autoJointCustomVerticalSpacing))
+      : Math.round(maxCenterSpanY * 10) / 10;
+
+    // Vertical Position / Offset (Up/Down shift along yAxis) bounds:
+    let occupiedHeight = itemHeight;
+    if (effectiveCount > 1) {
+      if (orientation === "vertical") occupiedHeight = centerSpanY + itemHeight;
+      else if (orientation === "grid") occupiedHeight = gridPitchY + itemHeight;
+    }
+    const maxVerticalShift = Math.max(0, Math.round(((wallHeight - 2 * wallMargin - occupiedHeight) / 2) * 10) / 10);
+    const effVOffset = Math.max(-maxVerticalShift, Math.min(maxVerticalShift, verticalOffset));
 
     const targetPoints: Vec3[] = [];
     if (shape === 0) {
       if (effectiveCount === 1) {
         targetPoints.push([
-          point[0] + yAxis.x * dovetailShift,
-          point[1] + yAxis.y * dovetailShift,
-          point[2] + yAxis.z * dovetailShift,
+          point[0] + yAxis.x * (dovetailShift + effVOffset),
+          point[1] + yAxis.y * (dovetailShift + effVOffset),
+          point[2] + yAxis.z * (dovetailShift + effVOffset),
         ]);
       } else {
         for (let i = 0; i < effectiveCount; i++) {
           const frac = -0.5 + i / (effectiveCount - 1);
-          const offset = frac * centerSpan;
+          const offset = frac * centerSpanX;
           targetPoints.push([
-            point[0] + yAxis.x * dovetailShift + xAxis.x * offset,
-            point[1] + yAxis.y * dovetailShift + xAxis.y * offset,
-            point[2] + yAxis.z * dovetailShift + xAxis.z * offset,
+            point[0] + yAxis.x * (dovetailShift + effVOffset) + xAxis.x * offset,
+            point[1] + yAxis.y * (dovetailShift + effVOffset) + xAxis.y * offset,
+            point[2] + yAxis.z * (dovetailShift + effVOffset) + xAxis.z * offset,
           ]);
         }
       }
     } else if (shape === 5) {
-      // Position pivot axis right along the corner edge so knuckles embed deeply into walls
       const hingeOffsetDist = wallWidth / 2;
       const hingeOffset = hingeEdge === "edge1"
         ? hingeOffsetDist
         : (hingeEdge === "edge2" ? -hingeOffsetDist : 0);
-
       targetPoints.push([
         point[0] + xAxis.x * hingeOffset,
         point[1] + xAxis.y * hingeOffset,
         point[2] + xAxis.z * hingeOffset,
       ]);
     } else if (effectiveCount === 1) {
-      targetPoints.push(point);
-    } else {
+      targetPoints.push([
+        point[0] + yAxis.x * effVOffset,
+        point[1] + yAxis.y * effVOffset,
+        point[2] + yAxis.z * effVOffset,
+      ]);
+    } else if (orientation === "grid" && effectiveCount >= 4) {
+      // 2x2 Grid arrangement with vertical offset
+      const halfGX = gridPitchX / 2;
+      const halfGY = gridPitchY / 2;
+      const gridOffsets = [
+        [-halfGX, -halfGY + effVOffset],
+        [halfGX, -halfGY + effVOffset],
+        [-halfGX, halfGY + effVOffset],
+        [halfGX, halfGY + effVOffset],
+      ];
+      for (const [gx, gy] of gridOffsets) {
+        targetPoints.push([
+          point[0] + xAxis.x * gx + yAxis.x * gy,
+          point[1] + xAxis.y * gx + yAxis.y * gy,
+          point[2] + xAxis.z * gx + yAxis.z * gy,
+        ]);
+      }
+    } else if (orientation === "vertical") {
+      // Vertical arrangement (along yAxis) with vertical offset
       for (let i = 0; i < effectiveCount; i++) {
         const frac = -0.5 + i / (effectiveCount - 1);
-        const offset = frac * centerSpan;
+        const offset = frac * centerSpanY + effVOffset;
         targetPoints.push([
-          point[0] + spacingVec.x * offset,
-          point[1] + spacingVec.y * offset,
-          point[2] + spacingVec.z * offset,
+          point[0] + yAxis.x * offset,
+          point[1] + yAxis.y * offset,
+          point[2] + yAxis.z * offset,
+        ]);
+      }
+    } else {
+      // Horizontal arrangement (along xAxis) with vertical offset
+      for (let i = 0; i < effectiveCount; i++) {
+        const frac = -0.5 + i / (effectiveCount - 1);
+        const offset = frac * centerSpanX;
+        targetPoints.push([
+          point[0] + spacingVec.x * offset + yAxis.x * effVOffset,
+          point[1] + spacingVec.y * offset + yAxis.y * effVOffset,
+          point[2] + spacingVec.z * offset + yAxis.z * effVOffset,
         ]);
       }
     }
@@ -1455,9 +1503,11 @@ export function App() {
       ? dovetailLen
       : (shape === 5
           ? Math.max(8, Math.round(wallHeight))
-          : (hasValidMaterialDepth
-              ? Math.min(maxSafeDepth, clampSize(minWallDim * 0.45, 1.5, 25))
-              : clampSize(minWallDim * 0.45, 2.5, 15)));
+          : (shape === 3
+              ? 20
+              : (hasValidMaterialDepth
+                  ? Math.min(maxSafeDepth, clampSize(minWallDim * 0.45, 1.5, 25))
+                  : clampSize(minWallDim * 0.45, 2.5, 15))));
 
     const effLength = (autoJointCustomLength !== undefined && autoJointCustomLength !== null && autoJointCustomLength > 0)
       ? autoJointCustomLength
@@ -1475,13 +1525,13 @@ export function App() {
 
     const autoWidth = shape === 0
       ? autoDovetailW
-      : (shape === 3 ? dimSpacing : (isWidthLonger ? dimSpacing : dimCross));
+      : (shape === 3 ? 22 : itemWidth);
     const effWidth = (autoJointCustomSize !== undefined && autoJointCustomSize !== null && autoJointCustomSize > 0 && shape !== 1 && shape !== 5 && shape !== 6)
       ? autoJointCustomSize
       : autoWidth;
 
     const autoThickness = shape === 3
-      ? dimCross
+      ? 8
       : (shape === 6 ? 2 * effRadius : clampSize(wallHeight * 0.28, 2.5, 12));
     const effThickness = (autoJointCustomThickness !== undefined && autoJointCustomThickness !== null && autoJointCustomThickness > 0)
       ? autoJointCustomThickness
@@ -1521,21 +1571,29 @@ export function App() {
       autoWidth,
       autoThickness,
       autoHeight,
-      autoPitch,
+      autoPitch: orientation === "vertical" ? autoPitchY : autoPitchX,
       effLength,
       effRadius,
       effWidth,
       effThickness,
       effHeight,
       effTaper,
-      effPitch,
-      minPitch,
-      maxPitch,
+      effPitch: orientation === "vertical" ? effPitchY : effPitchX,
+      minPitch: orientation === "vertical" ? minPitchY : minPitchX,
+      maxPitch: orientation === "vertical" ? maxPitchY : maxPitchX,
+      effPitchX,
+      minPitchX,
+      maxPitchX,
+      effPitchY,
+      minPitchY,
+      maxPitchY,
+      maxVerticalShift,
+      effVOffset,
       isPunchThrough,
       warning,
       isValid,
     };
-  }, [autoJointCustomLength, autoJointCustomSize, autoJointCustomThickness, autoJointCustomHeight, autoJointCustomTaper, autoJointCustomSpacing, autoJointHingeEdge, autoJointHingeSides]);
+  }, [autoJointCustomLength, autoJointCustomSize, autoJointCustomThickness, autoJointCustomHeight, autoJointCustomTaper, autoJointCustomSpacing, autoJointCustomVerticalSpacing, autoJointVerticalOffset, autoJointHingeEdge, autoJointHingeSides]);
 
   const resetAllJointSettings = useCallback(() => {
     setAutoJointCount(autoJointShape === 0 ? 1 : (autoJointShape === 5 ? 3 : 2));
@@ -1548,6 +1606,10 @@ export function App() {
     setAutoJointCustomHeight(null);
     setAutoJointCustomTaper(null);
     setAutoJointCustomSpacing(null);
+    setAutoJointCustomVerticalSpacing(null);
+    setAutoJointVerticalOffset(0);
+    setAutoJointOrientation("horizontal");
+    setAutoJointDominoRotation(0);
     setAutoJointHingeEdge("edge1");
     setAutoJointHingeSides(64);
   }, [autoJointShape]);
@@ -1563,6 +1625,9 @@ export function App() {
       autoJointDovetailStopped,
       autoJointDovetailStopEnd,
       autoJointHingeEdge,
+      autoJointOrientation,
+      autoJointDominoRotation,
+      autoJointVerticalOffset,
     );
     if (!layout.isValid) return;
 
@@ -1716,7 +1781,7 @@ export function App() {
 
     sceneRef.current?.setJoineryPreview(null);
     setToolMode("select");
-  }, [connectorSeam, autoJointShape, autoJointCount, autoJointClearance, autoJointDovetailStopped, autoJointDovetailStopEnd, autoJointHingeEdge, computeJoineryLayout, addPrimitive, setTransform, setParam, setHole, selectMany, combine, rename]);
+  }, [connectorSeam, autoJointShape, autoJointCount, autoJointClearance, autoJointDovetailStopped, autoJointDovetailStopEnd, autoJointHingeEdge, autoJointOrientation, autoJointDominoRotation, autoJointVerticalOffset, computeJoineryLayout, addPrimitive, setTransform, setParam, setHole, selectMany, combine, rename]);
 
   // Live Ghost Preview in 3D viewport while in "join" toolMode
   useEffect(() => {
@@ -1732,6 +1797,9 @@ export function App() {
       autoJointDovetailStopped,
       autoJointDovetailStopEnd,
       autoJointHingeEdge,
+      autoJointOrientation,
+      autoJointDominoRotation,
+      autoJointVerticalOffset,
     );
     sceneRef.current?.setJoineryPreview({
       plugId: connectorSeam.plugNode.id,
@@ -1746,7 +1814,7 @@ export function App() {
     return () => {
       sceneRef.current?.setJoineryPreview(null);
     };
-  }, [toolMode, connectorSeam, autoJointShape, autoJointCount, autoJointClearance, autoJointDovetailStopped, autoJointDovetailStopEnd, autoJointHingeEdge, computeJoineryLayout]);
+  }, [toolMode, connectorSeam, autoJointShape, autoJointCount, autoJointClearance, autoJointDovetailStopped, autoJointDovetailStopEnd, autoJointHingeEdge, autoJointOrientation, autoJointDominoRotation, autoJointVerticalOffset, computeJoineryLayout]);
 
   // If selection changes away from 2 objects while in "join" toolMode, return to "select"
   useEffect(() => {
@@ -1765,8 +1833,11 @@ export function App() {
       autoJointDovetailStopped,
       autoJointDovetailStopEnd,
       autoJointHingeEdge,
+      autoJointOrientation,
+      autoJointDominoRotation,
+      autoJointVerticalOffset,
     );
-  }, [connectorSeam, autoJointShape, autoJointCount, autoJointClearance, autoJointDovetailStopped, autoJointDovetailStopEnd, autoJointHingeEdge, computeJoineryLayout]);
+  }, [connectorSeam, autoJointShape, autoJointCount, autoJointClearance, autoJointDovetailStopped, autoJointDovetailStopEnd, autoJointHingeEdge, autoJointOrientation, autoJointDominoRotation, autoJointVerticalOffset, computeJoineryLayout]);
 
   // Deleting a skipped node should let its id go, not leak it for the rest
   // of the session — otherwise re-importing the same file under a new node
@@ -1879,18 +1950,35 @@ export function App() {
   useEffect(() => {
     if (meshRecoveryRef.current.shapeKey !== shapeKey) {
       meshRecoveryRef.current = { shapeKey, attempts: 0 };
+      autoSkipRef.current = { shapeKey, count: 0 };
     }
     const specs = flattenSpecs(pruneSkipped(useDoc.getState().nodes, skippedIds));
     if (!specs.length) {
+      // Skipping is the only reason a non-empty design has nothing to build.
+      // Blanking the viewport here and reporting "Ready" is how a scene that
+      // merely failed to build reads as a scene that was lost: the objects are
+      // all still in the document, and the tree still lists them.
+      if (skippedIds.size) {
+        setError(
+          `Every object was set aside after taking too long to build. Nothing has been deleted — ` +
+          `all ${useDoc.getState().nodes.length} objects are still in your design. Reload to try again.`,
+        );
+        return;
+      }
       setParts([]);
-      setInvalid((prev) => (skippedIds.size ? prev : {}));
+      setInvalid({});
       return;
     }
     const id = ++buildId.current;
     const t = setTimeout(() => {
       setSceneBusy(true);
       kernel
-        .buildScene(specs)
+        // Each round hands back everything built so far, so a heavy scene
+        // fills in as it goes instead of showing nothing until all of it is
+        // ready — and if the ceiling is reached, what arrived stays on screen.
+        .buildScene(specs, (round) => {
+          if (id === buildId.current) setParts(round.parts);
+        })
         .then((res) => {
           if (id !== buildId.current) return;
           setParts(res.parts);
@@ -1908,7 +1996,16 @@ export function App() {
             ...Object.fromEntries([...skippedIds].map((sid) => [sid, prev[sid]])),
             ...Object.fromEntries(visibleErrors.map((e) => [e.id, e.message])),
           }));
-          setError(null);
+          // A scene that ran out of rounds has real geometry on screen but is
+          // not all of itself. Saying nothing would let a partial scene pass
+          // for the finished article.
+          setError(
+            res.pending.length
+              ? `Showing ${res.parts.length} of ${res.parts.length + res.pending.length} objects — the rest ` +
+                `were still building when time ran out. Nothing has been deleted. Imported meshes used as ` +
+                `holes are the usual cause; hiding one and reloading will get the rest on screen.`
+              : null,
+          );
 
           if (retryMeshBuild) {
             window.setTimeout(() => {
@@ -1946,9 +2043,17 @@ export function App() {
         .catch((e: unknown) => {
           if (id !== buildId.current) return;
           if (e instanceof KernelTimeoutError) {
-            if (e.nodeId) {
+            if (e.nodeId && autoSkipRef.current.count < MAX_AUTO_SKIPS) {
+              autoSkipRef.current.count += 1;
               setInvalid((prev) => ({ ...prev, [e.nodeId!]: e.message }));
               setSkippedIds((prev) => addSkip(prev, e.nodeId!));
+            } else if (e.nodeId) {
+              const stalled = findNode(useDoc.getState().nodes, e.nodeId);
+              setError(
+                `Still waiting on “${stalled?.name ?? "an object"}” after setting ${MAX_AUTO_SKIPS} slow ` +
+                `objects aside. Nothing has been deleted. Hide or simplify the objects marked in the tree, ` +
+                `then reload — imported meshes used as holes are usually the expensive ones.`,
+              );
             } else {
               setError(e.message);
             }
@@ -3130,6 +3235,70 @@ export function App() {
     return { op, candidate };
   }, [edgeSelection, edgeKind, edgeDistance]);
 
+  const [resizeFrame, setResizeFrame] = useState<FaceResizeFrame | null>(null);
+  const [resizeBounds, setResizeBounds] = useState<FaceBounds | null>(null);
+  const [resizeStatus, setResizeStatus] = useState("");
+  /** Mirrors borderPreviewFailed (Round/Bevel Face Border): true only while
+   *  resizeStatus is reporting a refusal, so the message renders as the same
+   *  red alert pill rather than blending into the ordinary helper text. */
+  const [resizeFailed, setResizeFailed] = useState(false);
+  const [resizeReadyKey, setResizeReadyKey] = useState("");
+  const resizeFaceKey = toolMode === "face" && faceOp === "resize" && faceSelection
+    ? JSON.stringify([faceSelection.id, faceSelection.point, faceSelection.normal]) : "";
+  useEffect(() => {
+    const scene=sceneRef.current;
+    setResizeFrame(null); setResizeBounds(null); setResizeReadyKey(""); setResizeStatus(""); setResizeFailed(false);
+    if (resizeFaceKey && scene) {
+      const frame=scene.beginFaceResize(setResizeBounds);
+      setResizeFrame(frame); setResizeBounds(frame?.bounds ?? null);
+      if(!frame) setResizeStatus("Select a flat face to show resize handles.");
+    }
+    return () => { scene?.clearFaceResizeHandles(); scene?.setEdgePreview(null,null); };
+  }, [resizeFaceKey]);
+  const resizeOp: ResizeFaceOp | null = resizeFrame && resizeBounds && faceSelection ? {
+    kind:"resizeFace", point:faceSelection.point, normal:faceSelection.normal, offset:0,
+    stretch: {
+      scale:[(resizeBounds[1]-resizeBounds[0])/(resizeFrame.bounds[1]-resizeFrame.bounds[0]),
+        (resizeBounds[3]-resizeBounds[2])/(resizeFrame.bounds[3]-resizeFrame.bounds[2])],
+      origin:[resizeFrame.bounds[0],resizeFrame.bounds[2]],
+      translation:[resizeBounds[0]-resizeFrame.bounds[0],resizeBounds[2]-resizeFrame.bounds[2]],
+    },
+  } : null;
+  const resizeValueKey=resizeOp ? JSON.stringify(resizeOp) : "";
+  useEffect(()=>{
+    if(!resizeFaceKey || !resizeOp || !resizeBounds || !resizeFrame) return;
+    sceneRef.current?.setFaceResizeBounds(resizeBounds);
+    setResizeReadyKey("");
+    if(resizeBounds.every((v,i)=>Math.abs(v-resizeFrame.bounds[i])<1e-7)) {
+      sceneRef.current?.setEdgePreview(null,null); setResizeStatus("Drag a handle or enter a size."); setResizeFailed(false); return;
+    }
+    let cancelled=false;
+    setResizeStatus("BUILDING");
+    setResizeFailed(false);
+    const timer=window.setTimeout(async()=>{
+      try {
+        const node=findNode(nodes,faceSelection!.id);
+        if(!node || node.type==="import" || node.type==="build") throw new Error("Face resizing is unavailable for this object.");
+        let base=toSpec(node);
+        if(node.type!=="edit") base={...base,position:[0,0,0],rotation:[0,0,0],scale:[1,1,1]};
+        const candidate:EditSpec=node.type==="edit" ? {...(toSpec(node) as EditSpec),ops:[...node.ops,resizeOp]}
+          : {type:"edit",id:node.id,base,ops:[resizeOp],position:node.position,rotation:node.rotation,scale:node.scale,isHole:node.isHole};
+        const preview=await kernel.previewLocal(candidate);
+        if(cancelled) return;
+        if(!preview) throw new Error("This face can't be resized by this amount. Try a smaller change or another handle.");
+        sceneRef.current?.setEdgePreview(node.id,preview);
+        setResizeReadyKey(resizeValueKey); setResizeStatus("Preview only — Apply to keep changes.");
+      } catch(e) {
+        if(cancelled) return;
+        // Same refusal shown as the real object, not a broken or stale
+        // preview — see Round/Bevel Face Border's identical clear().
+        sceneRef.current?.setEdgePreview(null,null);
+        setResizeFailed(true);
+        setResizeStatus(msg(e));
+      }
+    },250);
+    return ()=>{cancelled=true; window.clearTimeout(timer);};
+  },[resizeFaceKey,resizeValueKey,nodes]);
   const [wallBottom, setWallBottom] = useState<number | null>(null);
   const [wallInset, setWallInset] = useState<number | null>(null);
   const [wallPreview, setWallPreview] = useState(true);
@@ -3180,28 +3349,110 @@ export function App() {
     }, 450);
     return () => { cancelled = true; window.clearTimeout(timer); };
   }, [toolMode, faceOp, faceSelection, faceValue, wallBottom, wallInset, wallPreview, nodes]);
+  // Live preview for Round (fillet) and Bevel (chamfer) Face Border, built the
+  // same way the Wall preview is: the exact op Apply would add, run through
+  // previewLocal once the size has paused, shown in place of the object and
+  // never written to the document or history. It shares the scene's single
+  // preview slot with Wall, so it only ever clears a preview it drew itself.
+  const [borderPreview, setBorderPreview] = useState(true);
+  const [borderPreviewStatus, setBorderPreviewStatus] = useState("");
+  /** The status line is reporting a failure, so it is shown in red. */
+  const [borderPreviewFailed, setBorderPreviewFailed] = useState(false);
+  const borderPreviewShownRef = useRef(false);
+  useEffect(() => {
+    let cancelled = false;
+    const border = faceOp === "fillet" || faceOp === "chamfer" ? faceOp : null;
+    if (toolMode !== "face" || !border || !faceSelection || !borderPreview) {
+      if (borderPreviewShownRef.current) {
+        borderPreviewShownRef.current = false;
+        sceneRef.current?.setEdgePreview(null, null);
+      }
+      setBorderPreviewStatus("");
+      setBorderPreviewFailed(false);
+      return;
+    }
+    setBorderPreviewStatus("BUILDING");
+    setBorderPreviewFailed(false);
+    const timer = window.setTimeout(async () => {
+      const clear = () => {
+        if (!borderPreviewShownRef.current) return;
+        borderPreviewShownRef.current = false;
+        sceneRef.current?.setEdgePreview(null, null);
+      };
+      try {
+        const node = findNode(nodes, faceSelection.id);
+        if (!node || node.type === "import" || node.type === "build") {
+          throw new Error("Preview is unavailable for this object.");
+        }
+        const op: EditOp = {
+          kind: border,
+          point: faceSelection.point,
+          face: { point: faceSelection.point, normal: faceSelection.normal },
+          distance: Math.max(0.1, Math.abs(faceValue)),
+        };
+        let base = toSpec(node);
+        if (node.type !== "edit") {
+          base = { ...base, position: [0, 0, 0] as Vec3, rotation: [0, 0, 0] as Vec3, scale: [1, 1, 1] as Vec3 };
+        }
+        const candidate: EditSpec = node.type === "edit"
+          ? { ...(toSpec(node) as EditSpec), ops: [...node.ops, op] }
+          : { type: "edit", id: node.id, base, ops: [op], position: node.position, rotation: node.rotation, scale: node.scale, isHole: node.isHole };
+        const preview = await kernel.previewLocal(candidate);
+        if (cancelled) return;
+        if (!preview) {
+          // Show the real object rather than a stale shape at a size that
+          // does not work.
+          clear();
+          setBorderPreviewFailed(true);
+          setBorderPreviewStatus(`This face's border can't be ${border === "fillet" ? "rounded" : "bevelled"} at this size. Try a smaller value or another face.`);
+          return;
+        }
+        borderPreviewShownRef.current = true;
+        sceneRef.current?.setEdgePreview(faceSelection.id, preview);
+        setBorderPreviewFailed(false);
+        setBorderPreviewStatus("Preview only — Apply to keep it.");
+      } catch (e) {
+        if (!cancelled) {
+          clear();
+          setBorderPreviewFailed(true);
+          setBorderPreviewStatus(msg(e));
+        }
+      }
+    }, 450);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [toolMode, faceOp, faceSelection, faceValue, borderPreview, nodes]);
+
   // Edge finishing can be expensive, so wait until the value has paused for
   // a moment and coalesce stale requests. The preview never touches history.
   useEffect(() => {
     const request = ++edgePreviewRequestRef.current;
     if (toolMode !== "edge" || !edgeSelection) {
       sceneRef.current?.setEdgePreview(null, null);
+      setEdgePreviewStatus("");
+      setEdgePreviewFailed(false);
       return;
     }
+    setEdgePreviewStatus("BUILDING");
+    setEdgePreviewFailed(false);
     const timer = window.setTimeout(() => {
       const pending = edgeCandidate();
       if (!pending) return;
+      const refused = `${edgeKind === "fillet" ? "These edges can't be filleted" : "These edges can't be chamfered"} at this size. Try a smaller value or fewer edges.`;
       void kernel.previewLocal(pending.candidate).then((preview) => {
         if (request !== edgePreviewRequestRef.current) return;
         sceneRef.current?.setEdgePreview(edgeSelection.id, preview);
+        setEdgePreviewFailed(!preview);
+        setEdgePreviewStatus(preview ? "Preview only — Apply to keep it." : refused);
       }).catch(() => {
         if (request === edgePreviewRequestRef.current) {
           sceneRef.current?.setEdgePreview(null, null);
+          setEdgePreviewFailed(true);
+          setEdgePreviewStatus(refused);
         }
       });
     }, 280);
     return () => window.clearTimeout(timer);
-  }, [toolMode, edgeSelection, edgeCandidate]);
+  }, [toolMode, edgeSelection, edgeCandidate, edgeKind]);
 
   const applyEdgeFinish = useCallback(async () => {
     if (!edgeSelection) return;
@@ -3257,6 +3508,9 @@ export function App() {
       } else if (mod && e.key.toLowerCase() === "s") {
         e.preventDefault();
         exportCurrentProject();
+      } else if (mod && e.key.toLowerCase() === "p") {
+        e.preventDefault();
+        setBlueprintOpen(true);
       } else if (mod && e.altKey && e.key.toLowerCase() === "n") {
         e.preventDefault();
         startNewDesign();
@@ -3355,6 +3609,11 @@ export function App() {
     if (toolMode !== "face") lastFace.current = null;
   }, [toolMode]);
 
+  // A new edit replaces the last refusal rather than showing under it.
+  useEffect(() => {
+    if (editPending) setEditNotice(null);
+  }, [editPending]);
+
   useEffect(() => {
     if (!editPending) return;
     const complaint = invalid[editPending];
@@ -3367,7 +3626,7 @@ export function App() {
     // Stale topology anchors are pruned automatically by the build handler.
     // Do not flash an alarming failure for the new operation while that
     // repair completes; the Inspector retains the warning if pruning fails.
-    if (!complaint.includes("could not be found after rebuilding")) setError(complaint);
+    if (!complaint.includes("could not be found after rebuilding")) setEditNotice(complaint);
     setEditPending(null);
   }, [editPending, invalid]);
 
@@ -3485,7 +3744,15 @@ export function App() {
                   onClick={() => { setFileMenuOpen(false); setExportModalOpen(true); }}
                 >
                   <ExportIcon className="topbar-icon" />
-                  <span className="item-label">Export…</span>
+                  <span className="item-label">Export 3D…</span>
+                </button>
+                <button
+                  role="menuitem"
+                  onClick={() => { setFileMenuOpen(false); setBlueprintOpen(true); }}
+                >
+                  <BlueprintIcon className="topbar-icon" />
+                  <span className="item-label">2D Blueprint & Cut List…</span>
+                  <span className="item-key">Ctrl+P</span>
                 </button>
               </div>
             )}
@@ -3638,6 +3905,16 @@ export function App() {
                       ? "Building…"
                       : "Ready"}
           </span>
+
+          <button
+            className="topbar-btn topbar-blueprint-btn"
+            onClick={() => setBlueprintOpen(true)}
+            title="2D Workshop Blueprint, Orthographic Drawings & Cut List (Ctrl+P)"
+            aria-label="Blueprint"
+          >
+            <BlueprintIcon className="topbar-icon" />
+            <span>Blueprint</span>
+          </button>
 
           <button
             className="topbar-btn topbar-export-btn"
@@ -3838,7 +4115,7 @@ export function App() {
             aria-label={"Drop " + dropDirection.label.toLowerCase()}
             disabled={!selectedIds.length}
           >
-            <DropIcon />
+            <DropIcon direction={dropDirection.label.toLowerCase() as DropDirection} />
           </button>
           <CornerFlyoutMark className="corner-flyout-mark drop-corner-mark" />
           {dropMenuOpen && dropFlyoutPos && createPortal(
@@ -3880,8 +4157,6 @@ export function App() {
           ["wall", "Wall", "Hollow a shape through the selected face"],
           ["resize", "Resize Face", "Resize the selected face"],
           ["offset", "Offset & Extrude", "Offset and extrude the selected face"],
-          ["fillet", "Fillet Face Border", "Round the selected face border"],
-          ["chamfer", "Chamfer Face Border", "Bevel the selected face border"],
         ] as const).map(([operation, label, title]) => (
           <button
             key={operation}
@@ -3893,6 +4168,16 @@ export function App() {
             <FaceModifierIcon kind={operation} />
           </button>
         ))}
+        {/* Round and Bevel are one tool; which finish is chosen in its panel.
+            The button shows, and reopens with, the one used last. */}
+        <button
+          className={toolMode === "face" && (faceOp === "fillet" || faceOp === "chamfer") ? "active" : ""}
+          onClick={() => { setFaceOp(borderKind); setToolMode("face"); }}
+          title="Round or bevel the selected face border"
+          aria-label="Round / Bevel Face Border"
+        >
+          <FaceModifierIcon kind={borderKind} />
+        </button>
         <button
           className={toolMode === "edge" ? "active" : ""}
           onClick={() => { setToolMode("edge"); setEdgeSelection(null); }}
@@ -4035,6 +4320,15 @@ export function App() {
         >
           <ZoomToFitIcon />
         </button>
+        <button
+          className={explodeAmount > 0 ? "active" : ""}
+          onClick={() => setExplodeAmount((v) => (v > 0 ? 0 : 0.5))}
+          title={explodeAmount > 0 ? `Exploded View: ${Math.round(explodeAmount * 100)}% (Click to collapse)` : "3D Exploded Assembly View"}
+          aria-label="Exploded View"
+          aria-pressed={explodeAmount > 0}
+        >
+          <ExplodeIcon />
+        </button>
       </div>
 
       {objectsPanelOpen && (
@@ -4086,6 +4380,7 @@ export function App() {
           alignFixedId={effectiveAlignFixedId}
           onSelectAnchor={handleSelectAnchor}
           wireframe={wireframe}
+          explodeAmount={explodeAmount}
           snapEnabled={snapEnabled}
           gridSnapEnabled={gridSnapEnabled}
           showSelectedCollisionContacts={showSelectedCollisionContacts}
@@ -4112,6 +4407,31 @@ export function App() {
           onPlaceSurface={placePrimitive}
           onDragChange={onDragChange}
         />
+        {explodeAmount > 0 && (
+          <div className="explode-floating-control" role="region" aria-label="Exploded Assembly View">
+            <div className="explode-label">
+              <ExplodeIcon className="tool-icon" />
+              <span>Explode: <strong>{Math.round(explodeAmount * 100)}%</strong></span>
+            </div>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.01}
+              value={explodeAmount}
+              onChange={(e) => setExplodeAmount(Number(e.target.value))}
+              className="explode-slider"
+              aria-label="Explode amount percentage"
+            />
+            <button
+              className="explode-reset-btn"
+              onClick={() => setExplodeAmount(0)}
+              title="Collapse all parts back to assembly positions"
+            >
+              Collapse (0%)
+            </button>
+          </div>
+        )}
         {toolMode === "place" && pendingPrimitive && (
           <div className="edge-bar placement-bar">
             <strong>Place {PRIMITIVES[pendingPrimitive].label}</strong>
@@ -4119,77 +4439,6 @@ export function App() {
             <button onClick={() => { setPendingPrimitive(null); setToolMode("select"); }}>Cancel</button>
           </div>
         )}
-        {toolMode === "edge" && (() => {
-          const assemblyGroup = edgeSelection ? findAssemblyOwner(nodes, edgeSelection.id) : null;
-          return (
-            <div className="edge-bar">
-              <div className="edge-selection-summary">
-                <strong>{edgeSelection ? `${edgeSelection.points.length} edge${edgeSelection.points.length === 1 ? "" : "s"} selected` : "Select edges"}</strong>
-                {edgeSelection && (
-                  <button
-                    className="edge-clear-selection"
-                    onClick={() => {
-                      sceneRef.current?.clearSelectedEdges?.();
-                      setEdgeSelection(null);
-                    }}
-                    aria-label="Clear selected edges"
-                    title="Clear selected edges"
-                  >
-                    <svg viewBox="0 0 16 16" aria-hidden="true">
-                      <path d="M4.5 4.5l7 7m0-7-7 7" />
-                    </svg>
-                  </button>
-                )}
-              </div>
-              <div className="edge-kind-buttons" role="group" aria-label="Edge finish type">
-                <button
-                  className={edgeKind === "fillet" ? "active" : ""}
-                  onClick={() => setEdgeKind("fillet")}
-                  title="Fillet — rounded edge"
-                  aria-label="Fillet"
-                  aria-pressed={edgeKind === "fillet"}
-                >
-                  <FaceModifierIcon kind="fillet" />
-                </button>
-                <button
-                  className={edgeKind === "chamfer" ? "active" : ""}
-                  onClick={() => setEdgeKind("chamfer")}
-                  title="Chamfer — bevelled edge"
-                  aria-label="Chamfer"
-                  aria-pressed={edgeKind === "chamfer"}
-                >
-                  <FaceModifierIcon kind="chamfer" />
-                </button>
-              </div>
-              <label>
-                Size
-                <SignedMeasurementInput
-                  valueMm={edgeDistance}
-                  unit="mm"
-                  decimals={decimalPlaces}
-                  min={0.1}
-                  step={0.5}
-                  onValue={(v) => setEdgeDistance(Math.max(0.1, v))}
-                  onEnter={() => void applyEdgeFinish()}
-                /> mm
-              </label>
-              <button disabled={!edgeSelection} onClick={() => void applyEdgeFinish()}>Apply</button>
-              {assemblyGroup && (
-                <button
-                  type="button"
-                  className="edge-bar-fuse-btn"
-                  onClick={() => {
-                    select(assemblyGroup.id);
-                    combineSelected("union");
-                  }}
-                  title="Fuse this assembly group into a single solid so you can chamfer or fillet intersection edges (Ctrl+Shift+B)"
-                >
-                  Fuse into Solid
-                </button>
-              )}
-            </div>
-          );
-        })()}
         {toolMode === "align" && (
           <div className="edge-bar align-bar">
             <div className="edge-kind-buttons" role="group" aria-label="Align mode">
@@ -4392,18 +4641,21 @@ export function App() {
                     : progressElapsed >= 8
                     ? exporting
                       ? `High-detail export gets ${Math.round(exportWatchdogMs / 1000)}s before the complete fallback.`
-                      : `Complex models can take up to ${Math.round(WATCHDOG_MS / 60_000)} min.`
+                      : `Complex models can take up to ${Math.round(SCENE_TOTAL_MS / 60_000)} min.`
                     : "Preparing geometry…";
                 })()}
               </small>
             </div>
           )}
-          {error && <div className="canvas-error">{error}</div>}
+          {(error || editNotice) && (
+            <div className="canvas-error" role="alert">{error ?? editNotice}</div>
+          )}
           {/* Only while a FILE is opening. During an ordinary edit this read
               as a warning about a file the user was not opening. */}
           {!error && progressLabel && !exporting && busySince && busyNow - busySince > 8000 && (
             <div className="canvas-notice">
-              Large or complex files can take a few minutes. ShapeForge will stop after {Math.round(WATCHDOG_MS / 60_000)} min.
+              Large or complex files can take a few minutes — objects appear as they finish.
+              ShapeForge will stop after {Math.round(SCENE_TOTAL_MS / 60_000)} min and keep whatever is built.
             </div>
           )}
         </div>
@@ -4444,44 +4696,164 @@ export function App() {
                 : faceOp === "wall" ? "Hollow"
                 : faceOp === "resize" ? "Resize Face"
                 : faceOp === "offset" ? "Offset & Extrude"
-                : faceOp === "fillet" ? "Fillet Face Border"
-                : "Chamfer Face Border"}
+                : "Round / Bevel Face Border"}
             </strong>
-            <button className="face-settings-cancel" onClick={() => { sceneRef.current?.setHollowPreview(null, null); sceneRef.current?.releaseFace(); lastFace.current = null; setFaceSelection(null); setToolMode("select"); }}>Cancel</button>
+
             <span className="face-selection-state">{faceSelection ? "Face selected" : "Select a face"}</span>
-            <label>
-              {faceOp === "wall" ? "Thickness"
-                : faceOp === "resize" ? "Inset / outset"
-                : faceOp === "offset" ? "Inset"
-                : faceOp === "fillet" || faceOp === "chamfer" ? "Size"
-                : "Distance"}
+            {(faceOp === "fillet" || faceOp === "chamfer") && (
+              // Laid out like the joinery panel: choice cards, then a value
+              // with its slider, typed field and quick picks.
+              <>
+                <div className="border-panel-section">
+                  <span className="border-panel-heading">Finish</span>
+                  <div className="joint-type-grid" role="group" aria-label="Face border finish">
+                    {([
+                      ["fillet", "Round", "Curved Border"],
+                      ["chamfer", "Bevel", "Angled Border"],
+                    ] as const).map(([kind, label, desc]) => (
+                      <button
+                        key={kind}
+                        type="button"
+                        className={`joint-type-card border-finish-card ${faceOp === kind ? "active" : ""}`}
+                        // Keep the face selected: see the Apply button below.
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => setFaceOp(kind)}
+                        aria-pressed={faceOp === kind}
+                      >
+                        <FaceModifierIcon kind={kind} />
+                        <span className="border-finish-title">{label}</span>
+                        <span className="border-finish-desc">{desc}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="border-panel-section">
+                  <div className="border-panel-row">
+                    <span className="border-panel-heading">{faceOp === "fillet" ? "Radius" : "Bevel Size"}</span>
+                    <span className="border-panel-value">
+                      {formatLength(Math.abs(faceValue), displayUnit, decimalPlaces)} {displayUnit}
+                    </span>
+                  </div>
+                  <div className="pin-slider-row">
+                    <input
+                      type="range"
+                      min={0.1}
+                      max={BORDER_SLIDER_MAX_MM}
+                      step={0.1}
+                      value={Math.min(BORDER_SLIDER_MAX_MM, Math.max(0.1, Math.abs(faceValue)))}
+                      onChange={(e) => setFaceValue(Number(e.target.value))}
+                      aria-label={faceOp === "fillet" ? "Radius" : "Bevel size"}
+                    />
+                    <span className="border-size-field">
+                      <SignedMeasurementInput
+                        valueMm={Math.abs(faceValue)}
+                        unit={displayUnit}
+                        decimals={decimalPlaces}
+                        min={0.1}
+                        step={0.5}
+                        onValue={(value) => setFaceValue(Math.max(0.1, Math.abs(value)))}
+                        onEnter={() => faceApplyButtonRef.current?.click()}
+                      />
+                    </span>
+                  </div>
+                  <div className="pin-quick-chips">
+                    {BORDER_QUICK_SIZES_MM.map((mm) => (
+                      <button
+                        key={mm}
+                        type="button"
+                        className={`pin-chip ${Math.abs(Math.abs(faceValue) - mm) < 1e-6 ? "active" : ""}`}
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={() => setFaceValue(mm)}
+                      >
+                        {formatLength(mm, displayUnit, decimalPlaces)} {displayUnit}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+            {faceOp !== "resize" && faceOp !== "wall" && faceOp !== "fillet" && faceOp !== "chamfer" && <label>
+              {faceOp === "offset" ? "Inset" : "Distance"} <span>({displayUnit})</span>
               <SignedMeasurementInput
                 valueMm={faceValue}
                 unit={displayUnit}
                 decimals={decimalPlaces}
-                min={faceOp === "push" || faceOp === "resize" ? undefined : 0.1}
+                min={faceOp === "push" ? undefined : 0.1}
                 step={0.5}
                 onValue={(value) => {
                   setFaceValue(value);
                 }}
                 onEnter={() => faceApplyButtonRef.current?.click()}
-              /> {displayUnit}
-            </label>
+              />
+            </label>}
+            {faceOp === "resize" && <>
+              <p>Drag a side to resize one direction, or a corner to resize both. The opposite handle stays fixed.</p>
+              {resizeFrame && resizeBounds && <>
+                <div className="face-resize-dimensions">
+                  {(["Width","Height"] as const).map((label,axis)=><label key={label}>{label} ({displayUnit})
+                    <SignedMeasurementInput
+                      valueMm={(resizeBounds[axis*2+1]-resizeBounds[axis*2])*resizeFrame.units[axis]}
+                      unit={displayUnit} decimals={decimalPlaces} min={0.1} step={0.5}
+                      onValue={value=>{
+                        const next:FaceBounds=[...resizeBounds];
+                        const center=(next[axis*2]+next[axis*2+1])/2;
+                        const half=Math.max(0.1,value)/resizeFrame.units[axis]/2;
+                        next[axis*2]=center-half; next[axis*2+1]=center+half;
+                        setResizeBounds(next);
+                      }}
+                      onEnter={()=>faceApplyButtonRef.current?.click()}
+                    />
+                  </label>)}
+                </div>
+                <small>Typed sizes resize around the face centre.</small>
+                <button className="face-resize-reset" onClick={()=>setResizeBounds([...resizeFrame.bounds])}>Reset size</button>
+              </>}
+              <p
+                role={resizeFailed ? "alert" : "status"}
+                aria-live={resizeFailed ? "assertive" : "polite"}
+                className={`border-preview-status${resizeFailed ? " failed" : ""}`}
+              >
+                {resizeStatus==="BUILDING"
+                  ? <span className="status-pill busy hollow-building-status">Building…</span>
+                  : resizeStatus || "Select a flat face to show resize handles."}
+              </p>
+            </>}
             {faceOp === "wall" && <>
-              <label>Bottom thickness
-                <SignedMeasurementInput valueMm={Math.max(faceValue, wallBottom ?? faceValue)} unit={displayUnit} decimals={decimalPlaces} min={faceValue} step={0.5} onValue={setWallBottom} onEnter={() => faceApplyButtonRef.current?.click()} /> {displayUnit}
-              </label>
-              <small>At least the wall thickness. Increase it for a stronger floor.</small>
-              <label>Opening inset
-                <SignedMeasurementInput valueMm={wallInset ?? faceValue} unit={displayUnit} decimals={decimalPlaces} min={0} step={0.5} onValue={setWallInset} onEnter={() => faceApplyButtonRef.current?.click()} /> {displayUnit}
-              </label>
-              <label><input type="checkbox" checked={wallPreview} onChange={e => setWallPreview(e.target.checked)} /> Live preview</label>
+              <div className="hollow-dimensions">
+                <label>Wall <span>({displayUnit})</span>
+                  <SignedMeasurementInput valueMm={faceValue} unit={displayUnit} decimals={decimalPlaces} min={0.1} step={0.5} onValue={setFaceValue} onEnter={() => faceApplyButtonRef.current?.click()} />
+                </label>
+                <label title="Thickness opposite the opening, at least the wall thickness">Bottom <span>({displayUnit})</span>
+                  <SignedMeasurementInput valueMm={Math.max(faceValue, wallBottom ?? faceValue)} unit={displayUnit} decimals={decimalPlaces} min={faceValue} step={0.5} onValue={setWallBottom} onEnter={() => faceApplyButtonRef.current?.click()} />
+                </label>
+                <label title="Distance from the face border to the opening">Inset <span>({displayUnit})</span>
+                  <SignedMeasurementInput valueMm={wallInset ?? faceValue} unit={displayUnit} decimals={decimalPlaces} min={0} step={0.5} onValue={setWallInset} onEnter={() => faceApplyButtonRef.current?.click()} />
+                </label>
+              </div>
+              <small>Bottom is opposite the opening and cannot be thinner than the wall. Inset controls the opening’s rim.</small>              <label><input type="checkbox" checked={wallPreview} onChange={e => setWallPreview(e.target.checked)} /> Live preview</label>
               <label><input type="checkbox" checked={wallTransparency} onChange={e => setWallTransparency(e.target.checked)} /> Transparency</label>
               <p role="status" aria-live="polite">
                 {wallPreviewStatus.startsWith("BUILDING")
                   ? <span className="status-pill busy hollow-building-status" title="Showing the last available preview while recalculating">Building…</span>
                   : !wallPreview ? "Preview off — Apply to create the hollow."
                   : wallPreviewStatus || "Select a flat face to preview the opening."}
+              </p>
+            </>}
+            {(faceOp === "fillet" || faceOp === "chamfer") && <>
+              <label className="border-preview-toggle">
+                <input type="checkbox" checked={borderPreview} onChange={e => setBorderPreview(e.target.checked)} />
+                <span>Live preview</span>
+              </label>
+              <p
+                role={borderPreviewFailed ? "alert" : "status"}
+                aria-live={borderPreviewFailed ? "assertive" : "polite"}
+                className={`border-preview-status${borderPreviewFailed && borderPreview ? " failed" : ""}`}
+              >
+                {borderPreviewStatus === "BUILDING"
+                  ? <span className="status-pill busy hollow-building-status" title="Recalculating the preview">Building…</span>
+                  : !borderPreview ? `Preview off — Apply to ${faceOp === "fillet" ? "round" : "bevel"} the border.`
+                  : borderPreviewStatus || `Select a flat face to preview its ${faceOp === "fillet" ? "rounded" : "bevelled"} border.`}
               </p>
             </>}
             {faceOp === "offset" && (
@@ -4497,8 +4869,18 @@ export function App() {
                 /> {displayUnit}
               </label>
             )}
+            <div className="face-settings-actions">
+            <button
+              className="face-settings-cancel"
+              data-cancel-face-edit
+              // Keep the distance pill focused until releaseFace discards its
+              // preview. Otherwise its blur handler commits before this click.
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => { sceneRef.current?.setHollowPreview(null, null); sceneRef.current?.releaseFace(); lastFace.current = null; setFaceSelection(null); setToolMode("select"); }}
+            >Cancel</button>
             <button
               ref={faceApplyButtonRef}
+              disabled={faceOp === "resize" && (!resizeReadyKey || resizeReadyKey !== resizeValueKey)}
               title={faceOp === "wall"
                 ? "Hollow this object out, leaving a wall of this thickness and opening the selected face"
                 : faceOp === "resize"
@@ -4521,6 +4903,16 @@ export function App() {
                 const target = faceSelection ?? lastFace.current;
                 if (!target) {
                   setError(NEEDS_FACE);
+                  return;
+                }
+                if (faceOp === "resize") {
+                  if(!resizeOp || resizeReadyKey!==resizeValueKey) return;
+                  sceneRef.current?.setEdgePreview(null,null);
+                  sceneRef.current?.clearFaceResizeHandles();
+                  sceneRef.current?.releaseFace();
+                  lastFace.current=null; setFaceSelection(null);
+                  setEditPending(target.id);
+                  finishEdit(target.id,resizeOp);
                   return;
                 }
                 if (faceOp === "push") {
@@ -4687,7 +5079,8 @@ export function App() {
                   });
                   releaseSelection();
                 }
-              }}>{faceOp === "wall" ? "Hollow" : "Apply"}</button>
+              }}>Apply</button>
+            </div>
               {assemblyGroup && (
                 <button
                   type="button"
@@ -4704,7 +5097,141 @@ export function App() {
             </div>
           );
         })()}
-        {toolMode !== "face" && rightPanelTab === "shapes" && (
+        {toolMode === "edge" && (() => {
+          // The edge tool's settings, in the right column like the Round /
+          // Bevel Face Border panel rather than a bar over the viewport.
+          const assemblyGroup = edgeSelection ? findAssemblyOwner(nodes, edgeSelection.id) : null;
+          const count = edgeSelection?.points.length ?? 0;
+          return (
+            <div className="face-settings-panel edge-settings-panel">
+              <strong>Fillet / Chamfer Edges</strong>
+
+              <div className="edge-selection-row">
+                <span className="face-selection-state">
+                  {count ? `${count} edge${count === 1 ? "" : "s"} selected` : "Click edges to add or remove them"}
+                </span>
+                {count > 0 && (
+                  <button
+                    type="button"
+                    className="edge-selection-clear"
+                    onClick={() => {
+                      sceneRef.current?.clearSelectedEdges?.();
+                      setEdgeSelection(null);
+                    }}
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+
+              <div className="border-panel-section">
+                <span className="border-panel-heading">Finish</span>
+                <div className="joint-type-grid" role="group" aria-label="Edge finish type">
+                  {([
+                    ["fillet", "Fillet", "Rounded Edge"],
+                    ["chamfer", "Chamfer", "Angled Edge"],
+                  ] as const).map(([kind, label, desc]) => (
+                    <button
+                      key={kind}
+                      type="button"
+                      className={`joint-type-card border-finish-card ${edgeKind === kind ? "active" : ""}`}
+                      onClick={() => setEdgeKind(kind)}
+                      aria-pressed={edgeKind === kind}
+                    >
+                      <FaceModifierIcon kind={kind} />
+                      <span className="border-finish-title">{label}</span>
+                      <span className="border-finish-desc">{desc}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="border-panel-section">
+                <div className="border-panel-row">
+                  <span className="border-panel-heading">{edgeKind === "fillet" ? "Radius" : "Chamfer Size"}</span>
+                  <span className="border-panel-value">
+                    {formatLength(edgeDistance, displayUnit, decimalPlaces)} {displayUnit}
+                  </span>
+                </div>
+                <div className="pin-slider-row">
+                  <input
+                    type="range"
+                    min={0.1}
+                    max={BORDER_SLIDER_MAX_MM}
+                    step={0.1}
+                    value={Math.min(BORDER_SLIDER_MAX_MM, Math.max(0.1, edgeDistance))}
+                    onChange={(e) => setEdgeDistance(Number(e.target.value))}
+                    aria-label={edgeKind === "fillet" ? "Radius" : "Chamfer size"}
+                  />
+                  <span className="border-size-field">
+                    <SignedMeasurementInput
+                      valueMm={edgeDistance}
+                      unit={displayUnit}
+                      decimals={decimalPlaces}
+                      min={0.1}
+                      step={0.5}
+                      onValue={(v) => setEdgeDistance(Math.max(0.1, Math.abs(v)))}
+                      onEnter={() => void applyEdgeFinish()}
+                    />
+                  </span>
+                </div>
+                <div className="pin-quick-chips">
+                  {BORDER_QUICK_SIZES_MM.map((mm) => (
+                    <button
+                      key={mm}
+                      type="button"
+                      className={`pin-chip ${Math.abs(edgeDistance - mm) < 1e-6 ? "active" : ""}`}
+                      onClick={() => setEdgeDistance(mm)}
+                    >
+                      {formatLength(mm, displayUnit, decimalPlaces)} {displayUnit}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <p
+                role={edgePreviewFailed ? "alert" : "status"}
+                aria-live={edgePreviewFailed ? "assertive" : "polite"}
+                className={`border-preview-status${edgePreviewFailed ? " failed" : ""}`}
+              >
+                {!count
+                  ? "Select edges to preview the finish."
+                  : edgePreviewStatus === "BUILDING"
+                  ? <span className="status-pill busy hollow-building-status" title="Recalculating the preview">Building…</span>
+                  : edgePreviewStatus || "Preview only — Apply to keep it."}
+              </p>
+
+              <div className="face-settings-actions">
+              <button
+                className="face-settings-cancel"
+                onClick={() => {
+                  sceneRef.current?.setEdgePreview(null, null);
+                  sceneRef.current?.clearSelectedEdges?.();
+                  setEdgeSelection(null);
+                  setToolMode("select");
+                }}
+              >
+                Cancel
+              </button>
+              <button disabled={!count} onClick={() => void applyEdgeFinish()}>Apply</button>
+              </div>
+              {assemblyGroup && (
+                <button
+                  type="button"
+                  className="edge-bar-fuse-btn"
+                  onClick={() => {
+                    select(assemblyGroup.id);
+                    combineSelected("union");
+                  }}
+                  title="Fuse this assembly group into a single solid so you can chamfer or fillet intersection edges (Ctrl+Shift+B)"
+                >
+                  Fuse into Solid
+                </button>
+              )}
+            </div>
+          );
+        })()}
+        {toolMode !== "face" && toolMode !== "edge" && rightPanelTab === "shapes" && (
           <section className="tool-section shape-library">
           <div className="panel-heading compact shape-library-header">
             <div><h1>Shape library</h1><p>Drag or click to add</p></div>
@@ -4787,7 +5314,7 @@ export function App() {
             if (file) void importSTLFile(file);
           }}
         />
-        {toolMode !== "face" && rightPanelTab === "properties" && (
+        {toolMode !== "face" && toolMode !== "edge" && rightPanelTab === "properties" && (
           <div className="tools-panel-inspector-wrap">
             <section className="tool-section inspector-section">
           <div className="panel-heading compact">
@@ -4861,6 +5388,7 @@ export function App() {
                 endHistoryBatch();
               }}
               onTransparent={applyTransparent}
+              onHideLines={(hideLines) => setHideLines(selected.id, hideLines)}
               onLowPoly={(lowPoly) => setLowPoly(selected.id, lowPoly)}
               onSvgThickness={(mm) => setSvgThickness(selected.id, mm)}
               onSimplifyMesh={handleSimplifyMesh}
@@ -4967,7 +5495,7 @@ export function App() {
                 {[
                   { shape: 1, label: "Round Pin", desc: "Push-Fit Dowel", icon: <RoundPinIcon /> },
                   { shape: 2, label: "Square Key", desc: "Anti-Rotation", icon: <SquarePinIcon /> },
-                  { shape: 3, label: "Tenon", desc: "Mortise Tab", icon: <TenonIcon /> },
+                  { shape: 3, label: "Domino", desc: "Festool Tenon", icon: <DominoJointIcon /> },
                   { shape: 0, label: "Dovetail", desc: "Alignment Rail", icon: <DovetailRailIcon /> },
                   { shape: 5, label: "Hinge", desc: "Print-in-Place", icon: <HingeJointIcon /> },
                   { shape: 6, label: "Snap Pin", desc: "Split-Prong Dowel", icon: <SnapJointIcon /> },
@@ -4999,7 +5527,7 @@ export function App() {
                     ? "Knuckle Segments"
                     : (autoJointShape === 0
                         ? "Dovetail Rails"
-                        : (autoJointShape === 3 ? "Tenon Quantity" : "Pin Quantity"))}
+                        : (autoJointShape === 3 ? "Domino Quantity" : "Pin Quantity"))}
                 </span>
                 <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                   <span style={{ fontSize: 11, fontWeight: 600, color: "#00a7a5" }}>
@@ -5007,7 +5535,9 @@ export function App() {
                       ? `${autoJointCount} knuckles`
                       : (autoJointShape === 0
                           ? `${autoJointCount} ${autoJointCount === 1 ? "rail" : "rails"}`
-                          : `${autoJointCount} ${autoJointCount === 1 ? "pin" : "pins"}`)}
+                          : (autoJointShape === 3
+                              ? `${autoJointCount} ${autoJointCount === 1 ? "domino" : "dominoes"}`
+                              : `${autoJointCount} ${autoJointCount === 1 ? "pin" : "pins"}`))}
                   </span>
                   {autoJointCount !== (autoJointShape === 0 ? 1 : (autoJointShape === 5 ? 3 : 2)) && (
                     <button
@@ -5039,76 +5569,209 @@ export function App() {
                   onChange={(e) => {
                     const minV = autoJointShape === 5 ? 3 : 1;
                     const maxV = autoJointShape === 5 ? 9 : 8;
-                    const val = Math.max(minV, Math.min(maxV, Number(e.target.value) || minV));
+                    const raw = Number(e.target.value) || minV;
+                    let val = Math.max(minV, Math.min(maxV, raw));
+                    if (autoJointShape === 5 && val % 2 === 0) val = Math.min(maxV, val + 1);
                     setAutoJointCount(val);
                   }}
                 />
               </div>
-              <div className="pin-quick-chips">
-                {autoJointShape === 5
-                  ? [
-                      { c: 3, text: "3 Knuckles" },
-                      { c: 5, text: "5 Knuckles" },
-                      { c: 7, text: "7 Knuckles" },
-                    ].map(({ c, text }) => (
-                      <button
-                        key={c}
-                        type="button"
-                        className={`pin-chip ${autoJointCount === c ? "active" : ""}`}
-                        onClick={() => setAutoJointCount(c)}
-                      >
-                        {text}
-                      </button>
-                    ))
-                  : (autoJointShape === 0
-                      ? [
-                          { c: 1, text: "1 Rail" },
-                          { c: 2, text: "2 Rails" },
-                          { c: 3, text: "3 Rails" },
-                          { c: 4, text: "4 Rails" },
-                        ]
-                      : [
-                          { c: 1, text: "1 Pin" },
-                          { c: 2, text: "2 Pins (Anti-Twist)" },
-                          { c: 3, text: "3 Pins" },
-                          { c: 4, text: "4 Pins" },
-                        ]
-                    ).map(({ c, text }) => (
-                      <button
-                        key={c}
-                        type="button"
-                        className={`pin-chip ${autoJointCount === c ? "active" : ""}`}
-                        onClick={() => setAutoJointCount(c)}
-                      >
-                        {text}
-                      </button>
-                    ))}
-              </div>
             </div>
 
-            {/* Spacing Slider (when quantity > 1, for Dovetails, Pins, and Tenons) */}
+            {/* Domino Mortise Slot Orientation (Flat vs Upright) */}
+            {autoJointShape === 3 && (
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+                  <span className="field-label" style={{ fontSize: 11, fontWeight: 600, color: "#475569" }}>
+                    Domino Slot Orientation
+                  </span>
+                  <span style={{ fontSize: 10, color: "#64748b" }}>
+                    {autoJointDominoRotation === 0 ? "0° Flat" : "90° Upright"}
+                  </span>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                  <button
+                    type="button"
+                    className={`tolerance-card ${autoJointDominoRotation === 0 ? "active" : ""}`}
+                    onClick={() => setAutoJointDominoRotation(0)}
+                    style={{ padding: "8px 6px", textAlign: "center", display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}
+                    title="Flat horizontal mortise slot (0°)"
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <span style={{ fontSize: 15, lineHeight: 1 }}>▬</span>
+                      <span style={{ fontWeight: 600, fontSize: 11 }}>Flat</span>
+                    </div>
+                    <span style={{ fontSize: 9, opacity: 0.8 }}>Horizontal Slot (0°)</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`tolerance-card ${autoJointDominoRotation === 90 ? "active" : ""}`}
+                    onClick={() => setAutoJointDominoRotation(90)}
+                    style={{ padding: "8px 6px", textAlign: "center", display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}
+                    title="Upright vertical mortise slot (90°)"
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <span style={{ fontSize: 15, lineHeight: 1 }}>▮</span>
+                      <span style={{ fontWeight: 600, fontSize: 11 }}>Upright</span>
+                    </div>
+                    <span style={{ fontSize: 9, opacity: 0.8 }}>Vertical Slot (90°)</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Spacing & Arrangement Controls (when quantity > 1, for Dovetails, Pins, and Tenons) */}
             {autoJointCount > 1 && autoJointShape !== 5 && joineryLayout && (
+              <div style={{ marginBottom: 12 }}>
+                {/* Arrangement Direction: Horizontal vs Vertical vs Grid */}
+                <div style={{ marginBottom: 8 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                    <span className="field-label" style={{ fontSize: 11, fontWeight: 600, color: "#475569" }}>
+                      Arrangement Direction
+                    </span>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: autoJointCount >= 4 ? "1fr 1fr 1fr" : "1fr 1fr", gap: 6 }}>
+                    <button
+                      type="button"
+                      className={`tolerance-card ${autoJointOrientation === "horizontal" ? "active" : ""}`}
+                      onClick={() => setAutoJointOrientation("horizontal")}
+                      style={{ padding: "5px 6px", textAlign: "center" }}
+                      title="Distribute horizontally along seam width/length"
+                    >
+                      <span style={{ fontWeight: 600, fontSize: 11 }}>Horizontal ↔</span>
+                    </button>
+                    <button
+                      type="button"
+                      className={`tolerance-card ${autoJointOrientation === "vertical" ? "active" : ""}`}
+                      onClick={() => setAutoJointOrientation("vertical")}
+                      style={{ padding: "5px 6px", textAlign: "center" }}
+                      title="Distribute vertically along seam height/thickness (stacked)"
+                    >
+                      <span style={{ fontWeight: 600, fontSize: 11 }}>Vertical ↕</span>
+                    </button>
+                    {autoJointCount >= 4 && (
+                      <button
+                        type="button"
+                        className={`tolerance-card ${autoJointOrientation === "grid" ? "active" : ""}`}
+                        onClick={() => setAutoJointOrientation("grid")}
+                        style={{ padding: "5px 6px", textAlign: "center" }}
+                        title="2×2 Grid distribution (both horizontal and vertical)"
+                      >
+                        <span style={{ fontWeight: 600, fontSize: 11 }}>2×2 Grid ⊞</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Horizontal Spacing Slider */}
+                {(autoJointOrientation === "horizontal" || autoJointOrientation === "grid") && (
+                  <div style={{ marginBottom: autoJointOrientation === "grid" ? 8 : 0 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                      <span className="field-label" style={{ fontSize: 11, fontWeight: 600, color: "#475569" }}>
+                        Horizontal Spacing
+                      </span>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: "#00a7a5" }}>
+                          {joineryLayout.effPitchX.toFixed(1)} mm
+                        </span>
+                        {autoJointCustomSpacing !== null && (
+                          <button
+                            type="button"
+                            onClick={() => setAutoJointCustomSpacing(null)}
+                            style={{ fontSize: 9, padding: "1px 5px", background: "#f1f5f9", border: "1px solid #cbd5e1", borderRadius: 3, cursor: "pointer", color: "#64748b" }}
+                            title="Reset to evenly distributed"
+                          >
+                            Auto
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    <div className="pin-slider-row">
+                      <input
+                        type="range"
+                        min={Math.max(1, Number(joineryLayout.minPitchX.toFixed(1)))}
+                        max={Math.max(Number(joineryLayout.minPitchX.toFixed(1)) + 1, Number(joineryLayout.maxPitchX.toFixed(1)))}
+                        step={0.5}
+                        value={joineryLayout.effPitchX}
+                        onChange={(e) => setAutoJointCustomSpacing(Number(e.target.value))}
+                      />
+                      <input
+                        type="number"
+                        min={Math.max(1, Number(joineryLayout.minPitchX.toFixed(1)))}
+                        max={Math.max(Number(joineryLayout.minPitchX.toFixed(1)) + 1, Number(joineryLayout.maxPitchX.toFixed(1)) + 10)}
+                        step={0.5}
+                        value={Number(joineryLayout.effPitchX.toFixed(1))}
+                        onChange={(e) => setAutoJointCustomSpacing(Math.max(1, Number(e.target.value) || 1))}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {/* Vertical Spacing Slider */}
+                {(autoJointOrientation === "vertical" || autoJointOrientation === "grid") && (
+                  <div>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                      <span className="field-label" style={{ fontSize: 11, fontWeight: 600, color: "#475569" }}>
+                        Vertical Spacing
+                      </span>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: "#00a7a5" }}>
+                          {joineryLayout.effPitchY.toFixed(1)} mm
+                        </span>
+                        {autoJointCustomVerticalSpacing !== null && (
+                          <button
+                            type="button"
+                            onClick={() => setAutoJointCustomVerticalSpacing(null)}
+                            style={{ fontSize: 9, padding: "1px 5px", background: "#f1f5f9", border: "1px solid #cbd5e1", borderRadius: 3, cursor: "pointer", color: "#64748b" }}
+                            title="Reset to evenly distributed"
+                          >
+                            Auto
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                    <div className="pin-slider-row">
+                      <input
+                        type="range"
+                        min={Math.max(1, Number(joineryLayout.minPitchY.toFixed(1)))}
+                        max={Math.max(Number(joineryLayout.minPitchY.toFixed(1)) + 1, Number(joineryLayout.maxPitchY.toFixed(1)))}
+                        step={0.5}
+                        value={joineryLayout.effPitchY}
+                        onChange={(e) => setAutoJointCustomVerticalSpacing(Number(e.target.value))}
+                      />
+                      <input
+                        type="number"
+                        min={Math.max(1, Number(joineryLayout.minPitchY.toFixed(1)))}
+                        max={Math.max(Number(joineryLayout.minPitchY.toFixed(1)) + 1, Number(joineryLayout.maxPitchY.toFixed(1)) + 10)}
+                        step={0.5}
+                        value={Number(joineryLayout.effPitchY.toFixed(1))}
+                        onChange={(e) => setAutoJointCustomVerticalSpacing(Math.max(1, Number(e.target.value) || 1))}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Vertical Position / Shift (Up ⤒ / Down ⤓) */}
+            {autoJointShape !== 5 && joineryLayout && joineryLayout.maxVerticalShift > 0.2 && (
               <div style={{ marginBottom: 12 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
                   <span className="field-label" style={{ fontSize: 11, fontWeight: 600, color: "#475569" }}>
-                    {autoJointShape === 0
-                      ? "Dovetail Spacing (Center-to-Center)"
-                      : (autoJointShape === 3
-                          ? "Tenon Spacing (Center-to-Center)"
-                          : "Pin Spacing (Center-to-Center)")}
+                    Vertical Position (Up ⤒ / Down ⤓)
                   </span>
                   <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                    <span style={{ fontSize: 11, fontWeight: 600, color: "#00a7a5" }}>
-                      {joineryLayout.effPitch.toFixed(1)} mm
+                    <span style={{ fontSize: 11, fontWeight: 600, color: autoJointVerticalOffset === 0 ? "#64748b" : "#00a7a5" }}>
+                      {autoJointVerticalOffset > 0 ? `+${autoJointVerticalOffset.toFixed(1)} mm (Up)` : (autoJointVerticalOffset < 0 ? `${autoJointVerticalOffset.toFixed(1)} mm (Down)` : "Centered (0 mm)")}
                     </span>
-                    {autoJointCustomSpacing !== null && (
+                    {autoJointVerticalOffset !== 0 && (
                       <button
                         type="button"
-                        onClick={() => setAutoJointCustomSpacing(null)}
+                        onClick={() => setAutoJointVerticalOffset(0)}
                         style={{ fontSize: 9, padding: "1px 5px", background: "#f1f5f9", border: "1px solid #cbd5e1", borderRadius: 3, cursor: "pointer", color: "#64748b" }}
-                        title="Reset to evenly distributed"
+                        title="Reset to center of face"
                       >
-                        Auto (Even)
+                        Center
                       </button>
                     )}
                   </div>
@@ -5116,19 +5779,19 @@ export function App() {
                 <div className="pin-slider-row">
                   <input
                     type="range"
-                    min={Math.max(1, Number(joineryLayout.minPitch.toFixed(1)))}
-                    max={Math.max(Number(joineryLayout.minPitch.toFixed(1)) + 1, Number(joineryLayout.maxPitch.toFixed(1)))}
+                    min={-Number(joineryLayout.maxVerticalShift.toFixed(1))}
+                    max={Number(joineryLayout.maxVerticalShift.toFixed(1))}
                     step={0.5}
-                    value={joineryLayout.effPitch}
-                    onChange={(e) => setAutoJointCustomSpacing(Number(e.target.value))}
+                    value={autoJointVerticalOffset}
+                    onChange={(e) => setAutoJointVerticalOffset(Number(e.target.value))}
                   />
                   <input
                     type="number"
-                    min={Math.max(1, Number(joineryLayout.minPitch.toFixed(1)))}
-                    max={Math.max(Number(joineryLayout.minPitch.toFixed(1)) + 1, Number(joineryLayout.maxPitch.toFixed(1)) + 10)}
+                    min={-Number(joineryLayout.maxVerticalShift.toFixed(1))}
+                    max={Number(joineryLayout.maxVerticalShift.toFixed(1))}
                     step={0.5}
-                    value={Number(joineryLayout.effPitch.toFixed(1))}
-                    onChange={(e) => setAutoJointCustomSpacing(Math.max(1, Number(e.target.value) || 1))}
+                    value={autoJointVerticalOffset}
+                    onChange={(e) => setAutoJointVerticalOffset(Number(e.target.value) || 0)}
                   />
                 </div>
               </div>
@@ -5244,40 +5907,138 @@ export function App() {
 
             {/* Dimensions & Depth Settings */}
             <div style={{ marginBottom: 12, padding: "10px", background: "#f8fafc", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
                 <span style={{ fontSize: 11, fontWeight: 700, color: "#334155", textTransform: "uppercase", letterSpacing: "0.5px" }}>
                   Joint Dimensions & Depth
                 </span>
-                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  {(autoJointCustomLength !== null || autoJointCustomSize !== null || autoJointCustomThickness !== null || autoJointCustomHeight !== null || autoJointCustomTaper !== null || autoJointCustomSpacing !== null) && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAutoJointCustomLength(null);
-                        setAutoJointCustomSize(null);
-                        setAutoJointCustomThickness(null);
-                        setAutoJointCustomHeight(null);
-                        setAutoJointCustomTaper(null);
-                        setAutoJointCustomSpacing(null);
-                      }}
-                      style={{ fontSize: 9, padding: "2px 6px", background: "#f1f5f9", border: "1px solid #cbd5e1", borderRadius: 4, cursor: "pointer", color: "#334155", fontWeight: 600 }}
-                      title="Reset all dimensions to auto-calculated defaults"
-                    >
-                      ↺ Reset Dimensions
-                    </button>
-                  )}
-                  {joineryLayout.materialDepth !== undefined && joineryLayout.materialDepth >= 1.0 && (
-                    <span style={{ fontSize: 10, color: "#64748b" }}>
-                      Wall: <strong>{joineryLayout.materialDepth.toFixed(1)} mm</strong>
-                      {joineryLayout.maxSafeDepth < joineryLayout.materialDepth && (
-                        <span style={{ color: "#00a7a5", marginLeft: 4 }}>
-                          (Safe: ≤ {joineryLayout.maxSafeDepth.toFixed(1)} mm)
-                        </span>
-                      )}
-                    </span>
-                  )}
-                </div>
+                {(autoJointCustomLength !== null || autoJointCustomSize !== null || autoJointCustomThickness !== null || autoJointCustomHeight !== null || autoJointCustomTaper !== null || autoJointCustomSpacing !== null) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAutoJointCustomLength(null);
+                      setAutoJointCustomSize(null);
+                      setAutoJointCustomThickness(null);
+                      setAutoJointCustomHeight(null);
+                      setAutoJointCustomTaper(null);
+                      setAutoJointCustomSpacing(null);
+                    }}
+                    style={{ fontSize: 9, padding: "2px 6px", background: "#f1f5f9", border: "1px solid #cbd5e1", borderRadius: 4, cursor: "pointer", color: "#334155", fontWeight: 600 }}
+                    title="Reset all dimensions to auto-calculated defaults"
+                  >
+                    ↺ Reset Dimensions
+                  </button>
+                )}
               </div>
+              {joineryLayout.materialDepth !== undefined && joineryLayout.materialDepth >= 1.0 && (
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 10, color: "#64748b", marginBottom: 8, padding: "3px 6px", background: "#f1f5f9", borderRadius: 4, border: "1px solid #e2e8f0" }}>
+                  <span>Material Wall:</span>
+                  <span>
+                    <strong>{joineryLayout.materialDepth.toFixed(1)} mm</strong>
+                    {joineryLayout.maxSafeDepth < joineryLayout.materialDepth && (
+                      <span style={{ color: "#00a7a5", marginLeft: 6, fontWeight: 600 }}>
+                        (Safe: ≤ {joineryLayout.maxSafeDepth.toFixed(1)} mm)
+                      </span>
+                    )}
+                  </span>
+                </div>
+              )}
+
+              {/* Festool Domino Presets Dropdown */}
+              {autoJointShape === 3 && (
+                <div style={{ marginBottom: 12 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                    <span className="field-label" style={{ fontSize: 11, fontWeight: 600, color: "#475569" }}>
+                      Domino Standard Size
+                    </span>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: "#00a7a5" }}>
+                      {joineryLayout.effThickness} × {joineryLayout.effWidth} mm
+                    </span>
+                  </div>
+                  <select
+                    className="unit-select"
+                    style={{
+                      width: "100%",
+                      padding: "6px 8px",
+                      fontSize: 12,
+                      fontWeight: 600,
+                      borderRadius: 6,
+                      border: "1px solid #cbd5e1",
+                      background: "#ffffff",
+                      color: "#1e293b",
+                      cursor: "pointer",
+                    }}
+                    value={(() => {
+                      const allDominoSizes = [
+                        { key: "4x20", t: 4, w: 17, l: 10 },
+                        { key: "5x30", t: 5, w: 19, l: 15 },
+                        { key: "6x40", t: 6, w: 20, l: 20 },
+                        { key: "8x40", t: 8, w: 22, l: 20 },
+                        { key: "8x50", t: 8, w: 22, l: 25 },
+                        { key: "10x50", t: 10, w: 24, l: 25 },
+                        { key: "8x80", t: 8, w: 22, l: 40 },
+                        { key: "10x80", t: 10, w: 24, l: 40 },
+                        { key: "8x100", t: 8, w: 22, l: 50 },
+                        { key: "10x100", t: 10, w: 24, l: 50 },
+                        { key: "12x100", t: 12, w: 26, l: 50 },
+                        { key: "14x100", t: 14, w: 28, l: 50 },
+                        { key: "12x140", t: 12, w: 26, l: 70 },
+                        { key: "14x140", t: 14, w: 28, l: 70 },
+                      ];
+                      const matched = allDominoSizes.find(
+                        (d) =>
+                          Math.abs(joineryLayout.effThickness - d.t) < 0.1 &&
+                          Math.abs(joineryLayout.effWidth - d.w) < 0.1 &&
+                          Math.abs(joineryLayout.effLength - d.l) < 0.1
+                      );
+                      return matched ? matched.key : "custom";
+                    })()}
+                    onChange={(e) => {
+                      const sizeMap: Record<string, { t: number; w: number; l: number }> = {
+                        "4x20": { t: 4, w: 17, l: 10 },
+                        "5x30": { t: 5, w: 19, l: 15 },
+                        "6x40": { t: 6, w: 20, l: 20 },
+                        "8x40": { t: 8, w: 22, l: 20 },
+                        "8x50": { t: 8, w: 22, l: 25 },
+                        "10x50": { t: 10, w: 24, l: 25 },
+                        "8x80": { t: 8, w: 22, l: 40 },
+                        "10x80": { t: 10, w: 24, l: 40 },
+                        "8x100": { t: 8, w: 22, l: 50 },
+                        "10x100": { t: 10, w: 24, l: 50 },
+                        "12x100": { t: 12, w: 26, l: 50 },
+                        "14x100": { t: 14, w: 28, l: 50 },
+                        "12x140": { t: 12, w: 26, l: 70 },
+                        "14x140": { t: 14, w: 28, l: 70 },
+                      };
+                      const found = sizeMap[e.target.value];
+                      if (found) {
+                        setAutoJointCustomThickness(found.t);
+                        setAutoJointCustomSize(found.w);
+                        setAutoJointCustomLength(found.l);
+                      }
+                    }}
+                  >
+                    <optgroup label="DOMINO DF 500">
+                      <option value="4x20">D 4 × 20 mm (Plunge: 10mm)</option>
+                      <option value="5x30">D 5 × 30 mm (Plunge: 15mm)</option>
+                      <option value="6x40">D 6 × 40 mm (Plunge: 20mm)</option>
+                      <option value="8x40">D 8 × 40 mm (Plunge: 20mm)</option>
+                      <option value="8x50">D 8 × 50 mm (Plunge: 25mm)</option>
+                      <option value="10x50">D 10 × 50 mm (Plunge: 25mm)</option>
+                    </optgroup>
+                    <optgroup label="DOMINO XL DF 700">
+                      <option value="8x80">D 8 × 80 mm (Plunge: 40mm)</option>
+                      <option value="10x80">D 10 × 80 mm (Plunge: 40mm)</option>
+                      <option value="8x100">D 8 × 100 mm (Plunge: 50mm)</option>
+                      <option value="10x100">D 10 × 100 mm (Plunge: 50mm)</option>
+                      <option value="12x100">D 12 × 100 mm (Plunge: 50mm)</option>
+                      <option value="14x100">D 14 × 100 mm (Plunge: 50mm)</option>
+                      <option value="12x140">D 12 × 140 mm (Plunge: 70mm)</option>
+                      <option value="14x140">D 14 × 140 mm (Plunge: 70mm)</option>
+                    </optgroup>
+                    <option value="custom">Custom Dimensions</option>
+                  </select>
+                </div>
+              )}
 
               {/* 1. Depth / Length Slider & Input (for all shapes except Hinge which uses wallHeight) */}
               {autoJointShape !== 5 && (
@@ -5285,7 +6046,7 @@ export function App() {
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
                       <span className="field-label" style={{ fontSize: 11, color: "#475569" }}>
-                        {autoJointShape === 0 ? "Rail Length" : "Hole / Pin Depth"}
+                        {autoJointShape === 0 ? "Rail Length" : (autoJointShape === 3 ? "Mortise Plunge Depth" : "Hole / Pin Depth")}
                       </span>
                       {autoJointCustomLength !== null && (
                         <button
@@ -5342,7 +6103,7 @@ export function App() {
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
                     <span className="field-label" style={{ fontSize: 11, color: "#475569" }}>
-                      {autoJointShape === 1 || autoJointShape === 6 ? "Pin Diameter" : (autoJointShape === 5 ? "Knuckle Diameter" : (autoJointShape === 0 ? "Dovetail Base Width" : "Joint Width"))}
+                      {autoJointShape === 1 || autoJointShape === 6 ? "Pin Diameter" : (autoJointShape === 5 ? "Knuckle Diameter" : (autoJointShape === 0 ? "Dovetail Base Width" : (autoJointShape === 3 ? "Domino Pocket Width" : "Joint Width")))}
                     </span>
                     {autoJointCustomSize !== null && (
                       <button
@@ -5379,13 +6140,13 @@ export function App() {
                 </div>
               </div>
 
-              {/* 3. Thickness (for Tenon) */}
+              {/* 3. Thickness (for Domino / Tenon) */}
               {autoJointShape === 3 && (
                 <div style={{ marginBottom: 8 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
                       <span className="field-label" style={{ fontSize: 11, color: "#475569" }}>
-                        Tenon Thickness
+                        Domino Thickness
                       </span>
                       {autoJointCustomThickness !== null && (
                         <button
@@ -5842,6 +6603,15 @@ export function App() {
         onClose={() => setExportModalOpen(false)}
       />
 
+      <BlueprintModal
+        open={blueprintOpen}
+        captureGeometry={() => sceneRef.current?.captureBlueprintGeometry() ?? []}
+        projectName={projectName}
+        nodes={nodes}
+        parts={parts}
+        onClose={() => setBlueprintOpen(false)}
+      />
+
       {pendingSvg && (
         <SvgImportModal
           isOpen={true}
@@ -5871,6 +6641,3 @@ function timeAgo(then: number, now: number): string {
   const mins = Math.round(secs / 60);
   return mins < 60 ? `${mins}m ago` : `${Math.round(mins / 60)}h ago`;
 }
-
-
-

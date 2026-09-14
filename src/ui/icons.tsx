@@ -367,19 +367,45 @@ export function WireframeIcon({
  * what makes it read as "lands on something" rather than a plain download or
  * move-down arrow.
  */
-export function DropIcon({ className = "tool-icon" }: { className?: string }) {
+export type DropDirection = "left" | "right" | "up" | "down" | "front" | "back";
+
+/** How far to turn the downward drop glyph (degrees, clockwise on screen) so
+ *  it points the same way as that direction's arrow in the flyout — front and
+ *  back are the flyout's diagonals. */
+const DROP_ICON_TURN: Record<DropDirection, number> = {
+  down: 0,
+  left: 90,
+  up: 180,
+  right: -90,
+  front: -135,
+  back: 45,
+};
+
+export function DropIcon({
+  className = "tool-icon",
+  direction = "down",
+}: {
+  className?: string;
+  direction?: DropDirection;
+}) {
+  const turn = DROP_ICON_TURN[direction];
+  // A diagonal turn swings the glyph's corners past the 24px box, so it is
+  // drawn a little smaller rather than clipped.
+  const fit = turn % 90 === 0 ? "" : " translate(12 12) scale(0.8) translate(-12 -12)";
   return (
     <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      {/* fill-opacity (not opacity) so the box keeps a crisp, fully-visible outline
-          instead of fading the stroke along with the fill. */}
-      <rect x="8" y="3" width="8" height="6" rx="1.2" fill="currentColor" fillOpacity=".22" stroke="currentColor" strokeWidth="1.3" />
-      {/* Trailing dashes = "just fell from here", not ambiguous side marks. */}
-      <path d="M10 .6v1.7M14 .6v1.7" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" opacity=".32" />
-      <g fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M12 10.5v5" />
-        <path d="M8.8 13 12 16.2 15.2 13" />
+      <g transform={`rotate(${turn} 12 12)${fit}`}>
+        {/* fill-opacity (not opacity) so the box keeps a crisp, fully-visible outline
+            instead of fading the stroke along with the fill. */}
+        <rect x="8" y="3" width="8" height="6" rx="1.2" fill="currentColor" fillOpacity=".22" stroke="currentColor" strokeWidth="1.3" />
+        {/* Trailing dashes = "just fell from here", not ambiguous side marks. */}
+        <path d="M10 .6v1.7M14 .6v1.7" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" opacity=".32" />
+        <g fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M12 10.5v5" />
+          <path d="M8.8 13 12 16.2 15.2 13" />
+        </g>
+        <path className="icon-accent" d="M4.5 19.5h15" fill="none" strokeWidth="1.8" strokeLinecap="round" />
       </g>
-      <path className="icon-accent" d="M4.5 19.5h15" fill="none" strokeWidth="1.8" strokeLinecap="round" />
     </svg>
   );
 }
@@ -1395,6 +1421,22 @@ export function PrimitiveShapeIcon({
           <path d="M 21 8.5 L 18 13" fill="none" stroke="#a6e6fc" strokeWidth="0.9" strokeLinecap="round" />
         </svg>
       );
+    case "domino":
+      return (
+        <svg className={className} viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+          {/* Stadium Floating Tenon Body */}
+          {/* Top Rounded End (Semi-cylinder top) */}
+          <path d="M 9 10 C 9 6 23 6 23 10 L 23 22 C 23 26 9 26 9 22 Z" fill="#38a7d5" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
+          {/* Top Cap Arc */}
+          <ellipse cx="16" cy="10" rx="7" ry="3.5" fill="#78d5f8" stroke="#1d7a9f" strokeWidth="1.1" />
+          {/* Glue Grooves / Ribbing Accents */}
+          <path d="M 13 13 V 19" stroke="#1d7a9f" strokeWidth="1" strokeLinecap="round" />
+          <path d="M 16 13 V 19" stroke="#1d7a9f" strokeWidth="1" strokeLinecap="round" />
+          <path d="M 19 13 V 19" stroke="#1d7a9f" strokeWidth="1" strokeLinecap="round" />
+          {/* Bottom Arc Outline */}
+          <path d="M 9 22 C 9 25.5 23 25.5 23 22" fill="none" stroke="#1d7a9f" strokeWidth="1.1" />
+        </svg>
+      );
   }
 }
 
@@ -1499,6 +1541,19 @@ export function TenonIcon({ className = "tool-icon" }: { className?: string }) {
   );
 }
 
+/** Festool Domino / Rounded Tenon Joint Icon */
+export function DominoJointIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <rect x="3" y="6" width="18" height="12" rx="6" fill="currentColor" fillOpacity="0.15" />
+      <line x1="10" y1="9" x2="10" y2="15" strokeWidth="1.2" opacity="0.7" />
+      <line x1="14" y1="9" x2="14" y2="15" strokeWidth="1.2" opacity="0.7" />
+      <circle cx="6" cy="12" r="1.2" fill="currentColor" />
+      <circle cx="18" cy="12" r="1.2" fill="currentColor" />
+    </svg>
+  );
+}
+
 /** Dovetail Rail Icon */
 export function DovetailRailIcon({ className = "tool-icon" }: { className?: string }) {
   return (
@@ -1573,4 +1628,37 @@ export function SnapJointIcon({ className = "tool-icon" }: { className?: string 
     </svg>
   );
 }
+
+/** 2D Technical Blueprint Icon */
+export function BlueprintIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      {/* Blueprint Sheet */}
+      <rect x="3" y="3" width="18" height="18" rx="2" fill="currentColor" fillOpacity="0.1" />
+      {/* Ortho layout grid lines */}
+      <line x1="3" y1="12" x2="21" y2="12" strokeDasharray="2 2" strokeWidth="1" opacity="0.6" />
+      <line x1="12" y1="3" x2="12" y2="21" strokeDasharray="2 2" strokeWidth="1" opacity="0.6" />
+      {/* Dimension marks */}
+      <path d="M6 7h4M6 7l1.5-1.5M6 7l1.5 1.5M10 7l-1.5-1.5M10 7l-1.5 1.5" strokeWidth="1.2" />
+      <rect x="14" y="6" width="4" height="4" fill="currentColor" fillOpacity="0.3" strokeWidth="1" />
+      <rect x="5.5" y="14" width="4" height="4" fill="currentColor" fillOpacity="0.3" strokeWidth="1" />
+    </svg>
+  );
+}
+
+/** 3D Exploded Assembly View Icon */
+export function ExplodeIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      {/* Center box */}
+      <rect x="9" y="9" width="6" height="6" rx="1" fill="currentColor" fillOpacity="0.35" />
+      {/* 4 outward explosion arrows */}
+      <path d="M7 7L3 3M3 3h3.5M3 3v3.5" strokeWidth="1.5" />
+      <path d="M17 7l4-4M21 3h-3.5M21 3v3.5" strokeWidth="1.5" />
+      <path d="M7 17l-4 4M3 21h3.5M3 21v-3.5" strokeWidth="1.5" />
+      <path d="M17 17l4 4M21 21h-3.5M21 21v-3.5" strokeWidth="1.5" />
+    </svg>
+  );
+}
+
 

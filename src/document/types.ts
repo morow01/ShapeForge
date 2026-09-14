@@ -27,7 +27,8 @@ export type PrimitiveKind =
   | "ellipsoid"
   | "spring"
   | "hinge"
-  | "screwHole";
+  | "screwHole"
+  | "domino";
 
 export interface ParamField {
   key: string;
@@ -105,7 +106,7 @@ export const PRIMITIVE_CATEGORIES: PrimitiveCategory[] = [
   {
     id: "hardware",
     label: "Hardware & Fasteners",
-    kinds: ["threadedRod", "threadedNut", "washer", "bearing", "hinge", "screwHole"],
+    kinds: ["threadedRod", "threadedNut", "washer", "bearing", "hinge", "screwHole", "domino"],
   },
 ];
 
@@ -1247,6 +1248,74 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
       { key: "headDepth", label: "Counterbore Depth", min: 0.5, max: 500, step: 0.5, suffix: "mm", noSlider: true, showIf: { key: "headStyle", oneOf: [1] } },
     ],
   },
+  domino: {
+    label: "Festool Domino",
+    defaults: {
+      type: 0,
+      preset: 5,
+      thickness: 8,
+      width: 28,
+      length: 50,
+      depth: 25,
+      slotWidthMode: 0,
+      clearance: 0.1,
+    },
+    fields: [
+      {
+        key: "type",
+        label: "Usage",
+        min: 0,
+        max: 1,
+        step: 1,
+        options: [
+          { value: 0, label: "Mortise Slot (Hole Cutter)" },
+          { value: 1, label: "Loose Tenon (Solid Domino Insert)" },
+        ],
+      },
+      {
+        key: "preset",
+        label: "Standard Domino Size",
+        min: 0,
+        max: 14,
+        step: 1,
+        options: [
+          { value: 0, label: "Custom" },
+          { value: 1, label: "DF 500: D 4 × 20 mm" },
+          { value: 2, label: "DF 500: D 5 × 30 mm" },
+          { value: 3, label: "DF 500: D 6 × 40 mm" },
+          { value: 4, label: "DF 500: D 8 × 40 mm" },
+          { value: 5, label: "DF 500: D 8 × 50 mm" },
+          { value: 6, label: "DF 500: D 10 × 50 mm" },
+          { value: 7, label: "DF 700: D 8 × 80 mm" },
+          { value: 8, label: "DF 700: D 8 × 100 mm" },
+          { value: 9, label: "DF 700: D 10 × 80 mm" },
+          { value: 10, label: "DF 700: D 10 × 100 mm" },
+          { value: 11, label: "DF 700: D 12 × 100 mm" },
+          { value: 12, label: "DF 700: D 12 × 140 mm" },
+          { value: 13, label: "DF 700: D 14 × 100 mm" },
+          { value: 14, label: "DF 700: D 14 × 140 mm" },
+        ],
+      },
+      {
+        key: "slotWidthMode",
+        label: "Mortise Width Setting",
+        min: 0,
+        max: 2,
+        step: 1,
+        options: [
+          { value: 0, label: "Exact Fit (+0 mm)" },
+          { value: 1, label: "Medium Slot (+6 mm)" },
+          { value: 2, label: "Wide Slot (+10 mm)" },
+        ],
+        showIf: { key: "type", oneOf: [0] },
+      },
+      { key: "thickness", label: "Cutter / Tenon Thickness", min: 2, max: 30, step: 0.1, suffix: "mm", noSlider: true },
+      { key: "width", label: "Tenon / Base Width", min: 5, max: 150, step: 0.5, suffix: "mm", noSlider: true },
+      { key: "length", label: "Total Tenon Length", min: 10, max: 250, step: 1, suffix: "mm", noSlider: true, showIf: { key: "type", oneOf: [1] } },
+      { key: "depth", label: "Mortise Plunge Depth", min: 5, max: 120, step: 0.5, suffix: "mm", noSlider: true, showIf: { key: "type", oneOf: [0] } },
+      { key: "clearance", label: "Glue / Fit Clearance", min: 0, max: 2, step: 0.05, suffix: "mm", noSlider: true },
+    ],
+  },
 };
 
 /** Fields visible for the current parameter values. */
@@ -1348,6 +1417,10 @@ interface NodeBase {
   color?: string;
   /** Whether the solid object is rendered with translucency. */
   transparent?: boolean;
+  /** Display only: leave out this object's edge lines in the shaded view, for
+   *  a combined or finely tessellated part whose lines make it look busy.
+   *  Geometry, export and edge selection are unaffected. */
+  hideLines?: boolean;
   /**
    * Faceted low-poly styling, applied as the very last step of this node's
    * own build. Real geometry, so it is what exports and prints — see
@@ -1466,6 +1539,8 @@ export interface ResizeFaceOp {
   normal: Vec3;
   /** Per-edge inset/outset in millimetres, not the total width change. */
   offset: number;
+  /** Face-plane affine resize, used by independent side/corner handles. */
+  stretch?: { scale: [number, number]; origin: [number, number]; translation: [number, number] };
 }
 
 /**

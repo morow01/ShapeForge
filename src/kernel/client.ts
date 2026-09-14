@@ -66,9 +66,38 @@ export class KernelTimeoutError extends Error {
  * something tolerable rather than promising every large file will finish.
  */
 export const WATCHDOG_MS = 45_000;
+/**
+ * How long one build round may run before the worker stops at a node boundary
+ * and hands back what it has. Short enough that a big scene visibly fills in
+ * rather than sitting blank, long enough that the per-round walk over every
+ * spec is not the dominant cost. The watchdog above still backs this up: a
+ * round only overruns if a single node wedges inside OCCT, where there is no
+ * boundary to stop at.
+ */
+export const SCENE_ROUND_MS = 12_000;
+/**
+ * The watchdog for ONE round. A round yields at a node boundary, so it must
+ * be able to outlast the single slowest node or it never reaches one: measured
+ * on a real 79-object scene where 20 top-level objects each carry a ~2MB
+ * imported-mesh hole, one such object alone runs past the 45s general
+ * watchdog, which killed the worker mid-node every time and left the
+ * cooperative budget with no boundary to stop at. Generous here costs nothing
+ * in the normal case — a round that has work left returns after SCENE_ROUND_MS
+ * — and is only reached by a node genuinely wedged inside OCCT.
+ */
+export const SCENE_ROUND_WATCHDOG_MS = 120_000;
+/**
+ * Ceiling on opening one scene, across all its rounds. Measured on a real
+ * 79-object scene carrying 37MB of imported-mesh holes: it needs far longer
+ * than one watchdog, but rounds keep the caches warm so the time is spent
+ * making progress instead of re-parsing the same STLs. Reaching this returns
+ * the objects that did build — never a blank scene.
+ */
+export const SCENE_TOTAL_MS = 240_000;
 /** High-detail STL gets a shorter budget because export has a complete,
- * already-rendered mesh fallback. Scene rebuilding still keeps the generous
- * three-minute ceiling above. */
+ * already-rendered mesh fallback. Scene building has no single ceiling to
+ * compare against: it runs in rounds (see SCENE_ROUND_MS / SCENE_TOTAL_MS),
+ * where the watchdog above bounds one round rather than the whole scene. */
 export const EXPORT_WATCHDOG_MS = 30_000;
 /**
  * 3MF's high-detail path does strictly more work than STL's for the same
@@ -310,9 +339,46 @@ function coalesceLatest<Args extends unknown[], R>(
  * same way on a fresh worker too, and retrying that forever would just
  * hide a real error behind a growing pile of abandoned workers.
  */
-function buildSceneWithFreshWorkerRetry(specs: NodeSpec[]): Promise<SceneBuild> {
-  const attempt = () =>
-    withWatchdog("scene", (raw, onProgress) => raw.buildScene(specs, Comlink.proxy(onProgress)));
+/**
+ * Builds a scene in resumable rounds.
+ *
+ * The watchdog can only stop a wedged worker by terminating it, which throws
+ * away the mesh and import caches with it — so a scene too big for one budget
+ * used to restart from cold every time and never converge, however many
+ * attempts it was given. Each round instead asks the worker to stop at a node
+ * boundary when its budget runs out. The worker stays alive, its caches stay
+ * warm, and the next round pays only for the nodes still outstanding: a 2MB
+ * STL is parsed once for the session rather than once per attempt.
+ *
+ * Rounds stop when the scene is complete, when a round makes no headway (one
+ * node too slow for any budget), or at the overall ceiling. Each of those
+ * returns the parts built so far rather than nothing.
+ */
+async function buildSceneInRounds(
+  specs: NodeSpec[],
+  onRound?: (build: SceneBuild) => void,
+): Promise<SceneBuild> {
+  const startedAt = Date.now();
+  let outstanding = Number.POSITIVE_INFINITY;
+  for (;;) {
+    const round = await withWatchdog(
+      "scene",
+      (raw, onProgress) => raw.buildScene(specs, Comlink.proxy(onProgress), SCENE_ROUND_MS),
+      SCENE_ROUND_WATCHDOG_MS,
+    );
+    if (!round.pending.length) return round;
+    onRound?.(round);
+    if (round.pending.length >= outstanding) return round;
+    if (Date.now() - startedAt > SCENE_TOTAL_MS) return round;
+    outstanding = round.pending.length;
+  }
+}
+
+function buildSceneWithFreshWorkerRetry(
+  specs: NodeSpec[],
+  onRound?: (build: SceneBuild) => void,
+): Promise<SceneBuild> {
+  const attempt = () => buildSceneInRounds(specs, onRound);
   return attempt().then((first) => {
     const retryableCount = (build: SceneBuild) =>
       build.errors.filter((e) => e.message.startsWith(RETRYABLE_MESH_ERROR)).length;

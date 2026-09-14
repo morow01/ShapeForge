@@ -476,6 +476,25 @@ export const SCREW_HOLE_PRESETS: Record<number, {
   10: { holeDia: 11.0, csHeadDia: 20.5, cbHeadDia: 17.5, cbHeadDepth: 10.6, headAngle: 90 },
 };
 
+export const DOMINO_PRESETS: Record<number, { thickness: number; width: number; length: number; depth: number; label: string }> = {
+  // DF 500
+  1: { thickness: 4, width: 17, length: 20, depth: 10, label: "DF 500: D 4 × 20 mm" },
+  2: { thickness: 5, width: 19, length: 30, depth: 15, label: "DF 500: D 5 × 30 mm" },
+  3: { thickness: 6, width: 20, length: 40, depth: 20, label: "DF 500: D 6 × 40 mm" },
+  4: { thickness: 8, width: 22, length: 40, depth: 20, label: "DF 500: D 8 × 40 mm" },
+  5: { thickness: 8, width: 22, length: 50, depth: 25, label: "DF 500: D 8 × 50 mm" },
+  6: { thickness: 10, width: 24, length: 50, depth: 25, label: "DF 500: D 10 × 50 mm" },
+  // DF 700 / XL
+  7: { thickness: 8, width: 22, length: 80, depth: 40, label: "DF 700: D 8 × 80 mm" },
+  8: { thickness: 8, width: 22, length: 100, depth: 50, label: "DF 700: D 8 × 100 mm" },
+  9: { thickness: 10, width: 24, length: 80, depth: 40, label: "DF 700: D 10 × 80 mm" },
+  10: { thickness: 10, width: 24, length: 100, depth: 50, label: "DF 700: D 10 × 100 mm" },
+  11: { thickness: 12, width: 26, length: 100, depth: 50, label: "DF 700: D 12 × 100 mm" },
+  12: { thickness: 12, width: 26, length: 140, depth: 70, label: "DF 700: D 12 × 140 mm" },
+  13: { thickness: 14, width: 28, length: 100, depth: 50, label: "DF 700: D 14 × 100 mm" },
+  14: { thickness: 14, width: 28, length: 140, depth: 70, label: "DF 700: D 14 × 140 mm" },
+};
+
 /** Remembers customized parameters (e.g. corner radius, dimensions) across placements in a session. */
 export const stickyParams: Partial<Record<PrimitiveKind, Record<string, number>>> = {};
 
@@ -576,6 +595,25 @@ function nextParams(o: ObjectNode, key: string, value: number): Record<string, n
 
   if (o.kind === "screwHole" && (key === "pocketDepth" || key === "recess")) {
     return { ...o.params, pocketDepth: value, recess: value };
+  }
+
+  if (o.kind === "domino" && key === "preset") {
+    const p = DOMINO_PRESETS[value];
+    if (p) {
+      return {
+        ...o.params,
+        preset: value,
+        thickness: p.thickness,
+        width: p.width,
+        length: p.length,
+        depth: p.depth,
+      };
+    }
+    return { ...o.params, preset: value };
+  }
+
+  if (o.kind === "domino" && (key === "thickness" || key === "width" || key === "length" || key === "depth")) {
+    return { ...o.params, [key]: value, preset: 0 };
   }
 
   if (o.kind !== "triangle") return { ...o.params, [key]: value };
@@ -735,6 +773,7 @@ interface DocState {
   setHole: (id: string, isHole: boolean) => void;
   setColor: (id: string, color: string) => void;
   setTransparent: (id: string, transparent: boolean) => void;
+  setHideLines: (id: string, hideLines: boolean) => void;
   /** Faceted low-poly styling; undefined clears it back to full detail. */
   setLowPoly: (id: string, lowPoly: LowPoly | undefined) => void;
   setGroupOp: (id: string, op: BooleanOp) => void;
@@ -959,7 +998,7 @@ export const useDoc = create<DocState>()(
             position: position ?? [s.nodes.length * 6, 0, 0],
             rotation: rotation ?? [0, 0, 0],
             scale: [1, 1, 1],
-            isHole: kind === "screwHole",
+            isHole: kind === "screwHole" || (kind === "domino" && (getEffectiveDefaults(kind).type ?? 0) === 0),
             ...(randomColor ? { color: randomColor } : {}),
             ...(kind === "text" ? { text: "TEXT", fontName: "Default" } : {}),
           };
@@ -1328,6 +1367,13 @@ export const useDoc = create<DocState>()(
             }
             return { ...n, transparent };
           }),
+        }));
+        afterBatchedMutation();
+      },
+
+      setHideLines: (id, hideLines) => {
+        set((s) => ({
+          nodes: updateNode(s.nodes, id, (n) => ({ ...n, hideLines: hideLines || undefined })),
         }));
         afterBatchedMutation();
       },

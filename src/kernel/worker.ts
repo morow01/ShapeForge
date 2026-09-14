@@ -1196,11 +1196,16 @@ const api = {
    * TinkerCAD does. Placement is applied on the main thread, so moving a node
    * costs nothing here.
    */
-  async buildScene(specs: NodeSpec[], onProgress?: (id: string) => void): Promise<SceneBuild> {
+  async buildScene(specs: NodeSpec[], onProgress?: (id: string) => void, budgetMs?: number): Promise<SceneBuild> {
     await init();
     const t0 = performance.now();
     const { errors, onError } = collector();
-    const seen = new Set<string>();
+    // Every requested node is a live root from the outset. Adding ids only as
+    // the loop reaches them would let a round that stops early treat the nodes
+    // it never got to as dormant and evict their meshes — throwing away
+    // exactly the work the next round is counting on.
+    const seen = new Set(specs.map((s) => s.id));
+    const pending: string[] = [];
 
     const parts: ScenePart[] = [];
     /** Per-node wall time, reported (below) whenever a build runs long. A
@@ -1210,8 +1215,15 @@ const api = {
      *  guessing. */
     const spent = new Map<string, number>();
     for (const spec of specs) {
+      // Stop at a node boundary once the round's budget is gone, but only
+      // after something has been built: a first node slower than the whole
+      // budget must still be attempted, or a scene containing one would make
+      // no progress however many rounds it is given.
+      if (budgetMs !== undefined && parts.length > 0 && performance.now() - t0 > budgetMs) {
+        pending.push(spec.id);
+        continue;
+      }
       const specStartedAt = performance.now();
-      seen.add(spec.id);
       const key = localKey(spec);
       const cached = meshCache.get(spec.id);
 
@@ -1566,7 +1578,7 @@ const api = {
       resultSolidCache = null;
     }
 
-    return { parts, errors, buildMs: performance.now() - t0 };
+    return { parts, errors, buildMs: performance.now() - t0, pending };
   },
 
   /** Applies every boolean in the tree and meshes the single resulting solid.
@@ -2081,9 +2093,12 @@ const api = {
         }
         solid = pushPullPreviewCache ? applyPushPullPreview(pushPullPreviewCache.solid, finalOp as PushPullOp) : null;
       } else {
-        let previewError = false;
-        solid = await makeLocal(spec, () => { previewError = true; });
-        if (previewError) return null;
+        let previewError = "";
+        solid = await makeLocal(spec, (_id, message) => { previewError = message; });
+        if (previewError) {
+          if (spec.type === "edit" && spec.ops.at(-1)?.kind === "shell") throw new Error(previewError);
+          return null;
+        }
       }
       if (!solid) return null;
       // Faces ride along too — not just for completeness: without this, the
@@ -2101,11 +2116,12 @@ const api = {
         mesh = withTorusNormals(mesh, baseSpec.params);
       }
       return { mesh, faces: faceInfoOf(mesh) };
-    } catch {
+    } catch (error) {
       // A mid-drag distance can transiently describe something OCCT can't
       // build (e.g. pushing clean through the far side) — just skip this
       // frame's preview rather than surfacing an error for a value nobody
       // has committed to yet.
+      if (spec.type === "edit" && spec.ops.at(-1)?.kind === "shell") throw error;
       return null;
     }
   },

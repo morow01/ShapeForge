@@ -29,6 +29,9 @@ const OPS: BooleanOp[] = ["assembly", "union", "subtract", "intersect"];
 const isVec3 = (v: unknown): v is Vec3 =>
   Array.isArray(v) && v.length === 3 && v.every((n) => typeof n === "number" && Number.isFinite(n));
 
+const isPair = (v: unknown): v is [number, number] =>
+  Array.isArray(v) && v.length === 2 && v.every((n) => typeof n === "number" && Number.isFinite(n));
+
 /**
  * Saved JSON is untrusted — it may be from an older build, hand-edited, or
  * truncated. Anything that does not match is dropped rather than crashing the
@@ -62,6 +65,7 @@ export function parseNode(raw: unknown): SceneNode | null {
     isHole: n.isHole === true,
     color: typeof n.color === "string" && /^#[0-9a-fA-F]{6}$/.test(n.color) ? n.color : undefined,
     transparent: typeof n.transparent === "boolean" ? n.transparent : undefined,
+    hideLines: n.hideLines === true ? true : undefined,
     lowPoly: parseLowPoly(n.lowPoly),
     hidden: n.hidden === true,
   };
@@ -181,7 +185,15 @@ function parseOp(raw: unknown): EditOp | null {
   if (o.kind === "resizeFace") {
     if (!isVec3(o.point) || !isVec3(o.normal)) return null;
     if (typeof o.offset !== "number" || !Number.isFinite(o.offset)) return null;
-    return { kind: "resizeFace", point: o.point, normal: o.normal, offset: o.offset };
+    // The independent-handle drag carries its whole result in `stretch`, not
+    // `offset` (which stays 0 for it) — dropping this field here silently
+    // turned every handle-based resize back into a no-op the moment the page
+    // reloaded, since offset:0 does nothing on its own.
+    const s = o.stretch as Record<string, unknown> | undefined;
+    const stretch = s && isPair(s.scale) && isPair(s.origin) && isPair(s.translation)
+      ? { scale: s.scale, origin: s.origin, translation: s.translation }
+      : undefined;
+    return { kind: "resizeFace", point: o.point, normal: o.normal, offset: o.offset, ...(stretch ? { stretch } : {}) };
   }
   if (o.kind === "offsetExtrude") {
     if (!isVec3(o.point) || !isVec3(o.normal)) return null;

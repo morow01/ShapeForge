@@ -1,4 +1,6 @@
 import * as THREE from "three";
+import type { BlueprintGeometry } from "../document/blueprint";
+import { FaceResizeHandles, type FaceBounds, type FaceResizeFrame } from "./FaceResizeHandles";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
 import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
@@ -9,7 +11,7 @@ import type { ReplicadMesh, ThreeGeometry } from "replicad-threejs-helper";
 import type { CellPart, FaceInfo, KernelMesh, PreviewBuild, ScenePart } from "../kernel/types";
 import type { CameraMode, GroupNode, PrimitiveKind, SceneNode, Vec3 } from "../document/types";
 import { DEFAULT_OBJECT_COLOR, isGroup } from "../document/types";
-import { findNode, resolveNodeColor, resolveNodeTransparent } from "../document/tree";
+import { findNode, resolveNodeColor, resolveNodeHideLines, resolveNodeTransparent } from "../document/tree";
 import { loadCameraState, saveCameraState } from "../document/persist";
 import { getEffectiveDefaults } from "../document/store";
 import { snapBounds } from "../snapping/snap";
@@ -223,6 +225,34 @@ interface ResizeDrag {
   handleIndex: number;
 }
 
+/**
+ * The face in `faces` lying in the same plane as `target` (same facing, its
+ * point on that plane), nearest to target's point; -1 if there is none.
+ * Rounding or bevelling a face's border shrinks the face but leaves its plane.
+ */
+function matchingFaceIndex(faces: FaceInfo[] | undefined, target: FaceInfo): number {
+  if (!faces) return -1;
+  const [nx, ny, nz] = target.normal;
+  const nl = Math.hypot(nx, ny, nz) || 1;
+  let best = -1;
+  let bestDistance = Infinity;
+  faces.forEach((face, index) => {
+    const [fx, fy, fz] = face.normal;
+    const facing = (fx * nx + fy * ny + fz * nz) / ((Math.hypot(fx, fy, fz) || 1) * nl);
+    if (facing < 0.9999) return;
+    const dx = face.point[0] - target.point[0];
+    const dy = face.point[1] - target.point[1];
+    const dz = face.point[2] - target.point[2];
+    if (Math.abs((dx * nx + dy * ny + dz * nz) / nl) > 1e-3) return;
+    const distance = Math.hypot(dx, dy, dz);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = index;
+    }
+  });
+  return best;
+}
+
 interface PartView {
   group: THREE.Group;
   mesh: THREE.Mesh;
@@ -332,6 +362,10 @@ const MATERIALS = {
   // Using vibrant amber ensures high visibility across all solid colors
   // and prevents visual confusion with the default blue object color.
   faceHighlight: new THREE.MeshBasicMaterial({ color: 0xff9f1a, depthTest: true }),
+  /** The face under the pointer in the face tools: a paler amber than the
+   *  selected face, and material index 2 rather than 1, so hovering never
+   *  looks like — or paints over — the face that was actually clicked. */
+  faceHover: new THREE.MeshBasicMaterial({ color: 0xffd79a, depthTest: true }),
   /** Shape Builder regions. Kept is ordinary solid; removed stays visible as
    *  a ghost so it can be clicked back rather than vanishing irretrievably;
    *  hovered is the same amber the face tool uses, so "the thing under your
@@ -825,6 +859,95 @@ export class Scene {
   }
 
   private host: HTMLElement;
+  captureBlueprintGeometry(): BlueprintGeometry[] {
+    const result:BlueprintGeometry[]=[];
+    for(const [id,view] of this.parts) {
+      if(!view.group.visible) continue;
+      view.group.updateWorldMatrix(true,true);
+      const geometry=view.mesh.geometry as THREE.BufferGeometry;
+      const position=geometry.getAttribute("position");
+      if(!position) continue;
+      geometry.computeBoundingBox();
+      const matrix=view.mesh.matrixWorld;
+      const localSize=geometry.boundingBox!.getSize(new THREE.Vector3());
+      localSize.multiply(new THREE.Vector3(
+        new THREE.Vector3().setFromMatrixColumn(matrix,0).length(),
+        new THREE.Vector3().setFromMatrixColumn(matrix,1).length(),
+        new THREE.Vector3().setFromMatrixColumn(matrix,2).length()));
+      const vertices:Vec3[]=[];
+      for(let i=0;i<position.count;i++) vertices.push(new THREE.Vector3().fromBufferAttribute(position,i).applyMatrix4(matrix).toArray() as Vec3);
+      const edgeGeometry=new THREE.EdgesGeometry(geometry,1);
+      const edgePositions=edgeGeometry.getAttribute("position");
+      const edges:[Vec3,Vec3][]=[];
+      for(let i=0;i<edgePositions.count;i+=2) edges.push([
+        new THREE.Vector3().fromBufferAttribute(edgePositions,i).applyMatrix4(matrix).toArray() as Vec3,
+        new THREE.Vector3().fromBufferAttribute(edgePositions,i+1).applyMatrix4(matrix).toArray() as Vec3]);
+      edgeGeometry.dispose();
+      result.push({id,vertices,edges,localSize:localSize.toArray() as Vec3});
+    }
+    return result;
+  }
+  private faceResizeHandles: FaceResizeHandles | null = null;
+  /** Set while a resize handle is actively being dragged, so the object
+   *  being reshaped goes translucent — its own crease-line edges still draw
+   *  on top — and the new outline stays visible from every side instead of
+   *  being hidden behind the solid it is replacing. Mirrors hollowTransparentId. */
+  private faceResizeDragPartId: string | null = null;
+
+  clearFaceResizeHandles() {
+    this.faceResizeHandles?.dispose();
+    this.faceResizeHandles = null;
+    if (this.faceResizeDragPartId) {
+      this.faceResizeDragPartId = null;
+      this.applyMaterials();
+    }
+  }
+
+  setFaceResizeBounds(bounds: FaceBounds) { this.faceResizeHandles?.setBounds(bounds); }
+
+  beginFaceResize(onChange: (bounds: FaceBounds) => void): FaceResizeFrame | null {
+    this.clearFaceResizeHandles();
+    const selected=this.selectedFace;
+    const view=selected ? this.parts.get(selected.partId) : undefined;
+    if(!selected || !view) return null;
+    const saved=this.edgePreview?.id === selected.partId ? this.edgePreview : null;
+    const face=(saved?.originalFaces ?? view.faces)?.[selected.groupIndex];
+    if(!face?.planar) return null;
+    const geometry=saved?.originalGeom[0].faces ?? view.mesh.geometry as THREE.BufferGeometry;
+    const pivot=saved?.originalPivot ?? view.pivot;
+    const group=geometry.groups[selected.groupIndex];
+    const positions=geometry.getAttribute("position"), indices=geometry.getIndex();
+    if(!group || !positions) return null;
+    const n=new THREE.Vector3(...face.normal).normalize();
+    const x=new THREE.Vector3().crossVectors(Math.abs(n.z)<0.9?new THREE.Vector3(0,0,1):new THREE.Vector3(1,0,0),n).normalize();
+    const y=new THREE.Vector3().crossVectors(n,x);
+    const origin=new THREE.Vector3(...face.point);
+    const bounds:FaceBounds=[Infinity,-Infinity,Infinity,-Infinity];
+    for(let i=group.start;i<group.start+group.count;i++) {
+      const p=new THREE.Vector3().fromBufferAttribute(positions,indices?indices.getX(i):i).add(pivot).sub(origin);
+      const u=p.dot(x),v=p.dot(y);
+      bounds[0]=Math.min(bounds[0],u); bounds[1]=Math.max(bounds[1],u);
+      bounds[2]=Math.min(bounds[2],v); bounds[3]=Math.max(bounds[3],v);
+    }
+    if(!bounds.every(Number.isFinite) || bounds[1]-bounds[0]<1e-6 || bounds[3]-bounds[2]<1e-6) return null;
+    view.group.updateWorldMatrix(true,false);
+    const local=new THREE.Matrix4().makeBasis(x,y,n).setPosition(origin.sub(pivot));
+    const matrix=view.group.matrixWorld.clone().multiply(local);
+    const units:[number,number]=[new THREE.Vector3().setFromMatrixColumn(matrix,0).length(),new THREE.Vector3().setFromMatrixColumn(matrix,1).length()];
+    this.faceResizeHandles=new FaceResizeHandles(this.host,this.scene,()=>this.camera,matrix,bounds,onChange,active=>{
+      this.controls.enabled=!active;
+      // A handle drag is intercepted before it ever reaches this.onPointerDown
+      // (see FaceResizeHandles' own doc comment), which is normally what
+      // clears a stale hover highlight at the start of every other drag.
+      // Without this, whatever face happened to be hover-lit right as the
+      // handle was grabbed stayed lit — motionless — for the entire drag.
+      if (active) this.clearFaceHover();
+      this.faceResizeDragPartId = active ? selected.partId : null;
+      this.applyMaterials();
+      this.onDragChange?.(active);
+    });
+    return {bounds,units};
+  }
   private renderer: THREE.WebGLRenderer;
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera | THREE.OrthographicCamera;
@@ -940,6 +1063,9 @@ export class Scene {
   /** A click (without a drag) on a resize handle pins its relevant dimension
    *  input open for direct Tinkercad-style numeric entry. */
   private dimensionPinnedHandleIndex = -1;
+  /** Whether the edge tool was active at the last tool change, so leaving it
+   *  re-applies any object's hidden lines. */
+  private lastEdgeToolMode = false;
   /** Three dimension shafts plus four arrowhead strokes per axis. */
   private dimensionEdges = new THREE.LineSegments(
     new THREE.BufferGeometry()
@@ -1021,6 +1147,8 @@ export class Scene {
   private showResult = false;
   /** Wireframe display mode: off, clean edges, full tessellated mesh, or xray. */
   private wireframe: WireframeMode = "off";
+  /** Exploded assembly view displacement factor (0.0 to 1.0). */
+  private explodeAmount = 0;
   /** Smart Guides. Off means a drag goes exactly where the pointer goes. */
   private snapEnabled = true;
   /** Independent 1 mm workplane grid snapping. */
@@ -1259,9 +1387,12 @@ export class Scene {
       this.onDragChange?.(true);
       this.pushPullLabelEl.select();
     });
-    this.pushPullLabelEl.addEventListener("blur", () => this.commitOrAbandonPushPull(true));
+    // Moving to the settings panel must never silently apply a preview.
+    // The panel retains the distance and Apply can explicitly use it.
+    this.pushPullLabelEl.addEventListener("blur", () => this.commitOrAbandonPushPull(false));
     this.pushPullLabelEl.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
+        this.commitOrAbandonPushPull(true);
         this.pushPullLabelEl.blur();
       } else if (event.key === "Escape") {
         // Explicit abandon (reverts any live preview) before blur — blur's
@@ -1942,6 +2073,7 @@ export class Scene {
     const m = new THREE.Mesh(geom[0].faces, [
       isHole ? (isSelected ? MATERIALS.holeSelected : MATERIALS.hole) : this.getSolidMaterial(color, isSelected, transparent),
       MATERIALS.faceHighlight,
+      MATERIALS.faceHover,
     ]);
     const wire = new THREE.LineSegments(
       geom[0].lines,
@@ -2098,6 +2230,7 @@ export class Scene {
       } else {
         this.disposeGeom(saved.originalGeom);
       }
+      if (!id || !preview) this.restoreSelectedFaceHighlight();
     }
     if (!id || !preview) return;
     const view = this.parts.get(id);
@@ -2118,6 +2251,7 @@ export class Scene {
     view.faces = preview.faces;
     this.applyPlacements();
     this.applyMaterials();
+    this.restoreSelectedFaceHighlight();
   }
 
   setJoineryPreview(preview: JoineryPreviewData | null) {
@@ -2206,6 +2340,11 @@ export class Scene {
     this.pushPullLabelEl.title = `Push/pull distance in ${unit}`;
     this.pushPullLabelEl.setAttribute("aria-label", `Push/pull distance in ${unit}`);
     this.updateResizeOverlay();
+  }
+
+  setExplodeAmount(amount: number) {
+    this.explodeAmount = Math.max(0, Math.min(1, amount));
+    this.applyPlacements();
   }
 
   private isOwnerOrAncestorSelected(partId: string): boolean {
@@ -2316,6 +2455,17 @@ export class Scene {
   private applyPlacements() {
     const activeAssemblyIds = new Set<string>();
 
+    // Compute overall scene centroid for free-standing parts explosion
+    const sceneCentroid = new THREE.Vector3();
+    let scenePartCount = 0;
+    for (const node of this.lastNodes) {
+      sceneCentroid.add(new THREE.Vector3(...node.position));
+      scenePartCount++;
+    }
+    if (scenePartCount > 0) {
+      sceneCentroid.divideScalar(scenePartCount);
+    }
+
     for (const node of this.lastNodes) {
       if (isGroup(node) && node.op === "assembly") {
         activeAssemblyIds.add(node.id);
@@ -2340,6 +2490,16 @@ export class Scene {
           }
         }
 
+        // Compute assembly local centroid for child explosion
+        const childCentroid = new THREE.Vector3();
+        if (node.children.length > 0) {
+          for (const child of node.children) {
+            childCentroid.add(new THREE.Vector3(...child.position));
+          }
+          childCentroid.divideScalar(node.children.length);
+        }
+
+        let childIdx = 0;
         for (const child of node.children) {
           const childView = this.parts.get(child.id);
           if (!childView) continue;
@@ -2354,7 +2514,23 @@ export class Scene {
             child.position[1] + rotatedPivot.y,
             child.position[2] + rotatedPivot.z,
           );
+
+          // Apply assembly explode displacement outward from childCentroid
+          if (this.explodeAmount > 0 && node.children.length > 1) {
+            const childPos = new THREE.Vector3(...child.position);
+            const disp = childPos.clone().sub(childCentroid);
+            if (disp.lengthSq() < 1e-4) {
+              const sign = childIdx % 2 === 0 ? 1 : -1;
+              disp.set(0, 0, sign * 25 * (Math.floor(childIdx / 2) + 1));
+            }
+            const dist = disp.length();
+            const dir = disp.normalize();
+            const explodeOffset = dir.multiplyScalar(Math.max(35, dist * 1.6) * this.explodeAmount);
+            childView.group.position.add(explodeOffset);
+          }
+
           childView.isHole = child.isHole;
+          childIdx++;
         }
       } else {
         const view = this.parts.get(node.id);
@@ -2382,6 +2558,20 @@ export class Scene {
         if (previewing?.id === node.id) {
           view.group.position.sub(this.pivotDrift(view, previewing.originalPivot, view.pivot));
         }
+
+        // Apply scene explode displacement outward from sceneCentroid
+        if (this.explodeAmount > 0 && this.lastNodes.length > 1) {
+          const nodePos = new THREE.Vector3(...node.position);
+          const disp = nodePos.clone().sub(sceneCentroid);
+          if (disp.lengthSq() < 1e-4) {
+            disp.set(0, 0, 30);
+          }
+          const dist = disp.length();
+          const dir = disp.normalize();
+          const explodeOffset = dir.multiplyScalar(Math.max(40, dist * 1.5) * this.explodeAmount);
+          view.group.position.add(explodeOffset);
+        }
+
         view.isHole = node.isHole;
       }
     }
@@ -2476,7 +2666,7 @@ export class Scene {
             })()
           )
         );
-        const isTrans = isTransparentMode || transparent || this.joineryTransparentIds.has(id) || this.hollowTransparentId === id || isPlacementTarget;
+        const isTrans = isTransparentMode || transparent || this.joineryTransparentIds.has(id) || this.hollowTransparentId === id || this.faceResizeDragPartId === id || isPlacementTarget;
         const mat = this.getSolidMaterial(color, sel, isTrans);
         view.mesh.material = [mat, this.hollowPreviewId === id ? mat : MATERIALS.faceHighlight];
         view.mesh.renderOrder = isTrans ? 1 : 0;
@@ -2525,7 +2715,15 @@ export class Scene {
         // out of them, and the two coincident surfaces stripe against each
         // other as the camera moves.
         view.group.visible = !this.cellViews.size && !hiddenByUser;
-        view.wire.visible = true;
+        // Every material list above is [surface, selected face]; the hover
+        // colour rides along as the third entry (see updateFaceHover).
+        if (Array.isArray(view.mesh.material) && view.mesh.material.length === 2) {
+          view.mesh.material = [...view.mesh.material, MATERIALS.faceHover];
+        }
+        // "Hide lines" is for the shaded view only. The wireframe styles are
+        // nothing but lines, and the edge tool needs them to pick from.
+        const hideLines = !!node && resolveNodeHideLines(node);
+        view.wire.visible = !(hideLines && !isWire && !isEdgesOnly && this.toolMode !== "edge");
       }
     }
     for (const [id, groupObj] of this.assemblyGroups) {
@@ -3473,19 +3671,52 @@ export class Scene {
   private restoreSelectedFaceHighlight() {
     const selected = this.selectedFace;
     const view = selected ? this.parts.get(selected.partId) : undefined;
-    if (view) this.highlightFace(selected!.groupIndex, view.mesh.geometry as THREE.BufferGeometry);
+    if (!view) return;
+    const geometry = view.mesh.geometry as THREE.BufferGeometry;
+    let groupIndex = selected!.groupIndex;
+    // A live preview (Wall, Round, Bevel) swaps in a rebuilt mesh whose faces
+    // are numbered differently, so the stored index painted some other face —
+    // the front of a block lit up while its top was the one being rounded.
+    // Find the same face in the preview by its plane instead.
+    if (this.edgePreview?.id === selected!.partId) {
+      const original = this.edgePreview.originalFaces?.[groupIndex];
+      groupIndex = original ? matchingFaceIndex(view.faces, original) : -1;
+    }
+    if (groupIndex >= 0) this.highlightFace(groupIndex, geometry);
+    else clearHighlights(geometry);
   }
 
   /** Makes the face under a plain click persistent and shows its sole arrow.
    * Returns false for empty/curved faces so ordinary object picking continues. */
+  /**
+   * The face index to store as the selection for a face hit on a part's mesh.
+   *
+   * With a live preview (Round, Bevel, Wall) showing on the part, the hit is
+   * on the PREVIEW mesh, whose faces are numbered differently, while the
+   * selection belongs to the unedited shape — emitFaceSelection reads it
+   * against the original faces. Storing the raw index picked some other face:
+   * clicking the front face beside a bevelled one did nothing, the next click
+   * selected a hidden back face, and only a third got the front. The clicked
+   * preview face is mapped back to the original face in the same plane; -1
+   * when there is none (a face only the preview has, like the bevel strip).
+   */
+  private selectableFaceIndex(partId: string, groupIndex: number, face: FaceInfo): number {
+    if (this.edgePreview?.id !== partId) return groupIndex;
+    return matchingFaceIndex(this.edgePreview.originalFaces, face);
+  }
+
   private selectFaceAt(e: PointerEvent): boolean {
     const found = this.raycastFace(e);
     if (!found) return false;
     const partId = [...this.parts.entries()].find(([, view]) => view === found.view)?.[0];
     const face = found.view.faces?.[found.groupIndex];
     if (!partId || !face) return false;
+    const groupIndex = this.selectableFaceIndex(partId, found.groupIndex, face);
+    // A face the preview created (the bevel strip itself) has no original to
+    // select; leave the current selection alone.
+    if (groupIndex < 0) return true;
     this.clearFaceHover();
-    this.selectedFace = { partId, groupIndex: found.groupIndex };
+    this.selectedFace = { partId, groupIndex };
     this.selectedIds = [partId];
     this.onSelectObject?.(partId, false);
     this.restoreSelectedFaceHighlight();
@@ -3587,7 +3818,15 @@ export class Scene {
       return; // same face as last frame — nothing to change
     }
     this.clearFaceHover();
-    this.highlightFace(found.groupIndex, found.view.mesh.geometry as THREE.BufferGeometry);
+    // Hover is a paler amber on its own material slot, and never lands on the
+    // selected face. It used to repaint the selection colour onto whatever was
+    // under the pointer and take it off the clicked face, so simply moving
+    // across a part looked like selecting each face in turn — while the panel
+    // and preview stayed on the face actually clicked.
+    const geometry = found.view.mesh.geometry as THREE.BufferGeometry;
+    const group = geometry.groups[found.groupIndex];
+    // three.js reads groups afresh every frame, so no update flag is needed.
+    if (group && group.materialIndex !== 1) group.materialIndex = 2;
     this.hoverFace = found;
   }
 
@@ -3609,7 +3848,7 @@ export class Scene {
   }
 
   private setPlacementTarget(targetId: string | null) {
-    const nextId = (this.placementKind === "screwHole" && targetId) ? targetId : null;
+    const nextId = ((this.placementKind === "screwHole" || this.placementKind === "domino") && targetId) ? targetId : null;
     if (this.placementTransparentId === nextId) return;
     this.placementTransparentId = nextId;
     this.applyMaterials();
@@ -4528,10 +4767,21 @@ export class Scene {
       }
       geometry = new THREE.LatheGeometry(pts, 24);
       geometry.rotateX(Math.PI / 2);
+    } else if (kind === "domino") {
+      const isMortise = (p.type ?? 0) === 0;
+      const th = p.thickness ?? 8;
+      const w = p.width ?? 28;
+      if (isMortise) {
+        const depth = p.depth ?? 25;
+        geometry = new THREE.BoxGeometry(w, th, depth).translate(0, 0, -depth / 2);
+      } else {
+        const len = p.length ?? 50;
+        geometry = new THREE.BoxGeometry(w, th, len).translate(0, 0, len / 2);
+      }
     } else {
       geometry = new THREE.BoxGeometry(20, 20, 20).translate(0, 0, 10);
     }
-    const isHolePreview = kind === "screwHole";
+    const isHolePreview = kind === "screwHole" || (kind === "domino" && (p.type ?? 0) === 0);
     this.placementPreview = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
       color: isHolePreview ? 0xff4433 : 0x25b7bd,
       transparent: true,
@@ -4664,7 +4914,11 @@ export class Scene {
     handle.scale.setScalar(scale);
     this.pushPullHandles.add(handle);
 
-    this.selectedFace = { partId, groupIndex };
+    // This press is also how a face gets selected in every face tool, so it
+    // needs the same preview-to-original mapping as a click (see
+    // selectableFaceIndex). The arrow above stays on the mesh as drawn.
+    const selectedIndex = this.selectableFaceIndex(partId, groupIndex, face);
+    if (selectedIndex >= 0) this.selectedFace = { partId, groupIndex: selectedIndex };
     this.selectedIds = [partId];
     this.onSelectObject?.(partId, false);
     this.restoreSelectedFaceHighlight();
@@ -5283,35 +5537,83 @@ export class Scene {
     // Probe the actual rendered faces, not only each object's outer box. This
     // lets a second directional drop see a recess, ledge, or internal wall in
     // the same compound object after its outermost face is already touching.
-    for (const origin of rayOrigins) {
-      this.raycaster.set(origin, travel);
-      for (const hit of this.raycaster.intersectObjects(targetMeshes, false)) {
-        if (hit.distance <= Scene.DROP_EPS || !hit.face) continue;
-        normalMatrix.getNormalMatrix(hit.object.matrixWorld);
-        hitNormal.copy(hit.face.normal).applyNormalMatrix(normalMatrix);
-        if (hitNormal.dot(travel) >= -0.05) continue;
-        distance = Math.min(distance, hit.distance);
-        break;
+    //
+    // Same two modes as downward gravity (see dropDistance). In open space the
+    // selection moves until it touches something. Once it is touching — or has
+    // been pushed into something by an earlier press — it steps to the next
+    // face lying ENTIRELY ahead of its leading side and facing back at it
+    // within 60 degrees. Measured by contact alone, every press found the
+    // same sloped or drafted wall a little further on and crept along it.
+    const leadingAlong = leading * sign;
+    const span = movingBox.max.getComponent(axis) - movingBox.min.getComponent(axis);
+    const faceReach = new Map<THREE.Object3D, { regionOf: Int32Array; nearest: Map<number, number> }>();
+    const measure = (stepping: boolean): { distance: number; resting: boolean } => {
+      let nearest = Infinity;
+      let resting = false;
+      for (const origin of rayOrigins) {
+        this.raycaster.set(origin, travel);
+        for (const hit of this.raycaster.intersectObjects(targetMeshes, false)) {
+          if (!hit.face) continue;
+          normalMatrix.getNormalMatrix(hit.object.matrixWorld);
+          hitNormal.copy(hit.face.normal).applyNormalMatrix(normalMatrix);
+          const facing = -hitNormal.dot(travel) / hitNormal.length();
+          if (hit.distance <= Scene.DROP_EPS) {
+            if (facing > 0.05) resting = true;
+            continue;
+          }
+          if (facing <= 0.05) continue;
+          if (stepping) {
+            if (facing < Scene.DROP_LEVEL_MIN_NZ) continue;
+            if (this.faceNearestAlong(hit, travel, faceReach) <= leadingAlong + Scene.DROP_EPS) continue;
+          }
+          nearest = Math.min(nearest, hit.distance);
+          break;
+        }
+        // Looking back from the selection's leading surface: a target face
+        // turned the way the selection is travelling, within the selection's
+        // own depth, means the two already overlap there.
+        if (!stepping && !resting) {
+          this.raycaster.set(origin, reverse);
+          for (const hit of this.raycaster.intersectObjects(targetMeshes, false)) {
+            if (!hit.face || hit.distance > span + Scene.DROP_EPS) break;
+            normalMatrix.getNormalMatrix(hit.object.matrixWorld);
+            hitNormal.copy(hit.face.normal).applyNormalMatrix(normalMatrix);
+            if (hitNormal.dot(travel) > 0.05) { resting = true; break; }
+          }
+        }
       }
-    }
 
-    for (const [id, target] of this.parts) {
-      if (selected.has(id) || !target.group.visible || target.isHole) continue;
-      const targetBox = new THREE.Box3().setFromObject(target.group);
-      const overlapsPath = perpendicular.every((otherAxis) =>
-        movingBox.max.getComponent(otherAxis) >= targetBox.min.getComponent(otherAxis) - Scene.DROP_EPS &&
-        movingBox.min.getComponent(otherAxis) <= targetBox.max.getComponent(otherAxis) + Scene.DROP_EPS);
-      if (!overlapsPath) continue;
+      for (const [id, target] of this.parts) {
+        if (selected.has(id) || !target.group.visible || target.isHole) continue;
+        const targetBox = new THREE.Box3().setFromObject(target.group);
+        const overlapsPath = perpendicular.every((otherAxis) =>
+          movingBox.max.getComponent(otherAxis) >= targetBox.min.getComponent(otherAxis) - Scene.DROP_EPS &&
+          movingBox.min.getComponent(otherAxis) <= targetBox.max.getComponent(otherAxis) + Scene.DROP_EPS);
+        if (!overlapsPath) continue;
 
-      const gap = sign > 0
-        ? targetBox.min.getComponent(axis) - movingBox.max.getComponent(axis)
-        : movingBox.min.getComponent(axis) - targetBox.max.getComponent(axis);
-      // Match normal gravity: a face already touching the selection is the
-      // layer we are leaving, not a permanent lock. Ignore it and search for
-      // the next object farther along the chosen direction. If there is no
-      // farther target, the selection stays where it is.
-      if (gap > Scene.DROP_EPS) distance = Math.min(distance, gap);
-    }
+        const gap = sign > 0
+          ? targetBox.min.getComponent(axis) - movingBox.max.getComponent(axis)
+          : movingBox.min.getComponent(axis) - targetBox.max.getComponent(axis);
+        // Match normal gravity: a face already touching the selection is the
+        // layer we are leaving, not a permanent lock. Ignore it and search for
+        // the next object farther along the chosen direction. If there is no
+        // farther target, the selection stays where it is.
+        if (gap > Scene.DROP_EPS) nearest = Math.min(nearest, gap);
+        // The selection's box touches or overlaps this part's box along the
+        // travel axis: resting against it, or already pushed into it. Rays
+        // alone miss this against a drafted wall, which touches along a single
+        // edge line that no probe ray happens to lie on.
+        else if (
+          targetBox.min.getComponent(axis) <= movingBox.max.getComponent(axis) + Scene.DROP_EPS &&
+          targetBox.max.getComponent(axis) >= movingBox.min.getComponent(axis) - Scene.DROP_EPS
+        ) resting = true;
+      }
+      return { distance: nearest, resting };
+    };
+
+    const contact = measure(false);
+    if (contact.resting) distance = measure(true).distance;
+    else distance = contact.distance;
 
     if (!Number.isFinite(distance)) return [];
     const delta = sign * distance;
@@ -5427,9 +5729,132 @@ export class Scene {
     });
   }
 
-  /** How far this part can fall before something stops it, or null if nothing
-   *  does (it is already resting). */
+  /** Steepest surface (as the z of its unit normal) a repeated drop may land
+   *  on — 60 degrees from level. Steeper ones are walls, not levels. The same
+   *  limit, measured against the travel direction, applies to sideways drops. */
+  private static readonly DROP_LEVEL_MIN_NZ = 0.5;
+
+  /** Faces meeting at less than this angle (as a normal dot) count as one
+   *  continuous surface for a repeated drop — about 25 degrees. */
+  private static readonly DROP_SMOOTH_JOIN = 0.9;
+
+  /**
+   * The nearest point, measured along `direction`, of the whole surface a hit
+   * triangle belongs to — min over its vertices of p · direction. A repeated
+   * drop uses it to ask whether an entire surface lies ahead of the part,
+   * rather than just the point a ray happened to strike.
+   *
+   * A surface is the hit's face (geometry group) plus every face joined to it
+   * smoothly. On a solid from the CAD kernel a curved face is already one
+   * group, but a mesh result — anything combined — splits a curved surface
+   * into dozens of flat facets, and judged one facet at a time a drop crept
+   * across a rounded cavity a facet per press.
+   */
+  private faceNearestAlong(
+    hit: THREE.Intersection,
+    direction: THREE.Vector3,
+    cache: Map<THREE.Object3D, { regionOf: Int32Array; nearest: Map<number, number> }>,
+  ): number {
+    const mesh = hit.object as THREE.Mesh;
+    const geometry = mesh.geometry as THREE.BufferGeometry;
+    const group = hit.faceIndex == null
+      ? -1
+      : getFaceIndex(hit.faceIndex, geometry as unknown as Parameters<typeof getFaceIndex>[1]);
+    if (group < 0) return hit.point.dot(direction);
+
+    const index = geometry.getIndex();
+    const position = geometry.getAttribute("position");
+    const normal = geometry.getAttribute("normal");
+    const groups = geometry.groups;
+    let entry = cache.get(mesh);
+    if (!entry) {
+      // Union groups that share a vertex position with near-equal normals
+      // there. Keyed by position because CAD faces do not share vertices.
+      const parent = Int32Array.from(groups, (_, i) => i);
+      const find = (i: number): number => {
+        while (parent[i] !== i) i = parent[i] = parent[parent[i]];
+        return i;
+      };
+      const atPoint = new Map<string, { group: number; nx: number; ny: number; nz: number }[]>();
+      for (let g = 0; g < groups.length; g++) {
+        const { start, count } = groups[g];
+        for (let i = start; i < start + count; i++) {
+          const v = index ? index.getX(i) : i;
+          const key = `${Math.round(position.getX(v) * 1e4)},${Math.round(position.getY(v) * 1e4)},${Math.round(position.getZ(v) * 1e4)}`;
+          const nx = normal ? normal.getX(v) : 0;
+          const ny = normal ? normal.getY(v) : 0;
+          const nz = normal ? normal.getZ(v) : 0;
+          const here = atPoint.get(key);
+          if (!here) {
+            atPoint.set(key, [{ group: g, nx, ny, nz }]);
+            continue;
+          }
+          for (const other of here) {
+            if (other.group === g || !normal) continue;
+            const length = Math.hypot(nx, ny, nz) * Math.hypot(other.nx, other.ny, other.nz);
+            if (length > 0 && (nx * other.nx + ny * other.ny + nz * other.nz) / length >= Scene.DROP_SMOOTH_JOIN) {
+              parent[find(g)] = find(other.group);
+            }
+          }
+          if (!here.some((other) => other.group === g)) here.push({ group: g, nx, ny, nz });
+        }
+      }
+      const regionOf = Int32Array.from(groups, (_, i) => find(i));
+      entry = { regionOf, nearest: new Map() };
+      cache.set(mesh, entry);
+    }
+
+    const region = entry.regionOf[group];
+    const cached = entry.nearest.get(region);
+    if (cached !== undefined) return cached;
+    const point = new THREE.Vector3();
+    let nearest = Infinity;
+    for (let g = 0; g < groups.length; g++) {
+      if (entry.regionOf[g] !== region) continue;
+      const { start, count } = groups[g];
+      for (let i = start; i < start + count; i++) {
+        point.fromBufferAttribute(position, index ? index.getX(i) : i).applyMatrix4(mesh.matrixWorld);
+        nearest = Math.min(nearest, point.dot(direction));
+      }
+    }
+    entry.nearest.set(region, nearest);
+    return nearest;
+  }
+
+  /**
+   * How far this part can fall before something stops it, or null if nothing
+   * does (it is already resting).
+   *
+   * A part in open air falls until it really touches something. A part that is
+   * already resting on something (or has been sunk into it by an earlier press)
+   * instead steps to the next LEVEL: the highest reasonably flat surface lying
+   * entirely below its current bottom. Measured by contact alone, a second press
+   * crept down whatever sloped surface ran under the part — a cone's side, a
+   * tilted ledge — a few hundredths of a millimetre at a time, because each
+   * press found that same surface again just below. Dropping a box that had
+   * landed on a cone took dozens of presses and stalled on the ledge beneath
+   * instead of ever reaching the plate.
+   */
   private dropDistance(movingId: string, view: PartView): number | null {
+    const contact = this.measureDrop(movingId, view, null);
+    if (!contact.resting) return contact.distance;
+    const bottom = new THREE.Box3().setFromObject(view.group).min.z;
+    return this.measureDrop(movingId, view, bottom).distance;
+  }
+
+  /**
+   * One drop measurement. With `levelBelow` null it is plain contact; with a
+   * height, only flat-enough surfaces whose whole face lies below that height
+   * can hold the part up. Also reports whether the part is resting now: some
+   * upward surface already touches or reaches into it.
+   */
+  private measureDrop(
+    movingId: string,
+    view: PartView,
+    levelBelow: number | null,
+  ): { distance: number | null; resting: boolean } {
+    let resting = false;
+    const faceReach = new Map<THREE.Object3D, { regionOf: Int32Array; nearest: Map<number, number> }>();
     const targets = [...this.parts]
       // A hole is subtractive: landing on one would be landing on nothing.
       .filter(([id, v]) => id !== movingId && v.group.visible && !v.isHole)
@@ -5446,6 +5871,15 @@ export class Scene {
       worldNormal.copy(hit.face.normal).applyNormalMatrix(normalMatrix);
       return wantUp ? worldNormal.z > 0 : worldNormal.z < 0;
     };
+    /** Can this upward hit hold the part up, for this kind of measurement? */
+    const holds = (hit: THREE.Intersection): boolean => {
+      if (!upwardHit(hit, true)) return false;
+      if (levelBelow === null) return true;
+      if (worldNormal.z / worldNormal.length() < Scene.DROP_LEVEL_MIN_NZ) return false;
+      // The whole face below the part's bottom: its NEAREST point along DOWN
+      // is -(its highest z).
+      return -this.faceNearestAlong(hit, DOWN, faceReach) < levelBelow - Scene.DROP_EPS;
+    };
 
     // Rays down from this part: where does its own geometry first meet a face
     // that points up? An underside cannot hold anything up, so those are
@@ -5454,8 +5888,11 @@ export class Scene {
     for (const origin of this.sampleFacePoints(view, true, Scene.DROP_SAMPLES)) {
       this.raycaster.set(origin, DOWN);
       for (const hit of this.raycaster.intersectObjects(meshes, false)) {
-        if (hit.distance <= Scene.DROP_EPS) continue;
-        if (!upwardHit(hit, true)) continue;
+        if (hit.distance <= Scene.DROP_EPS) {
+          if (upwardHit(hit, true)) resting = true;
+          continue;
+        }
+        if (!holds(hit)) continue;
         best = Math.min(best, hit.distance);
         break;
       }
@@ -5464,7 +5901,11 @@ export class Scene {
     // Rays up from what is underneath. Sampling only the falling part would
     // let a cone tip or sphere pole slip between its own sample points and be
     // sunk straight through; every point below gets to push back too.
-    for (const target of targets) {
+    //
+    // Not when stepping to a level: these start from vertices, which carry no
+    // face to judge, so a tilted ledge the part has already passed would push
+    // back from its low corner and the part would creep again.
+    for (const target of levelBelow === null ? targets : []) {
       const box = new THREE.Box3().setFromObject(target.group);
       if (box.min.x > movingBox.max.x || box.max.x < movingBox.min.x) continue;
       if (box.min.y > movingBox.max.y || box.max.y < movingBox.min.y) continue;
@@ -5475,7 +5916,10 @@ export class Scene {
         if (origin.z > movingBox.max.z) continue;
         this.raycaster.set(origin, UP);
         for (const hit of this.raycaster.intersectObject(view.mesh, false)) {
-          if (hit.distance <= Scene.DROP_EPS) continue;
+          if (hit.distance <= Scene.DROP_EPS) {
+            if (upwardHit(hit, false)) resting = true;
+            continue;
+          }
           if (!upwardHit(hit, false)) continue;
           best = Math.min(best, hit.distance);
           break;
@@ -5525,8 +5969,13 @@ export class Scene {
           this.raycaster.set(from, DOWN);
           let support = -Infinity;
           for (const hit of this.raycaster.intersectObject(target.mesh, false)) {
-            if (hit.point.z > underside - Scene.DROP_EPS) continue;
-            if (!upwardHit(hit, true)) continue;
+            if (hit.point.z > underside - Scene.DROP_EPS) {
+              // An upward surface at or inside the part, within its height:
+              // the part is standing on it or has been sunk into it.
+              if (hit.point.z <= movingBox.max.z + Scene.DROP_EPS && upwardHit(hit, true)) resting = true;
+              continue;
+            }
+            if (!holds(hit)) continue;
             support = Math.max(support, hit.point.z);
             break;
           }
@@ -5541,7 +5990,7 @@ export class Scene {
     if (movingBox.min.z > Scene.DROP_EPS) best = Math.min(best, movingBox.min.z);
     if (best > movingBox.min.z) best = Math.max(0, movingBox.min.z);
 
-    return Number.isFinite(best) ? best : null;
+    return { distance: Number.isFinite(best) ? best : null, resting };
   }
 
   /**
@@ -6060,6 +6509,9 @@ export class Scene {
       this.clearEdgeSelection(true);
       this.clearEdgeHover();
     }
+    // Hidden lines come back while the edge tool is picking edges.
+    if (mode === "edge" || this.lastEdgeToolMode) this.applyMaterials();
+    this.lastEdgeToolMode = mode === "edge";
     if (leavingFace) {
       // A half-finished push/pull must not survive the tool switch — abandon
       // it rather than leaving its preview geometry and open distance pill
@@ -7714,6 +8166,16 @@ export class Scene {
    * as before — this never changes what a non-dragging click does.
    */
   private onPointerMove = (e: PointerEvent) => {
+    // Resize Face's own handles are on screen: the face being resized is
+    // already shown selected (solid fill), and clicking a handle — not a
+    // different face — is the only thing to do here now, so a hover
+    // highlight sweeping over some other face as the cursor crosses it
+    // (reaching for a corner handle, say) is just noise, drag or no drag.
+    // FaceResizeHandles' own capture-phase listener on `host` should
+    // already keep this handler from ever seeing the event during an
+    // actual drag — this bail covers the plain-hover case that isn't one,
+    // and is belt and braces for the drag case regardless of why.
+    if (this.faceResizeHandles) return;
     // If the left mouse button is no longer pressed, any active drag gesture must finish immediately.
     // This guards against missed pointerup events on Windows (e.g. while holding Alt or dragging off-canvas).
     if ((e.buttons & 1) === 0) {
@@ -8161,33 +8623,8 @@ export class Scene {
       }
       const distance = drag.active ? this.pushPullDistance(e, drag) : 0;
       drag.currentDistance = distance;
-      if (drag.active) {
-        // A drag is a complete gesture: commit on release. Previously it
-        // left a focused pending editor over live preview geometry. Starting
-        // another drag blurred that editor and raced its old rebuild against
-        // the new gesture, which made the second drag appear frozen.
-        this.pushPullGeneration++;
-        this.pushPullPending = null;
-        this.pushPullLabelEl.style.display = "none";
-        this.onDragChange?.(false);
-        this.disposeGeom(drag.originalGeom);
-        const travelled = this.toLocalDistance(distance, drag.worldPerLocal);
-        this.armedFace = {
-          id: drag.id,
-          localPoint: [
-            drag.localPoint[0] + drag.localNormal[0] * travelled,
-            drag.localPoint[1] + drag.localNormal[1] * travelled,
-            drag.localPoint[2] + drag.localNormal[2] * travelled,
-          ],
-          localNormal: drag.localNormal,
-          view: drag.view,
-          worldPerLocal: drag.worldPerLocal,
-        };
-        void this.applyPushPull(drag, distance);
-      } else {
-        // A click, unlike a drag, means the user wants exact numeric entry.
-        this.showPushPullInput(drag, 0);
-      }
+      // Keep the drag reviewable until Apply/Enter or Cancel resolves it.
+      this.showPushPullInput(drag, distance);
       return;
     }
 
@@ -8838,6 +9275,7 @@ export class Scene {
     this.updateAlignOverlay();
     this.updatePushPullOverlay();
     this.emitFaceSelection();
+    this.faceResizeHandles?.render();
     this.updateMoveReadout();
     this.renderer.render(this.scene, this.camera);
     this.renderer.autoClear = false;
@@ -8875,6 +9313,7 @@ export class Scene {
   }
 
   dispose() {
+    this.clearFaceResizeHandles();
     cancelAnimationFrame(this.frame);
     // Appended to the host, so it outlives the renderer unless removed here —
     // in dev that leaves one orphan badge behind on every remount.

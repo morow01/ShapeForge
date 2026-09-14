@@ -144,6 +144,14 @@ export interface SceneBuild {
   parts: ScenePart[];
   errors: BuildError[];
   buildMs: number;
+  /** Nodes this round ran out of time before reaching, in the order they will
+   *  be attempted next. Empty means the scene is complete.
+   *
+   *  A round stops at a node boundary and leaves the worker alive with its
+   *  caches intact, so resuming costs only the nodes still outstanding —
+   *  unlike the watchdog, which can only stop a wedged node by terminating
+   *  the worker and losing every mesh built so far. */
+  pending: string[];
 }
 
 export interface ResultBuild {

@@ -16,7 +16,7 @@ import {
   getOC,
   sketchFaceOffset,
 } from "replicad";
-import type { Face, Shape3D, Sketch } from "replicad";
+import type { Face, Shape3D, Sketch, Wire } from "replicad";
 import { InvalidShapeError, solveTriangle, solveScaledTriangle } from "../geometry/triangle";
 import { getBlob, putBlob } from "../document/blobStore";
 import { svgMeshSolid } from "./svgSolid";
@@ -662,6 +662,57 @@ function makeScrewHoleSolid(p: Record<string, number>): Shape3D {
 }
 
 /**
+ * Creates a stadium / capsule 2D profile (rounded rectangle with semi-circular ends).
+ */
+function makeStadiumSketch(width: number, thickness: number, z = 0): Sketch {
+  const W = Math.max(width, thickness + 0.01);
+  const T = Math.max(thickness, 0.1);
+  const r = T / 2;
+  const halfStraight = (W - T) / 2;
+  const pts: [number, number][] = [
+    [-halfStraight, r],
+    [halfStraight, r],
+    [halfStraight, -r],
+    [-halfStraight, -r],
+  ];
+  let pen = draw(pts[0])
+    .lineTo(pts[1])
+    .threePointsArcTo(pts[2], [halfStraight + r, 0])
+    .lineTo(pts[3])
+    .threePointsArcTo(pts[0], [-halfStraight - r, 0]);
+  return pen.close().sketchOnPlane("XY", z) as Sketch;
+}
+
+/**
+ * Festool Domino mortise pocket cutter or loose tenon solid insert.
+ */
+function makeDominoSolid(p: Record<string, number>): Shape3D {
+  const type = Math.round(p.type ?? 0); // 0 = Mortise Slot, 1 = Loose Tenon
+  const T = Math.max(1, p.thickness ?? 8);
+  const W = Math.max(T + 0.1, p.width ?? 28);
+  const clearance = Math.max(0, p.clearance ?? 0.1);
+
+  if (type === 0) {
+    // Mortise Slot cutter (extends downwards into -Z to depth, with 0.5mm bleed into +Z)
+    const slotExtra = p.slotWidthMode === 1 ? 6 : p.slotWidthMode === 2 ? 10 : 0;
+    const effW = W + clearance + slotExtra;
+    const effT = T + clearance;
+    const depth = Math.max(1, p.depth ?? 25);
+    const bleed = 0.5;
+    const totalH = depth + bleed;
+    const sketch = makeStadiumSketch(effW, effT, -depth);
+    return sketch.extrude(totalH) as Shape3D;
+  }
+
+  // Loose Tenon (solid insert sitting on Z=0 with height = length)
+  const effW = Math.max(T, W - clearance);
+  const effT = Math.max(0.5, T - clearance);
+  const length = Math.max(2, p.length ?? 50);
+  const sketch = makeStadiumSketch(effW, effT, 0);
+  return sketch.extrude(length) as Shape3D;
+}
+
+/**
  * Builds a primitive in LOCAL space: centred in XY with its base on z = 0,
  * with no position or rotation applied. Placement lives on the Three.js side
  * so dragging an object never needs a kernel rebuild.
@@ -1277,6 +1328,10 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
       s = makeScrewHoleSolid(p);
       break;
     }
+    case "domino": {
+      s = makeDominoSolid(p);
+      break;
+    }
     case "hinge": {
       s = makeHingeSolid(p);
       break;
@@ -1726,8 +1781,8 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
     }
   }
 
-  if (spec.kind === "connector" || spec.kind === "screwHole") {
-    // Connector and screwHole solids already define their exact mounting plane (z=0 is surface,
+  if (spec.kind === "connector" || spec.kind === "screwHole" || (spec.kind === "domino" && (spec.params.type ?? 0) === 0)) {
+    // Connector, screwHole, and mortise-slot domino solids already define their exact mounting plane (z=0 is surface,
     // centered in XY). They must never be normalized or shifted by normalise().
     return s;
   }
@@ -2204,6 +2259,49 @@ function findFace(solid: Shape3D, point: Vec3, normal: Vec3, tolerance = 0.05): 
  */
 const SOFT_EDGE_NORMAL_DOT = 0.5;
 
+/**
+ * Rounds or bevels several edges in two passes, for when OCCT refuses them
+ * all at once: every edge but one, then that last edge on the result.
+ *
+ * Measured on a block standing on a wider base and overhanging it on one
+ * side: the front face's bottom border is two edges meeting where the block
+ * leaves the base — an inside corner against the base's top, an outside one
+ * under the overhang. OCCT finishes each edge alone, and any set without one
+ * of those two, but never both together through that vertex.
+ *
+ * Edges are tried as the one left out in order, and the first split that
+ * passes the usual validity checks both times wins. Order matters: for that
+ * block, leaving out the inside half gave a round within 3 mm³ of the
+ * per-edge sum, while leaving out the outside half came out 50 mm³ short —
+ * which is why each result must pass validation, not merely not throw.
+ */
+function finishEdgesInTwoPasses(
+  solid: Shape3D,
+  kind: "fillet" | "chamfer",
+  distance: number,
+  anchors: Vec3[],
+): Shape3D | null {
+  if (anchors.length < 2) return null;
+  const run = (on: Shape3D, group: Vec3[]): Shape3D | null => {
+    try {
+      const selector = edgesAt(group);
+      const candidate = (kind === "fillet" ? on.fillet(distance, selector) : on.chamfer(distance, selector)) as Shape3D;
+      return isOcctValid(candidate) && !tessellatesEmpty(candidate) && isWatertight(candidate) && noNewSplit(on, candidate)
+        ? candidate
+        : null;
+    } catch {
+      return null;
+    }
+  };
+  for (let left = 0; left < anchors.length; left++) {
+    const most = run(solid, anchors.filter((_, i) => i !== left));
+    if (!most) continue;
+    const done = run(most, [anchors[left]]);
+    if (done) return done;
+  }
+  return null;
+}
+
 function sharpBorderEdges(solid: Shape3D, face: Face): import("replicad").Edge[] {
   const border = face.edges;
   const faceNormal = face.normalAt(face.center);
@@ -2541,27 +2639,51 @@ function resizePlanarFace(solid: Shape3D, face: Face, op: ResizeFaceOp): Shape3D
     throw new Error("These walls cannot be brought back exactly upright with a resize.");
   }
 
-  const oc = getOC();
-  const originVector = new Vector([
+  const pivotPoint: Vec3 = [
     center.x - normal.x * height,
     center.y - normal.y * height,
     center.z - normal.z * height,
-  ]);
-  const origin = originVector.toPnt();
-  const direction = normal.toDir();
-  const neutral = new oc.gp_Pln(origin, direction);
-  // replicad's draft() takes a single angle for every face, which is exactly
-  // what cannot work here, so the OCCT builder is driven directly.
-  const drafter = new oc.BRepOffsetAPI_DraftAngle(solid.wrapped);
+  ];
   try {
-    for (const { wall, angle } of tilts) drafter.Add(wall.wrapped, direction, angle, neutral, false);
+    return draftFacesAbout(solid, tilts.map(({ wall, angle }) => ({ face: wall, angle })), normal, pivotPoint);
+  } catch (error) {
+    // OCCT can fail drafting a part's walls where every one of them drafts
+    // cleanly alone — measured on a block pushed out past the edge of the base
+    // it stands on, with a ledge on three sides and an overhang on the fourth.
+    // One at a time fails there too, on the second wall. Built as a separate
+    // simple shape and swapped in, the same taper goes through.
+    const rebuilt = resizeRuledFace(solid, face, adjoining, normal, faceProjection, op.offset);
+    if (rebuilt) return rebuilt;
+    throw error;
+  }
+}
+
+/**
+ * Drafts each face by its own absolute angle (radians) about the plane through
+ * `origin` perpendicular to `normal`. replicad's draft() takes one angle for
+ * every face, which is exactly what a repeated resize cannot use.
+ */
+function draftFacesAbout(
+  target: Shape3D,
+  items: { face: Face; angle: number }[],
+  normal: Vector,
+  origin: Vec3,
+): Shape3D {
+  const oc = getOC();
+  const originVector = new Vector(origin);
+  const point = originVector.toPnt();
+  const direction = normal.toDir();
+  const neutral = new oc.gp_Pln(point, direction);
+  const drafter = new oc.BRepOffsetAPI_DraftAngle(target.wrapped);
+  try {
+    for (const { face, angle } of items) drafter.Add(face.wrapped, direction, angle, neutral, false);
     drafter.Build();
-    return (cast(drafter.ModifiedShape(solid.wrapped)) as Shape3D).asShape3D();
+    return (cast(drafter.ModifiedShape(target.wrapped)) as Shape3D).asShape3D();
   } finally {
     drafter.delete();
     neutral.delete();
     direction.delete();
-    origin.delete();
+    point.delete();
     originVector.delete();
   }
 }
@@ -2641,7 +2763,36 @@ function resizeRuledFace(
     : outline.clone()
   ).translate([back.x, back.y, back.z]);
 
-  const current = loft([atPivot.clone(), outline.clone()], { ruled: true });
+  // A section with flat walls is built as an upright prism on the pivot
+  // outline, drafted as a separate simple shape by `grow` mm at the face. OCCT
+  // drafts a lone prism reliably where it fails on the walls of the full part,
+  // and unlike a loft it keeps flat walls PLANE (a loft between two polygons
+  // turns each into a BSPLINE_SURFACE, which later face tools refuse).
+  // Curved walls are lofted: between circles that gives a true CONE.
+  const flatWalls = adjoining.every((wall) => wall.geomType === "PLANE");
+  const up = normal.multiply(height);
+  const pivotPoint: Vec3 = [
+    face.center.x + back.x,
+    face.center.y + back.y,
+    face.center.z + back.z,
+  ];
+  const section = (grow: number, topOutline: () => Wire): Shape3D => {
+    if (flatWalls) {
+      const prism = basicFaceExtrusion(makeFace(atPivot.clone()), up) as Shape3D;
+      if (Math.abs(grow) < 1e-9) return prism;
+      const angle = -Math.atan(grow / height);
+      if (Math.abs(angle) >= NEAR_UPRIGHT_DRAFT) {
+        const sides = prism.faces.filter((candidate) => {
+          const n = candidate.normalAt(candidate.center);
+          return Math.abs(along(n)) / Math.hypot(n.x, n.y, n.z) < 1e-6;
+        });
+        return draftFacesAbout(prism, sides.map((side) => ({ face: side, angle })), normal, pivotPoint);
+      }
+    }
+    return loft([atPivot.clone(), topOutline()], { ruled: true });
+  };
+
+  const current = section(-spread, () => outline.clone());
   const currentVolume = measureVolume(current);
   if (!(currentVolume > 1e-6)) return null;
   // Also catches a wall that is not what it seemed: if the loft does not lie
@@ -2649,14 +2800,13 @@ function resizeRuledFace(
   const filled = measureVolume(solid.intersect(current) as Shape3D);
   if (Math.abs(filled - currentVolume) > currentVolume * 1e-4) return null;
 
-  // Walls that end up exactly upright are extruded rather than lofted. A loft
-  // between two polygons makes each flat wall a BSPLINE_SURFACE, which every
-  // face tool afterwards — including the next resize — refuses as not flat.
+  // Walls that end up exactly upright are extruded rather than lofted, for the
+  // same BSPLINE reason — and a draft cannot do it, since OCCT ignores angles
+  // that close to zero.
   const upright = Math.abs(offset - spread) < 1e-6;
-  const resizedOutline = outline.offset2D(offset, "intersection");
   const resized = upright
-    ? (basicFaceExtrusion(makeFace(resizedOutline), back) as Shape3D)
-    : loft([atPivot, resizedOutline], { ruled: true });
+    ? (basicFaceExtrusion(makeFace(outline.clone().offset2D(offset, "intersection")), back) as Shape3D)
+    : section(offset - spread, () => outline.clone().offset2D(offset, "intersection"));
   const rest = solid.cut(current) as Shape3D;
   // The whole solid was that section (a plain cylinder): nothing to join.
   if (measureVolume(rest) < 1e-6) return resized;
@@ -3577,10 +3727,12 @@ async function replayEdit(
         // edge on every duplicate instead of just the one on the selected
         // face. Anchoring by each edge's own 3D midpoint is Location-aware
         // and only ever matches the edges actually on that face.
-        const edgeSelector = faceEdges
-          ? edgesAt(faceEdges.map((edge) => edge.pointAt(0.5).toTuple()))
-          : edgesAt(anchors);
-        let candidate: Shape3D;
+        const edgeAnchors: Vec3[] = faceEdges
+          ? faceEdges.map((edge) => edge.pointAt(0.5).toTuple() as Vec3)
+          : anchors;
+        const edgeSelector = edgesAt(edgeAnchors);
+        let candidate: Shape3D | null = null;
+        let firstFailure: unknown = null;
         try {
           candidate = (op.kind === "fillet"
             ? solid.fillet(op.distance, edgeSelector)
@@ -3592,13 +3744,25 @@ async function replayEdit(
               ? solid.fillet(op.distance, fallbackSelector)
               : solid.chamfer(op.distance, fallbackSelector)) as Shape3D;
           } else {
-            throw firstError;
+            firstFailure = firstError;
           }
         }
-        if (
+        const invalid = !!candidate && (
           !isOcctValid(candidate) || tessellatesEmpty(candidate) || !isWatertight(candidate) ||
           !noNewSplit(solid, candidate)
-        ) {
+        );
+        if (!candidate || invalid) {
+          // All at once was refused; several edges may still go in two passes.
+          const stepped = finishEdgesInTwoPasses(solid, op.kind, op.distance, edgeAnchors);
+          if (stepped) {
+            candidate = stepped;
+          } else if (firstFailure) {
+            throw firstFailure;
+          } else {
+            candidate = null;
+          }
+        }
+        if (!candidate) {
           onError?.(spec.id, `That ${op.kind} would create an invalid shape; the previous shape was kept.`);
         } else {
           solid = candidate;
@@ -3673,9 +3837,9 @@ async function replayEdit(
       continue;
     }
     if (op.kind === "resizeFace") {
-      if (isMesh(solid)) {
+      if (isMesh(solid) || op.stretch) {
         let reason = "That face cannot be resized by this amount; the previous shape was kept.";
-        const candidate = resizeMeshFace(solid, op, (message) => { reason = message; });
+        const candidate = resizeMeshFace(isMesh(solid) ? solid : solid.meshShape(FALLBACK_MESH_QUALITY), op, (message) => { reason = message; });
         if (candidate) solid = candidate;
         else onError?.(spec.id, reason);
         continue;
@@ -3821,9 +3985,10 @@ export async function survivingOps(
       if (op.face && !faceEdges?.length) continue;
       // See the matching comment in makeEdit — inList() matches through
       // Location-blind IsSame(), which is wrong for duplicated features.
-      const edgeSelector = faceEdges
-        ? edgesAt(faceEdges.map((edge) => edge.pointAt(0.5).toTuple()))
-        : edgesAt(anchors);
+      const edgeAnchors: Vec3[] = faceEdges
+        ? faceEdges.map((edge) => edge.pointAt(0.5).toTuple() as Vec3)
+        : anchors;
+      const edgeSelector = edgesAt(edgeAnchors);
       let candidate = settled(() => (op.kind === "fillet"
         ? bRepSolid.fillet(op.distance, edgeSelector)
         : bRepSolid.chamfer(op.distance, edgeSelector)) as Shape3D);
@@ -3835,6 +4000,10 @@ export async function survivingOps(
           : bRepSolid.chamfer(op.distance, fallbackSelector)) as Shape3D);
         if (candidate && !noNewSplit(bRepSolid, candidate)) candidate = null;
       }
+      // Mirrors makeEdit: several edges OCCT will not take at once may still
+      // go in two passes. Without this here, Apply would reject the very
+      // finish the live preview had just shown working.
+      if (!candidate) candidate = finishEdgesInTwoPasses(bRepSolid, op.kind, op.distance, edgeAnchors);
       if (candidate) {
         solid = candidate;
         kept.push(op);
@@ -3888,8 +4057,8 @@ export async function survivingOps(
       continue;
     }
     if (op.kind === "resizeFace") {
-      if (isMesh(solid)) {
-        const candidate = resizeMeshFace(solid, op);
+      if (isMesh(solid) || op.stretch) {
+        const candidate = resizeMeshFace(isMesh(solid) ? solid : solid.meshShape(FALLBACK_MESH_QUALITY), op);
         if (candidate) { solid = candidate; kept.push(op); }
         continue;
       }

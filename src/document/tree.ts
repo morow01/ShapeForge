@@ -50,6 +50,15 @@ export function resolveNodeTransparent(node: SceneNode | null | undefined): bool
   return false;
 }
 
+/** Whether a part's edge lines are hidden. An edit made from an object that
+ *  already had its lines hidden keeps them hidden. */
+export function resolveNodeHideLines(node: SceneNode | null | undefined): boolean {
+  if (!node) return false;
+  if (node.hideLines !== undefined) return node.hideLines;
+  if (node.type === "edit") return resolveNodeHideLines(node.base);
+  return false;
+}
+
 /** Replaces one node in place, rebuilding only the branches that contain it. */
 export function updateNode(
   nodes: SceneNode[],

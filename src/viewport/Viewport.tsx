@@ -29,6 +29,8 @@ interface Props {
   gridSnapEnabled: boolean;
   /** Keep collision contact patches visible while an object is selected. */
   showSelectedCollisionContacts: boolean;
+  /** Exploded view outward displacement factor (0 to 1). */
+  explodeAmount?: number;
   plateVisible?: boolean;
   plateSize?: { width: number; depth: number };
   displayUnit: DisplayUnit;
@@ -120,6 +122,7 @@ export function Viewport(props: Props) {
       scene.setPlateSize(latest.current.plateSize.width, latest.current.plateSize.depth);
     }
     scene.setMeasurementFormat(latest.current.displayUnit, latest.current.decimalPlaces);
+    scene.setExplodeAmount(latest.current.explodeAmount ?? 0);
 
     sceneRef.current = scene;
     latest.current.onSceneReady?.(scene);
@@ -173,6 +176,10 @@ export function Viewport(props: Props) {
   useEffect(() => {
     sceneRef.current?.setWireframe(wireframe);
   }, [wireframe]);
+
+  useEffect(() => {
+    sceneRef.current?.setExplodeAmount(props.explodeAmount ?? 0);
+  }, [props.explodeAmount]);
 
   useEffect(() => {
     sceneRef.current?.setSnapEnabled(snapEnabled);
