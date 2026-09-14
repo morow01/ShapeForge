@@ -137,10 +137,11 @@ assert.equal(row('Loose Tenon').kind,'tenon');
 assert.equal(joinery.cutList.filter(i=>i.kind==='tenon').length,1,'sockets are not scheduled');
 // The board keeps its own size and is not counted as carrying the tenons.
 assert.ok(row('Table Top (Tenon)'),'the board is still scheduled');
-// Every fitting earns a detail page of its own size.
-const tenonSheet=joinery.partSheets.find(s=>s.name==='Loose Tenon');
-assert.deepEqual([tenonSheet.lengthMm,tenonSheet.widthMm,tenonSheet.thicknessMm],[22,20,8]);
-assert.equal(tenonSheet.count,4);
+// Fittings are listed, not drawn: size and quantity on the cut list, no
+// detail page — a dowel or domino is cut from stock by its size alone.
+assert.equal(joinery.partSheets.some(s=>s.kind==='tenon'),false,'no detail page for tenons');
+assert.deepEqual(joinery.partSheets.map(s=>s.name).sort(),['Leg (Mortise)','Table Top (Tenon)'],'boards keep their pages');
+assert.ok(row('Loose Tenon'),'tenons still on the cut list');
 // ...but the drawings stay on the boards: a fused tenon is already drawn by
 // the board it belongs to, and must not be outlined a second time.
 assert.deepEqual(joinery.frontView.parts.map(p=>p.id),['topgrp','leggrp'],'fittings are not redrawn on the assembly');

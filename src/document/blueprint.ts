@@ -940,9 +940,12 @@ export function generatePartSheets(parts: BlueprintPart[]): PartSheet[] {
 export function generateBlueprintData(projectName: string, nodes: SceneNode[], parts: ScenePart[], geometry?: BlueprintGeometry[]): BlueprintData {
   const bpParts = extractBlueprintParts(nodes, parts, geometry);
   const solidParts = bpParts.filter((p) => !p.isHole);
-  // Boards plus the loose fittings that join them. The drawings stay on the
-  // boards alone — a fused tenon is already drawn by the board it belongs to,
-  // and adding it again would only double its outline.
+  // Boards plus the loose fittings that join them. Fittings go on the cut list
+  // — how many, what size — but get no drawing of their own: a dowel or a
+  // domino is bought or cut from stock by its size, and a detail page for one
+  // tells the carpenter nothing the schedule row does not. The assembly
+  // drawings stay on the boards too; a fused tenon is already drawn by the
+  // board it belongs to.
   const schedule = [...bpParts, ...extractConnectorParts(nodes)];
   return {
     projectName: projectName || "ShapeForge Project",
@@ -950,7 +953,7 @@ export function generateBlueprintData(projectName: string, nodes: SceneNode[], p
     unit: "mm",
     parts: bpParts,
     cutList: generateCutList(schedule),
-    partSheets: generatePartSheets(schedule),
+    partSheets: generatePartSheets(bpParts),
     ...buildViews(solidParts),
   };
 }
