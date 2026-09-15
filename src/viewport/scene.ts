@@ -1,3 +1,4 @@
+import { MeasuringTape } from "./MeasuringTape";
 import * as THREE from "three";
 import type { BlueprintGeometry } from "../document/blueprint";
 import { cellColour, DEFAULT_CELL_DISPLAY, type CellDisplay } from "./cellColours";
@@ -25,7 +26,7 @@ import type { DisplayUnit } from "../measurement";
 import { evaluateMathExpression } from "../utils/mathExpr";
 
 export type { CameraMode } from "../document/types";
-export type ToolMode = "select" | "face" | "edge" | "place" | "move" | "rotate" | "align" | "build" | "join";
+export type ToolMode = "measure" | "select" | "face" | "edge" | "place" | "move" | "rotate" | "align" | "build" | "join";
 export type AlignAxis = 0 | 1 | 2;
 export type AlignAnchor = "min" | "center" | "max";
 export type AlignSubMode = "box" | "points";
@@ -1140,6 +1141,7 @@ export class Scene {
   private moveReadout: { id: string; startPos: THREE.Vector3 } | null = null;
   private resizeDrag: ResizeDrag | null = null;
   private resizeConstrained = true;
+  private tape: MeasuringTape;
   private toolMode: ToolMode = "select";
   /** The face tool can select faces for several independent operations; only
    * Push/Pull is allowed to expose or drag the normal-direction arrow. */
@@ -1568,6 +1570,7 @@ export class Scene {
     );
     this.scene.add(this.pushPullHandles);
 
+    this.tape = new MeasuringTape(host, this.scene, () => this.camera, () => this.showResult ? [] : [...this.parts.values()], () => ({ unit: this.displayUnit, decimals: this.decimalPlaces }));
     this.addLights();
     this.scene.add(this.plateGroup);
     this.rebuildPlate();
@@ -6636,6 +6639,11 @@ export class Scene {
     for (const arrowhead of negativeArrowheads) translateGizmo.remove(arrowhead);
   }
 
+  setTapePanelHost(host: HTMLElement) { this.tape.mountPanel(host); }
+  setTapeMode(mode: "points" | "faces" | "edge") { this.tape.setMode(mode); }
+  clearTape() { this.tape.clear(); }
+  cancelTape() { this.tape.cancel(); }
+
   setToolMode(mode: ToolMode) {
     if (mode !== "face") this.armedFace = null;
     const leavingFace = (this.toolMode === "face" || this.toolMode === "place") && mode !== this.toolMode;
@@ -6644,6 +6652,7 @@ export class Scene {
     if (mode !== "select") this.clearMoveReadout();
     if (this.toolMode === "build" && mode !== "build") this.setCells(null);
     this.toolMode = mode;
+    this.tape.setActive(mode === "measure");
     if (mode !== "align" && this.alignPointDrag) {
       this.alignPointDrag = null;
       this.alignDragArrow.visible = false;
@@ -8100,6 +8109,7 @@ export class Scene {
   // ---- picking ------------------------------------------------------------
 
   private onPointerDown = (e: PointerEvent) => {
+    if (this.toolMode === "measure" && e.button === 0) { this.tape.click(e); return; }
     // Only the left button ever selects/drags — right/middle are reserved
     // for orbit/pan and must never be misread as a click on release.
     if (e.button !== 0) return;
@@ -8418,6 +8428,7 @@ export class Scene {
    * as before — this never changes what a non-dragging click does.
    */
   private onPointerMove = (e: PointerEvent) => {
+    if (this.toolMode === "measure") { this.tape.move(e); return; }
     // Resize Face's own handles are on screen: the face being resized is
     // already shown selected (solid fill), and clicking a handle — not a
     // different face — is the only thing to do here now, so a hover
@@ -8829,6 +8840,7 @@ export class Scene {
   };
 
   private onPointerUp = (e: PointerEvent) => {
+    if (this.toolMode === "measure") return;
     this.releasePointer(e);
     const down = this.downAt;
     this.downAt = null;
@@ -9528,6 +9540,7 @@ export class Scene {
     this.updateAlignOverlay();
     this.updatePushPullOverlay();
     this.emitFaceSelection();
+    this.tape.render();
     this.faceResizeHandles?.render();
     this.updateMoveReadout();
     this.renderer.render(this.scene, this.camera);
@@ -9566,6 +9579,7 @@ export class Scene {
   }
 
   dispose() {
+    this.tape.dispose();
     this.clearFaceResizeHandles();
     cancelAnimationFrame(this.frame);
     // Appended to the host, so it outlives the renderer unless removed here —

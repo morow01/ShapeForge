@@ -3858,3 +3858,134 @@ button.stepper-btn:disabled {
 .sketch-revolve-axis { stroke: #d2544c; stroke-width: 1.5; stroke-dasharray: 8 5; }
 .sketch-revolve-ghost { fill: rgb(0 167 165 / 6%); stroke: #0a8f8d; stroke-width: 1; stroke-dasharray: 4 4; opacity: 0.7; }
 .sketch-revolve.blocked .sketch-revolve-axis { stroke: #b42318; stroke-width: 2; }
+
+/* Tape details live in the standard right sidebar; only numbers overlay the scene. */
+.tape-panel-host { min-height: 0; overflow: auto; }
+.tape-panel-host[hidden], .tape-panel[hidden], .tape-label[hidden], .tape-current[hidden] { display: none; }
+.tape-panel { padding: 20px 16px; color: inherit; }
+.tape-panel strong { display: block; margin-bottom: 16px; font-size: 18px; }
+.tape-modes { display: flex; gap: 4px; margin-bottom: 14px; }
+.tape-panel button { cursor: pointer; padding: 6px 8px; border: 1px solid #9ca3af66; border-radius: 6px; background: transparent; color: inherit; }
+.tape-modes button { flex: 1; }
+.tape-modes button[aria-pressed="true"] { background: #f6b83b; color: #252525; border-color: #c48b1d; }
+.tape-panel label, .tape-panel p { font-size: 12px; }
+.tape-panel p { margin: 14px 0; line-height: 1.5; }
+.tape-panel > button { margin-right: 6px; }
+.tape-readings { display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; }
+.tape-reading { display: flex; align-items: flex-start; gap: 10px; border: 1px solid #9ca3af44; padding: 12px 10px; border-radius: 8px; }
+.tape-reading > button { margin-left: auto; padding: 2px 7px; }
+.tape-number { display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 20px; padding: 0 4px; border-radius: 4px; background: #f8fafc; border: 1px solid #cbd5e1; color: #334155; font-size: 11px; font-weight: 600; }
+.tape-details, .tape-current { white-space: pre-line; font-size: 12px; line-height: 1.8; font-variant-numeric: tabular-nums; }
+.tape-current { border-left: 3px solid #0284c7; padding: 8px 12px; margin-bottom: 14px; }
+.tape-panel small { display: block; font-size: 11px; line-height: 1.5; margin-top: 16px; opacity: .75; }
+
+/* Match the inspector's dimension fields while keeping measurements read-only. */
+.tape-reading { display: grid; grid-template-columns: 20px auto minmax(0, 1fr) 20px; gap: 10px 7px; align-items: center; padding: 10px; background: #fff; border-color: #dce3e9; }
+.tape-reading .tape-details { display: contents; }
+.tape-reading .tape-detail-title { grid-column: 2; grid-row: 1; }
+.tape-reading .tape-total { grid-column: 3; grid-row: 1; text-align: right; }
+.tape-reading .tape-axis-grid { grid-column: 1 / -1; }
+.tape-reading > .tape-number { grid-column: 1; grid-row: 1; }
+.tape-reading > button { grid-column: 4; grid-row: 1; width: 20px; height: 20px; padding: 0; color: #768591; display: inline-flex; align-items: center; justify-content: center; }
+.tape-detail-title { color: #607581; font-size: 12px; font-weight: 500; }
+.tape-total { font-size: 14px; font-weight: 600; line-height: 1.5; color: #24415c; white-space: nowrap; }
+.tape-axis-caption { display: none; font-size: 10px; color: #758591; font-weight: 600; letter-spacing: .04em; margin-bottom: 7px; }
+.tape-axis-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.tape-axis-grid label { min-width: 0; }
+.tape-axis-grid label > span { display: flex; align-items: center; gap: 6px; color: #758591; margin-bottom: 4px; font-size: 11px; }
+.tape-axis-grid i { width: 9px; height: 9px; border-radius: 2px; }
+.tape-axis-grid input { width: 100%; min-width: 0; box-sizing: border-box; padding: 6px 8px; border: 1px solid #cbd7e1; border-radius: 6px; background: #f8fafc; color: #24415c; font-size: 13px; font-variant-numeric: tabular-nums; }
+.tape-axis-grid input:focus { outline: 2px solid #6c9ec8; outline-offset: 1px; }
+
+.tape-tool-flyout { width: 190px; flex-direction: column; transform: none; }
+.tape-tool-flyout > button { width: 100%; text-align: left; padding: 10px 12px; }
+.tape-tool-flyout hr { width: 100%; border: 0; border-top: 1px solid #dce3e9; margin: 4px 0; }
+
+.tape-label {
+  position: absolute;
+  z-index: 35;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 22px;
+  padding: 0 9px;
+  box-sizing: border-box;
+  background: #ffffff;
+  border: 1px solid #b9c6d0;
+  border-radius: 5px;
+  color: #0f172a;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 11px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  white-space: nowrap;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.1);
+  pointer-events: auto;
+  user-select: none;
+  cursor: default;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.tape-label:hover, .tape-label:focus-within {
+  border-color: #0a8f8d;
+  box-shadow: 0 0 0 3px rgba(10, 143, 141, 0.14);
+}
+
+.tape-label.tape-highlight, .tape-label:focus {
+  border-color: #0a8f8d;
+  box-shadow: 0 0 0 3px rgba(10, 143, 141, 0.18);
+  outline: none;
+}
+
+.tape-label button.tape-remove {
+  all: unset;
+  box-sizing: border-box;
+  position: absolute;
+  right: 0;
+  top: 0;
+  transform: translate(35%, -35%) scale(0.6);
+  width: 17px;
+  height: 17px;
+  min-width: 17px;
+  max-width: 17px;
+  min-height: 17px;
+  max-height: 17px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: 1px solid #b9c6d0;
+  color: #64748b;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.15);
+  transition: transform 0.16s ease, opacity 0.16s ease, background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  z-index: 2;
+}
+
+.tape-label:hover button.tape-remove,
+.tape-label:focus-within button.tape-remove,
+.tape-label:focus button.tape-remove {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(35%, -35%) scale(1);
+}
+
+.tape-label button.tape-remove:hover {
+  background: #dc2626;
+  border-color: #dc2626;
+  color: #ffffff;
+}
+
+.tape-hint { position: absolute; left: 50%; top: 12px; transform: translateX(-50%); margin: 0; padding: 6px 10px; font-size: 12px; color: #536b7b; background: #ffffffde; border-radius: 5px; pointer-events: none; z-index: 30; }
+.tape-hint[hidden] { display: none; }
+
+.tape-saved-list { display: flex; flex-direction: column; gap: 7px; margin-bottom: 14px; }
+.tape-saved-row { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto 22px; gap: 7px; align-items: center; padding: 10px 8px; border: 1px solid #dce3e9; border-radius: 7px; font-size: 12px; }
+.tape-saved-value { font-weight: 600; white-space: nowrap; color: #24415c; }
+.tape-saved-row > button { all: unset; box-sizing: border-box; width: 18px; height: 18px; min-width: 18px; max-width: 18px; min-height: 18px; max-height: 18px; border-radius: 50%; border: 1px solid #cbd5e1; display: inline-flex; align-items: center; justify-content: center; color: #64748b; background: #ffffff; cursor: pointer; transition: all 0.12s ease; }
+.tape-saved-row > button:hover { background: #dc2626; border-color: #dc2626; color: #ffffff; }
+.tape-saved-row.tape-highlight { background: #eaf3f7; border-color: #7893a3; }

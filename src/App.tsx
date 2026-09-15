@@ -2008,6 +2008,7 @@ export function App() {
   );
 
   const sceneRef = useRef<Scene | null>(null);
+  const tapePanelRef = useRef<HTMLDivElement>(null);
   // A prepared STL is valid only for the exact document and quality used to
   // create it. The revision also catches a change made while export is still
   // running, before there is a URL for the invalidation effect to clear.
@@ -4089,6 +4090,7 @@ export function App() {
       )}
 
       <div className="tool-rail" role="toolbar" aria-label="Design tools">
+        <button className={toolMode === "measure" ? "active" : ""} aria-pressed={toolMode === "measure"} onClick={() => setToolMode(mode => mode === "measure" ? "select" : "measure")} title="Measuring tape" aria-label="Measuring tape tool"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 6v6m5-6v4m5-4v6M7 18v-3m5 3v-3m5 3v-3"/></svg></button>
         {/* Category 1: Selection & Transform */}
         <button
           className={toolMode === "select" ? "active" : ""}
@@ -4506,7 +4508,7 @@ export function App() {
           plateSize={plateSize}
           displayUnit={displayUnit}
           decimalPlaces={decimalPlaces}
-          onSceneReady={(scene) => { sceneRef.current = scene; }}
+          onSceneReady={(scene) => { sceneRef.current = scene; if (scene && tapePanelRef.current) scene.setTapePanelHost(tapePanelRef.current); }}
           onCellsChanged={setBuildCells}
           onSelect={onSelect}
           onSelectMany={onSelectMany}
@@ -4670,7 +4672,9 @@ export function App() {
           </div>
         )}
         <div className="canvas-help">
-          {toolMode === "build"
+          {toolMode === "measure"
+            ? "Measuring tape · Click to measure · Right-drag orbit · Middle-drag pan · V Select"
+            : toolMode === "build"
             ? buildBusy
               ? "Working out the regions…"
               : "Alt-click a shape to subtract it · Click to add it back · Use the region list on the right for one region at a time"
@@ -4742,7 +4746,8 @@ export function App() {
       </main>
 
       <aside className="panel tools-panel">
-        <div className="tools-panel-tabs" role="tablist">
+        <div className="tape-panel-host" ref={tapePanelRef} hidden={toolMode !== "measure"} />
+        <div className="tools-panel-tabs" role="tablist" style={{ order: -1 }}>
           <button
             type="button"
             role="tab"
@@ -5423,7 +5428,7 @@ export function App() {
             </div>
           );
         })()}
-        {toolMode !== "face" && toolMode !== "edge" && toolMode !== "build" && rightPanelTab === "shapes" && (
+        {toolMode !== "measure" && toolMode !== "face" && toolMode !== "edge" && toolMode !== "build" && rightPanelTab === "shapes" && (
           <section className="tool-section shape-library">
           <div className="panel-heading compact shape-library-header">
             <div><h1>Shape library</h1><p>Drag or click to add</p></div>
@@ -5506,7 +5511,7 @@ export function App() {
             if (file) void importSTLFile(file);
           }}
         />
-        {toolMode !== "face" && toolMode !== "edge" && toolMode !== "build" && rightPanelTab === "properties" && (
+        {toolMode !== "measure" && toolMode !== "face" && toolMode !== "edge" && toolMode !== "build" && rightPanelTab === "properties" && (
           <div className="tools-panel-inspector-wrap">
             <section className="tool-section inspector-section">
           <div className="panel-heading compact">
