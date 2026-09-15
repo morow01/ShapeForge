@@ -20,6 +20,7 @@ import {
 } from "../sketch/geometry";
 import { fromMillimetres, toMillimetres, UNIT_LABEL, type DisplayUnit } from "../measurement";
 import { evaluateMathExpression } from "../utils/mathExpr";
+import { RedoIcon, SketchToolIcon, UndoIcon } from "./icons";
 
 /**
  * Full-screen 2D sketch editor: Bézier paths drawn the way Illustrator draws
@@ -111,9 +112,31 @@ type Drag =
   | { kind: "pull"; pathId: string; index: number; base: SketchPath[]; sx: number; sy: number; moved: boolean; closing: boolean }
   | { kind: "reshape"; pathId: string; index: number; t: number; start: Pt; base: SketchPath[]; moved: boolean };
 
+/** What a sketch becomes: an extrusion, or a revolve around one of its axes. */
+export interface SketchShape {
+  revolve: boolean;
+  /** Degrees, 1–360. */
+  angle: number;
+  /** 0: vertical (Y) axis; 1: horizontal (X) axis. */
+  axis: 0 | 1;
+  /** Revolve with its axis up, standing on the build plate. */
+  upright: boolean;
+}
+
+/** A path mirrored across the sketch's vertical (axis 0) or horizontal (1) axis. */
+function mirroredPath(path: SketchPath, axis: 0 | 1): SketchPath {
+  const sx = axis === 0 ? -1 : 1, sy = axis === 0 ? 1 : -1;
+  return {
+    ...path,
+    anchors: path.anchors.map((a) => ({ ...a, x: a.x * sx, y: a.y * sy, inX: a.inX * sx, inY: a.inY * sy, outX: a.outX * sx, outY: a.outY * sy })),
+  };
+}
+
 interface Props {
   title: string;
-  applyLabel: string;
+  /** Overrides the apply button's label (Update, when editing). */
+  applyLabel?: string;
+  initialShape: SketchShape;
   initial: SketchData;
   initialDepth: number;
   /** Model edges in the sketch plane (the face it was started on), shown and snapped to. */
@@ -121,12 +144,14 @@ interface Props {
   displayUnit: DisplayUnit;
   decimals: number;
   onCancel: () => void;
-  onApply: (sketch: SketchData, depth: number) => void;
+  onApply: (sketch: SketchData, depth: number, shape: SketchShape) => void;
 }
 
-export function SketchEditor({ title, applyLabel, initial, initialDepth, guides = [], displayUnit, decimals, onCancel, onApply }: Props) {
+export function SketchEditor({ title, applyLabel, initialShape, initial, initialDepth, guides = [], displayUnit, decimals, onCancel, onApply }: Props) {
   const [paths, setPaths] = useState<SketchPath[]>(() => clonePaths(initial.paths));
   const [depth, setDepth] = useState(initialDepth);
+  const [shape, setShape] = useState<SketchShape>(initialShape);
+  const [angleText, setAngleText] = useState(String(initialShape.angle));
   const [tool, setTool] = useState<Tool>("pen");
   const [selection, setSelection] = useState<Selection>(emptySelection);
   /** The open path the Pen is adding to, if any. */
@@ -144,6 +169,10 @@ export function SketchEditor({ title, applyLabel, initial, initialDepth, guides 
   const [hover, setHover] = useState<Hit>({ kind: "none" });
   const [drag, setDrag] = useState<Drag | null>(null);
   const [spaceHeld, setSpaceHeld] = useState(false);
+  /** Ctrl (Cmd) held: any drawing tool works as Direct Selection for the
+   *  moment, as in Illustrator, so points can be adjusted mid-path. */
+  const [ctrlHeld, setCtrlHeld] = useState(false);
+  const toolFor = (ctrl: boolean): Tool => (ctrl && tool !== "select" && tool !== "direct" ? "direct" : tool);
   const [, setHistoryTick] = useState(0);
 
   const canvasRef = useRef<HTMLDivElement>(null);
@@ -338,6 +367,7 @@ export function SketchEditor({ title, applyLabel, initial, initialDepth, guides 
   // ---- Pointer handling --------------------------------------------------
 
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const tool = toolFor(e.ctrlKey || e.metaKey);
     if (e.button === 2) return;
     const { sx, sy, world } = localPoint(e);
     (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
@@ -535,6 +565,7 @@ export function SketchEditor({ title, applyLabel, initial, initialDepth, guides 
   };
 
   const onPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const tool = toolFor(e.ctrlKey || e.metaKey);
     const { sx, sy, world } = localPoint(e);
     setPointer({ sx, sy, world });
     if (!drag) {
@@ -642,6 +673,7 @@ export function SketchEditor({ title, applyLabel, initial, initialDepth, guides 
   };
 
   const onPointerUp = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const tool = toolFor(e.ctrlKey || e.metaKey);
     const current = drag;
     setDrag(null);
     if (!current) return;
@@ -698,6 +730,7 @@ export function SketchEditor({ title, applyLabel, initial, initialDepth, guides 
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Control" || e.key === "Meta") setCtrlHeld(true);
       if ((e.target as HTMLElement | null)?.closest?.("input, textarea")) return;
       // The editor owns the keyboard while open: Delete must not remove the
       // selected 3D object behind it, nor V or A switch the app's tools.
@@ -755,10 +788,16 @@ export function SketchEditor({ title, applyLabel, initial, initialDepth, guides 
       else if (e.key === "-" || e.key === "_") switchTool("delete");
       else if (key === "f") fitView();
     };
-    const onKeyUp = (e: KeyboardEvent) => { if (e.key === " ") setSpaceHeld(false); };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === " ") setSpaceHeld(false);
+      if (e.key === "Control" || e.key === "Meta") setCtrlHeld(false);
+    };
+    const onBlur = () => setCtrlHeld(false);
+    window.addEventListener("blur", onBlur);
     window.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("keyup", onKeyUp, true);
     return () => {
+      window.removeEventListener("blur", onBlur);
       window.removeEventListener("keydown", onKeyDown, true);
       window.removeEventListener("keyup", onKeyUp, true);
     };
@@ -767,6 +806,17 @@ export function SketchEditor({ title, applyLabel, initial, initialDepth, guides 
   // ---- Derived -------------------------------------------------------------
 
   const closedCount = paths.filter((p) => p.closed).length;
+  // A revolve needs every closed shape on one side of its axis (touching is
+  // fine): the sketch's X for a vertical axis, its Y for a horizontal one.
+  const axisSides = useMemo(() => {
+    const closed = paths.filter((p) => p.closed && p.anchors.length > 1);
+    const bounds = closed.length ? sketchBounds({ paths: closed }) : null;
+    if (!bounds) return { crosses: false, extent: 0 };
+    const [lo, hi] = shape.axis === 0 ? [bounds.minX, bounds.maxX] : [bounds.minY, bounds.maxY];
+    const touch = Math.max(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY, 1) * 1e-6;
+    return { crosses: lo < -touch && hi > touch, extent: Math.max(Math.abs(lo), Math.abs(hi)) };
+  }, [paths, shape.axis]);
+  const revolveBlocked = shape.revolve && axisSides.crosses;
   const openCount = paths.length - closedCount;
 
   const selectedAnchors = useMemo(() => {
@@ -906,7 +956,7 @@ export function SketchEditor({ title, applyLabel, initial, initialDepth, guides 
   const active = activePathId ? paths.find((p) => p.id === activePathId) : undefined;
   let rubberBand: string | null = null;
   let closeHint = false;
-  if (tool === "pen" && active && pointer && !drag && !spaceHeld) {
+  if (tool === "pen" && !ctrlHeld && active && pointer && !drag && !spaceHeld) {
     const last = active.anchors[active.anchors.length - 1];
     const first = active.anchors[0];
     closeHint = hover.kind === "anchor" && hover.pathId === active.id && hover.index === 0 && active.anchors.length > 1;
@@ -941,7 +991,9 @@ export function SketchEditor({ title, applyLabel, initial, initialDepth, guides 
     if (path && hover.index < segmentCount(path)) insertPreview = nearestOnCubic(segmentCubic(path, hover.index), pointer.world).point;
   }
 
-  const cursor = spaceHeld || drag?.kind === "pan" ? (drag ? "grabbing" : "grab") : tool === "select" || tool === "direct" ? "default" : "crosshair";
+  const cursor = spaceHeld || drag?.kind === "pan"
+    ? (drag ? "grabbing" : "grab")
+    : toolCursor(toolFor(ctrlHeld), ctrlHeld ? "" : cursorHint);
 
   // Handles shown: on selected anchors and on the anchor the Pen is drawing from.
   const handleAnchors = new Set(selection.anchors);
@@ -967,23 +1019,33 @@ export function SketchEditor({ title, applyLabel, initial, initialDepth, guides 
   return (
     <div className="sketch-editor" role="dialog" aria-modal="true" aria-label={title}>
       <header className="sketch-header">
-        <div className="sketch-title">
-          <strong>{title}</strong>
-          <span>Draw closed shapes, then extrude them. A shape inside another becomes a hole.</span>
+        <div className="sketch-header-start">
+          <div className="sketch-title">
+            <strong>{title}</strong>
+            <span>Draw closed shapes, then extrude them. A shape inside another becomes a hole.</span>
+          </div>
+          <div className="topbar-group sketch-history" role="group" aria-label="History">
+            <button type="button" className="topbar-icon-btn" onClick={undo} disabled={!past.current.length} title="Undo (Ctrl+Z)" aria-label="Undo">
+              <UndoIcon className="topbar-icon" />
+            </button>
+            <button type="button" className="topbar-icon-btn" onClick={redo} disabled={!future.current.length} title="Redo (Ctrl+Shift+Z)" aria-label="Redo">
+              <RedoIcon className="topbar-icon" />
+            </button>
+          </div>
         </div>
         <div className="sketch-header-actions">
-          <button type="button" onClick={undo} disabled={!past.current.length} title="Undo (Ctrl+Z)">Undo</button>
-          <button type="button" onClick={redo} disabled={!future.current.length} title="Redo (Ctrl+Shift+Z)">Redo</button>
           <button type="button" onClick={fitView} title="Fit the drawing in view (F)">Fit</button>
           <span className="sketch-header-sep" />
           <button type="button" onClick={onCancel}>Cancel</button>
           <button
             type="button"
             className="primary"
-            disabled={!closedCount}
-            title={closedCount ? undefined : "Close at least one path to extrude it"}
-            onClick={() => { finishPath(); onApply({ paths: pathsRef.current.filter((p) => p.anchors.length > 1) }, depth); }}
-          >{applyLabel}</button>
+            disabled={!closedCount || revolveBlocked}
+            title={!closedCount
+              ? `Close at least one path to ${shape.revolve ? "revolve" : "extrude"} it`
+              : revolveBlocked ? "A shape crosses the revolve axis" : undefined}
+            onClick={() => { finishPath(); onApply({ paths: pathsRef.current.filter((p) => p.anchors.length > 1) }, depth, shape); }}
+          >{applyLabel ?? (shape.revolve ? "Revolve" : "Extrude")}</button>
         </div>
       </header>
 
@@ -1024,6 +1086,19 @@ export function SketchEditor({ title, applyLabel, initial, initialDepth, guides 
                 return <line key={i} x1={x1} y1={y1} x2={x2} y2={y2} />;
               })}
             </g>
+            {shape.revolve && (() => {
+              const [ox, oy] = toScreen(0, 0);
+              return (
+                <g className={`sketch-revolve ${revolveBlocked ? "blocked" : ""}`} pointerEvents="none">
+                  {paths.filter((p) => p.closed && p.anchors.length > 1).map((p) => (
+                    <path key={p.id} d={screenPathData(mirroredPath(p, shape.axis))} className="sketch-revolve-ghost" />
+                  ))}
+                  {shape.axis === 0
+                    ? <line x1={ox} y1={0} x2={ox} y2={size.height} className="sketch-revolve-axis" />
+                    : <line x1={0} y1={oy} x2={size.width} y2={oy} className="sketch-revolve-axis" />}
+                </g>
+              );
+            })()}
             <OriginMarker at={toScreen(0, 0)} />
 
             <path d={compoundFill} className="sketch-fill-visual" fillRule="nonzero" pointerEvents="none" />
@@ -1106,7 +1181,7 @@ export function SketchEditor({ title, applyLabel, initial, initialDepth, guides 
           </section>
 
           <section className="sketch-section">
-            <div className="field-label">Anchor {selectedAnchors.length > 1 ? `(${selectedAnchors.length})` : ""}</div>
+            <div className="field-label">Anchor{selectedAnchors.length > 1 ? ` · ${selectedAnchors.length} selected` : ""} ({unit})</div>
             {single ? (
               <div className="sketch-xy">
                 <LengthInput label="X" axis={0} valueMm={single.anchor.x} unit={displayUnit} decimals={decimals} onCommit={(mm) => setAnchorCoordinate("x", mm)} />
@@ -1170,7 +1245,7 @@ export function SketchEditor({ title, applyLabel, initial, initialDepth, guides 
           </section>
 
           <section className="sketch-section">
-            <div className="field-label">Snapping</div>
+            <div className="field-label">Snapping ({unit})</div>
             <label className="sketch-check">
               <input type="checkbox" checked={snapGrid} onChange={(e) => setSnapGrid(e.target.checked)} />
               Snap to grid
@@ -1180,13 +1255,57 @@ export function SketchEditor({ title, applyLabel, initial, initialDepth, guides 
           </section>
 
           <section className="sketch-section sketch-extrude">
-            <div className="field-label">Extrude</div>
-            <LengthInput label="Height" axis={2} valueMm={depth} unit={displayUnit} decimals={decimals} min={0.01} onCommit={(mm) => setDepth(mm)} />
-            <p className="sketch-hint">
-              {closedCount
-                ? `${shapeCount} ${shapeCount === 1 ? "shape" : "shapes"}${holeCount ? ` with ${holeCount} ${holeCount === 1 ? "hole" : "holes"}` : ""} will be extruded${openCount ? `; ${openCount} open ${openCount === 1 ? "path is" : "paths are"} ignored` : ""}.`
-                : "Close a path to extrude it: click its first anchor with the Pen."}
-            </p>
+            <div className="field-label">Make solid{shape.revolve ? "" : ` (${unit})`}</div>
+            <div className="sketch-segmented" role="radiogroup" aria-label="Make solid by">
+              <button type="button" role="radio" aria-checked={!shape.revolve} className={!shape.revolve ? "active" : ""} onClick={() => setShape((s) => ({ ...s, revolve: false }))} title="Push the shapes straight out of the sketch plane">Extrude</button>
+              <button type="button" role="radio" aria-checked={shape.revolve} className={shape.revolve ? "active" : ""} onClick={() => setShape((s) => ({ ...s, revolve: true }))} title="Spin the shapes around an axis, like a lathe">Revolve</button>
+            </div>
+            {shape.revolve ? (
+              <>
+                <div className="sketch-subsection-label">Axis</div>
+                <div className="sketch-segmented" role="radiogroup" aria-label="Revolve axis">
+                  <button type="button" role="radio" aria-checked={shape.axis === 0} className={shape.axis === 0 ? "active" : ""} onClick={() => setShape((s) => ({ ...s, axis: 0 }))} title="Spin around the vertical line through the sketch origin">Vertical (Y)</button>
+                  <button type="button" role="radio" aria-checked={shape.axis === 1} className={shape.axis === 1 ? "active" : ""} onClick={() => setShape((s) => ({ ...s, axis: 1 }))} title="Spin around the horizontal line through the sketch origin">Horizontal (X)</button>
+                </div>
+                <label className="sketch-length">
+                  <span className="field-label">Angle</span>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={angleText}
+                    onChange={(e) => setAngleText(e.target.value)}
+                    onBlur={() => {
+                      const value = evaluateMathExpression(angleText);
+                      const angle = value === null || !Number.isFinite(value) ? shape.angle : Math.min(Math.max(value, 1), 360);
+                      setShape((s) => ({ ...s, angle }));
+                      setAngleText(String(+angle.toFixed(2)));
+                    }}
+                    onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                  />
+                  <span className="sketch-unit">°</span>
+                </label>
+                <label className="sketch-check">
+                  <input type="checkbox" checked={shape.upright} onChange={(e) => setShape((s) => ({ ...s, upright: e.target.checked }))} />
+                  Stand upright on the build plate
+                </label>
+                <p className={`sketch-hint ${revolveBlocked ? "sketch-hint-error" : ""}`}>
+                  {!closedCount
+                    ? "Close a path to revolve it: click its first anchor with the Pen."
+                    : revolveBlocked
+                      ? "A shape crosses the axis (dashed line). Keep every shape on one side of it; touching it is fine."
+                      : `${shapeCount} ${shapeCount === 1 ? "shape" : "shapes"} will be spun ${+shape.angle.toFixed(2)}° around the dashed axis${shape.upright ? " and stood upright on the build plate" : ""}. The faint outline shows the other side.`}
+                </p>
+              </>
+            ) : (
+              <>
+                <LengthInput label="Height" axis={2} valueMm={depth} unit={displayUnit} decimals={decimals} min={0.01} onCommit={(mm) => setDepth(mm)} />
+                <p className="sketch-hint">
+                  {closedCount
+                    ? `${shapeCount} ${shapeCount === 1 ? "shape" : "shapes"}${holeCount ? ` with ${holeCount} ${holeCount === 1 ? "hole" : "holes"}` : ""} will be extruded${openCount ? `; ${openCount} open ${openCount === 1 ? "path is" : "paths are"} ignored` : ""}.`
+                    : "Close a path to extrude it: click its first anchor with the Pen."}
+                </p>
+              </>
+            )}
           </section>
         </aside>
       </div>
@@ -1225,7 +1344,6 @@ function LengthInput({ label, valueMm, unit, decimals, min, axis, onCommit }: {
           if (e.key === "Escape") { setText(format(valueMm)); (e.target as HTMLInputElement).blur(); }
         }}
       />
-      <span className="sketch-unit">{UNIT_LABEL[unit]}</span>
     </label>
   );
 }
@@ -1290,6 +1408,55 @@ function AnchorGlyph({ kind }: { kind: AnchorMode | "break" | "merge" }) {
   return <svg viewBox="0 0 24 24" className="sketch-glyph" aria-hidden="true">{body}</svg>;
 }
 
+/**
+ * The pointer for each tool, drawn like the tool's own icon so it is always
+ * clear which tool is active — black with a white edge to read on the grid. A
+ * small mark beside the Pen says what a click will do there.
+ */
+function svgCursor(body: string, hotX: number, hotY: number, fallback: string) {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">${body}</svg>`;
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}") ${hotX} ${hotY}, ${fallback}`;
+}
+const outlined = (d: string, fill = "none") =>
+  `<path d="${d}" fill="${fill}" stroke="#fff" stroke-width="3.2" stroke-linejoin="round" stroke-linecap="round"/>` +
+  `<path d="${d}" fill="${fill}" stroke="#111" stroke-width="1.4" stroke-linejoin="round" stroke-linecap="round"/>`;
+/** Pen nib tilted like Illustrator's; its tip, at (7, 7), is the hotspot. */
+const PEN_NIB = `<g transform="rotate(-45 12 12) translate(0 2)">${outlined("M12 3l5 8-2.5 7h-5L7 11z", "#fff")}${outlined("M12 3v6.5")}<circle cx="12" cy="11" r="1.2" fill="#111"/></g>`;
+const penMark = (mark: string) => {
+  const marks: Record<string, string> = {
+    "+": outlined("M16 19h6M19 16v6"),
+    "-": outlined("M16 19h6"),
+    o: `<circle cx="19" cy="19" r="2.6" fill="#fff" stroke="#111" stroke-width="1.4"/>`,
+    "/": outlined("M16.5 21.5l5-5"),
+  };
+  return PEN_NIB + (marks[mark] ?? "");
+};
+function toolCursor(tool: Tool, hint: string): string {
+  switch (tool) {
+    case "select":
+      return svgCursor(outlined("M5 3l13 10-6 .8 3.4 6.4-2.6 1.3-3.3-6.5L5 19z", "#111"), 5, 3, "default");
+    case "direct":
+      return svgCursor(outlined("M5 3l13 10-6 .8 3.4 6.4-2.6 1.3-3.3-6.5L5 19z", "#fff"), 5, 3, "default");
+    case "pen": {
+      const mark = hint === "Close path" ? "o" : hint === "Add anchor" ? "+" : hint === "Continue path" || hint === "Join paths" ? "/" : "";
+      return svgCursor(penMark(mark), 7, 7, "crosshair");
+    }
+    case "add":
+      return svgCursor(penMark("+"), 7, 7, "crosshair");
+    case "delete":
+      return svgCursor(penMark("-"), 7, 7, "crosshair");
+    case "convert":
+      return svgCursor(outlined("M4 19L12 5l8 14"), 12, 5, "crosshair");
+    case "scissors":
+      return svgCursor(
+        `<circle cx="6" cy="7" r="2.8" fill="none" stroke="#fff" stroke-width="3.2"/><circle cx="6" cy="17" r="2.8" fill="none" stroke="#fff" stroke-width="3.2"/>` +
+        `<circle cx="6" cy="7" r="2.8" fill="none" stroke="#111" stroke-width="1.4"/><circle cx="6" cy="17" r="2.8" fill="none" stroke="#111" stroke-width="1.4"/>` +
+        outlined("M8.3 8.4L21 16.5M8.3 15.6L21 7.5"),
+        14, 12, "crosshair",
+      );
+  }
+}
+
 function OriginMarker({ at: [x, y] }: { at: Pt }) {
   return (
     <g className="sketch-origin" pointerEvents="none">
@@ -1310,14 +1477,7 @@ function ToolGlyph({ tool }: { tool: Tool }) {
     case "direct":
       return <svg viewBox="0 0 24 24" className="tool-icon"><path d="M6 3l12 9-5.5 1 3 6-2.5 1.2-3-6L6 18z" {...common} fill="#fff" /></svg>;
     case "pen":
-      return (
-        <svg viewBox="0 0 24 24" className="tool-icon">
-          <path d="M12 3l6 9-3 8H9l-3-8z" {...common} />
-          <path d="M12 3v7" {...common} />
-          <circle cx="12" cy="11.5" r="1.4" fill="currentColor" />
-          <path d="M9 20h6" {...common} />
-        </svg>
-      );
+      return <SketchToolIcon />;
     case "add":
     case "delete":
       return (

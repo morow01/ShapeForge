@@ -3849,3 +3849,12 @@ button.stepper-btn:disabled {
 .sketch-insert-preview.cut { fill: none; stroke-width: 2; }
 .sketch-icon-button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; padding: 5px 2px 4px; font-size: 11px; line-height: 1.1; }
 .sketch-glyph { display: block; width: 22px; height: 22px; }
+.sketch-header-start { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.sketch-history { display: flex; gap: 2px; }
+.placement-bar strong, .placement-bar > span { white-space: nowrap; }
+
+.sketch-subsection-label { font-size: 12px; color: #52606b; margin-top: 2px; }
+.sketch-hint-error { color: #b42318; }
+.sketch-revolve-axis { stroke: #d2544c; stroke-width: 1.5; stroke-dasharray: 8 5; }
+.sketch-revolve-ghost { fill: rgb(0 167 165 / 6%); stroke: #0a8f8d; stroke-width: 1; stroke-dasharray: 4 4; opacity: 0.7; }
+.sketch-revolve.blocked .sketch-revolve-axis { stroke: #b42318; stroke-width: 2; }

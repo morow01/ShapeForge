@@ -12,7 +12,7 @@ const load=(file,names,deps={})=>{
   return new Function(...Object.keys(deps),`${js};return {${names.join(',')}};`)(...Object.values(deps));
 };
 const g=load('../src/sketch/geometry.ts',['mergeAnchors','breakPath','linkHandles','convertAnchor','anchor','insertAnchor','segmentCubic','cubicPoint','nearestOnCubic','sketchCommands','sketchBounds','pathArea','parseSketch','splitCubic']);
-const {svgMeshSolid}=load('../src/kernel/svgSolid.ts',['svgMeshSolid'],{getManifold,MeshShape});
+const {svgMeshSolid,svgRevolveSolid}=load('../src/kernel/svgSolid.ts',['svgMeshSolid','svgRevolveSolid'],{getManifold,MeshShape});
 const near=(a,b,tol=1e-6)=>assert.ok(Math.abs(a-b)<=tol,`${a} ≈ ${b}`);
 
 // A square drawn with the Pen: four corners, closed.
@@ -188,4 +188,23 @@ assert.deepEqual(squareMerged.paths[0].anchors.map(a=>[a.x,a.y]),[[0,20],[40,0],
 // Middles of different paths, or non-neighbours, cannot merge.
 assert.equal(g.mergeAnchors([wavy,u],ref(wavy,1),ref(u,1)),null);
 assert.equal(g.mergeAnchors([outer],ref(outer,0),ref(outer,2)),null);
-console.log('Sketch: closed paths extrude, holes cut, curves split exactly, anchor types, quality, scissors, merge, saved sketches load passed');
+
+// Revolve: spun around the sketch's own axes. A partial turn starts at the
+// drawn profile and sweeps out of the sketch plane (+Z); upright puts the axis
+// along +Z resting on z = 0.
+const rect=(x0,y0,x1,y1)=>[[['M',x0,y0],['L',x1,y0],['L',x1,y1],['L',x0,y1],['L',x0,y0]]];
+const revolved=(paths,o)=>svgRevolveSolid(paths,{curveSamples:8,circularSegments:96,...o}).wrapped;
+const box=(solid)=>{const b=solid.boundingBox(); return [...b.min,...b.max].map(v=>Math.round(v*100)/100+0);};
+const ring=Math.PI*(100-25)*20;
+assert.deepEqual(box(revolved(rect(5,0,10,20),{angle:90,axis:0,upright:false})),[0,0,0,10,20,10],'vertical axis, quarter turn out of the plane');
+assert.deepEqual(box(revolved(rect(-10,0,-5,20),{angle:90,axis:0,upright:false})),[-10,0,0,0,20,10],'drawn left of the axis');
+assert.deepEqual(box(revolved(rect(0,5,20,10),{angle:90,axis:1,upright:false})),[0,0,0,20,10,10],'horizontal axis');
+assert.deepEqual(box(revolved(rect(0,-10,20,-5),{angle:90,axis:1,upright:false})),[0,-10,0,20,0,10],'drawn below the axis');
+assert.deepEqual(box(revolved(rect(5,3,10,23),{angle:360,axis:0,upright:true})),[-10,-10,0,10,10,20],'upright rests on the plate');
+const full=revolved(rect(5,0,10,20),{angle:360,axis:0,upright:false});
+assert.ok(Math.abs(full.volume()-ring)/ring<0.002,'full turn volume '+full.volume());
+assert.throws(()=>revolved(rect(-5,0,10,20),{angle:360,axis:0,upright:false}),/crosses the revolve axis/);
+// Touching the axis gives a solid (a cylinder here), not an error.
+const solidCylinder=revolved(rect(0,0,10,20),{angle:360,axis:0,upright:true});
+assert.ok(Math.abs(solidCylinder.volume()-Math.PI*100*20)/(Math.PI*2000)<0.002);
+console.log('Sketch: closed paths extrude, holes cut, curves split exactly, anchor types, quality, scissors, merge, revolve, saved sketches load passed');

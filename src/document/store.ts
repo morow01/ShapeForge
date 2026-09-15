@@ -736,9 +736,9 @@ interface DocState {
   resetParams: (id: string) => void;
   setText: (id: string, text: string) => void;
   /** Adds an extruded sketch whose local XY plane is the picked sketch plane. */
-  addSketch: (sketch: SketchData, params: { depth: number; curveSegments: number }, position: Vec3, rotation: Vec3) => void;
+  addSketch: (sketch: SketchData, params: Record<string, number>, position: Vec3, rotation: Vec3) => void;
   /** Replaces a sketch's outlines, extrude height and curve quality. */
-  setSketch: (id: string, sketch: SketchData, params: { depth: number; curveSegments?: number }) => void;
+  setSketch: (id: string, sketch: SketchData, params: Record<string, number>, transform?: { position: Vec3; rotation: Vec3 }) => void;
   setFontName: (id: string, fontName: string) => void;
   setTransform: (id: string, patch: { position?: Vec3; rotation?: Vec3; scale?: Vec3 }) => void;
   setPositions: (updates: { id: string; position: Vec3 }[]) => void;
@@ -1153,10 +1153,10 @@ export const useDoc = create<DocState>()(
         }
       },
 
-      setSketch: (id, sketch, sketchParams) => {
+      setSketch: (id, sketch, sketchParams, transform) => {
         set((s) => ({
           nodes: updateNode(s.nodes, id, (n) =>
-            n.type === "object" && n.kind === "sketch" ? { ...n, sketch, params: { ...n.params, ...sketchParams } } : n),
+            n.type === "object" && n.kind === "sketch" ? { ...n, sketch, params: { ...n.params, ...sketchParams }, ...(transform ?? {}) } : n),
         }));
         afterBatchedMutation();
       },

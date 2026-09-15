@@ -19,7 +19,7 @@ import {
 import type { Face, Shape3D, Sketch, Wire } from "replicad";
 import { InvalidShapeError, solveTriangle, solveScaledTriangle } from "../geometry/triangle";
 import { getBlob, putBlob } from "../document/blobStore";
-import { svgMeshSolid } from "./svgSolid";
+import { svgMeshSolid, svgRevolveSolid } from "./svgSolid";
 import { makeThreadedRodSolid, makeThreadedNutSolid } from "./threads";
 import { makeSpringSolid } from "./spring";
 import { makeHingeSolid } from "./hinge";
@@ -1305,10 +1305,20 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
       break;
     }
     case "sketch": {
-      const depth = Math.max(p.depth ?? 10, 0.01);
-      const solid = spec.sketchPaths?.length
-        ? svgMeshSolid(spec.sketchPaths, depth, undefined, Math.min(Math.max(Math.round(p.curveSegments ?? 24), 1), 256))
-        : null;
+      const curveSamples = Math.min(Math.max(Math.round(p.curveSegments ?? 24), 1), 256);
+      if (!spec.sketchPaths?.length) throw new Error("This sketch has no closed shape. Close a path in the sketch editor.");
+      if ((p.revolve ?? 0) >= 0.5) {
+        s = svgRevolveSolid(spec.sketchPaths, {
+          angle: p.revolveAngle ?? 360,
+          axis: (p.revolveAxis ?? 0) >= 0.5 ? 1 : 0,
+          upright: (p.standUpright ?? 1) >= 0.5,
+          curveSamples,
+          // Quality sets the smoothness around the turn as well as along curves.
+          circularSegments: Math.min(Math.max(curveSamples * 3, 24), 192),
+        });
+        break;
+      }
+      const solid = svgMeshSolid(spec.sketchPaths, Math.max(p.depth ?? 10, 0.01), undefined, curveSamples);
       if (!solid) throw new Error("This sketch has no closed shape to extrude. Close a path in the sketch editor.");
       s = solid;
       break;

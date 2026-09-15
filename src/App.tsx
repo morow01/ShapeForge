@@ -63,7 +63,7 @@ import type { DropDirection } from "./ui/icons";
 import { buildThreeMF } from "./export/threemf";
 import { SvgImportModal } from "./ui/SvgImportModal";
 import { TextModal } from "./ui/TextModal";
-import { SketchEditor } from "./ui/SketchEditor";
+import { SketchEditor, type SketchShape } from "./ui/SketchEditor";
 import { SettingsModal } from "./ui/SettingsModal";
 import type { BuildPlateSize } from "./ui/SettingsModal";
 import { ExportModal } from "./ui/ExportModal";
@@ -553,6 +553,7 @@ export function App() {
     sketch: SketchData;
     depth: number;
     curveSegments: number;
+    shape: SketchShape;
     position: Vec3;
     rotation: Vec3;
     /** Model edges lying in the sketch plane, in its own 2D frame. */
@@ -820,6 +821,14 @@ export function App() {
         sketch: { paths: [] },
         depth: getEffectiveDefaults("sketch").depth ?? 10,
         curveSegments: getEffectiveDefaults("sketch").curveSegments ?? SKETCH_CURVE_SEGMENTS,
+        // Started on the build plate, a revolve stands up by default; on a
+        // face it stays where it was drawn.
+        shape: {
+          revolve: false,
+          angle: 360,
+          axis: 0,
+          upright: !targetId,
+        },
         position: base.toArray() as Vec3,
         rotation: degrees,
       });
@@ -5594,6 +5603,12 @@ export function App() {
                   sketch: selected.sketch ?? { paths: [] },
                   depth: selected.params.depth ?? 10,
                   curveSegments: selected.params.curveSegments ?? SKETCH_CURVE_SEGMENTS,
+                  shape: {
+                    revolve: (selected.params.revolve ?? 0) >= 0.5,
+                    angle: selected.params.revolveAngle ?? 360,
+                    axis: (selected.params.revolveAxis ?? 0) >= 0.5 ? 1 : 0,
+                    upright: (selected.params.standUpright ?? 1) >= 0.5,
+                  },
                   position: selected.position,
                   rotation: selected.rotation,
                 });
@@ -6829,16 +6844,37 @@ export function App() {
       {sketchSession && (
         <SketchEditor
           title={sketchSession.title}
-          applyLabel={sketchSession.nodeId ? "Update" : "Extrude"}
+          applyLabel={sketchSession.nodeId ? "Update" : undefined}
+          initialShape={sketchSession.shape}
           initial={sketchSession.sketch}
           initialDepth={sketchSession.depth}
           guides={sketchSession.guides}
           displayUnit={displayUnit}
           decimals={decimalPlaces}
           onCancel={() => setSketchSession(null)}
-          onApply={(sketch, depth) => {
-            if (sketchSession.nodeId) setSketch(sketchSession.nodeId, sketch, { depth });
-            else addSketch(sketch, { depth, curveSegments: sketchSession.curveSegments }, sketchSession.position, sketchSession.rotation);
+          onApply={(sketch, depth, shape) => {
+            const params = {
+              depth,
+              revolve: shape.revolve ? 1 : 0,
+              revolveAngle: shape.angle,
+              revolveAxis: shape.axis,
+              standUpright: shape.upright ? 1 : 0,
+            };
+            // Stood up, a revolve is built with its axis along +Z resting on
+            // z = 0, so it goes on the build plate unturned, at the spot the
+            // sketch was started.
+            const upright = shape.revolve && shape.upright;
+            const plate = { position: [sketchSession.position[0], sketchSession.position[1], 0] as Vec3, rotation: [0, 0, 0] as Vec3 };
+            if (sketchSession.nodeId) {
+              setSketch(sketchSession.nodeId, sketch, params, upright ? plate : undefined);
+            } else {
+              addSketch(
+                sketch,
+                { ...params, curveSegments: sketchSession.curveSegments },
+                upright ? plate.position : sketchSession.position,
+                upright ? plate.rotation : sketchSession.rotation,
+              );
+            }
             setSketchSession(null);
           }}
         />

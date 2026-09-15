@@ -1156,6 +1156,7 @@ export class Scene {
   private collisionContactOwnerId: string | null = null;
   private collisionContactCache = new Map<string, import("../snapping/snap").ActiveSnap[]>();
   private showSelectedCollisionContacts = true;
+  /** Edge and point contact markers: thin, so drawn over everything. */
   private collisionContactMaterial = new THREE.MeshBasicMaterial({
     color: 0xff6b35,
     transparent: true,
@@ -1163,6 +1164,38 @@ export class Scene {
     depthTest: false,
     depthWrite: false,
     side: THREE.DoubleSide,
+  });
+  /**
+   * A shared contact face, filled. It is depth-tested and pulled just in front
+   * of the coincident target surface, so it shows only where nothing covers
+   * it — through a see-through part, say. Drawn over everything, the fill lay
+   * across the selected part's FRONT face while really sitting at its back,
+   * and slid over that face as the camera turned: a thin part like an
+   * extruded sketch looked as though it twisted while orbiting.
+   */
+  private collisionFaceMaterial = new THREE.MeshBasicMaterial({
+    color: 0xff6b35,
+    transparent: true,
+    opacity: 0.85,
+    depthTest: true,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -4,
+    side: THREE.DoubleSide,
+  });
+  /**
+   * The outline of a contact face, drawn over everything so the contact is
+   * always visible. A line lies along the part's own edges where it meets the
+   * other part, so it moves with the part as the camera turns instead of
+   * covering it the way a fill does.
+   */
+  private collisionOutlineMaterial = new LineMaterial({
+    color: 0xff6b35,
+    linewidth: 3,
+    depthTest: false,
+    depthWrite: false,
+    transparent: true,
   });
   private collisionRafId: number | null = null;
   private pendingCollisionId: string | null = null;
@@ -1520,7 +1553,10 @@ export class Scene {
     this.multiGizmoPivot.name = "MultiGizmoPivot";
     this.scene.add(this.multiGizmoPivot);
     this.scene.add(this.guides.group);
-    this.collisionContacts.renderOrder = 10;
+    // A Group's renderOrder sorts all its children ahead of their own, so
+    // this stays 0: the depth-tested fill must draw before a see-through
+    // part (1). Lines and markers ignore depth and need no late slot.
+    this.collisionContacts.renderOrder = 0;
     this.scene.add(this.collisionContacts);
     this.scene.add(
       this.resizeBox,
@@ -3944,8 +3980,11 @@ export class Scene {
     this.setPlacementTarget(null);
     if (this.placementPreview) {
       this.placementPreview.removeFromParent();
-      this.placementPreview.geometry.dispose();
-      (this.placementPreview.material as THREE.Material).dispose();
+      this.placementPreview.traverse((child) => {
+        const mesh = child as THREE.Mesh;
+        mesh.geometry?.dispose();
+        (mesh.material as THREE.Material | undefined)?.dispose();
+      });
       this.placementPreview = null;
     }
     if (!kind) return;
@@ -4849,6 +4888,24 @@ export class Scene {
     }));
     this.placementPreview.renderOrder = 20;
     this.placementPreview.visible = false;
+    if (kind === "sketch") {
+      // Which way the drawing runs on the plane, and which way it extrudes:
+      // red X and green Y along the plane, teal out of it.
+      const length = 18;
+      for (const [direction, color, scale] of [
+        [new THREE.Vector3(1, 0, 0), 0xd2544c, 1],
+        [new THREE.Vector3(0, 1, 0), 0x3f9a55, 1],
+        [new THREE.Vector3(0, 0, 1), 0x0a8f8d, 1.3],
+      ] as const) {
+        const arrow = new THREE.ArrowHelper(direction, new THREE.Vector3(), length * scale, color, length * 0.2 * scale, length * 0.11 * scale);
+        arrow.traverse((child) => {
+          const material = (child as THREE.Mesh).material as THREE.Material | undefined;
+          if (material) { material.depthTest = false; material.transparent = true; }
+          child.renderOrder = 21;
+        });
+        this.placementPreview.add(arrow);
+      }
+    }
     this.scene.add(this.placementPreview);
   }
 
@@ -7383,10 +7440,39 @@ export class Scene {
       if (!vertices.length) continue;
       const geometry = new THREE.BufferGeometry();
       geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
-      const patch = new THREE.Mesh(geometry, this.collisionContactMaterial);
-      patch.renderOrder = 10;
+      const patch = new THREE.Mesh(geometry, this.collisionFaceMaterial);
+      // Before a see-through part (renderOrder 1), which then blends over it.
+      patch.renderOrder = 0;
       patch.frustumCulled = false;
       this.collisionContacts.add(patch);
+
+      // Outline of the shared area: each part's own face boundary, kept where
+      // it lies on the other part's face.
+      const outline: number[] = [];
+      const addSegment = (p: [number, number], q: [number, number]) => {
+        for (const [u, w] of [p, q]) {
+          const point = [0, 0, 0];
+          point[axis] = plane;
+          point[others[0]] = u;
+          point[others[1]] = w;
+          outline.push(point[0], point[1], point[2]);
+        }
+      };
+      for (const [a, b] of this.boundaryEdges(movingTriangles)) {
+        for (const [p, q] of this.clipSegmentToTriangles(a, b, targetTriangles)) addSegment(p, q);
+      }
+      for (const [a, b] of this.boundaryEdges(targetTriangles)) {
+        for (const [p, q] of this.clipSegmentToTriangles(a, b, movingTriangles)) addSegment(p, q);
+      }
+      if (outline.length) {
+        const lineGeometry = new LineSegmentsGeometry();
+        lineGeometry.setPositions(outline);
+        this.collisionOutlineMaterial.resolution.set(this.host.clientWidth, this.host.clientHeight);
+        const lines = new LineSegments2(lineGeometry, this.collisionOutlineMaterial);
+        lines.renderOrder = 10;
+        lines.frustumCulled = false;
+        this.collisionContacts.add(lines);
+      }
       faceTargets.add(snap.targetId);
     }
     // Edge contact is independent from axis-aligned snapping. A box can touch
@@ -7605,6 +7691,9 @@ export class Scene {
     const points = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
     root.traverse((child) => {
       if (!(child instanceof THREE.Mesh) || !(child.geometry instanceof THREE.BufferGeometry)) return;
+      // A hidden occluder copy would count every triangle twice and use up
+      // the triangle budget below on duplicates.
+      if (!child.visible) return;
       if (!child.geometry.boundingBox) child.geometry.computeBoundingBox();
       if (child.geometry.boundingBox) {
         const childBox = child.geometry.boundingBox.clone().applyMatrix4(child.matrixWorld);
@@ -7633,6 +7722,74 @@ export class Scene {
       }
     });
     return triangles;
+  }
+
+  /** Edges used by only one of the triangles: the outline of a flat patch.
+   *  A part's triangles share exact vertices, so matching by value works. */
+  private boundaryEdges(triangles: [number, number][][]): [[number, number], [number, number]][] {
+    const key = (p: [number, number]) => `${p[0].toFixed(4)},${p[1].toFixed(4)}`;
+    const edges = new Map<string, { a: [number, number]; b: [number, number]; count: number }>();
+    // A part's hidden-line occluder repeats its mesh exactly; counted twice,
+    // every edge would look shared and no outline would be left.
+    const seen = new Set<string>();
+    for (const triangle of triangles) {
+      const id = triangle.map(key).sort().join("|");
+      if (seen.has(id)) continue;
+      seen.add(id);
+      for (let i = 0; i < 3; i++) {
+        const a = triangle[i], b = triangle[(i + 1) % 3];
+        const ka = key(a), kb = key(b);
+        if (ka === kb) continue;
+        const k = ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
+        const entry = edges.get(k);
+        if (entry) entry.count++;
+        else edges.set(k, { a, b, count: 1 });
+      }
+    }
+    return [...edges.values()].filter((e) => e.count === 1).map((e) => [e.a, e.b]);
+  }
+
+  /** The pieces of segment a→b lying inside any of the triangles. */
+  private clipSegmentToTriangles(a: [number, number], b: [number, number], triangles: [number, number][][]): [[number, number], [number, number]][] {
+    const intervals: [number, number][] = [];
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    const length = Math.hypot(dx, dy);
+    if (length < 1e-9) return [];
+    for (const triangle of triangles) {
+      const area = (triangle[1][0] - triangle[0][0]) * (triangle[2][1] - triangle[0][1])
+        - (triangle[1][1] - triangle[0][1]) * (triangle[2][0] - triangle[0][0]);
+      if (Math.abs(area) < 1e-12) continue;
+      const orientation = area > 0 ? 1 : -1;
+      let t0 = 0, t1 = 1;
+      for (let i = 0; i < 3 && t0 <= t1; i++) {
+        const p = triangle[i], q = triangle[(i + 1) % 3];
+        const ex = q[0] - p[0], ey = q[1] - p[1];
+        const edgeLength = Math.hypot(ex, ey) || 1;
+        // Signed distance inside this edge, with a little slack so a boundary
+        // running exactly along the other part's edge still counts as inside.
+        const side = (x: number, y: number) => orientation * (ex * (y - p[1]) - ey * (x - p[0])) / edgeLength + 1e-4;
+        const f0 = side(a[0], a[1]), f1 = side(b[0], b[1]);
+        if (f0 < 0 && f1 < 0) { t1 = -1; break; }
+        if (f0 >= 0 && f1 >= 0) continue;
+        const t = f0 / (f0 - f1);
+        if (f0 < 0) t0 = Math.max(t0, t);
+        else t1 = Math.min(t1, t);
+      }
+      if (t1 - t0 > 1e-6) intervals.push([t0, t1]);
+    }
+    intervals.sort((u, v) => u[0] - v[0]);
+    const pieces: [[number, number], [number, number]][] = [];
+    const at = (t: number): [number, number] => [a[0] + dx * t, a[1] + dy * t];
+    let current: [number, number] | null = null;
+    for (const interval of intervals) {
+      if (current && interval[0] <= current[1] + 1e-6) current[1] = Math.max(current[1], interval[1]);
+      else {
+        if (current) pieces.push([at(current[0]), at(current[1])]);
+        current = [interval[0], interval[1]];
+      }
+    }
+    if (current) pieces.push([at(current[0]), at(current[1])]);
+    return pieces;
   }
 
   /** Intersects one projected triangle with another (Sutherland-Hodgman). */
@@ -9277,6 +9434,7 @@ export class Scene {
     this.renderer.setSize(w, h);
     for (const edge of this.selectedEdges) edge.line.material.resolution.set(w, h);
     this.hoverEdgeLine?.material.resolution.set(w, h);
+    this.collisionOutlineMaterial.resolution.set(w, h);
     if (this.camera instanceof THREE.PerspectiveCamera) {
       this.camera.aspect = w / h;
     } else {
@@ -9439,6 +9597,8 @@ export class Scene {
     this.guides.dispose();
     this.clearCollisionContacts();
     this.collisionContactMaterial.dispose();
+    this.collisionFaceMaterial.dispose();
+    this.collisionOutlineMaterial.dispose();
     this.alignHandleMeshes[0]?.geometry.dispose();
     for (const handle of this.alignHandleMeshes) (handle.material as THREE.Material).dispose();
     this.alignDragArrow.line.geometry.dispose();

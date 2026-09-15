@@ -110,15 +110,16 @@ export function TextToolIcon({ className = "tool-icon" }: { className?: string }
   );
 }
 
-/** Sketch tool: a pen nib drawing a Bézier curve. */
+/** Sketch tool: the pen nib, the same one as the sketch editor's Pen tool. */
 export function SketchToolIcon({ className = "tool-icon" }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <g fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M3 20c3-8 7-2 10-9" />
-        <path d="M14.5 3.5l6 6-5 5.5-3.5-1-2-2-1-3.5z" />
-        <circle cx="15.2" cy="8.8" r="1" />
+      <g fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 3l6 9-3 8H9l-3-8z" />
+        <path d="M12 3v7" />
+        <path d="M9 20h6" />
       </g>
+      <circle cx="12" cy="11.5" r="1.4" fill="currentColor" />
     </svg>
   );
 }

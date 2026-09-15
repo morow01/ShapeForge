@@ -176,6 +176,14 @@ export function svgMeshSolid(
   curveSamples = CURVE_SAMPLES,
 ): MeshShape | null {
   const manifold = getManifold();
+  const section = svgCrossSection(paths, curveSamples);
+  if (!section) return null;
+  return extrudeSection(manifold, section, thickness, rounding);
+}
+
+/** The outlines as one 2D region: holes cut, overlaps merged. Null if empty. */
+function svgCrossSection(paths: SvgCommand[][], curveSamples = CURVE_SAMPLES) {
+  const manifold = getManifold();
   const sections: InstanceType<typeof manifold.CrossSection>[] = [];
 
   for (const path of paths) {
@@ -237,7 +245,15 @@ export function svgMeshSolid(
   // Merge the whole word before doing any offsets. The old implementation ran
   // the safety search and every rounded layer once per glyph, making build time
   // grow roughly as letters × steps. One combined section keeps it steps-only.
-  const section = manifold.CrossSection.union(sections);
+  return manifold.CrossSection.union(sections);
+}
+
+function extrudeSection(
+  manifold: ReturnType<typeof getManifold>,
+  section: InstanceType<ReturnType<typeof getManifold>["CrossSection"]>,
+  thickness: number,
+  rounding?: { top: number; bottom: number; steps: number },
+): MeshShape | null {
   const requestedTop = Math.max(0, rounding?.top ?? 0);
   const requestedBottom = Math.max(0, rounding?.bottom ?? 0);
   // Keep text rebuilding bounded. Unlike simple primitives, a single word may
@@ -297,4 +313,81 @@ export function svgMeshSolid(
     result = result.smoothOut(45, 1).refine(2);
   }
   return new MeshShape(result);
+}
+
+export interface RevolveOptions {
+  /** Degrees swept, 0–360. */
+  angle: number;
+  /** 0: the sketch's vertical (Y) axis through its origin; 1: its horizontal (X) axis. */
+  axis: 0 | 1;
+  /** Build with the axis pointing along +Z and the lowest point at z = 0, to
+   *  stand on the build plate, instead of lying in the sketch plane. */
+  upright: boolean;
+  /** Straight segments per curve in the outline. */
+  curveSamples: number;
+  /** Segments around a full turn. */
+  circularSegments: number;
+}
+
+/**
+ * Sketch outlines spun around one of the sketch's own axes.
+ *
+ * In the sketch's frame the solid keeps the axis where it was drawn, and a
+ * partial turn starts at the drawn profile and sweeps out of the sketch plane
+ * (towards +Z, the side an extrusion grows to), so the profile face stays
+ * where it was drawn. Upright, the axis becomes +Z and the solid rests on
+ * z = 0 — placement on the build plate is the caller's job.
+ *
+ * The outlines must all lie on one side of the axis; they may touch it.
+ */
+export function svgRevolveSolid(paths: SvgCommand[][], options: RevolveOptions): MeshShape {
+  // Into the revolve frame: radial coordinate along x, axis coordinate along
+  // y. For the horizontal axis that is a quarter turn of the drawing.
+  const toFrame = options.axis === 1
+    ? (x: number, y: number): [number, number] => [-y, x]
+    : (x: number, y: number): [number, number] => [x, y];
+  const mapped = paths.map((path) => path.map((c): SvgCommand => {
+    if (c[0] === "M" || c[0] === "L") return [c[0], ...toFrame(c[1], c[2])];
+    if (c[0] === "C") return ["C", ...toFrame(c[1], c[2]), ...toFrame(c[3], c[4]), ...toFrame(c[5], c[6])];
+    return c;
+  }));
+  let section = svgCrossSection(mapped, options.curveSamples);
+  if (!section) throw new Error("This sketch has no closed shape to revolve. Close a path in the sketch editor.");
+  const bounds = section.bounds();
+  const extent = Math.max(bounds.max[0] - bounds.min[0], bounds.max[1] - bounds.min[1], 1);
+  const touch = extent * 1e-6;
+  if (bounds.min[0] < -touch && bounds.max[0] > touch) {
+    throw new Error("A shape crosses the revolve axis. Keep every shape on one side of the axis; touching it is fine.");
+  }
+  // Drawn on the other side of the axis: spin its mirror image, then turn it
+  // back half a turn so a partial revolve still starts at the drawn profile.
+  const mirrored = bounds.max[0] <= touch;
+  if (mirrored) section = section.mirror([1, 0]);
+
+  const angle = Math.min(Math.max(options.angle, 1), 360);
+  const segments = Math.max(12, Math.round(options.circularSegments));
+  // Manifold spins about the frame's y, which it turns into z, starting at +x
+  // and sweeping towards +y.
+  let solid = section.revolve(segments, angle);
+
+  const rad = (d: number) => (d * Math.PI) / 180;
+  if (options.upright) {
+    // Axis up already. Mirrored drawings are turned back to face +X.
+    if (mirrored) solid = solid.rotate([0, 0, 180]);
+    const box = solid.boundingBox();
+    solid = solid.translate([0, 0, -box.min[2]]);
+    return new MeshShape(solid);
+  }
+
+  // Into the sketch frame. Revolve frame x (profile start) → sketch X, frame z
+  // (axis) → sketch Y, sweep direction y → sketch -Z; then turned about the
+  // axis by φ so the sweep grows out of the sketch plane instead of into it:
+  // φ = -angle, or half a turn for a mirrored drawing.
+  const phi = rad(mirrored ? 180 : -angle);
+  const c = Math.cos(phi), s = Math.sin(phi);
+  // Column-major: images of frame x, y, z.
+  solid = solid.transform([c, 0, -s, 0, -s, 0, -c, 0, 0, 1, 0, 0, 0, 0, 0, 1]);
+  // Horizontal axis: the frame's quarter turn undone about sketch Z.
+  if (options.axis === 1) solid = solid.transform([0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+  return new MeshShape(solid);
 }
