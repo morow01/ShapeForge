@@ -1,4 +1,5 @@
 import { PRIMITIVES } from "./types";
+import { parseSketch } from "../sketch/geometry";
 import type {
   BooleanOp,
   CameraMode,
@@ -89,6 +90,7 @@ export function parseNode(raw: unknown): SceneNode | null {
     }
     const text = typeof n.text === "string" ? n.text : undefined;
     const fontName = typeof n.fontName === "string" ? n.fontName : undefined;
+    const sketch = kind === "sketch" ? parseSketch(n.sketch) ?? { paths: [] } : undefined;
     return {
       ...base,
       type: "object",
@@ -96,6 +98,7 @@ export function parseNode(raw: unknown): SceneNode | null {
       params,
       ...(text !== undefined ? { text } : {}),
       ...(fontName !== undefined ? { fontName } : {}),
+      ...(sketch ? { sketch } : {}),
     };
   }
 

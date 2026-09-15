@@ -66,7 +66,7 @@ function cleanPolygon(raw: [number, number][]): [number, number][] {
 }
 
 /** A polygon that follows the outline closely enough to test against. */
-function flatten(commands: SvgCommand[]): [number, number][] {
+function flatten(commands: SvgCommand[], samples = CURVE_SAMPLES): [number, number][] {
   const points: [number, number][] = [];
   let cursor: [number, number] = [0, 0];
   for (const c of commands) {
@@ -78,8 +78,8 @@ function flatten(commands: SvgCommand[]): [number, number][] {
       const c1: [number, number] = [c[1], c[2]];
       const c2: [number, number] = [c[3], c[4]];
       const p1: [number, number] = [c[5], c[6]];
-      for (let i = 1; i <= CURVE_SAMPLES; i++) {
-        points.push(cubicAt(i / CURVE_SAMPLES, p0, c1, c2, p1));
+      for (let i = 1; i <= samples; i++) {
+        points.push(cubicAt(i / samples, p0, c1, c2, p1));
       }
       cursor = p1;
     }
@@ -172,13 +172,15 @@ export function svgMeshSolid(
   paths: SvgCommand[][],
   thickness: number,
   rounding?: { top: number; bottom: number; steps: number },
+  /** Straight segments per curve; sketches let the user choose, artwork uses the default. */
+  curveSamples = CURVE_SAMPLES,
 ): MeshShape | null {
   const manifold = getManifold();
   const sections: InstanceType<typeof manifold.CrossSection>[] = [];
 
   for (const path of paths) {
     const polygons = splitSubpaths(path)
-      .map(flatten)
+      .map((subpath) => flatten(subpath, Math.max(1, Math.round(curveSamples))))
       .filter((points) => points.length >= 3 && areaOf(points) > 1e-4);
     if (!polygons.length) continue;
 

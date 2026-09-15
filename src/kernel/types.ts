@@ -42,6 +42,8 @@ export interface ObjectSpec extends SpecBase {
   text?: string;
   fontName?: string;
   textPaths?: SvgCommand[][];
+  /** kind === "sketch": the closed outlines, already flattened to commands. */
+  sketchPaths?: SvgCommand[][];
 }
 
 export interface GroupSpec extends SpecBase {

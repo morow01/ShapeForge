@@ -1023,7 +1023,7 @@ function localKey(spec: NodeSpec): string {
       KERNEL_REVISION,
     ]);
   }
-  return JSON.stringify([spec.type, spec.kind, spec.params, spec.text, spec.fontName, spec.textPaths, facets, KERNEL_REVISION]);
+  return JSON.stringify([spec.type, spec.kind, spec.params, spec.text, spec.fontName, spec.textPaths, spec.sketchPaths, facets, KERNEL_REVISION]);
 }
 
 /**

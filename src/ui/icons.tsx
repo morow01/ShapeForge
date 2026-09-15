@@ -110,6 +110,19 @@ export function TextToolIcon({ className = "tool-icon" }: { className?: string }
   );
 }
 
+/** Sketch tool: a pen nib drawing a Bézier curve. */
+export function SketchToolIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <g fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M3 20c3-8 7-2 10-9" />
+        <path d="M14.5 3.5l6 6-5 5.5-3.5-1-2-2-1-3.5z" />
+        <circle cx="15.2" cy="8.8" r="1" />
+      </g>
+    </svg>
+  );
+}
+
 /** Move tool: the standard 4-way cross. */
 export function MoveToolIcon({ className = "tool-icon" }: { className?: string }) {
   return (
@@ -765,6 +778,16 @@ export function PrimitiveShapeIcon({
   className?: string;
 }) {
   switch (kind) {
+    case "sketch":
+      return (
+        <svg className={className} viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+          {/* An extruded Bézier outline: curved top face over its wall */}
+          <path d="M5 20 C5 26 27 26 27 20 V24 C27 30 5 30 5 24 Z" fill="#2087b2" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
+          <path d="M5 20 C5 12 12 5 18 8 C24 11 27 14 27 20 C27 26 5 26 5 20 Z" fill="#78d5f8" stroke="#1d7a9f" strokeWidth="1.2" strokeLinejoin="round" />
+          <path d="M12 9 L22 6" stroke="#1d7a9f" strokeWidth="1" />
+          <rect x="16.5" y="6.5" width="3" height="3" fill="#fff" stroke="#1d7a9f" strokeWidth="1" />
+        </svg>
+      );
     case "box":
       return (
         <svg className={className} viewBox="0 0 32 32" aria-hidden="true" focusable="false">

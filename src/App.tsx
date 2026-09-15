@@ -50,6 +50,7 @@ import {
   ShapeBuilderIcon,
   SolidCubeIcon,
   TextToolIcon,
+  SketchToolIcon,
   TransparencyIcon,
   UndoIcon,
   UngroupIcon,
@@ -62,6 +63,7 @@ import type { DropDirection } from "./ui/icons";
 import { buildThreeMF } from "./export/threemf";
 import { SvgImportModal } from "./ui/SvgImportModal";
 import { TextModal } from "./ui/TextModal";
+import { SketchEditor } from "./ui/SketchEditor";
 import { SettingsModal } from "./ui/SettingsModal";
 import type { BuildPlateSize } from "./ui/SettingsModal";
 import { ExportModal } from "./ui/ExportModal";
@@ -72,21 +74,23 @@ import { formatLength, fromMillimetres, toMillimetres } from "./measurement";
 import type { AppearancePreference, DisplayUnit } from "./measurement";
 import type { TextConfig } from "./ui/TextModal";
 import { NO_FONT_LISTING, getCachedTextPaths, resolveTextPaths } from "./text/systemFonts";
+import { sketchCommands } from "./sketch/geometry";
 import type { LocalFontData } from "./text/systemFonts";
 import {
   beginHistoryBatch,
   copySelected,
+  getEffectiveDefaults,
   endHistoryBatch,
   pasteClipboard,
   useDoc,
   useTemporal,
 } from "./document/store";
-import { MAX_BUILD_SOURCES, PRIMITIVES, PRIMITIVE_CATEGORIES, isGroup } from "./document/types";
+import { MAX_BUILD_SOURCES, PRIMITIVES, PRIMITIVE_CATEGORIES, SKETCH_CURVE_SEGMENTS, isGroup } from "./document/types";
 import { findAssemblyOwner, findNode, parentOf, resolveNodeTransparent, resolveNodeColor, updateNode, walk } from "./document/tree";
 import { bakeScale } from "./document/bake";
 import { putBlob } from "./document/blobStore";
 import { loadCameraState } from "./document/persist";
-import type { EditOp, GroupNode, PrimitiveKind, SceneNode, ShellOp, ResizeFaceOp, Vec3 } from "./document/types";
+import type { EditOp, GroupNode, PrimitiveKind, SceneNode, ShellOp, ResizeFaceOp, SketchData, Vec3 } from "./document/types";
 import { RETRYABLE_MESH_ERROR } from "./kernel/types";
 import type { EditSpec, ExportQuality, NodeSpec, PreviewBuild, ScenePart } from "./kernel/types";
 import type { CameraMode, DuplicateResult, Scene, ToolMode, WireframeMode } from "./viewport/scene";
@@ -171,6 +175,20 @@ const toSpec = (n: SceneNode): NodeSpec => {
       id: n.id,
       base: toSpec(n.base),
       ops: n.ops,
+      position: n.position,
+      rotation: n.rotation,
+      scale: n.scale,
+      isHole: n.isHole,
+      lowPoly: n.lowPoly,
+    };
+  }
+  if (n.kind === "sketch") {
+    return {
+      type: "object",
+      id: n.id,
+      kind: n.kind,
+      params: n.params,
+      sketchPaths: sketchCommands(n.sketch),
       position: n.position,
       rotation: n.rotation,
       scale: n.scale,
@@ -289,7 +307,7 @@ const shapeOf = (n: SceneNode): unknown => {
   if (n.type === "import") return [n.id, "import", n.blobId, n.svg?.thickness, facets];
   if (n.type === "edit") return [n.id, "edit", shapeOf(n.base), n.ops, facets];
   if (n.type === "build") return [n.id, "build", n.sources.map(shapeOf), n.keep, facets];
-  return [n.id, n.kind, n.params, n.text, n.fontName, facets];
+  return [n.id, n.kind, n.params, n.text, n.fontName, n.sketch, facets];
 };
 
 /** Safe to rebuild independently during an export fallback. Primitive-only
@@ -465,6 +483,8 @@ export function App() {
     setParam,
     resetParams,
     setText,
+    addSketch,
+    setSketch,
     setFontName,
     setTransform,
     setPositions,
@@ -526,6 +546,18 @@ export function App() {
   } | null>(null);
   const [textFonts, setTextFonts] = useState<LocalFontData[] | null>(null);
   const [textModalOpen, setTextModalOpen] = useState(false);
+  /** The sketch being drawn: a new one on a picked plane, or an existing sketch object. */
+  const [sketchSession, setSketchSession] = useState<{
+    nodeId: string | null;
+    title: string;
+    sketch: SketchData;
+    depth: number;
+    curveSegments: number;
+    position: Vec3;
+    rotation: Vec3;
+    /** Model edges lying in the sketch plane, in its own 2D frame. */
+    guides: [[number, number], [number, number]][];
+  } | null>(null);
 
   useEffect(() => {
     if ("queryLocalFonts" in window) {
@@ -753,6 +785,18 @@ export function App() {
     sceneRef.current?.zoomToFit();
   }, []);
 
+  /** The face outline a sketch is drawn against. Only a guide: if it cannot be
+   *  read, the editor still opens, because a failure here used to stop the
+   *  click on the plane from opening the editor at all. */
+  const sketchGuides = useCallback((origin: Vec3, rotation: Vec3, excludeId?: string) => {
+    const scene = sceneRef.current;
+    try {
+      return typeof scene?.sketchPlaneEdges === "function" ? scene.sketchPlaneEdges(origin, rotation, excludeId) : [];
+    } catch {
+      return [];
+    }
+  }, []);
+
   const placePrimitive = useCallback((point: Vec3, normal: Vec3, targetId?: string) => {
     if (!pendingPrimitive) return;
     const n = new THREE.Vector3(...normal).normalize();
@@ -765,6 +809,24 @@ export function App() {
       new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), n),
       "XYZ",
     );
+    if (pendingPrimitive === "sketch") {
+      // The picked point and normal become the sketch plane; the solid is
+      // only created once something closed has been drawn on it.
+      const degrees: Vec3 = [rotation.x / Math.PI * 180, rotation.y / Math.PI * 180, rotation.z / Math.PI * 180];
+      setSketchSession({
+        nodeId: null,
+        title: "New sketch",
+        guides: sketchGuides(base.toArray() as Vec3, degrees),
+        sketch: { paths: [] },
+        depth: getEffectiveDefaults("sketch").depth ?? 10,
+        curveSegments: getEffectiveDefaults("sketch").curveSegments ?? SKETCH_CURVE_SEGMENTS,
+        position: base.toArray() as Vec3,
+        rotation: degrees,
+      });
+      setPendingPrimitive(null);
+      setToolMode("select");
+      return;
+    }
     addPrimitive(
       pendingPrimitive,
       base.toArray() as Vec3,
@@ -786,7 +848,7 @@ export function App() {
     }
     setPendingPrimitive(null);
     setToolMode("select");
-  }, [addPrimitive, pendingPrimitive, selectMany, combine, rename, select]);
+  }, [addPrimitive, pendingPrimitive, selectMany, combine, rename, select, sketchGuides]);
 
   useEffect(() => {
     if (!wireframeMenuOpen) {
@@ -1098,6 +1160,12 @@ export function App() {
     if (!bounds) return null;
     const size = bounds.max.map((v, i) => v - bounds.min[i]) as Vec3;
     return size.every((v) => v > 1e-6) ? size : null;
+  }, [selected, parts]);
+  /** Triangles in the selected object's built mesh, for the sketch quality readout. */
+  const selectedTriangleCount = useMemo((): number | null => {
+    if (!selected) return null;
+    const part = parts.find((p) => p.id === selected.id);
+    return part ? Math.floor(part.mesh.faces.triangles.length / 3) : null;
   }, [selected, parts]);
   // Multi-select has no single node to read a Size/Position from the way one
   // selected object (or a Group, which IS one node) does. Its own combined
@@ -4225,6 +4293,16 @@ export function App() {
           aria-label="Add text tool"
         ><TextToolIcon /></button>
         <button
+          className={toolMode === "place" && pendingPrimitive === "sketch" ? "active" : ""}
+          onClick={() => {
+            setPendingPrimitive("sketch");
+            setToolMode("place");
+            select(null);
+          }}
+          title="Sketch: pick a plane, draw Bézier shapes, extrude them"
+          aria-label="Sketch tool"
+        ><SketchToolIcon /></button>
+        <button
           className={toolMode === "build" ? "active" : ""}
           onClick={() => setToolMode("build")}
           title="Shape Builder: combine overlapping shapes region by region (B)"
@@ -4465,8 +4543,8 @@ export function App() {
         )}
         {toolMode === "place" && pendingPrimitive && (
           <div className="edge-bar placement-bar">
-            <strong>Place {PRIMITIVES[pendingPrimitive].label}</strong>
-            <span>Choose a face or the workplane</span>
+            <strong>{pendingPrimitive === "sketch" ? "New sketch" : `Place ${PRIMITIVES[pendingPrimitive].label}`}</strong>
+            <span>{pendingPrimitive === "sketch" ? "Click the workplane or a flat face to draw on" : "Choose a face or the workplane"}</span>
             <button onClick={() => { setPendingPrimitive(null); setToolMode("select"); }}>Cancel</button>
           </div>
         )}
@@ -5432,6 +5510,7 @@ export function App() {
             <Inspector
               node={selected}
               localSize={selectedLocalSize}
+              triangleCount={selectedTriangleCount}
               selectedCount={selectedIds.length}
               selectionBounds={selectionBounds}
               onResizeSelectionAxis={resizeSelectionAxis}
@@ -5506,6 +5585,19 @@ export function App() {
               onRetryNode={handleRetryNode}
               onDuplicateWithParams={(params, overrides) => duplicateWithParams(selected.id, params, overrides)}
               onText={(t) => setText(selected.id, t)}
+              onEditSketch={() => {
+                if (selected.type !== "object" || selected.kind !== "sketch") return;
+                setSketchSession({
+                  nodeId: selected.id,
+                  title: `Edit ${selected.name}`,
+                  guides: sketchGuides(selected.position, selected.rotation, selected.id),
+                  sketch: selected.sketch ?? { paths: [] },
+                  depth: selected.params.depth ?? 10,
+                  curveSegments: selected.params.curveSegments ?? SKETCH_CURVE_SEGMENTS,
+                  position: selected.position,
+                  rotation: selected.rotation,
+                });
+              }}
               onFontName={(fn) => setFontName(selected.id, fn)}
               fonts={textFonts}
               onPickFontFile={() => textFontInputRef.current?.click()}
@@ -6732,6 +6824,23 @@ export function App() {
           detectedPreset={pendingSvg.art.unitPreset}
           onClose={() => setPendingSvg(null)}
           onImport={confirmSvgImport}
+        />
+      )}
+      {sketchSession && (
+        <SketchEditor
+          title={sketchSession.title}
+          applyLabel={sketchSession.nodeId ? "Update" : "Extrude"}
+          initial={sketchSession.sketch}
+          initialDepth={sketchSession.depth}
+          guides={sketchSession.guides}
+          displayUnit={displayUnit}
+          decimals={decimalPlaces}
+          onCancel={() => setSketchSession(null)}
+          onApply={(sketch, depth) => {
+            if (sketchSession.nodeId) setSketch(sketchSession.nodeId, sketch, { depth });
+            else addSketch(sketch, { depth, curveSegments: sketchSession.curveSegments }, sketchSession.position, sketchSession.rotation);
+            setSketchSession(null);
+          }}
         />
       )}
       {textModalOpen && textFonts && (

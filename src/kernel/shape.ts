@@ -1304,6 +1304,15 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
       s = pen.close().sketchOnPlane("XZ").revolve([0, 0, 1]) as Shape3D;
       break;
     }
+    case "sketch": {
+      const depth = Math.max(p.depth ?? 10, 0.01);
+      const solid = spec.sketchPaths?.length
+        ? svgMeshSolid(spec.sketchPaths, depth, undefined, Math.min(Math.max(Math.round(p.curveSegments ?? 24), 1), 256))
+        : null;
+      if (!solid) throw new Error("This sketch has no closed shape to extrude. Close a path in the sketch editor.");
+      s = solid;
+      break;
+    }
     case "text": {
       const thickness = Math.max(p.thickness ?? 4, 0.1);
       const size = Math.max(p.size ?? 20, 1);
@@ -1780,6 +1789,10 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
       break;
     }
   }
+
+  // A sketch keeps its own origin: it is the point picked on the sketch plane,
+  // so reshaping one curve must not re-centre, and so shift, the rest.
+  if (spec.kind === "sketch") return s;
 
   if (spec.kind === "connector" || spec.kind === "screwHole" || (spec.kind === "domino" && (spec.params.type ?? 0) === 0)) {
     // Connector, screwHole, and mortise-slot domino solids already define their exact mounting plane (z=0 is surface,

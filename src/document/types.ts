@@ -28,7 +28,8 @@ export type PrimitiveKind =
   | "spring"
   | "hinge"
   | "screwHole"
-  | "domino";
+  | "domino"
+  | "sketch";
 
 export interface ParamField {
   key: string;
@@ -390,6 +391,13 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
         key: "surfaceEdges", label: "Corner lines", min: 0, max: 1, step: 1,
         options: [{ value: 0, label: "Hidden" }, { value: 1, label: "Shown" }],
       },
+    ],
+  },
+  sketch: {
+    label: "Sketch",
+    defaults: { depth: 10, curveSegments: 24 },
+    fields: [
+      { key: "depth", label: "Extrude height", min: 0.1, max: 2000, step: 0.5, noSlider: true },
     ],
   },
   text: {
@@ -1441,6 +1449,43 @@ interface NodeBase {
   hidden?: boolean;
 }
 
+/**
+ * One anchor of a Bézier path, in sketch millimetres (X right, Y up). Handles
+ * are offsets from the anchor, so moving an anchor carries its handles; a
+ * zero offset is no handle, and a segment with none at either end is straight.
+ */
+export interface SketchAnchor {
+  x: number;
+  y: number;
+  inX: number;
+  inY: number;
+  outX: number;
+  outY: number;
+  /** How the two handles move together. */
+  mode: AnchorMode;
+}
+
+/**
+ * corner: handles move independently, so the path can bend at the anchor.
+ * smooth: handles stay in line, each keeping its own length.
+ * symmetric: handles stay in line and equally long, mirroring each other.
+ */
+export type AnchorMode = "corner" | "smooth" | "symmetric";
+
+/** Default curve quality of a sketch: straight segments per Bézier curve. */
+export const SKETCH_CURVE_SEGMENTS = 24;
+
+export interface SketchPath {
+  id: string;
+  anchors: SketchAnchor[];
+  closed: boolean;
+}
+
+/** Drawn outlines. Closed paths are extruded; a path inside another is a hole. */
+export interface SketchData {
+  paths: SketchPath[];
+}
+
 export interface ObjectNode extends NodeBase {
   type: "object";
   kind: PrimitiveKind;
@@ -1449,6 +1494,9 @@ export interface ObjectNode extends NodeBase {
   text?: string;
   /** Chosen font family / postscript name when kind === "text". */
   fontName?: string;
+  /** The editable outlines when kind === "sketch". The sketch plane is the
+   *  node's own local XY plane, extruded along local +Z. */
+  sketch?: SketchData;
 }
 
 export interface GroupNode extends NodeBase {

@@ -249,6 +249,8 @@ interface Props {
    *  falls back to a plain percentage in either case. Unused for a
    *  primitive, which already has a real Dimensions section of its own. */
   localSize: Vec3 | null;
+  /** Triangles in the selected object's built mesh; null before it builds. */
+  triangleCount?: number | null;
   selectedCount?: number;
   /** Combined WORLD bounding box of a multi-object selection — null below 2
    *  selected, or before any of them have a built mesh. The Size/Position
@@ -298,6 +300,8 @@ interface Props {
   onDuplicateWithParams?: (params: Record<string, number>, overrides?: Partial<ObjectNode>) => void;
   onCreateMatchingThreadPart?: () => void;
   onText?: (text: string) => void;
+  /** Sketch objects only: reopen the sketch editor on this object. */
+  onEditSketch?: () => void;
   onFontName?: (fontName: string) => void;
   fonts?: LocalFontData[] | null;
   onPickFontFile?: () => void;
@@ -325,6 +329,7 @@ function isLightColor(hex: string): boolean {
 export function Inspector({
   node,
   localSize,
+  triangleCount = null,
   selectedCount = 1,
   selectionBounds = null,
   onResizeSelectionAxis,
@@ -352,6 +357,7 @@ export function Inspector({
   onDuplicateWithParams,
   onCreateMatchingThreadPart,
   onText,
+  onEditSketch,
   onFontName,
   fonts,
   onPickFontFile,
@@ -614,6 +620,8 @@ export function Inspector({
               onDuplicateWithParams={onDuplicateWithParams}
               onCreateMatchingThreadPart={onCreateMatchingThreadPart}
               onText={onText}
+              onEditSketch={onEditSketch}
+              triangleCount={triangleCount}
               onFontName={onFontName}
               fonts={fonts}
               onPickFontFile={onPickFontFile}
@@ -1156,6 +1164,8 @@ function ObjectParams({
   onDuplicateWithParams,
   onCreateMatchingThreadPart,
   onText,
+  onEditSketch,
+  triangleCount = null,
   onFontName,
   fonts,
   onPickFontFile,
@@ -1164,6 +1174,8 @@ function ObjectParams({
   decimalPlaces,
 }: {
   node: Extract<SceneNode, { type: "object" }>;
+  onEditSketch?: () => void;
+  triangleCount?: number | null;
   onResetParams: () => void;
   resizeConstrained?: boolean;
   onResizeConstrained: (value: boolean) => void;
@@ -1194,6 +1206,22 @@ function ObjectParams({
 
   return (
     <>
+      {node.kind === "sketch" && (
+        <div className="sketch-inspector-block">
+          <h2>Sketch</h2>
+          <p className="sketch-inspector-summary">
+            {(node.sketch?.paths ?? []).filter((p) => p.closed).length} closed
+            {" "}{(node.sketch?.paths ?? []).filter((p) => p.closed).length === 1 ? "shape" : "shapes"},
+            {" "}{(node.sketch?.paths ?? []).reduce((n, p) => n + p.anchors.length, 0)} anchors
+          </p>
+          <button type="button" className="primary" onClick={() => onEditSketch?.()}>Edit sketch…</button>
+          <SketchQuality
+            value={node.params.curveSegments ?? 24}
+            onChange={(segments) => onParam("curveSegments", segments)}
+            triangles={triangleCount}
+          />
+        </div>
+      )}
       {node.kind === "text" && (
         <div className="text-inspector-block" style={{ display: "flex", flexDirection: "column", gap: "8px", marginBottom: "8px" }}>
           <h2>Text & Font</h2>
@@ -2012,6 +2040,46 @@ const LOW_POLY_DEFAULT: LowPoly = { facet: 1.2, even: 3 };
  * a shading effect — so they live with the other shape settings rather than
  * with colour and transparency.
  */
+/** Segments per curve for each sketch quality; Medium is the default. */
+const SKETCH_QUALITY: { label: string; segments: number }[] = [
+  { label: "Low", segments: 8 },
+  { label: "Medium", segments: 24 },
+  { label: "High", segments: 64 },
+];
+
+/**
+ * How finely a sketch's curves are turned into flat facets, as three choices,
+ * with the polygon count of the built object. Straight edges never add
+ * polygons; only curves do.
+ */
+function SketchQuality({ value, onChange, triangles }: {
+  value: number;
+  onChange: (segments: number) => void;
+  triangles: number | null;
+}) {
+  return (
+    <div className="sketch-quality">
+      <span className="field-label">Quality</span>
+      <div className="sketch-quality-options" role="radiogroup" aria-label="Sketch quality">
+        {SKETCH_QUALITY.map((q) => (
+          <button
+            key={q.label}
+            type="button"
+            role="radio"
+            aria-checked={value === q.segments}
+            className={value === q.segments ? "active" : ""}
+            onClick={() => onChange(q.segments)}
+            title={`${q.segments} segments per curve`}
+          >{q.label}</button>
+        ))}
+      </div>
+      <p className="sketch-quality-count">
+        {triangles === null ? "Building…" : `${triangles.toLocaleString()} polygons`}
+      </p>
+    </div>
+  );
+}
+
 function LowPolySection({
   lowPoly,
   onLowPoly,

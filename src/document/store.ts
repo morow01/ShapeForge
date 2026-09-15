@@ -38,6 +38,7 @@ import type {
   EditNode,
   GroupNode,
   ImportNode,
+  SketchData,
   LowPoly,
   ObjectNode,
   PrimitiveKind,
@@ -734,6 +735,10 @@ interface DocState {
   setParam: (id: string, key: string, value: number) => void;
   resetParams: (id: string) => void;
   setText: (id: string, text: string) => void;
+  /** Adds an extruded sketch whose local XY plane is the picked sketch plane. */
+  addSketch: (sketch: SketchData, params: { depth: number; curveSegments: number }, position: Vec3, rotation: Vec3) => void;
+  /** Replaces a sketch's outlines, extrude height and curve quality. */
+  setSketch: (id: string, sketch: SketchData, params: { depth: number; curveSegments?: number }) => void;
   setFontName: (id: string, fontName: string) => void;
   setTransform: (id: string, patch: { position?: Vec3; rotation?: Vec3; scale?: Vec3 }) => void;
   setPositions: (updates: { id: string; position: Vec3 }[]) => void;
@@ -1129,6 +1134,31 @@ export const useDoc = create<DocState>()(
             return { ...n, params: { ...PRIMITIVES[n.kind].defaults } };
           }),
         }));
+      },
+
+      addSketch: (sketch, sketchParams, position, rotation) => {
+        // Created and filled in as one undo step: undoing half of it would
+        // leave an empty sketch that cannot build.
+        beginHistoryBatch();
+        try {
+          get().addPrimitive("sketch", position, rotation);
+          const id = get().selectedIds[0];
+          if (!id) return;
+          set((s) => ({
+            nodes: updateNode(s.nodes, id, (n) =>
+              n.type === "object" && n.kind === "sketch" ? { ...n, sketch, params: { ...n.params, ...sketchParams } } : n),
+          }));
+        } finally {
+          endHistoryBatch();
+        }
+      },
+
+      setSketch: (id, sketch, sketchParams) => {
+        set((s) => ({
+          nodes: updateNode(s.nodes, id, (n) =>
+            n.type === "object" && n.kind === "sketch" ? { ...n, sketch, params: { ...n.params, ...sketchParams } } : n),
+        }));
+        afterBatchedMutation();
       },
 
       setText: (id, text) => {

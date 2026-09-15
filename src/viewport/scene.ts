@@ -848,6 +848,36 @@ export class Scene {
   }
 
   private host: HTMLElement;
+  /**
+   * Model edges lying in a sketch plane, as 2D segments in that plane's own
+   * frame (origin and XYZ Euler rotation in degrees, local Z its normal) —
+   * the outline of the face a sketch was started on, for the sketch editor to
+   * show and snap to.
+   */
+  sketchPlaneEdges(origin: Vec3, rotation: Vec3, excludeId?: string, tolerance = 0.05): [[number, number], [number, number]][] {
+    const toPlane = new THREE.Matrix4().compose(
+      new THREE.Vector3(...origin),
+      new THREE.Quaternion().setFromEuler(new THREE.Euler(...rotation.map((d) => d * Math.PI / 180) as Vec3, "XYZ")),
+      new THREE.Vector3(1, 1, 1),
+    ).invert();
+    const out: [[number, number], [number, number]][] = [];
+    for (const [id, view] of this.parts) {
+      if (id === excludeId || !view.group.visible) continue;
+      view.group.updateWorldMatrix(true, true);
+      const edges = new THREE.EdgesGeometry(view.mesh.geometry as THREE.BufferGeometry, 30);
+      const position = edges.getAttribute("position");
+      const matrix = new THREE.Matrix4().multiplyMatrices(toPlane, view.mesh.matrixWorld);
+      const a = new THREE.Vector3(), b = new THREE.Vector3();
+      for (let i = 0; i + 1 < position.count; i += 2) {
+        a.fromBufferAttribute(position, i).applyMatrix4(matrix);
+        b.fromBufferAttribute(position, i + 1).applyMatrix4(matrix);
+        if (Math.abs(a.z) <= tolerance && Math.abs(b.z) <= tolerance) out.push([[a.x, a.y], [b.x, b.y]]);
+      }
+      edges.dispose();
+    }
+    return out;
+  }
+
   captureBlueprintGeometry(): BlueprintGeometry[] {
     const result:BlueprintGeometry[]=[];
     for(const [id,view] of this.parts) {
@@ -3921,7 +3951,9 @@ export class Scene {
     if (!kind) return;
     const p = getEffectiveDefaults(kind);
     let geometry: THREE.BufferGeometry;
-    if (kind === "box") geometry = new THREE.BoxGeometry(p.width, p.depth, p.height).translate(0, 0, p.height / 2);
+    // A sketch has no shape yet: preview the plane it will be drawn on.
+    if (kind === "sketch") geometry = new THREE.PlaneGeometry(60, 60).translate(0, 0, 0.05);
+    else if (kind === "box") geometry = new THREE.BoxGeometry(p.width, p.depth, p.height).translate(0, 0, p.height / 2);
     else if (kind === "sphere") geometry = new THREE.SphereGeometry(p.radius, 32, 20).translate(0, 0, p.radius);
     else if (kind === "cylinder" || kind === "cone") {
       geometry = new THREE.CylinderGeometry(kind === "cone" ? p.topRadius : p.radius, kind === "cone" ? p.bottomRadius : p.radius, p.height, 32);
