@@ -1125,7 +1125,7 @@ export class Scene {
   private moveGuide = new THREE.LineSegments(
     new THREE.BufferGeometry().setAttribute(
       "position",
-      new THREE.BufferAttribute(new Float32Array(12), 3),
+      new THREE.BufferAttribute(new Float32Array(18), 3),
     ),
     // depthTest stays ON, unlike the selection overlays: this leader lies on
     // the build plate, so letting the object occlude the stretch that runs
@@ -1780,8 +1780,8 @@ export class Scene {
     this.dimensionEdges.frustumCulled = false;
     this.scene.add(this.dimensionEdges);
 
-    for (let axis = 0; axis < 2; axis++) {
-      const name = axis === 0 ? "X" : "Y";
+    for (let axis = 0; axis < 3; axis++) {
+      const name = axis === 0 ? "X" : axis === 1 ? "Y" : "Z";
       // Same axis colour as the matching size readout, so the axis is never in
       // question — the dashed border (is-offset) is what says this one is a
       // distance travelled rather than a dimension.
@@ -1833,7 +1833,7 @@ export class Scene {
     const view = readout ? this.parts.get(readout.id) : undefined;
     const obj = readout ? (this.assemblyGroups.get(readout.id) ?? view?.group) : undefined;
     const visible =
-      !!readout && !!obj && this.toolMode === "select" && !this.showResult &&
+      !!readout && !!obj && (this.toolMode === "select" || this.toolMode === "move") && !this.showResult &&
       obj.visible && this.selectedIds.includes(readout.id);
     this.moveGuide.visible = !!visible;
     if (!visible || !readout || !obj) {
@@ -1845,6 +1845,7 @@ export class Scene {
     const now = obj.position;
     const dx = now.x - readout.startPos.x;
     const dy = now.y - readout.startPos.y;
+    const dz = now.z - readout.startPos.z;
 
     // Draw on the build plate under the object rather than through it, so the
     // leader reads as a measurement on the ground the way TinkerCAD's does.
@@ -1854,11 +1855,15 @@ export class Scene {
     const to = new THREE.Vector3(now.x, now.y, z);
     const xFrom = new THREE.Vector3(readout.startPos.x, now.y, z);
     const yFrom = new THREE.Vector3(now.x, readout.startPos.y, z);
+    const zFrom = new THREE.Vector3(now.x, now.y, z - dz);
+    const zTo = new THREE.Vector3(now.x, now.y, z);
     const position = this.moveGuide.geometry.getAttribute("position") as THREE.BufferAttribute;
     position.setXYZ(0, xFrom.x, xFrom.y, xFrom.z);
     position.setXYZ(1, to.x, to.y, to.z);
     position.setXYZ(2, yFrom.x, yFrom.y, yFrom.z);
     position.setXYZ(3, to.x, to.y, to.z);
+    position.setXYZ(4, zFrom.x, zFrom.y, zFrom.z);
+    position.setXYZ(5, zTo.x, zTo.y, zTo.z);
     position.needsUpdate = true;
     this.moveGuide.geometry.computeBoundingSphere();
 
@@ -1866,6 +1871,7 @@ export class Scene {
     const legs = [
       { value: dx, from: xFrom, to },
       { value: dy, from: yFrom, to },
+      { value: dz, from: zFrom, to: zTo },
     ];
     const toScreen = (point: THREE.Vector3) => {
       const projected = point.clone().project(this.camera);
@@ -1894,12 +1900,17 @@ export class Scene {
         labelPositions[1].addScaledVector(yDir.clone().negate(), 40);
       }
     }
+    if (Math.abs(dz) >= 0.005 && (Math.abs(dx) >= 0.005 || Math.abs(dy) >= 0.005)) {
+      if (labelPositions[2].distanceTo(labelPositions[0]) < 48 || labelPositions[2].distanceTo(labelPositions[1]) < 48) {
+        labelPositions[2].x += 32;
+      }
+    }
     for (let i = 0; i < this.moveInputs.length; i++) {
       const input = this.moveInputs[i];
       const pill = this.movePills[i];
       const leg = legs[i];
       // A leg of zero length has no arrow to label and nowhere sensible to sit.
-      if (Math.abs(leg.value) < 0.005) {
+      if (!leg || Math.abs(leg.value) < 0.005) {
         pill.style.display = "none";
         continue;
       }
@@ -1931,31 +1942,80 @@ export class Scene {
    *  leaving the other axis (and its height) exactly where they are. */
   private applyTypedMove(input: HTMLInputElement) {
     const readout = this.moveReadout;
+    const isAssembly = readout ? this.assemblyGroups.has(readout.id) : false;
+    const asmGroup = readout ? this.assemblyGroups.get(readout.id) : undefined;
     const view = readout ? this.parts.get(readout.id) : undefined;
+    const obj = asmGroup ?? view?.group;
     const parsed = evaluateMathExpression(input.value);
     const typed = parsed !== null ? toMillimetres(parsed, this.displayUnit) : NaN;
-    if (!readout || !view || !Number.isFinite(typed)) {
+    if (!readout || !obj || !Number.isFinite(typed)) {
       this.updateMoveReadout();
       return;
     }
     const axis = this.moveInputs.indexOf(input);
-    const target = view.group.position.clone();
+    const target = obj.position.clone();
     if (axis === 0) target.x = readout.startPos.x + typed;
-    else target.y = readout.startPos.y + typed;
-    if (target.equals(view.group.position)) return;
+    else if (axis === 1) target.y = readout.startPos.y + typed;
+    else target.z = readout.startPos.z + typed;
+    if (target.equals(obj.position)) return;
 
-    view.group.position.copy(target);
-    view.group.updateWorldMatrix(true, true);
-    // Same conversion the drag itself uses: the document stores a node's own
-    // origin, while group.position carries the mesh pivot baked in.
-    const rotatedPivot = view.pivot.clone().applyEuler(view.group.rotation);
-    this.onTransformObject?.(readout.id, {
-      position: [
-        target.x - rotatedPivot.x,
-        target.y - rotatedPivot.y,
-        target.z - rotatedPivot.z,
-      ],
-    });
+    const deltaX = target.x - obj.position.x;
+    const deltaY = target.y - obj.position.y;
+    const deltaZ = target.z - obj.position.z;
+
+    if (this.selectedIds.length > 1 && this.selectedIds.includes(readout.id)) {
+      const effectiveIds = this.selectedIds.filter((id) => {
+        const root = this.findRootOwner(id);
+        return id === root || !this.selectedIds.includes(root);
+      });
+      for (const id of effectiveIds) {
+        const isAsm = this.assemblyGroups.has(id);
+        const itemObj = this.assemblyGroups.get(id) ?? this.parts.get(id)?.group;
+        const itemView = this.parts.get(id);
+        if (!itemObj) continue;
+        itemObj.position.x += deltaX;
+        itemObj.position.y += deltaY;
+        itemObj.position.z += deltaZ;
+        itemObj.updateWorldMatrix(true, true);
+        if (isAsm) {
+          this.onTransformObject?.(id, {
+            position: [itemObj.position.x, itemObj.position.y, itemObj.position.z],
+          });
+        } else {
+          const rotPivot = itemView ? itemView.pivot.clone().applyEuler(itemObj.rotation) : new THREE.Vector3();
+          this.onTransformObject?.(id, {
+            position: [
+              itemObj.position.x - rotPivot.x,
+              itemObj.position.y - rotPivot.y,
+              itemObj.position.z - rotPivot.z,
+            ],
+          });
+        }
+      }
+      const center = this.computeSelectionCenter(this.selectedIds);
+      this.multiGizmoPivot.position.copy(center);
+      this.multiGizmoPivot.updateMatrixWorld(true);
+    } else {
+      obj.position.copy(target);
+      obj.updateWorldMatrix(true, true);
+      if (isAssembly) {
+        this.onTransformObject?.(readout.id, {
+          position: [target.x, target.y, target.z],
+        });
+      } else {
+        const rotatedPivot = view ? view.pivot.clone().applyEuler(obj.rotation) : new THREE.Vector3();
+        this.onTransformObject?.(readout.id, {
+          position: [
+            target.x - rotatedPivot.x,
+            target.y - rotatedPivot.y,
+            target.z - rotatedPivot.z,
+          ],
+        });
+      }
+    }
+    this.attachGizmo();
+    this.updateResizeOverlay();
+    this.updateMoveReadout();
   }
 
   private setupAlignOverlay() {
@@ -6647,9 +6707,9 @@ export class Scene {
   setToolMode(mode: ToolMode) {
     if (mode !== "face") this.armedFace = null;
     const leavingFace = (this.toolMode === "face" || this.toolMode === "place") && mode !== this.toolMode;
-    // The offset readout belongs to select-tool dragging; leaving would strand
-    // a start point that the next return to select has no reason to honour.
-    if (mode !== "select") this.clearMoveReadout();
+    // The offset readout belongs to select-tool and move-tool dragging; leaving
+    // would strand a start point that the next return has no reason to honour.
+    if (mode !== "select" && mode !== "move") this.clearMoveReadout();
     if (this.toolMode === "build" && mode !== "build") this.setCells(null);
     this.toolMode = mode;
     this.tape.setActive(mode === "measure");
@@ -6922,8 +6982,25 @@ export class Scene {
           for (let i = 1; i < newSelectedIds.length; i++) {
             this.onSelectObject?.(newSelectedIds[i], true);
           }
+          if (this.gizmo.getMode() === "translate") {
+            const leadId = newSelectedIds[0];
+            const leadObj = leadId ? (this.assemblyGroups.get(leadId) ?? this.parts.get(leadId)?.group) : undefined;
+            if (leadId && leadObj) {
+              this.beginMoveReadout(leadId, leadObj.position);
+            }
+          }
           return;  // onDragChange was already called above
         }
+      }
+
+      if (this.gizmo.getMode() === "translate") {
+        const id = this.gizmoTarget();
+        const obj = id ? (this.assemblyGroups.get(id) ?? this.parts.get(id)?.group) : undefined;
+        if (id && obj) {
+          this.beginMoveReadout(id, obj.position);
+        }
+      } else {
+        this.clearMoveReadout();
       }
 
       if (this.selectedIds.length > 1) {
