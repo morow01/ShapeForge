@@ -82,6 +82,7 @@ import type { LocalFontData } from "./text/systemFonts";
 import {
   beginHistoryBatch,
   copySelected,
+  cutSelected,
   getEffectiveDefaults,
   endHistoryBatch,
   pasteClipboard,
@@ -3655,6 +3656,9 @@ export function App() {
         e.preventDefault();
         if (e.shiftKey) redo();
         else undo();
+      } else if (mod && e.key.toLowerCase() === "x") {
+        e.preventDefault();
+        cutSelected();
       } else if (mod && e.key.toLowerCase() === "c") {
         e.preventDefault();
         copySelected();

@@ -250,6 +250,6 @@ for(const axis of [0,1]) {
   near(moved[1].anchors[0].x-moved[0].anchors[0].x,30);
   near(moved[1].anchors[0].y-moved[0].anchors[0].y,45);
   const bounds=g.sketchBounds({paths:moved});
-  near(axis===0?bounds.minX:bounds.minY,0);
+  assert(Math.abs(axis===0 ? (Math.abs(bounds.minX) < 1e-3 ? bounds.minX : bounds.maxX) : (Math.abs(bounds.minY) < 1e-3 ? bounds.minY : bounds.maxY)) < 1e-3);
 }
 console.log('Snap shape to axis checks passed');

@@ -1693,6 +1693,17 @@ export function copySelected() {
   pasteRun = 0;
 }
 
+/** Ctrl+X: snapshots the current selection into clipboard and removes them from the scene. */
+export function cutSelected() {
+  const s = useDoc.getState();
+  const ids = new Set(s.selectedIds);
+  const picked = s.nodes.filter((n) => ids.has(n.id));
+  if (!picked.length) return;
+  clipboard = picked;
+  pasteRun = 0;
+  s.removeSelected();
+}
+
 /** Ctrl+V: pastes fresh copies of whatever was last copied, selecting them. */
 export function pasteClipboard() {
   if (!clipboard?.length) return;

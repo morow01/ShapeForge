@@ -178,8 +178,35 @@ function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdg
     triPlanes[t] = nx * ax + ny * ay + nz * az;
   }
 
-  // Build edge-to-triangles adjacency using numeric keys for fast lookup and zero string allocations
-  const edgeKey = (a: number, b: number) => (a < b ? a * 20000000 + b : b * 20000000 + a);
+  // Build spatial vertex map so coincident vertices across seams/disconnected buffers share edges
+  const numVerts = raw.vertices.length / 3;
+  const spatialVerts = new Uint32Array(numVerts);
+  const coordToSpatialId = new Map<string, number>();
+  const spatialToCoord = new Float32Array(numVerts * 3);
+  let nextSpatialId = 0;
+
+  for (let v = 0; v < numVerts; v++) {
+    const vx = raw.vertices[v * 3];
+    const vy = raw.vertices[v * 3 + 1];
+    const vz = raw.vertices[v * 3 + 2];
+    const key = `${Math.round(vx * 1000)},${Math.round(vy * 1000)},${Math.round(vz * 1000)}`;
+    let sId = coordToSpatialId.get(key);
+    if (sId === undefined) {
+      sId = nextSpatialId++;
+      coordToSpatialId.set(key, sId);
+      spatialToCoord[sId * 3] = vx;
+      spatialToCoord[sId * 3 + 1] = vy;
+      spatialToCoord[sId * 3 + 2] = vz;
+    }
+    spatialVerts[v] = sId;
+  }
+
+  // Build edge-to-triangles adjacency using spatial vertex IDs
+  const edgeKey = (v0: number, v1: number) => {
+    const s0 = spatialVerts[v0];
+    const s1 = spatialVerts[v1];
+    return s0 < s1 ? s0 * 20000000 + s1 : s1 * 20000000 + s0;
+  };
   const edgeToTris = new Map<number, number[]>();
   for (let t = 0; t < numTris; t++) {
     const v0 = raw.triangles[t * 3];
@@ -274,19 +301,19 @@ function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdg
       const dot = triNormals[tA * 3] * triNormals[tB * 3] +
                   triNormals[tA * 3 + 1] * triNormals[tB * 3 + 1] +
                   triNormals[tA * 3 + 2] * triNormals[tB * 3 + 2];
-      // Dihedral angle > 28 deg (dot < 0.88) represents real feature creases/edges,
+      // Dihedral angle > 30 deg (dot < 0.866) represents real feature creases/edges,
       // avoiding excessive line clutter on smooth curved surfaces
-      if (dot < 0.88) {
+      if (dot < 0.866) {
         isSharp = true;
       }
     }
     if (isSharp) {
-      const v0 = Math.floor(key / 20000000);
-      const v1 = key % 20000000;
+      const s0 = Math.floor(key / 20000000);
+      const s1 = key % 20000000;
       const startIdx = edgeLines.length / 3;
       edgeLines.push(
-        raw.vertices[v0 * 3], raw.vertices[v0 * 3 + 1], raw.vertices[v0 * 3 + 2],
-        raw.vertices[v1 * 3], raw.vertices[v1 * 3 + 1], raw.vertices[v1 * 3 + 2],
+        spatialToCoord[s0 * 3], spatialToCoord[s0 * 3 + 1], spatialToCoord[s0 * 3 + 2],
+        spatialToCoord[s1 * 3], spatialToCoord[s1 * 3 + 1], spatialToCoord[s1 * 3 + 2],
       );
       edgeGroups.push({
         start: startIdx,
