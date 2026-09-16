@@ -9,7 +9,7 @@ export default defineConfig({
   // to the Pages ACCOUNT root instead and 404s everything. Only the
   // Pages workflow build sets GITHUB_PAGES; local `npm run build` /
   // `npm run preview` / `npm run dev` all still serve from "/", unchanged.
-  base: process.env.GITHUB_PAGES === "true" ? "/ShapeForge/" : "/",
+  base: process.env.ELECTRON === "true" ? "./" : process.env.GITHUB_PAGES === "true" ? "/ShapeForge/" : "/",
   // The OCCT wasm glue must not be pre-bundled by esbuild.
   optimizeDeps: { exclude: ["replicad-opencascadejs"] },
   worker: { format: "es" },
