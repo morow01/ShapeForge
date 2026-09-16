@@ -4335,3 +4335,87 @@ button.stepper-btn:disabled {
 .tape-saved-row > button { all: unset; box-sizing: border-box; width: 18px; height: 18px; min-width: 18px; max-width: 18px; min-height: 18px; max-height: 18px; border-radius: 50%; border: 1px solid #cbd5e1; display: inline-flex; align-items: center; justify-content: center; color: #64748b; background: #ffffff; cursor: pointer; transition: all 0.12s ease; }
 .tape-saved-row > button:hover { background: #fee2e2; border-color: #fca5a5; color: #dc2626; }
 .tape-saved-row.tape-highlight { background: #e6f7f7; border-color: #00a7a5; }
+
+/* Pattern & Array Modal styles */
+.pattern-modal {
+  width: 620px;
+  max-width: 95vw;
+}
+.pattern-tab-icon {
+  width: 18px;
+  height: 18px;
+  margin-right: 8px;
+}
+.pattern-field {
+  margin-bottom: 14px;
+}
+.pattern-field label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: #334155;
+  margin-bottom: 4px;
+}
+.pattern-label-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+.pattern-val {
+  font-size: 11px;
+  font-weight: 700;
+  color: #00a7a5;
+  font-variant-numeric: tabular-nums;
+}
+.pattern-dual-inputs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.pattern-triple-inputs {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+}
+.pattern-triple-inputs label,
+.pattern-dual-inputs label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: normal;
+  font-size: 12px;
+}
+.pattern-dual-inputs input[type="number"] {
+  flex: 1;
+  padding: 5px 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 5px;
+  font-size: 12px;
+}
+.pattern-select {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  font-size: 12px;
+  background: #fff;
+}
+.pattern-options-bar {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pattern-summary {
+  margin-right: auto;
+  font-size: 12px;
+  color: #64748b;
+}
+.pattern-btn-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}

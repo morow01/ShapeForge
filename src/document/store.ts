@@ -747,6 +747,8 @@ interface DocState {
    *  them, and selects the new copies. Returns the new top-level ids, in the
    *  same order as `source`. */
   duplicateNodes: (source: SceneNode[], offset: Vec3) => string[];
+  /** Clones source nodes according to an array of transform positions & rotations. */
+  applyPattern: (sourceIds: string[], transforms: { position: Vec3; rotation: Vec3 }[], options?: { asGroup?: boolean; asHole?: boolean; groupName?: string }) => string[];
   /** Exact in-place duplicate (no offset) of one object node, with `params`
    *  merged into the copy's own params before it is ever built — atomic, so
    *  there is no window where the clone briefly exists with the source's
@@ -1206,6 +1208,58 @@ export const useDoc = create<DocState>()(
         set((s) => ({ nodes: [...s.nodes, ...clones], selectedIds: clones.map((c) => c.id) }));
         afterBatchedMutation();
         return clones.map((c) => c.id);
+      },
+
+      applyPattern: (sourceIds, transforms, options) => {
+        const state = get();
+        const sources = sourceIds.map((id) => findNode(state.nodes, id)).filter((n): n is SceneNode => n != null);
+        if (!sources.length || transforms.length < 1) return [];
+
+        const createdNodes: SceneNode[] = [];
+        // Transform 0 optionally updates or stays as the source.
+        // Transforms 1..N-1 become clones.
+        for (let i = 1; i < transforms.length; i++) {
+          const t = transforms[i];
+          for (const src of sources) {
+            const clone = cloneSubtree(src, [0, 0, 0]);
+            clone.position = [...t.position];
+            clone.rotation = [...t.rotation];
+            if (options?.asHole !== undefined && clone.type === "object") {
+              clone.isHole = options.asHole;
+            }
+            createdNodes.push(clone);
+          }
+        }
+
+        if (options?.asGroup && (sources.length + createdNodes.length > 1)) {
+          const allNodesInPattern = [...sources, ...createdNodes];
+          const groupNode: GroupNode = {
+            id: nextId(),
+            type: "group",
+            name: options.groupName || "Pattern Group",
+            op: "assembly",
+            isHole: false,
+            position: [0, 0, 0],
+            rotation: [0, 0, 0],
+            scale: [1, 1, 1],
+            children: allNodesInPattern,
+          };
+          const sourceIdSet = new Set(sourceIds);
+          const remainingNodes = state.nodes.filter((n) => !sourceIdSet.has(n.id));
+          set({
+            nodes: [...remainingNodes, groupNode],
+            selectedIds: [groupNode.id],
+          });
+          afterBatchedMutation();
+          return [groupNode.id];
+        } else {
+          set((s) => ({
+            nodes: [...s.nodes, ...createdNodes],
+            selectedIds: createdNodes.map((c) => c.id),
+          }));
+          afterBatchedMutation();
+          return createdNodes.map((c) => c.id);
+        }
       },
 
       duplicateWithParams: (id, params, overrides) => {

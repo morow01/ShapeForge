@@ -640,6 +640,72 @@ export function NewDesignIcon({ className = "tool-icon" }: { className?: string 
   );
 }
 
+/** Pattern / Array tool icon */
+export function PatternIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <g fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="3" width="6" height="6" rx="1.5" fill="currentColor" opacity="0.9" />
+        <rect x="15" y="3" width="6" height="6" rx="1.5" opacity="0.6" strokeDasharray="2 1.5" />
+        <rect x="3" y="15" width="6" height="6" rx="1.5" opacity="0.6" strokeDasharray="2 1.5" />
+        <rect x="15" y="15" width="6" height="6" rx="1.5" opacity="0.6" strokeDasharray="2 1.5" />
+        <path d="M9 6h6M6 9v6M18 9v6M9 18h6" opacity="0.4" strokeWidth="1.2" strokeDasharray="1.5 1.5" />
+      </g>
+    </svg>
+  );
+}
+
+/** Circular / Radial Pattern icon */
+export function CircularPatternIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <g fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="7" strokeDasharray="2.5 2" opacity="0.4" />
+        <circle cx="12" cy="5" r="2" fill="currentColor" />
+        <circle cx="19" cy="12" r="2" fill="currentColor" opacity="0.7" />
+        <circle cx="12" cy="19" r="2" fill="currentColor" opacity="0.7" />
+        <circle cx="5" cy="12" r="2" fill="currentColor" opacity="0.7" />
+        <circle cx="12" cy="12" r="1" fill="currentColor" opacity="0.3" />
+      </g>
+    </svg>
+  );
+}
+
+/** Grid / Matrix / Honeycomb pattern icon */
+export function GridPatternIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <g fill="currentColor">
+        <rect x="3" y="3" width="4.5" height="4.5" rx="1" />
+        <rect x="9.75" y="3" width="4.5" height="4.5" rx="1" opacity="0.7" />
+        <rect x="16.5" y="3" width="4.5" height="4.5" rx="1" opacity="0.7" />
+        <rect x="3" y="9.75" width="4.5" height="4.5" rx="1" opacity="0.7" />
+        <rect x="9.75" y="9.75" width="4.5" height="4.5" rx="1" opacity="0.7" />
+        <rect x="16.5" y="9.75" width="4.5" height="4.5" rx="1" opacity="0.7" />
+        <rect x="3" y="16.5" width="4.5" height="4.5" rx="1" opacity="0.7" />
+        <rect x="9.75" y="16.5" width="4.5" height="4.5" rx="1" opacity="0.7" />
+        <rect x="16.5" y="16.5" width="4.5" height="4.5" rx="1" opacity="0.7" />
+      </g>
+    </svg>
+  );
+}
+
+/** Path / Curve pattern icon */
+export function PathPatternIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <g fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M4 19C4 12 10 16 13 10C15 6 18 5 20 5" strokeDasharray="3 2" opacity="0.45" />
+        <circle cx="4" cy="19" r="2.2" fill="currentColor" />
+        <circle cx="9.5" cy="14.5" r="2.2" fill="currentColor" opacity="0.7" />
+        <circle cx="13" cy="10" r="2.2" fill="currentColor" opacity="0.7" />
+        <circle cx="16.5" cy="6.5" r="2.2" fill="currentColor" opacity="0.7" />
+        <circle cx="20" cy="5" r="2.2" fill="currentColor" opacity="0.7" />
+      </g>
+    </svg>
+  );
+}
+
 /** TinkerCAD-style Undo curved counter-clockwise arrow */
 export function UndoIcon({ className = "tool-icon" }: { className?: string }) {
   return (

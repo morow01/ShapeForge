@@ -41,6 +41,7 @@ import {
   NewDesignIcon,
   ObjectsIcon,
   OrthographicIcon,
+  PatternIcon,
   PencilIcon,
   PerspectiveIcon,
   PrimitiveShapeIcon,
@@ -70,6 +71,7 @@ import { SketchEditor, type SketchShape } from "./ui/SketchEditor";
 import { SettingsModal } from "./ui/SettingsModal";
 import type { BuildPlateSize } from "./ui/SettingsModal";
 import { ExportModal } from "./ui/ExportModal";
+import { PatternModal } from "./ui/PatternModal";
 import { BlueprintModal } from "./ui/BlueprintModal";
 import { NewDesignModal } from "./ui/NewDesignModal";
 import { StepperButtons } from "./ui/MathNumInput";
@@ -453,6 +455,7 @@ export function App() {
 
   const [projectsModalOpen, setProjectsModalOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [patternModalOpen, setPatternModalOpen] = useState(false);
   const [viewportQuality, setViewportQuality] = useState<ViewportQuality>(readViewportQuality);
   const [exportModalOpen, setExportModalOpen] = useState(false);
   const [newDesignPromptOpen, setNewDesignPromptOpen] = useState(false);
@@ -495,6 +498,7 @@ export function App() {
     setTransform,
     setPositions,
     duplicateNodes,
+    applyPattern,
     duplicateWithParams,
     pushPullFace,
     finishEdit,
@@ -3665,6 +3669,11 @@ export function App() {
       } else if (mod && e.key.toLowerCase() === "v") {
         e.preventDefault();
         pasteClipboard();
+      } else if (e.altKey && e.key.toLowerCase() === "p") {
+        e.preventDefault();
+        if (useDoc.getState().selectedIds.length > 0) {
+          setPatternModalOpen(true);
+        }
       } else if (!mod && e.key.toLowerCase() === "v") {
         setToolMode("select");
       } else if (!mod && e.key.toLowerCase() === "f") {
@@ -3950,6 +3959,19 @@ export function App() {
               aria-label="Ungroup"
             >
               <UngroupIcon className="topbar-icon" />
+            </button>
+            <button
+              className={`topbar-icon-btn ${patternModalOpen ? "on" : ""}`}
+              onClick={() => setPatternModalOpen(true)}
+              disabled={selectedIds.length === 0 || treeChangeBusy}
+              title={
+                selectedIds.length > 0
+                  ? "Pattern & Array (Alt+P) — Duplicate along Circle, Grid/Honeycomb, or Path"
+                  : "Pattern & Array — Select 1 or more objects first"
+              }
+              aria-label="Pattern & Array"
+            >
+              <PatternIcon className="topbar-icon" />
             </button>
           </div>
 
@@ -6870,6 +6892,18 @@ export function App() {
         onHideAllLines={setHideAllLines}
         onClose={() => setSettingsOpen(false)}
         getFps={() => sceneRef.current?.getFps() ?? null}
+      />
+
+      <PatternModal
+        open={patternModalOpen}
+        onClose={() => setPatternModalOpen(false)}
+        selectedNodes={nodes.filter((n) => selectedIds.includes(n.id))}
+        allNodes={nodes}
+        onApply={(transforms, options) => {
+          beginHistoryBatch();
+          applyPattern(selectedIds, transforms, options);
+          endHistoryBatch();
+        }}
       />
 
       <NewDesignModal
