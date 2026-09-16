@@ -301,9 +301,9 @@ function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdg
       const dot = triNormals[tA * 3] * triNormals[tB * 3] +
                   triNormals[tA * 3 + 1] * triNormals[tB * 3 + 1] +
                   triNormals[tA * 3 + 2] * triNormals[tB * 3 + 2];
-      // Dihedral angle > 30 deg (dot < 0.866) represents real feature creases/edges,
-      // avoiding excessive line clutter on smooth curved surfaces
-      if (dot < 0.866) {
+      // Dihedral angle > 2.5 deg (dot < 0.999) represents visible feature creases/facets,
+      // while filtering out flat coplanar diagonals
+      if (dot < 0.999) {
         isSharp = true;
       }
     }
