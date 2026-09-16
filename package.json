@@ -11,7 +11,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "desktop": "concurrently -k \"vite\" \"wait-on tcp:5173 && electron .\"",
-    "build:exe": "cross-env ELECTRON=true npm run build && electron-packager . ShapeForge --platform=win32 --arch=x64 --out=build-desktop --overwrite --asar --ignore=\"^(src|tests)\"",
+    "build:exe": "node electron/pack.cjs",
     "preversion": "npm run build",
     "postversion": "git push && git push --tags",
     "release": "npm run release:patch",
