@@ -12,6 +12,7 @@ dist
 dist-ssr
 dist-desktop
 dist-pack
+build-desktop
 release
 *.local
 
