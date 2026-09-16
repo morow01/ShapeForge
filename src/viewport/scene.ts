@@ -1570,7 +1570,7 @@ export class Scene {
     );
     this.scene.add(this.pushPullHandles);
 
-    this.tape = new MeasuringTape(host, this.scene, () => this.camera, () => this.showResult ? [] : [...this.parts.values()], () => ({ unit: this.displayUnit, decimals: this.decimalPlaces }));
+    this.tape = new MeasuringTape(host, this.scene, () => this.camera, () => this.showResult ? [] : [...this.parts.entries()].map(([id, view]) => ({ id, mesh: view.mesh, wire: view.wire, group: view.group, faces: view.faces })), () => ({ unit: this.displayUnit, decimals: this.decimalPlaces }));
     this.addLights();
     this.scene.add(this.plateGroup);
     this.rebuildPlate();

@@ -4090,7 +4090,6 @@ export function App() {
       )}
 
       <div className="tool-rail" role="toolbar" aria-label="Design tools">
-        <button className={toolMode === "measure" ? "active" : ""} aria-pressed={toolMode === "measure"} onClick={() => setToolMode(mode => mode === "measure" ? "select" : "measure")} title="Measuring tape" aria-label="Measuring tape tool"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 6v6m5-6v4m5-4v6M7 18v-3m5 3v-3m5 3v-3"/></svg></button>
         {/* Category 1: Selection & Transform */}
         <button
           className={toolMode === "select" ? "active" : ""}
@@ -4258,6 +4257,18 @@ export function App() {
             document.body,
           )}
         </div>
+        <button
+          className={toolMode === "measure" ? "active" : ""}
+          aria-pressed={toolMode === "measure"}
+          onClick={() => setToolMode((mode) => mode === "measure" ? "select" : "measure")}
+          title="Measuring tape"
+          aria-label="Measuring tape tool"
+        >
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+            <rect x="3" y="6" width="18" height="12" rx="2" />
+            <path d="M7 6v6m5-6v4m5-4v6M7 18v-3m5 3v-3m5 3v-3" />
+          </svg>
+        </button>
 
         <span className="tool-rail-sep" role="separator" />
 
