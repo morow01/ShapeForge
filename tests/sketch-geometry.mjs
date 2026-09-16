@@ -202,9 +202,54 @@ assert.deepEqual(box(revolved(rect(0,5,20,10),{angle:90,axis:1,upright:false})),
 assert.deepEqual(box(revolved(rect(0,-10,20,-5),{angle:90,axis:1,upright:false})),[0,-10,0,20,0,10],'drawn below the axis');
 assert.deepEqual(box(revolved(rect(5,3,10,23),{angle:360,axis:0,upright:true})),[-10,-10,0,10,10,20],'upright rests on the plate');
 const full=revolved(rect(5,0,10,20),{angle:360,axis:0,upright:false});
+// Partial turns keep the same angular resolution, plus four end-cap triangles.
+for (const angle of [45,90,180]) {
+  const partial=revolved(rect(5,0,10,20),{angle,axis:0,upright:false});
+  assert.equal(partial.numTri(),full.numTri()*angle/360+4,`${angle}° triangle count scales with sweep`);
+  near(partial.volume(),full.volume()*angle/360,1e-6);
+}
+const tiny=revolved(rect(5,0,10,20),{angle:1,axis:0,upright:false});
+assert.ok(tiny.volume()>0 && tiny.numTri()<full.numTri()/8,'tiny sweeps stay valid and economical');
 assert.ok(Math.abs(full.volume()-ring)/ring<0.002,'full turn volume '+full.volume());
 assert.throws(()=>revolved(rect(-5,0,10,20),{angle:360,axis:0,upright:false}),/crosses the revolve axis/);
 // Touching the axis gives a solid (a cylinder here), not an error.
 const solidCylinder=revolved(rect(0,0,10,20),{angle:360,axis:0,upright:true});
 assert.ok(Math.abs(solidCylinder.volume()-Math.PI*100*20)/(Math.PI*2000)<0.002);
 console.log('Sketch: closed paths extrude, holes cut, curves split exactly, anchor types, quality, scissors, merge, revolve, saved sketches load passed');
+
+// Snapping uses interior curve extrema and translates whole paths rigidly.
+const snapGeometry=load('../src/sketch/geometry.ts',['snapShapeToAxis','sampled']);
+const bulge={id:'bulge',closed:true,anchors:[
+  {...g.anchor(12,14),outX:-24,outY:-30},
+  {...g.anchor(12,24),inX:-6,inY:-3},
+  g.anchor(30,24),g.anchor(30,14),
+]};
+const untouched=square('untouched',80,80,10);
+const before=structuredClone(bulge);
+for(const axis of [0,1]) {
+  const source=[bulge,untouched];
+  const result=snapGeometry.snapShapeToAxis(source,new Set(['bulge']),axis);
+  const bounds=g.sketchBounds({paths:[result[0]]});
+  near(axis===0?bounds.minX:bounds.minY,0,1e-10);
+  assert.equal(result[1],untouched);
+  const dx=result[0].anchors[0].x-bulge.anchors[0].x;
+  const dy=result[0].anchors[0].y-bulge.anchors[0].y;
+  near(axis===0?dy:dx,0);
+  bulge.anchors.forEach((a,i)=>assert.deepEqual(result[0].anchors[i],{...a,x:a.x+dx,y:a.y+dy}));
+  near(Math.min(...snapGeometry.sampled(result[0]).map(p=>p[axis])),0,1e-10);
+  assert.equal(snapGeometry.snapShapeToAxis(result,new Set(['bulge']),axis),result);
+}
+assert.deepEqual(bulge,before);
+const noSelection=[bulge];
+assert.equal(snapGeometry.snapShapeToAxis(noSelection,new Set(),0),noSelection);
+const openOnly=[{...bulge,closed:false}];
+assert.equal(snapGeometry.snapShapeToAxis(openOnly,new Set(['bulge']),0),openOnly);
+for(const axis of [0,1]) {
+  const a=square('a',-20,-30,5), b=square('b',10,15,5);
+  const moved=snapGeometry.snapShapeToAxis([a,b],new Set(['a','b']),axis);
+  near(moved[1].anchors[0].x-moved[0].anchors[0].x,30);
+  near(moved[1].anchors[0].y-moved[0].anchors[0].y,45);
+  const bounds=g.sketchBounds({paths:moved});
+  near(axis===0?bounds.minX:bounds.minY,0);
+}
+console.log('Snap shape to axis checks passed');

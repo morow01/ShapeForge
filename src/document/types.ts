@@ -397,8 +397,8 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
     label: "Sketch",
     // revolve: 0 extrude, 1 revolve. revolveAxis: 0 the sketch's vertical
     // (Y) axis, 1 its horizontal (X) axis. standUpright: 1 builds a revolve
-    // with its axis up, resting on the build plate.
-    defaults: { depth: 10, curveSegments: 24, revolve: 0, revolveAngle: 360, revolveAxis: 0, standUpright: 1 },
+    // with its axis up, resting on the build plate. revolveSegments: sides around circular sweep.
+    defaults: { depth: 10, curveSegments: 16, revolve: 0, revolveAngle: 360, revolveAxis: 0, standUpright: 1, revolveSegments: 48 },
     fields: [
       { key: "depth", label: "Extrude height", min: 0.1, max: 2000, step: 0.5, noSlider: true, showIf: { key: "revolve", oneOf: [0] } },
       { key: "revolveAngle", label: "Revolve angle", min: 1, max: 360, step: 1, suffix: "°", showIf: { key: "revolve", oneOf: [1] } },

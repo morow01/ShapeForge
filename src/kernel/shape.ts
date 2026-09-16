@@ -1305,16 +1305,31 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
       break;
     }
     case "sketch": {
-      const curveSamples = Math.min(Math.max(Math.round(p.curveSegments ?? 24), 1), 256);
+      const curveSamples = Math.min(Math.max(Math.round(p.curveSegments ?? 16), 2), 128);
       if (!spec.sketchPaths?.length) throw new Error("This sketch has no closed shape. Close a path in the sketch editor.");
       if ((p.revolve ?? 0) >= 0.5) {
+        // Count curves vs straight lines in sketch profile to dynamically balance polygon density
+        let totalCurves = 0;
+        let totalLines = 0;
+        for (const path of spec.sketchPaths) {
+          for (const cmd of path) {
+            if (cmd[0] === "C") totalCurves++;
+            else if (cmd[0] === "L" || cmd[0] === "M") totalLines++;
+          }
+        }
+        // Circular segments around the revolution (sides around circle):
+        // If explicitly specified in params (e.g. 48, 64, 96), use that.
+        // Otherwise scale smoothly with curveSamples (e.g. 16 -> 48, 24 -> 64, 32 -> 96) for round surfaces.
+        const circularSegments = p.revolveSegments != null
+          ? Math.min(Math.max(Math.round(p.revolveSegments), 8), 128)
+          : Math.min(Math.max(Math.round(curveSamples * 3), 16), 96);
+
         s = svgRevolveSolid(spec.sketchPaths, {
           angle: p.revolveAngle ?? 360,
           axis: (p.revolveAxis ?? 0) >= 0.5 ? 1 : 0,
           upright: (p.standUpright ?? 1) >= 0.5,
           curveSamples,
-          // Quality sets the smoothness around the turn as well as along curves.
-          circularSegments: Math.min(Math.max(curveSamples * 3, 24), 192),
+          circularSegments,
         });
         break;
       }

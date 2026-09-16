@@ -178,20 +178,19 @@ function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdg
     triPlanes[t] = nx * ax + ny * ay + nz * az;
   }
 
-  // Build edge-to-triangles adjacency
-  const edgeToTris = new Map<string, number[]>();
+  // Build edge-to-triangles adjacency using numeric keys for fast lookup and zero string allocations
+  const edgeKey = (a: number, b: number) => (a < b ? a * 20000000 + b : b * 20000000 + a);
+  const edgeToTris = new Map<number, number[]>();
   for (let t = 0; t < numTris; t++) {
     const v0 = raw.triangles[t * 3];
     const v1 = raw.triangles[t * 3 + 1];
     const v2 = raw.triangles[t * 3 + 2];
 
-    const edges = [
-      v0 < v1 ? `${v0}:${v1}` : `${v1}:${v0}`,
-      v1 < v2 ? `${v1}:${v2}` : `${v2}:${v1}`,
-      v2 < v0 ? `${v2}:${v0}` : `${v0}:${v2}`,
-    ];
+    const e0 = edgeKey(v0, v1);
+    const e1 = edgeKey(v1, v2);
+    const e2 = edgeKey(v2, v0);
 
-    for (const e of edges) {
+    for (const e of [e0, e1, e2]) {
       let list = edgeToTris.get(e);
       if (!list) {
         list = [];
@@ -221,11 +220,7 @@ function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdg
       const v0 = raw.triangles[curr * 3];
       const v1 = raw.triangles[curr * 3 + 1];
       const v2 = raw.triangles[curr * 3 + 2];
-      const currEdges = [
-        v0 < v1 ? `${v0}:${v1}` : `${v1}:${v0}`,
-        v1 < v2 ? `${v1}:${v2}` : `${v2}:${v1}`,
-        v2 < v0 ? `${v2}:${v0}` : `${v0}:${v2}`,
-      ];
+      const currEdges = [edgeKey(v0, v1), edgeKey(v1, v2), edgeKey(v2, v0)];
 
       for (const e of currEdges) {
         const neighbors = edgeToTris.get(e);
@@ -279,14 +274,15 @@ function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdg
       const dot = triNormals[tA * 3] * triNormals[tB * 3] +
                   triNormals[tA * 3 + 1] * triNormals[tB * 3 + 1] +
                   triNormals[tA * 3 + 2] * triNormals[tB * 3 + 2];
-      if (dot < 0.965) {
+      // Dihedral angle > 28 deg (dot < 0.88) represents real feature creases/edges,
+      // avoiding excessive line clutter on smooth curved surfaces
+      if (dot < 0.88) {
         isSharp = true;
       }
     }
     if (isSharp) {
-      const colon = key.indexOf(":");
-      const v0 = Number(key.slice(0, colon));
-      const v1 = Number(key.slice(colon + 1));
+      const v0 = Math.floor(key / 20000000);
+      const v1 = key % 20000000;
       const startIdx = edgeLines.length / 3;
       edgeLines.push(
         raw.vertices[v0 * 3], raw.vertices[v0 * 3 + 1], raw.vertices[v0 * 3 + 2],

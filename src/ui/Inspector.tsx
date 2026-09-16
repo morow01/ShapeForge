@@ -276,6 +276,8 @@ interface Props {
   onTransparent: (transparent: boolean) => void;
   /** Display only: hide this object's edge lines in the shaded view. */
   onHideLines: (hideLines: boolean) => void;
+  /** Global override: true when "Hide all lines" is enabled globally. */
+  globalHideAllLines?: boolean;
   /** Faceted low-poly styling; undefined restores full detail. */
   onLowPoly: (lowPoly: LowPoly | undefined) => void;
   /** Imported artwork only: how far the outlines are extruded, in mm. */
@@ -344,6 +346,7 @@ export function Inspector({
   onColor,
   onTransparent,
   onHideLines,
+  globalHideAllLines = false,
   onLowPoly,
   onSvgThickness,
   onSimplifyMesh,
@@ -805,13 +808,28 @@ export function Inspector({
           </div>
 
           <h2>Display</h2>
-          <label className="lowpoly-toggle">
+          <label
+            className={`lowpoly-toggle ${globalHideAllLines ? "is-disabled" : ""}`}
+            title={
+              globalHideAllLines
+                ? 'All lines are currently hidden by the global "Hide all lines" setting (top toolbar)'
+                : undefined
+            }
+          >
             <input
               type="checkbox"
-              checked={resolveNodeHideLines(node)}
+              disabled={globalHideAllLines}
+              checked={globalHideAllLines || resolveNodeHideLines(node)}
               onChange={(e) => onHideLines(e.target.checked)}
             />
-            <span>Hide lines on this object</span>
+            <span>
+              Hide lines on this object
+              {globalHideAllLines && (
+                <span style={{ opacity: 0.75, fontStyle: "italic", fontSize: "10px", marginLeft: 4 }}>
+                  (Global override active)
+                </span>
+              )}
+            </span>
           </label>
 
           <LowPolySection lowPoly={node.lowPoly} onLowPoly={onLowPoly} />
@@ -1216,9 +1234,12 @@ function ObjectParams({
           </p>
           <button type="button" className="primary" onClick={() => onEditSketch?.()}>Edit sketch…</button>
           <SketchQuality
-            value={node.params.curveSegments ?? 24}
+            value={node.params.curveSegments ?? 16}
             onChange={(segments) => onParam("curveSegments", segments)}
+            revolveSegments={node.params.revolveSegments ?? 48}
+            onRevolveSegments={(segs) => onParam("revolveSegments", segs)}
             triangles={triangleCount}
+            isRevolve={(node.params.revolve ?? 0) >= 0.5}
           />
         </div>
       )}
@@ -2040,42 +2061,236 @@ const LOW_POLY_DEFAULT: LowPoly = { facet: 1.2, even: 3 };
  * a shading effect — so they live with the other shape settings rather than
  * with colour and transparency.
  */
-/** Segments per curve for each sketch quality; Medium is the default. */
-const SKETCH_QUALITY: { label: string; segments: number }[] = [
-  { label: "Low", segments: 8 },
-  { label: "Medium", segments: 24 },
-  { label: "High", segments: 64 },
+/** Preset points for quick selection */
+const SKETCH_QUALITY_PRESETS = [
+  { label: "Low", segments: 6, desc: "Fast draft" },
+  { label: "Med", segments: 16, desc: "Balanced" },
+  { label: "High", segments: 32, desc: "Smooth" },
+  { label: "Ultra", segments: 64, desc: "Fine detail" },
+];
+
+const REVOLVE_ROUNDNESS_PRESETS = [
+  { label: "Faceted", segments: 16, desc: "16-sided polygon" },
+  { label: "Standard", segments: 32, desc: "32 sides" },
+  { label: "Smooth", segments: 64, desc: "64 sides (Round)" },
+  { label: "Ultra", segments: 96, desc: "96 sides (Silky smooth)" },
 ];
 
 /**
- * How finely a sketch's curves are turned into flat facets, as three choices,
- * with the polygon count of the built object. Straight edges never add
- * polygons; only curves do.
+ * How finely a sketch's curves and revolved surfaces are turned into flat facets,
+ * offering both a continuous linear slider / numeric stepper and quick presets.
  */
-function SketchQuality({ value, onChange, triangles }: {
+function SketchQuality({
+  value,
+  onChange,
+  revolveSegments = 48,
+  onRevolveSegments,
+  triangles,
+  isRevolve = false,
+}: {
   value: number;
   onChange: (segments: number) => void;
+  revolveSegments?: number;
+  onRevolveSegments?: (segments: number) => void;
   triangles: number | null;
+  isRevolve?: boolean;
 }) {
   return (
-    <div className="sketch-quality">
-      <span className="field-label">Quality</span>
-      <div className="sketch-quality-options" role="radiogroup" aria-label="Sketch quality">
-        {SKETCH_QUALITY.map((q) => (
-          <button
-            key={q.label}
-            type="button"
-            role="radio"
-            aria-checked={value === q.segments}
-            className={value === q.segments ? "active" : ""}
-            onClick={() => onChange(q.segments)}
-            title={`${q.segments} segments per curve`}
-          >{q.label}</button>
-        ))}
+    <div className="sketch-quality-card">
+      {isRevolve ? (
+        <>
+          <div className="sketch-quality-header">
+            <span className="field-label">Revolve Roundness</span>
+            <span className="sketch-quality-val">{revolveSegments} sides</span>
+          </div>
+
+          <div className="sketch-quality-slider-row">
+            <input
+              type="range"
+              min={8}
+              max={128}
+              step={1}
+              value={revolveSegments}
+              onPointerDown={beginHistoryBatch}
+              onPointerUp={endHistoryBatch}
+              onChange={(e) => onRevolveSegments?.(Number(e.target.value))}
+              aria-label="Revolve sides / roundness"
+            />
+            <div className="num-stepper-wrap">
+              <input
+                className="num"
+                type="number"
+                min={8}
+                max={128}
+                step={1}
+                value={revolveSegments}
+                onFocus={beginHistoryBatch}
+                onBlur={endHistoryBatch}
+                onChange={(e) => {
+                  const num = Number(e.target.value);
+                  if (Number.isFinite(num) && num >= 4) {
+                    onRevolveSegments?.(Math.min(128, Math.max(8, Math.round(num))));
+                  }
+                }}
+              />
+              <StepperButtons
+                onStep={(dir, shift, alt) => {
+                  const delta = dir * (shift ? 8 : alt ? 1 : 2);
+                  const next = Math.min(128, Math.max(8, revolveSegments + delta));
+                  onRevolveSegments?.(next);
+                }}
+                onStart={beginHistoryBatch}
+                onEnd={endHistoryBatch}
+              />
+            </div>
+          </div>
+
+          <div className="sketch-quality-chips" role="radiogroup" aria-label="Revolve roundness presets">
+            {REVOLVE_ROUNDNESS_PRESETS.map((q) => (
+              <button
+                key={q.label}
+                type="button"
+                role="radio"
+                aria-checked={revolveSegments === q.segments}
+                className={`sketch-quality-chip ${revolveSegments === q.segments ? "active" : ""}`}
+                onClick={() => {
+                  beginHistoryBatch();
+                  onRevolveSegments?.(q.segments);
+                  endHistoryBatch();
+                }}
+                title={`${q.segments} circular sides (${q.desc})`}
+              >
+                {q.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="sketch-quality-header" style={{ marginTop: "6px" }}>
+            <span className="field-label">Profile Curve Detail</span>
+            <span className="sketch-quality-val">{value} segs / curve</span>
+          </div>
+
+          <div className="sketch-quality-slider-row">
+            <input
+              type="range"
+              min={2}
+              max={32}
+              step={1}
+              value={value}
+              onPointerDown={beginHistoryBatch}
+              onPointerUp={endHistoryBatch}
+              onChange={(e) => onChange(Number(e.target.value))}
+              aria-label="Profile curve segments"
+            />
+            <div className="num-stepper-wrap">
+              <input
+                className="num"
+                type="number"
+                min={2}
+                max={64}
+                step={1}
+                value={value}
+                onFocus={beginHistoryBatch}
+                onBlur={endHistoryBatch}
+                onChange={(e) => {
+                  const num = Number(e.target.value);
+                  if (Number.isFinite(num) && num >= 2) {
+                    onChange(Math.min(64, Math.max(2, Math.round(num))));
+                  }
+                }}
+              />
+              <StepperButtons
+                onStep={(dir, shift, alt) => {
+                  const delta = dir * (shift ? 4 : alt ? 1 : 1);
+                  const next = Math.min(64, Math.max(2, value + delta));
+                  onChange(next);
+                }}
+                onStart={beginHistoryBatch}
+                onEnd={endHistoryBatch}
+              />
+            </div>
+          </div>
+        </>
+      ) : (
+        <>
+          <div className="sketch-quality-header">
+            <span className="field-label">Curve Resolution</span>
+            <span className="sketch-quality-val">{value} segs / curve</span>
+          </div>
+
+          <div className="sketch-quality-slider-row">
+            <input
+              type="range"
+              min={3}
+              max={64}
+              step={1}
+              value={value}
+              onPointerDown={beginHistoryBatch}
+              onPointerUp={endHistoryBatch}
+              onChange={(e) => onChange(Number(e.target.value))}
+              aria-label="Curve segments resolution"
+            />
+            <div className="num-stepper-wrap">
+              <input
+                className="num"
+                type="number"
+                min={3}
+                max={128}
+                step={1}
+                value={value}
+                onFocus={beginHistoryBatch}
+                onBlur={endHistoryBatch}
+                onChange={(e) => {
+                  const num = Number(e.target.value);
+                  if (Number.isFinite(num) && num >= 2) {
+                    onChange(Math.min(128, Math.max(3, Math.round(num))));
+                  }
+                }}
+              />
+              <StepperButtons
+                onStep={(dir, shift, alt) => {
+                  const delta = dir * (shift ? 4 : alt ? 1 : 1);
+                  const next = Math.min(128, Math.max(3, value + delta));
+                  onChange(next);
+                }}
+                onStart={beginHistoryBatch}
+                onEnd={endHistoryBatch}
+              />
+            </div>
+          </div>
+
+          <div className="sketch-quality-chips" role="radiogroup" aria-label="Quality presets">
+            {SKETCH_QUALITY_PRESETS.map((q) => (
+              <button
+                key={q.label}
+                type="button"
+                role="radio"
+                aria-checked={value === q.segments}
+                className={`sketch-quality-chip ${value === q.segments ? "active" : ""}`}
+                onClick={() => {
+                  beginHistoryBatch();
+                  onChange(q.segments);
+                  endHistoryBatch();
+                }}
+                title={`${q.segments} segments per curve (${q.desc})`}
+              >
+                {q.label}
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+
+      <div className="sketch-quality-footer">
+        <span className="sketch-quality-count">
+          {triangles === null ? "Building…" : `${triangles.toLocaleString()} polygons`}
+        </span>
+        {triangles !== null && triangles > 35000 && (
+          <span className="sketch-poly-warning" title="High polygon count. Lowering resolution will speed up scene rendering.">
+            ⚠️ High density
+          </span>
+        )}
       </div>
-      <p className="sketch-quality-count">
-        {triangles === null ? "Building…" : `${triangles.toLocaleString()} polygons`}
-      </p>
     </div>
   );
 }

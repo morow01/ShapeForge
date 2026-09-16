@@ -1,10 +1,13 @@
 import { MeasuringTape } from "./MeasuringTape";
+import { mergedRenderGroups } from "./renderGroups";
+import { readViewportQuality, viewportQualitySettings, type ViewportQuality } from "./quality";
 import * as THREE from "three";
 import type { BlueprintGeometry } from "../document/blueprint";
 import { cellColour, DEFAULT_CELL_DISPLAY, type CellDisplay } from "./cellColours";
 import { FaceResizeHandles, type FaceBounds, type FaceResizeFrame } from "./FaceResizeHandles";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
+import { SimplifyModifier } from "three/examples/jsm/modifiers/SimplifyModifier.js";
 import { LineSegments2 } from "three/examples/jsm/lines/LineSegments2.js";
 import { LineSegmentsGeometry } from "three/examples/jsm/lines/LineSegmentsGeometry.js";
 import { LineMaterial } from "three/examples/jsm/lines/LineMaterial.js";
@@ -282,6 +285,13 @@ interface PartView {
    *  blue". */
   lastColor?: string;
   lastTransparent?: boolean;
+  /** Draft display quality only: a decimated stand-in for `mesh`'s geometry,
+   *  shown instead of it to cut GPU cost. `mesh` itself is left untouched and
+   *  merely hidden — it stays exactly as raycasting (face pick, push/pull,
+   *  hover) already expects it, so none of that code needs to know this
+   *  exists. Null outside draft quality, or when the part was too small to
+   *  bother simplifying. */
+  displayMesh: THREE.Mesh | null;
 }
 
 interface EdgePreviewState {
@@ -512,6 +522,48 @@ function syncKernelGeometry(mesh: KernelMesh, previous: ThreeGeometry[] = []): T
   lines.setAttribute("position", new THREE.BufferAttribute(linePositions, 3));
   for (const group of mesh.edges.edgeGroups) lines.addGroup(group.start, group.count, 0);
   return [{ faces, lines }];
+}
+
+/** The material a mesh's slot `index` would show, whether `material` is a
+ *  single material or the array form used for multi-group geometry. */
+function materialAt(material: THREE.Material | THREE.Material[], index: number): THREE.Material {
+  return Array.isArray(material) ? material[index] : material;
+}
+
+const simplifyModifier = new SimplifyModifier();
+/** Below this the part is already cheap enough that decimating it would only
+ *  visibly round it off for no real GPU saving. */
+const DRAFT_SIMPLIFY_MIN_TRIANGLES = 800;
+/** SimplifyModifier's own cost grows fast with vertex count; a scanned STL
+ *  import can be large enough that running it synchronously here would
+ *  visibly stall the toggle — better to leave those at full detail than
+ *  freeze the UI for it. */
+const DRAFT_SIMPLIFY_MAX_TRIANGLES = 60_000;
+/** Roughly how much of the surface to keep — aggressive, since this is only
+ *  ever shown small/far or mid-interaction, never for judging a design. */
+const DRAFT_SIMPLIFY_KEEP_RATIO = 0.25;
+
+/** A decimated stand-in for `faces`, for draft display quality — or null if
+ *  it is out of the size range worth bothering with, or comes back
+ *  degenerate (SimplifyModifier can collapse a thin/tricky shape to nothing;
+ *  the caller falls back to full detail rather than show that). */
+function buildDraftFaces(faces: THREE.BufferGeometry): THREE.BufferGeometry | null {
+  const triangleCount = (faces.index ? faces.index.count : faces.attributes.position.count) / 3;
+  if (triangleCount < DRAFT_SIMPLIFY_MIN_TRIANGLES || triangleCount > DRAFT_SIMPLIFY_MAX_TRIANGLES) return null;
+  const vertexCount = faces.attributes.position.count;
+  const removeCount = Math.floor(vertexCount * (1 - DRAFT_SIMPLIFY_KEEP_RATIO));
+  if (removeCount <= 0) return null;
+  try {
+    const simplified = simplifyModifier.modify(faces, removeCount);
+    const resultTriangles = simplified.attributes.position.count / 3;
+    if (!(resultTriangles > 0)) { simplified.dispose(); return null; }
+    simplified.computeBoundingBox();
+    return simplified;
+  } catch {
+    // A handful of edge-case topologies (near-degenerate triangles, open
+    // shells) make the reference implementation throw outright.
+    return null;
+  }
 }
 
 /** One push/pull grip: a stubby arrow (shaft + cone) built pointing along
@@ -992,6 +1044,70 @@ export class Scene {
     return {bounds,units};
   }
   private renderer: THREE.WebGLRenderer;
+  private displayQuality = readViewportQuality();
+  private lastRenderTime = 0;
+  /** Rendered-frame timestamps from roughly the last second, purely so
+   *  Settings can show a live fps readout — lets a "does this setting do
+   *  anything" question be answered by looking at a number instead of by
+   *  feel. Not read anywhere performance-sensitive. */
+  private recentFrameTimes: number[] = [];
+
+  getFps(): number {
+    const now = performance.now();
+    this.recentFrameTimes = this.recentFrameTimes.filter((t) => now - t <= 1000);
+    return this.recentFrameTimes.length;
+  }
+
+  setDisplayQuality(quality: ViewportQuality) {
+    this.displayQuality = quality;
+    this.renderer.setPixelRatio(viewportQualitySettings(quality, window.devicePixelRatio).pixelRatio);
+    this.lastRenderTime = 0;
+    for (const view of this.parts.values()) this.applyDraftGeometry(view);
+  }
+
+  /**
+   * Builds, refreshes or drops a part's decimated stand-in mesh to match the
+   * current display quality. `view.mesh` — the one raycasting, face-pick,
+   * push/pull and hover already hit-test against — is never re-geometried,
+   * only hidden; a THREE.Raycaster does not consult `.visible`, so every
+   * existing hit-test keeps working against full detail without knowing
+   * this exists. Only the thing actually drawn to the screen changes.
+   */
+  private applyDraftGeometry(view: PartView) {
+    if (view.displayMesh) {
+      view.group.remove(view.displayMesh);
+      view.displayMesh.geometry.dispose();
+      view.displayMesh = null;
+    }
+    if (this.displayQuality === "draft") {
+      const draftFaces = buildDraftFaces(view.geom[0].faces);
+      if (draftFaces) {
+        // A single material, not the full mesh's array: its groups (per-face
+        // highlight/hover slots) don't exist on this simplified geometry,
+        // and an array material with no matching geometry groups renders
+        // nothing at all rather than falling back to the first entry.
+        const displayMesh = new THREE.Mesh(draftFaces, materialAt(view.mesh.material, 0));
+        displayMesh.renderOrder = view.mesh.renderOrder;
+        view.group.add(displayMesh);
+        view.displayMesh = displayMesh;
+      }
+    }
+    view.mesh.visible = !view.displayMesh;
+    view.occluder.geometry = view.displayMesh?.geometry ?? view.geom[0].faces;
+  }
+
+  /** Global performance override: forces every part's edge lines off,
+   *  regardless of each one's own "Hide lines on this object" setting — see
+   *  applyMaterials(), which ORs this into that per-node flag rather than
+   *  replacing it, so turning this back off restores whatever each object
+   *  already had. */
+  private hideAllLines = false;
+
+  setHideAllLines(hide: boolean) {
+    this.hideAllLines = hide;
+    this.applyMaterials();
+  }
+
   private scene: THREE.Scene;
   private camera: THREE.PerspectiveCamera | THREE.OrthographicCamera;
   private controls: OrbitControls;
@@ -1425,7 +1541,7 @@ export class Scene {
     this.host = host;
 
     this.renderer = new THREE.WebGLRenderer({ antialias: true });
-    this.renderer.setPixelRatio(window.devicePixelRatio);
+    this.renderer.setPixelRatio(viewportQualitySettings(this.displayQuality, window.devicePixelRatio).pixelRatio);
     this.renderer.setSize(host.clientWidth, host.clientHeight);
     host.appendChild(this.renderer.domElement);
 
@@ -2236,7 +2352,9 @@ export class Scene {
     const occluder = this.makeOccluder(geom[0].faces);
     group.add(m, wire, occluder);
     this.scene.add(group);
-    return { group, mesh: m, wire, occluder, geom, pivot, isHole, faces, ...remembered };
+    const view: PartView = { group, mesh: m, wire, occluder, geom, pivot, isHole, faces, displayMesh: null, ...remembered };
+    this.applyDraftGeometry(view);
+    return view;
   }
 
   /** Alt-drag needs a real Object3D to drag the instant the gesture starts —
@@ -2262,7 +2380,7 @@ export class Scene {
     group.scale.copy(source.group.scale);
     group.add(mesh, wire, occluder);
     this.scene.add(group);
-    return {
+    const view: PartView = {
       group,
       mesh,
       wire,
@@ -2272,7 +2390,10 @@ export class Scene {
       isHole: source.isHole,
       lastColor: source.lastColor,
       lastTransparent: source.lastTransparent,
+      displayMesh: null,
     };
+    this.applyDraftGeometry(view);
+    return view;
   }
 
   /** Centres both render geometries around their visible bounds. The outer
@@ -2300,6 +2421,7 @@ export class Scene {
         existing.mesh.geometry = existing.geom[0].faces;
         existing.wire.geometry = existing.geom[0].lines;
         existing.occluder.geometry = existing.geom[0].faces;
+        this.applyDraftGeometry(existing);
         existing.isHole = part.isHole;
         existing.faces = part.faces;
         // A rebuild may return the same topological faces in a different
@@ -2876,7 +2998,7 @@ export class Scene {
         }
         // "Hide lines" is for the shaded view only. The wireframe styles are
         // nothing but lines, and the edge tool needs them to pick from.
-        const hideLines = !!node && resolveNodeHideLines(node);
+        const hideLines = this.hideAllLines || (!!node && resolveNodeHideLines(node));
         view.wire.visible = !(hideLines && !isWire && !isEdgesOnly && this.toolMode !== "edge");
       }
     }
@@ -9595,6 +9717,12 @@ export class Scene {
 
   private animate = () => {
     this.frame = requestAnimationFrame(this.animate);
+    const now = performance.now();
+    const interval = viewportQualitySettings(this.displayQuality, window.devicePixelRatio).frameInterval;
+    const elapsed = now - this.lastRenderTime;
+    if (elapsed < interval - 0.5) return;
+    this.lastRenderTime = interval > 0 ? now - (Math.max(0, elapsed) % interval) : now;
+    this.recentFrameTimes.push(now);
     this.renderFrame();
   };
 
@@ -9620,7 +9748,31 @@ export class Scene {
     this.tape.render();
     this.faceResizeHandles?.render();
     this.updateMoveReadout();
-    this.renderer.render(this.scene, this.camera);
+    // A draft-quality stand-in mesh is never touched by any of the ~15 call
+    // sites that swap view.mesh.material for a new array (selection colour,
+    // hollow/boolean previews, wireframe modes, cell kept/removed, …) — so
+    // its own material would silently go stale the first time any of them
+    // ran. Mirroring the reference here, once a frame, keeps it looking like
+    // whatever view.mesh would show without those sites needing to know a
+    // stand-in exists.
+    for (const view of this.parts.values()) {
+      if (view.displayMesh) view.displayMesh.material = materialAt(view.mesh.material, 0);
+    }
+    // Face groups are needed for picking, but identical neighbouring materials
+    // do not need separate GPU submissions. Restore them before any input runs.
+    const originals = new Map<THREE.BufferGeometry, THREE.BufferGeometry["groups"]>();
+    this.scene.traverseVisible((object) => {
+      if (!(object instanceof THREE.Mesh) || !Array.isArray(object.material)) return;
+      const geometry = object.geometry;
+      if (originals.has(geometry) || geometry.groups.length < 2) return;
+      originals.set(geometry, geometry.groups);
+      geometry.groups = mergedRenderGroups(geometry.groups);
+    });
+    try {
+      this.renderer.render(this.scene, this.camera);
+    } finally {
+      for (const [geometry, groups] of originals) geometry.groups = groups;
+    }
     this.renderer.autoClear = false;
     this.renderer.clearDepth();
     this.renderer.render(this.gizmoScene, this.camera);

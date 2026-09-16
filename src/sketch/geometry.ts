@@ -130,7 +130,7 @@ export function nearestOnCubic(cubic: Cubic, p: Pt): { t: number; point: Pt; dis
 
 /**
  * Inserts an anchor on segment `index` at `t` without changing the path's
- * shape — the Add Anchor Point tool. Neighbouring handles are shortened to
+ * shape — hovering a curve with the Pen tool. Neighbouring handles are shortened to
  * the halves of the split curve, and the new anchor is smooth — its handles
  * are in line but, cut anywhere but the middle, not equally long.
  */
@@ -302,7 +302,29 @@ export function pathData(path: SketchPath): string {
   return d;
 }
 
-/** Axis-aligned bounds of the drawn curves (sampled), or null when empty. */
+/** Parameters of interior extrema on either coordinate of a cubic. */
+function cubicExtrema(cubic: Cubic): number[] {
+  const roots: number[] = [];
+  for (const axis of [0, 1]) {
+    const [p0, p1, p2, p3] = cubic.map((p) => p[axis]);
+    const d0 = p1 - p0, d1 = p2 - p1, d2 = p3 - p2;
+    const a = d0 - 2 * d1 + d2, b = 2 * (d1 - d0), c = d0;
+    const epsilon = Number.EPSILON * 16 * Math.max(Math.abs(a), Math.abs(b), Math.abs(c));
+    if (Math.abs(a) <= epsilon) {
+      if (Math.abs(b) > epsilon) roots.push(-c / b);
+    } else {
+      const discriminant = b * b - 4 * a * c;
+      if (discriminant >= 0) {
+        const q = -0.5 * (b + (b < 0 ? -1 : 1) * Math.sqrt(discriminant));
+        if (q === 0) roots.push(-b / (2 * a));
+        else roots.push(q / a, c / q);
+      }
+    }
+  }
+  return roots.filter((t) => t > 0 && t < 1);
+}
+
+/** Axis-aligned bounds of the actual Bézier outline, or null when empty. */
 export function sketchBounds(sketch: SketchData): { minX: number; minY: number; maxX: number; maxY: number } | null {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   const add = ([x, y]: Pt) => {
@@ -313,10 +335,34 @@ export function sketchBounds(sketch: SketchData): { minX: number; minY: number; 
     if (path.anchors.length === 1) add([path.anchors[0].x, path.anchors[0].y]);
     for (let i = 0; i < segmentCount(path); i++) {
       const cubic = segmentCubic(path, i);
-      for (let s = 0; s <= 16; s++) add(cubicPoint(cubic, s / 16));
+      add(cubic[0]);
+      add(cubic[3]);
+      for (const t of cubicExtrema(cubic)) add(cubicPoint(cubic, t));
     }
   }
   return Number.isFinite(minX) ? { minX, minY, maxX, maxY } : null;
+}
+
+/** Translate selected completed paths as a group until the nearer of their two
+ * bounds touches the axis — whichever side the shape already mostly sits on,
+ * not always its minimum. Always aligning to the minimum would drag a shape
+ * that is mostly on the negative side, and only barely crosses over, all the
+ * way across to sit entirely on the positive side: a small nudge back turns
+ * into a large, surprising jump. Handles are relative vectors, so translating
+ * only anchors preserves every curve.
+ */
+export function snapShapeToAxis(paths: SketchPath[], selectedIds: ReadonlySet<string>, axis: 0 | 1): SketchPath[] {
+  const selected = paths.filter((p) => selectedIds.has(p.id) && p.closed && p.anchors.length > 1);
+  const bounds = sketchBounds({ paths: selected });
+  if (!bounds) return paths;
+  const [lo, hi] = axis === 0 ? [bounds.minX, bounds.maxX] : [bounds.minY, bounds.maxY];
+  const offset = -(Math.abs(lo) <= Math.abs(hi) ? lo : hi);
+  if (Math.abs(offset) <= 1e-10) return paths;
+  const ids = new Set(selected.map((p) => p.id));
+  return paths.map((p) => ids.has(p.id) ? {
+    ...p,
+    anchors: p.anchors.map((a) => ({ ...a, x: a.x + (axis === 0 ? offset : 0), y: a.y + (axis === 1 ? offset : 0) })),
+  } : p);
 }
 
 /** Signed area of a closed path (positive anticlockwise), from its sampled outline. */
@@ -334,11 +380,13 @@ export function pathArea(path: SketchPath): number {
   return area / 2;
 }
 
-function sampled(path: SketchPath): Pt[] {
+export function sampled(path: SketchPath): Pt[] {
   const pts: Pt[] = [];
   for (let i = 0; i < segmentCount(path); i++) {
     const cubic = segmentCubic(path, i);
-    for (let s = 0; s < 16; s++) pts.push(cubicPoint(cubic, s / 16));
+    // Include exact extrema so the revolve preview reaches a snapped axis too.
+    const parameters = new Set([...Array.from({ length: 16 }, (_, s) => s / 16), ...cubicExtrema(cubic)]);
+    for (const t of [...parameters].sort((a, b) => a - b)) pts.push(cubicPoint(cubic, t));
   }
   return pts;
 }

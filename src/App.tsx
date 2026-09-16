@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import * as THREE from "three";
 import { EXPORT_MESHES_WATCHDOG_MS, EXPORT_WATCHDOG_MS, kernel, KernelTimeoutError, SCENE_TOTAL_MS } from "./kernel/client";
 import { Viewport } from "./viewport/Viewport";
+import { readViewportQuality, VIEWPORT_QUALITY_KEY, type ViewportQuality } from "./viewport/quality";
 import type { FaceBounds, FaceResizeFrame } from "./viewport/FaceResizeHandles";
 import { Inspector } from "./ui/Inspector";
 import { Tree } from "./ui/Tree";
@@ -20,7 +21,9 @@ import {
   EdgeToolIcon,
   ExportIcon,
   FaceModifierIcon,
+  GridSnapIcon,
   GroupIcon,
+  HideLinesIcon,
   ImportIcon,
   JoineryToolIcon,
   RoundPinIcon,
@@ -322,6 +325,7 @@ const EXPORT_FORMAT_KEY = "cad.exportFormat";
 const SNAP_KEY = "cad.smartGuides";
 const GRID_SNAP_KEY = "cad.gridSnap";
 const SELECTED_COLLISIONS_KEY = "cad.showSelectedCollisions";
+const HIDE_ALL_LINES_KEY = "cad.hideAllLines";
 const RANDOM_NEW_OBJECT_COLORS_KEY = "cad.randomNewObjectColors";
 const RANDOM_NEW_OBJECT_COLORS_MIGRATED_KEY = "cad.randomNewObjectColors.v2";
 const OBJECTS_PANEL_KEY = "cad.objectsPanelOpen";
@@ -448,6 +452,7 @@ export function App() {
 
   const [projectsModalOpen, setProjectsModalOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [viewportQuality, setViewportQuality] = useState<ViewportQuality>(readViewportQuality);
   const [exportModalOpen, setExportModalOpen] = useState(false);
   const [newDesignPromptOpen, setNewDesignPromptOpen] = useState(false);
   const [fileMenuOpen, setFileMenuOpen] = useState(false);
@@ -946,6 +951,9 @@ export function App() {
   );
   const [showSelectedCollisionContacts, setShowSelectedCollisionContacts] = useState(
     () => localStorage.getItem(SELECTED_COLLISIONS_KEY) !== "off",
+  );
+  const [hideAllLines, setHideAllLines] = useState(
+    () => localStorage.getItem(HIDE_ALL_LINES_KEY) === "on",
   );
   const [randomNewObjectColors, setRandomNewObjectColors] = useState(
     // v0.4.19 accidentally persisted the old disabled default. Migrate that
@@ -2008,6 +2016,10 @@ export function App() {
   );
 
   const sceneRef = useRef<Scene | null>(null);
+  useEffect(() => {
+    sceneRef.current?.setDisplayQuality(viewportQuality);
+    try { localStorage.setItem(VIEWPORT_QUALITY_KEY, viewportQuality); } catch { /* Keep the preference for this session. */ }
+  }, [viewportQuality]);
   const tapePanelRef = useRef<HTMLDivElement>(null);
   // A prepared STL is valid only for the exact document and quality used to
   // create it. The revision also catches a change made while export is still
@@ -2190,6 +2202,15 @@ export function App() {
       // Private mode / blocked storage: the choice just won't be remembered.
     }
   }, [showSelectedCollisionContacts]);
+
+  useEffect(() => {
+    sceneRef.current?.setHideAllLines(hideAllLines);
+    try {
+      localStorage.setItem(HIDE_ALL_LINES_KEY, hideAllLines ? "on" : "off");
+    } catch {
+      // Private mode / blocked storage: the choice just won't be remembered.
+    }
+  }, [hideAllLines]);
 
   useEffect(() => {
     try {
@@ -3970,6 +3991,19 @@ export function App() {
               <BuildPlateIcon className="topbar-icon" />
             </button>
             <button
+              className={`topbar-icon-btn ${gridSnapEnabled ? "on" : ""}`}
+              onClick={() => setGridSnapEnabled((v) => !v)}
+              title={
+                gridSnapEnabled
+                  ? "Snap to grid on — moves objects in 1 mm steps while dragging"
+                  : "Snap to grid off"
+              }
+              aria-pressed={gridSnapEnabled}
+              aria-label="Toggle Snap to Grid"
+            >
+              <GridSnapIcon className="topbar-icon" />
+            </button>
+            <button
               className={`topbar-icon-btn snap-toggle ${snapEnabled ? "on" : ""}`}
               onClick={() => setSnapEnabled((v) => !v)}
               title={
@@ -3981,6 +4015,19 @@ export function App() {
               aria-label="Toggle Snap to Objects"
             >
               <MagnetIcon className="topbar-icon snap-icon" />
+            </button>
+            <button
+              className={`topbar-icon-btn ${hideAllLines ? "on" : ""}`}
+              onClick={() => setHideAllLines((v) => !v)}
+              title={
+                hideAllLines
+                  ? "Hide all lines is ON — object edge outlines are hidden for maximum FPS (Click to show lines)"
+                  : "Hide all lines is OFF — edge lines are drawn on objects (Click to hide all lines and speed up scene)"
+              }
+              aria-pressed={hideAllLines}
+              aria-label="Toggle Hide All Lines"
+            >
+              <HideLinesIcon className="topbar-icon" hidden={hideAllLines} />
             </button>
             <button
               className={`topbar-icon-btn ${showSelectedCollisionContacts ? "on" : ""}`}
@@ -4374,6 +4421,7 @@ export function App() {
           >
             <WireframeIcon mode={wireframe} />
           </button>
+          <CornerFlyoutMark className="corner-flyout-mark wireframe-corner-mark" />
           {wireframeMenuOpen && wireframeFlyoutPos && createPortal(
             <div
               ref={wireframeFlyoutRef}
@@ -5598,6 +5646,7 @@ export function App() {
               }}
               onTransparent={applyTransparent}
               onHideLines={(hideLines) => setHideLines(selected.id, hideLines)}
+              globalHideAllLines={hideAllLines}
               onLowPoly={(lowPoly) => setLowPoly(selected.id, lowPoly)}
               onSvgThickness={(mm) => setSvgThickness(selected.id, mm)}
               onSimplifyMesh={handleSimplifyMesh}
@@ -6792,6 +6841,8 @@ export function App() {
       />
 
       <SettingsModal
+        viewportQuality={viewportQuality}
+        onViewportQuality={setViewportQuality}
         open={settingsOpen}
         unit={displayUnit}
         decimals={decimalPlaces}
@@ -6802,6 +6853,7 @@ export function App() {
         snapToObjects={snapEnabled}
         showSelectedCollisionContacts={showSelectedCollisionContacts}
         randomNewObjectColors={randomNewObjectColors}
+        hideAllLines={hideAllLines}
         onUnit={setDisplayUnit}
         onDecimals={setDecimalPlaces}
         onAppearance={setAppearance}
@@ -6811,7 +6863,9 @@ export function App() {
         onSnapToObjects={setSnapEnabled}
         onShowSelectedCollisionContacts={setShowSelectedCollisionContacts}
         onRandomNewObjectColors={setRandomNewObjectColors}
+        onHideAllLines={setHideAllLines}
         onClose={() => setSettingsOpen(false)}
+        getFps={() => sceneRef.current?.getFps() ?? null}
       />
 
       <NewDesignModal

@@ -365,7 +365,11 @@ export function svgRevolveSolid(paths: SvgCommand[][], options: RevolveOptions):
   if (mirrored) section = section.mirror([1, 0]);
 
   const angle = Math.min(Math.max(options.angle, 1), 360);
-  const segments = Math.max(12, Math.round(options.circularSegments));
+  // Manifold applies this count to the swept arc, not to a full circle.
+  // Keep angular resolution consistent instead of packing a full turn's
+  // polygons into every partial turn. Three segments also handles tiny arcs.
+  const fullTurnSegments = Math.max(12, Math.round(options.circularSegments));
+  const segments = Math.max(3, Math.ceil(fullTurnSegments * angle / 360));
   // Manifold spins about the frame's y, which it turns into z, starting at +x
   // and sweeping towards +y.
   let solid = section.revolve(segments, angle);

@@ -439,6 +439,56 @@ export function CornerFlyoutMark({ className = "corner-flyout-mark" }: { classNa
 }
 
 /**
+ * Snap to Grid toggle icon: a 3x3 grid with an active snap target center point.
+ */
+export function GridSnapIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <g fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M4 8.5h16M4 15.5h16M8.5 4v16M15.5 4v16" opacity=".55" />
+        <rect x="3.5" y="3.5" width="17" height="17" rx="2.5" strokeWidth="1.6" />
+      </g>
+      <circle className="icon-accent-fill" cx="12" cy="12" r="2.2" fill="currentColor" />
+    </svg>
+  );
+}
+
+/**
+ * Hide all lines toggle icon: an isometric cube with a diagonal slash or edge lines.
+ */
+export function HideLinesIcon({ className = "tool-icon", hidden = false }: { className?: string; hidden?: boolean }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path
+        d="M12 3.5 19.5 7.8V16.2L12 20.5 4.5 16.2V7.8Z"
+        fill="currentColor"
+        fillOpacity={hidden ? "0.08" : "0.18"}
+      />
+      <g
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        opacity={hidden ? "0.35" : "1"}
+      >
+        <path d="M12 3.5 19.5 7.8V16.2L12 20.5 4.5 16.2V7.8Z" />
+        <path d="M12 12 4.5 7.8M12 12l7.5-4.2M12 12v8.5" />
+      </g>
+      {hidden && (
+        <path
+          d="M4 4l16 16"
+          fill="none"
+          stroke="#ef4444"
+          strokeWidth="2.2"
+          strokeLinecap="round"
+        />
+      )}
+    </svg>
+  );
+}
+
+/**
  * Shape Builder: two overlapping outlines with only their shared region
  * filled — the regions, and the fact that you pick between them, is the whole
  * idea, so the icon shows an arrangement rather than a finished solid.

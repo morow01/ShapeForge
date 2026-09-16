@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
-import { type AnchorMode, type SketchAnchor, type SketchData, type SketchPath } from "../document/types";
+import * as THREE from "three";
+import { type AnchorMode, type SketchAnchor, type SketchData, type SketchPath, DEFAULT_OBJECT_COLOR } from "../document/types";
 import {
   anchor as makeAnchor,
   breakPath,
@@ -13,14 +14,18 @@ import {
   nestingDepths,
   nearestOnCubic,
   pathArea,
+  sampled,
   segmentCount,
   segmentCubic,
   sketchBounds,
+  snapShapeToAxis,
   type Pt,
 } from "../sketch/geometry";
 import { fromMillimetres, toMillimetres, UNIT_LABEL, type DisplayUnit } from "../measurement";
 import { evaluateMathExpression } from "../utils/mathExpr";
 import { RedoIcon, SketchToolIcon, UndoIcon } from "./icons";
+import { Shape3DPreview } from "./Shape3DPreview";
+import { StepperButtons } from "./MathNumInput";
 
 /**
  * Full-screen 2D sketch editor: Bézier paths drawn the way Illustrator draws
@@ -31,14 +36,12 @@ import { RedoIcon, SketchToolIcon, UndoIcon } from "./icons";
  * size at every zoom.
  */
 
-type Tool = "select" | "direct" | "pen" | "add" | "delete" | "convert" | "scissors";
+type Tool = "select" | "direct" | "pen" | "convert" | "scissors";
 
 const TOOLS: { id: Tool; label: string; key: string; hint: string }[] = [
   { id: "select", label: "Selection", key: "V", hint: "Click a shape to select it, drag to move it. Drag on empty space to select several. Delete removes them." },
   { id: "direct", label: "Direct Selection", key: "A", hint: "Select and drag anchors, handles or curves. A smooth anchor keeps its handles in line; a symmetric one also keeps them equally long. Alt-drag a handle to make it a corner. Arrow keys nudge." },
-  { id: "pen", label: "Pen", key: "P", hint: "Click for a corner, drag for a smooth curve. Alt while dragging bends the handle, Shift keeps 45°. Click the first anchor to close; Enter or Esc ends an open path." },
-  { id: "add", label: "Add Anchor Point", key: "+", hint: "Click on a path to add an anchor without changing its shape." },
-  { id: "delete", label: "Delete Anchor Point", key: "−", hint: "Click an anchor to remove it; the path reconnects around it." },
+  { id: "pen", label: "Pen", key: "P", hint: "Click empty space for a corner, drag for a smooth curve. Hover a curve to add an anchor there, an anchor to remove it, or an open end to continue it. Alt while dragging bends the handle, Shift keeps 45°. Click the first anchor to close; Enter or Esc ends an open path." },
   { id: "convert", label: "Anchor Point", key: "Shift+C", hint: "Click a smooth anchor to make it a corner. Drag from a corner to pull out smooth handles. Drag a handle to move it on its own." },
   { id: "scissors", label: "Scissors", key: "C", hint: "Click an anchor, or anywhere on a path, to cut it there. The cut leaves two ends on top of each other: drag one away with Direct Selection (A). Close joins them again." },
 ];
@@ -84,7 +87,7 @@ function deleteAnchors(paths: SketchPath[], keys: Set<string>): SketchPath[] {
     const anchors = path.anchors.filter((_, i) => !keys.has(keyOf(path.id, i)));
     if (anchors.length === path.anchors.length) { out.push(path); continue; }
     if (anchors.length < 2) continue;
-    out.push({ ...path, anchors, closed: path.closed && anchors.length > 2 });
+    out.push({ ...path, anchors, closed: path.closed && anchors.length > 1 });
   }
   return out;
 }
@@ -107,7 +110,7 @@ type Hit =
 type Drag =
   | { kind: "pan"; sx: number; sy: number; cx: number; cy: number }
   | { kind: "marquee"; from: Pt; to: Pt; additive: boolean }
-  | { kind: "move"; start: Pt; base: SketchPath[]; keys: string[]; grab: { pathId: string; index: number } | null; moved: boolean; sx: number; sy: number }
+  | { kind: "move"; start: Pt; base: SketchPath[]; keys: string[]; grab: { pathId: string; index: number } | null; wholeShape: boolean; moved: boolean; sx: number; sy: number }
   | { kind: "handle"; pathId: string; index: number; which: "in" | "out"; base: SketchPath[]; breakOnly: boolean; moved: boolean }
   | { kind: "pull"; pathId: string; index: number; base: SketchPath[]; sx: number; sy: number; moved: boolean; closing: boolean }
   | { kind: "reshape"; pathId: string; index: number; t: number; start: Pt; base: SketchPath[]; moved: boolean };
@@ -152,7 +155,14 @@ export function SketchEditor({ title, applyLabel, initialShape, initial, initial
   const [depth, setDepth] = useState(initialDepth);
   const [shape, setShape] = useState<SketchShape>(initialShape);
   const [angleText, setAngleText] = useState(String(initialShape.angle));
-  const [tool, setTool] = useState<Tool>("pen");
+  const angleRef = useRef(initialShape.angle);
+  const changeAngle = (value: number) => {
+    const angle = Math.min(360, Math.max(1, value));
+    angleRef.current = angle;
+    setShape((s) => ({ ...s, angle }));
+    setAngleText(String(+angle.toFixed(2)));
+  };
+  const [tool, setTool] = useState<Tool>("select");
   const [selection, setSelection] = useState<Selection>(emptySelection);
   /** The open path the Pen is adding to, if any. */
   const [activePathId, setActivePathId] = useState<string | null>(null);
@@ -281,14 +291,8 @@ export function SketchEditor({ title, applyLabel, initialShape, initial, initial
 
   const findPath = (list: SketchPath[], id: string) => list.find((p) => p.id === id);
 
-  /** Paths the Pen may add or delete anchors on: those with anything selected. */
-  const isPathSelected = useCallback(
-    (id: string) => selection.paths.has(id) || [...selection.anchors].some((k) => parseKey(k).pathId === id),
-    [selection],
-  );
-
   const snap = useCallback(
-    (p: Pt, options: { from?: Pt | null; shift?: boolean; exclude?: Set<string> } = {}): Pt => {
+    (p: Pt, options: { from?: Pt | null; shift?: boolean; exclude?: Set<string>; skipAxis?: boolean } = {}): Pt => {
       if (options.shift && options.from) return constrain45(options.from, p);
       const reach = SNAP_PX / view.zoom;
       let best: Pt | null = null, bestD = reach;
@@ -305,11 +309,23 @@ export function SketchEditor({ title, applyLabel, initialShape, initial, initial
           if (d < bestD) { bestD = d; best = q; }
         }
       }
+      // The revolve axis itself, so an edge can be pulled to sit exactly on
+      // it — useful since touching the axis (unlike crossing it) is valid,
+      // and a solid revolve usually wants that edge exactly there. Skipped
+      // for a whole-shape drag: that snaps whichever anchor the caller used
+      // as its move handle (often not even the one under the cursor), which
+      // would yank the entire shape however far THAT point needed to travel
+      // to reach the axis — nothing like the gentle single-point nudge this
+      // is meant to be.
+      if (shape.revolve && !options.skipAxis) {
+        const d = shape.axis === 0 ? Math.abs(p[0]) : Math.abs(p[1]);
+        if (d < bestD) { bestD = d; best = shape.axis === 0 ? [0, p[1]] : [p[0], 0]; }
+      }
       if (best) return best;
       if (snapGrid && gridStep > 0) return [Math.round(p[0] / gridStep) * gridStep, Math.round(p[1] / gridStep) * gridStep];
       return p;
     },
-    [view.zoom, snapGrid, gridStep, guides],
+    [view.zoom, snapGrid, gridStep, guides, shape.revolve, shape.axis],
   );
 
   const hitFromTarget = (target: EventTarget | null): Hit => {
@@ -436,10 +452,13 @@ export function SketchEditor({ title, applyLabel, initialShape, initial, initial
           setSelection({ paths: new Set(), anchors: new Set([keyOf(path.id, hit.index === 0 ? path.anchors.length - 1 : hit.index)]) });
           return;
         }
-        // Clicking any other anchor with the Pen does not delete it (that is
-        // the Delete Anchor Point tool's job): a new path starts there.
+        // Any other anchor, on any path: the Pen removes it, as in Illustrator.
+        checkpoint();
+        setPaths((ps) => deleteAnchors(ps, new Set([keyOf(hit.pathId, hit.index)])));
+        setSelection({ paths: new Set([hit.pathId]), anchors: new Set() });
+        return;
       }
-      if (hit.kind === "segment" && isPathSelected(hit.pathId)) {
+      if (hit.kind === "segment") {
         addAnchorAt(hit.pathId, hit.index, world);
         return;
       }
@@ -461,20 +480,6 @@ export function SketchEditor({ title, applyLabel, initialShape, initial, initial
         if (!path) return;
         const { t } = nearestOnCubic(segmentCubic(path, hit.index), world);
         cutAt(hit.pathId, hit.index + 1, insertAnchor(path, hit.index, t));
-      }
-      return;
-    }
-
-    if (tool === "add") {
-      if (hit.kind === "segment") addAnchorAt(hit.pathId, hit.index, world);
-      return;
-    }
-
-    if (tool === "delete") {
-      if (hit.kind === "anchor") {
-        checkpoint();
-        setPaths((ps) => deleteAnchors(ps, new Set([keyOf(hit.pathId, hit.index)])));
-        setSelection({ paths: new Set([hit.pathId]), anchors: new Set() });
       }
       return;
     }
@@ -506,7 +511,7 @@ export function SketchEditor({ title, applyLabel, initialShape, initial, initial
           keys = new Set([key]);
         }
         setSelection({ paths: new Set(), anchors: keys });
-        setDrag({ kind: "move", start: world, base: clonePaths(list), keys: [...keys], grab: { pathId: hit.pathId, index: hit.index }, moved: false, sx, sy });
+        setDrag({ kind: "move", start: world, base: clonePaths(list), keys: [...keys], grab: { pathId: hit.pathId, index: hit.index }, wholeShape: false, moved: false, sx, sy });
         return;
       }
       if (hit.kind === "segment") {
@@ -521,14 +526,14 @@ export function SketchEditor({ title, applyLabel, initialShape, initial, initial
         }
         const keys = e.shiftKey ? new Set([...selection.anchors, a, b]) : new Set([a, b]);
         setSelection({ paths: new Set(), anchors: keys });
-        setDrag({ kind: "move", start: world, base: clonePaths(list), keys: [...keys], grab: null, moved: false, sx, sy });
+        setDrag({ kind: "move", start: world, base: clonePaths(list), keys: [...keys], grab: null, wholeShape: false, moved: false, sx, sy });
         return;
       }
       if (hit.kind === "fill") {
         const path = findPath(list, hit.pathId)!;
         const keys = new Set(path.anchors.map((_, i) => keyOf(path.id, i)));
         setSelection({ paths: new Set(), anchors: keys });
-        setDrag({ kind: "move", start: world, base: clonePaths(list), keys: [...keys], grab: null, moved: false, sx, sy });
+        setDrag({ kind: "move", start: world, base: clonePaths(list), keys: [...keys], grab: null, wholeShape: true, moved: false, sx, sy });
         return;
       }
       if (!e.shiftKey) setSelection(emptySelection());
@@ -548,7 +553,7 @@ export function SketchEditor({ title, applyLabel, initialShape, initial, initial
       }
       setSelection({ paths: ids, anchors: new Set() });
       const keys = list.filter((p) => ids.has(p.id)).flatMap((p) => p.anchors.map((_, i) => keyOf(p.id, i)));
-      setDrag({ kind: "move", start: world, base: clonePaths(list), keys, grab: { pathId: id, index: 0 }, moved: false, sx, sy });
+      setDrag({ kind: "move", start: world, base: clonePaths(list), keys, grab: { pathId: id, index: 0 }, wholeShape: true, moved: false, sx, sy });
       return;
     }
     if (!e.shiftKey) setSelection(emptySelection());
@@ -588,7 +593,7 @@ export function SketchEditor({ title, applyLabel, initialShape, initial, initial
           dx = c[0]; dy = c[1];
         } else if (drag.grab) {
           const grabbed = findPath(drag.base, drag.grab.pathId)!.anchors[drag.grab.index];
-          const target = snap([grabbed.x + dx, grabbed.y + dy], { exclude: new Set(drag.keys) });
+          const target = snap([grabbed.x + dx, grabbed.y + dy], { exclude: new Set(drag.keys), skipAxis: drag.wholeShape });
           dx = target[0] - grabbed.x; dy = target[1] - grabbed.y;
         }
         const keys = new Set(drag.keys);
@@ -603,8 +608,7 @@ export function SketchEditor({ title, applyLabel, initialShape, initial, initial
         if (!drag.moved) checkpoint(drag.base);
         const basePath = findPath(drag.base, drag.pathId)!;
         const a = basePath.anchors[drag.index];
-        let target: Pt = world;
-        if (e.shiftKey) target = constrain45([a.x, a.y], world);
+        let target: Pt = e.shiftKey ? constrain45([a.x, a.y], world) : snap(world);
         const hx = target[0] - a.x, hy = target[1] - a.y;
         const breakIt = drag.breakOnly || e.altKey;
         setPaths(drag.base.map((p) => {
@@ -628,8 +632,7 @@ export function SketchEditor({ title, applyLabel, initialShape, initial, initial
         if (!drag.moved && tool === "convert") checkpoint(drag.base);
         const basePath = findPath(pathsRef.current, drag.pathId) ?? findPath(drag.base, drag.pathId)!;
         const a = basePath.anchors[drag.index];
-        let target: Pt = world;
-        if (e.shiftKey) target = constrain45([a.x, a.y], world);
+        let target: Pt = e.shiftKey ? constrain45([a.x, a.y], world) : snap(world, { exclude: new Set([keyOf(drag.pathId, drag.index)]) });
         const hx = target[0] - a.x, hy = target[1] - a.y;
         // Alt bends the anchor: only the handle that shapes the segment being
         // drawn moves — the outgoing one normally, the incoming one on closing.
@@ -784,8 +787,6 @@ export function SketchEditor({ title, applyLabel, initialShape, initial, initial
       else if (key === "v") switchTool("select");
       else if (key === "a") switchTool("direct");
       else if (key === "p") switchTool("pen");
-      else if (e.key === "+" || e.key === "=") switchTool("add");
-      else if (e.key === "-" || e.key === "_") switchTool("delete");
       else if (key === "f") fitView();
     };
     const onKeyUp = (e: KeyboardEvent) => {
@@ -818,6 +819,34 @@ export function SketchEditor({ title, applyLabel, initialShape, initial, initial
   }, [paths, shape.axis]);
   const revolveBlocked = shape.revolve && axisSides.crosses;
   const openCount = paths.length - closedCount;
+
+  // A fast client-side approximation for the live preview card, not the
+  // exact kernel result: one THREE.LatheGeometry per closed path, built by
+  // feeding it the path's own full sampled outline (out one side, back the
+  // other) rather than a single profile edge — since first and last points
+  // coincide, the lathe closes into a proper torus-like solid instead of an
+  // open tube. Radius is the closed path's distance from the revolve axis
+  // (X for a vertical axis, Y for a horizontal one — see axisSides above),
+  // taken as absolute value since a path drawn on the axis's negative side
+  // still revolves the same way.
+  const revolvePreviewGeometries = useMemo(() => {
+    if (!shape.revolve || revolveBlocked) return [];
+    const closed = paths.filter((p) => p.closed && p.anchors.length > 1);
+    const phiLength = (Math.min(Math.max(shape.angle, 1), 360) * Math.PI) / 180;
+    const segments = Math.max(3, Math.round((phiLength / (2 * Math.PI)) * 64));
+    const out: THREE.BufferGeometry[] = [];
+    for (const path of closed) {
+      const pts = sampled(path).map(([x, y]) =>
+        new THREE.Vector2(Math.abs(shape.axis === 0 ? x : y), shape.axis === 0 ? y : x));
+      if (pts.length < 3) continue;
+      // sampled() stops just short of the starting point (it doesn't repeat
+      // it), so the lathe's own tube cross-section never quite wraps shut —
+      // closing it explicitly here is what removes that seam.
+      pts.push(pts[0].clone());
+      out.push(new THREE.LatheGeometry(pts, segments, 0, phiLength));
+    }
+    return out;
+  }, [paths, shape.revolve, shape.angle, shape.axis, revolveBlocked]);
 
   const selectedAnchors = useMemo(() => {
     const out: { key: string; path: SketchPath; index: number; anchor: SketchAnchor }[] = [];
@@ -973,19 +1002,18 @@ export function SketchEditor({ title, applyLabel, initialShape, initial, initial
     else if (!active && hover.kind === "anchor") {
       const path = paths.find((p) => p.id === hover.pathId);
       if (path && !path.closed && (hover.index === 0 || hover.index === path.anchors.length - 1)) cursorHint = "Continue path";
+      else cursorHint = "Delete anchor";
     } else if (active && hover.kind === "anchor" && hover.pathId !== active.id) {
       const path = paths.find((p) => p.id === hover.pathId);
       if (path && !path.closed && (hover.index === 0 || hover.index === path.anchors.length - 1)) cursorHint = "Join paths";
-    } else if (!active && hover.kind === "segment" && isPathSelected(hover.pathId)) cursorHint = "Add anchor";
-  } else if (tool === "add" && hover.kind === "segment") cursorHint = "Add anchor";
-  else if (tool === "scissors" && (hover.kind === "segment" || hover.kind === "anchor")) cursorHint = "Cut path here";
-  else if (tool === "delete" && hover.kind === "anchor") cursorHint = "Delete anchor";
+    } else if (!active && hover.kind === "segment") cursorHint = "Add anchor";
+  } else if (tool === "scissors" && (hover.kind === "segment" || hover.kind === "anchor")) cursorHint = "Cut path here";
 
   // Where a click would add (or cut at) an anchor, shown on the path under the
   // pointer before clicking: the nearest point on the curve, the same point
   // the click uses.
   let insertPreview: Pt | null = null;
-  const adds = tool === "add" || tool === "scissors" || (tool === "pen" && !active && hover.kind === "segment" && isPathSelected(hover.pathId));
+  const adds = tool === "scissors" || (tool === "pen" && !active && hover.kind === "segment");
   if (adds && hover.kind === "segment" && pointer && !drag && !spaceHeld) {
     const path = paths.find((p) => p.id === hover.pathId);
     if (path && hover.index < segmentCount(path)) insertPreview = nearestOnCubic(segmentCubic(path, hover.index), pointer.world).point;
@@ -1004,6 +1032,13 @@ export function SketchEditor({ title, applyLabel, initialShape, initial, initial
   const single = selectedAnchors.length === 1 ? selectedAnchors[0] : null;
   const allMode = (mode: AnchorMode) => selectedAnchors.length > 0 && selectedAnchors.every((s) => s.anchor.mode === mode);
   const selectedPaths = paths.filter((p) => selectedPathIds.has(p.id));
+  const canSnapShape = selectedPaths.some((p) => p.closed && p.anchors.length > 1);
+  const snapSelectedShape = () => {
+    const next = snapShapeToAxis(pathsRef.current, selectedPathIds, shape.axis);
+    if (next === pathsRef.current) return;
+    checkpoint();
+    setPaths(next);
+  };
   const depths = useMemo(() => nestingDepths(paths), [paths]);
   const shapeCount = depths.filter((d, i) => d >= 0 && d % 2 === 0 && Math.abs(pathArea(paths[i])) > 1e-9).length;
   const holeCount = depths.filter((d) => d > 0 && d % 2 === 1).length;
@@ -1216,6 +1251,9 @@ export function SketchEditor({ title, applyLabel, initialShape, initial, initial
                 onClick={mergeSelected}
                 title="Merge: snap the two selected anchors together into one (Ctrl+J)"
               ><AnchorGlyph kind="merge" /><span>Merge</span></button>
+              <button type="button" className="sketch-icon-button" disabled={selectedPaths.every((p) => p.closed || p.anchors.length < 3)} onClick={() => setPathsClosed(true)} title="Close path: connect its last anchor to its first">
+                <ShapeActionGlyph kind="close" /><span>Close path</span>
+              </button>
             </div>
             {selectedAnchors.length === 2 && !mergePlan && (
               <p className="sketch-hint">These two can't merge: pick neighbouring anchors, or the ends of open paths.</p>
@@ -1234,10 +1272,6 @@ export function SketchEditor({ title, applyLabel, initialShape, initial, initial
                     ? `${selectedPaths[0].anchors.length} anchors · ${selectedPaths[0].closed ? "closed" : "open"}`
                     : `${selectedPaths.length} paths`}
                 </p>
-                <div className="sketch-segmented">
-                  <button type="button" disabled={selectedPaths.every((p) => p.closed || p.anchors.length < 3)} onClick={() => setPathsClosed(true)}>Close</button>
-                  <button type="button" onClick={() => { checkpoint(); setPaths((ps) => ps.filter((p) => !selectedPathIds.has(p.id))); setSelection(emptySelection()); setActivePathId(null); }}>Delete</button>
-                </div>
               </>
             ) : (
               <p className="sketch-hint">No path selected.</p>
@@ -1246,19 +1280,21 @@ export function SketchEditor({ title, applyLabel, initialShape, initial, initial
 
           <section className="sketch-section">
             <div className="field-label">Snapping ({unit})</div>
+            <div className="sketch-grid-row">
             <label className="sketch-check">
               <input type="checkbox" checked={snapGrid} onChange={(e) => setSnapGrid(e.target.checked)} />
               Snap to grid
             </label>
-            <LengthInput label="Grid" valueMm={gridStep} unit={displayUnit} decimals={decimals} min={0.01} onCommit={(mm) => setGridStep(mm)} />
+            <LengthInput label="Step" valueMm={gridStep} unit={displayUnit} decimals={decimals} min={0.01} onCommit={(mm) => setGridStep(mm)} />
+            </div>
             <p className="sketch-hint">Anchors always snap to other anchors{guides.length ? " and to the corners of the face you picked (grey)" : ""}. Hold Shift for 45° angles.</p>
           </section>
 
           <section className="sketch-section sketch-extrude">
             <div className="field-label">Make solid{shape.revolve ? "" : ` (${unit})`}</div>
             <div className="sketch-segmented" role="radiogroup" aria-label="Make solid by">
-              <button type="button" role="radio" aria-checked={!shape.revolve} className={!shape.revolve ? "active" : ""} onClick={() => setShape((s) => ({ ...s, revolve: false }))} title="Push the shapes straight out of the sketch plane">Extrude</button>
-              <button type="button" role="radio" aria-checked={shape.revolve} className={shape.revolve ? "active" : ""} onClick={() => setShape((s) => ({ ...s, revolve: true }))} title="Spin the shapes around an axis, like a lathe">Revolve</button>
+              <button type="button" role="radio" aria-checked={!shape.revolve} className={`sketch-icon-button sketch-solid-button ${!shape.revolve ? "active" : ""}`} onClick={() => setShape((s) => ({ ...s, revolve: false }))} title="Push the shapes straight out of the sketch plane"><ShapeActionGlyph kind="extrude" /><span>Extrude</span></button>
+              <button type="button" role="radio" aria-checked={shape.revolve} className={`sketch-icon-button sketch-solid-button ${shape.revolve ? "active" : ""}`} onClick={() => setShape((s) => ({ ...s, revolve: true }))} title="Spin the shapes around an axis, like a lathe"><ShapeActionGlyph kind="revolve" /><span>Revolve</span></button>
             </div>
             {shape.revolve ? (
               <>
@@ -1267,9 +1303,32 @@ export function SketchEditor({ title, applyLabel, initialShape, initial, initial
                   <button type="button" role="radio" aria-checked={shape.axis === 0} className={shape.axis === 0 ? "active" : ""} onClick={() => setShape((s) => ({ ...s, axis: 0 }))} title="Spin around the vertical line through the sketch origin">Vertical (Y)</button>
                   <button type="button" role="radio" aria-checked={shape.axis === 1} className={shape.axis === 1 ? "active" : ""} onClick={() => setShape((s) => ({ ...s, axis: 1 }))} title="Spin around the horizontal line through the sketch origin">Horizontal (X)</button>
                 </div>
-                <label className="sketch-length">
-                  <span className="field-label">Angle</span>
+                <div className="sketch-segmented">
+                  <button type="button" disabled={!canSnapShape} onClick={snapSelectedShape}
+                    title={shape.axis === 0 ? "Move the selected shapes horizontally until their nearer curved edge touches the red axis" : "Move the selected shapes vertically until their nearer curved edge touches the red axis"}>
+                    Snap shape to axis
+                  </button>
+                </div>
+                <p className="sketch-hint">{!canSnapShape ? "Select a closed shape to snap it to the red axis." : "Moves the selection by the shortest distance that brings its nearer edge to touch the red axis, keeping it on whichever side it's already on."}</p>
+                {revolvePreviewGeometries.length > 0 ? (
+                  <Shape3DPreview geometries={revolvePreviewGeometries} color={DEFAULT_OBJECT_COLOR} resetKey={shape.axis} />
+                ) : (
+                  <div className="shape-preview shape-preview-empty">
+                    {!closedCount
+                      ? "Close a path to preview it"
+                      : revolveBlocked
+                        ? "Shape crosses the axis"
+                        : "Preview"}
+                  </div>
+                )}
+                <div>
+                  <div className="field-label">Revolve angle (°)</div>
+                  <div className="field-row">
+                    <input type="range" min={1} max={360} step={1} value={shape.angle} aria-label="Revolve angle" onChange={(e) => changeAngle(Number(e.target.value))} />
+                    <div className="num-stepper-wrap">
                   <input
+                    className="num"
+                    aria-label="Revolve angle in degrees"
                     type="text"
                     inputMode="decimal"
                     value={angleText}
@@ -1277,13 +1336,20 @@ export function SketchEditor({ title, applyLabel, initialShape, initial, initial
                     onBlur={() => {
                       const value = evaluateMathExpression(angleText);
                       const angle = value === null || !Number.isFinite(value) ? shape.angle : Math.min(Math.max(value, 1), 360);
-                      setShape((s) => ({ ...s, angle }));
-                      setAngleText(String(+angle.toFixed(2)));
+                      changeAngle(angle);
                     }}
-                    onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") e.currentTarget.blur();
+                      if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+                        e.preventDefault();
+                        changeAngle((evaluateMathExpression(angleText) ?? shape.angle) + (e.key === "ArrowUp" ? 1 : -1) * (e.shiftKey ? 10 : e.altKey ? 0.1 : 1));
+                      }
+                    }}
                   />
-                  <span className="sketch-unit">°</span>
-                </label>
+                      <StepperButtons onStep={(dir, shift, alt) => changeAngle(angleRef.current + dir * (shift ? 10 : alt ? 0.1 : 1))} />
+                    </div>
+                  </div>
+                </div>
                 <label className="sketch-check">
                   <input type="checkbox" checked={shape.upright} onChange={(e) => setShape((s) => ({ ...s, upright: e.target.checked }))} />
                   Stand upright on the build plate
@@ -1346,6 +1412,21 @@ function LengthInput({ label, valueMm, unit, decimals, min, axis, onCommit }: {
       />
     </label>
   );
+}
+
+function ShapeActionGlyph({ kind }: { kind: "close" | "extrude" | "revolve" }) {
+  return <svg viewBox="0 0 24 24" className="sketch-glyph" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round">
+    {kind === "close" ? <>
+      <path d="M5 6v13h14V6" /><path d="M5 6h14" strokeDasharray="2 3" />
+      <rect x="3" y="4" width="4" height="4" fill="currentColor" stroke="none" /><rect x="17" y="4" width="4" height="4" fill="currentColor" stroke="none" />
+    </> : kind === "extrude" ? <>
+      <path d="m4 12 8 4 8-4-8-4-8 4Zm0 0v6l8 4 8-4v-6M12 16v6M12 9V2m-3 3 3-3 3 3" />
+    </> : <>
+      <path d="M12 2v20" strokeDasharray="2 2" />
+      <path d="M15 5c2 1 3 3 3 6v5" />
+      <path d="M19 10c2 1 3 2 3 4 0 3-5 5-10 5S2 17 2 14c0-2 2-3 5-4M4 8l3 2-2 3" />
+    </>}
+  </svg>;
 }
 
 /** Icons for the anchor type and anchor action buttons. */
@@ -1438,13 +1519,9 @@ function toolCursor(tool: Tool, hint: string): string {
     case "direct":
       return svgCursor(outlined("M5 3l13 10-6 .8 3.4 6.4-2.6 1.3-3.3-6.5L5 19z", "#fff"), 5, 3, "default");
     case "pen": {
-      const mark = hint === "Close path" ? "o" : hint === "Add anchor" ? "+" : hint === "Continue path" || hint === "Join paths" ? "/" : "";
+      const mark = hint === "Close path" ? "o" : hint === "Add anchor" ? "+" : hint === "Delete anchor" ? "-" : hint === "Continue path" || hint === "Join paths" ? "/" : "";
       return svgCursor(penMark(mark), 7, 7, "crosshair");
     }
-    case "add":
-      return svgCursor(penMark("+"), 7, 7, "crosshair");
-    case "delete":
-      return svgCursor(penMark("-"), 7, 7, "crosshair");
     case "convert":
       return svgCursor(outlined("M4 19L12 5l8 14"), 12, 5, "crosshair");
     case "scissors":
@@ -1478,14 +1555,6 @@ function ToolGlyph({ tool }: { tool: Tool }) {
       return <svg viewBox="0 0 24 24" className="tool-icon"><path d="M6 3l12 9-5.5 1 3 6-2.5 1.2-3-6L6 18z" {...common} fill="#fff" /></svg>;
     case "pen":
       return <SketchToolIcon />;
-    case "add":
-    case "delete":
-      return (
-        <svg viewBox="0 0 24 24" className="tool-icon">
-          <path d="M9 3l5 7.5-2.5 6.5h-5L4 10.5z" {...common} />
-          <path d={tool === "add" ? "M16 17h6M19 14v6" : "M16 17h6"} {...common} strokeWidth={2} />
-        </svg>
-      );
     case "scissors":
       return (
         <svg viewBox="0 0 24 24" className="tool-icon">

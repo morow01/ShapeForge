@@ -1,0 +1,12 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import ts from 'typescript';
+const source = readFileSync(new URL('../src/viewport/renderGroups.ts', import.meta.url), 'utf8').replace(/^import.*;\r?\n/gm, '').replace('export function', 'function');
+const merge = new Function(ts.transpile(source) + '; return mergedRenderGroups;')();
+const groups = [{start:0,count:3,materialIndex:0},{start:3,count:6,materialIndex:0},{start:9,count:3,materialIndex:1},{start:12,count:3,materialIndex:0}];
+const before = structuredClone(groups);
+assert.deepEqual(merge(groups), [{start:0,count:9,materialIndex:0},{start:9,count:3,materialIndex:1},{start:12,count:3,materialIndex:0}]);
+assert.deepEqual(groups,before,'picking groups remain intact');
+assert.equal(merge([{start:0,count:3,materialIndex:0},{start:6,count:3,materialIndex:0}]).length,2,'do not fill gaps');
+assert.equal(merge(Array.from({length:10000},(_,i)=>({start:i*3,count:3,materialIndex:0}))).length,1);
+console.log('Render batching preserves highlights, gaps and picking groups; 10,000 matching groups batch into one.');
