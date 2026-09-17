@@ -64,10 +64,10 @@ export function ProjectsModal({
     onClose();
   };
 
-  const handleExport = (p: ProjectMeta) => {
+  const handleExport = async (p: ProjectMeta) => {
     const full = loadProject(p.id);
     if (full) {
-      exportProjectFile(full);
+      await exportProjectFile(full);
     }
   };
 

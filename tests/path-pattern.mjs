@@ -1,0 +1,28 @@
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import ts from 'typescript';
+import * as THREE from 'three';
+const load=(file,names,deps={})=>{
+ const src=readFileSync(new URL(file,import.meta.url),'utf8').replace(/^import [\s\S]*?;\r?\n/gm,'').replaceAll('export ','');
+ return new Function(...Object.keys(deps),ts.transpile(src,{target:ts.ScriptTarget.ES2023,module:ts.ModuleKind.None})+`;return {${names.join(',')}};`)(...Object.values(deps));
+};
+const g=load('../src/sketch/geometry.ts',['anchor','cubicPoint','segmentCount','segmentCubic']);
+const {pathPlacements}=load('../src/geometry/pathPattern.ts',['pathPlacements'],{...THREE,...g});
+const opts={count:3,follow:false,angle:0,origin:[0,0,0],rotation:[0,0,0],scale:[1,1,1],sourceRotation:[0,0,0]};
+const line={id:'line',closed:false,anchors:[g.anchor(0,0),g.anchor(20,0)]};
+const near=(a,b)=>assert.ok(Math.abs(a-b)<1e-6,`${a} ~= ${b}`);
+assert.deepEqual(pathPlacements(line,opts).map(p=>p.position),[[0,0,0],[10,0,0],[20,0,0]]);
+const transformed=pathPlacements(line,{...opts,origin:[5,6,7],rotation:[0,0,90],scale:[2,1,1],spacing:10});
+assert.equal(transformed.length,5);
+transformed.forEach((p,i)=>{near(p.position[0],5);near(p.position[1],6+i*10);near(p.position[2],7);});
+const square={id:'square',closed:true,anchors:[g.anchor(0,0),g.anchor(10,0),g.anchor(10,10),g.anchor(0,10)]};
+assert.deepEqual(pathPlacements(square,{...opts,count:4}).map(p=>p.position),[[0,0,0],[10,0,0],[10,10,0],[0,10,0]]);
+assert.equal(pathPlacements(square,{...opts,spacing:10}).length,4);
+const vertical={...line,anchors:[g.anchor(0,0),g.anchor(0,20)]};
+near(pathPlacements(vertical,{...opts,follow:true})[0].rotation[2],90);
+near(pathPlacements(vertical,{...opts,follow:false,sourceRotation:[0,0,25]})[0].rotation[2],25);
+near(pathPlacements(vertical,{...opts,follow:true,angle:90})[0].rotation[2],180);
+assert.equal(pathPlacements({...line,anchors:[g.anchor(0,0),g.anchor(0,0)]},opts).length,0);
+assert.throws(()=>pathPlacements(line,{...opts,spacing:0.001}),/300/);
+assert.equal(pathPlacements(line,{...opts,count:1}).length,1);
+console.log('Path patterns: endpoints, closed seam, spacing, guide transforms, orientation, limits passed.');

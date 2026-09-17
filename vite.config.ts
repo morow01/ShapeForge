@@ -13,5 +13,11 @@ export default defineConfig({
   // The OCCT wasm glue must not be pre-bundled by esbuild.
   optimizeDeps: { exclude: ["replicad-opencascadejs"] },
   worker: { format: "es" },
-  server: { host: true, port: 5173 },
+  server: {
+    host: true,
+    port: 5173,
+    watch: {
+      ignored: ["**/.electron-stage/**", "**/release/**", "**/dist-desktop/**", "**/build-desktop/**"],
+    },
+  },
 });

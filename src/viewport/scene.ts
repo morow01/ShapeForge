@@ -34,6 +34,7 @@ export type AlignAxis = 0 | 1 | 2;
 export type AlignAnchor = "min" | "center" | "max";
 export type AlignSubMode = "box" | "points";
 export type WireframeMode = "off" | "outlined" | "edges" | "mesh" | "xray" | "transparent";
+export type CollisionHighlightStyle = "outline" | "face" | "both";
 
 export interface JoineryPreviewItem {
   position: Vec3;
@@ -1044,6 +1045,168 @@ export class Scene {
     return {bounds,units};
   }
   private renderer: THREE.WebGLRenderer;
+  private surfacePlacement: {
+    source: string; target: string | null; ghost: THREE.Mesh; angle: number; depth: number;
+    tiltX: number; tiltY: number; base: THREE.Vector3; localRotation: THREE.Quaternion;
+    attachment: {point: THREE.Vector3; normal: THREE.Vector3} | null;
+    patch: { position: Vec3; rotation: Vec3 } | null;
+    lastHit: { point: THREE.Vector3; normal: THREE.Vector3 } | null;
+  } | null = null;
+  onSurfaceObjectPlaced: ((id: string, patch: { position: Vec3; rotation: Vec3 }) => void) | null = null;
+  onSurfaceTargetPicked: ((id: string | null) => void) | null = null;
+  onSurfaceSourceFacePicked: (() => void) | null = null;
+  applySurfaceObjectPlacement() {
+    const s = this.surfacePlacement;
+    if (s?.target && s.patch) this.onSurfaceObjectPlaced?.(s.source,s.patch);
+  }
+
+  setSurfaceObjectPlacement(source: string | null, angle = 0, depth = 0, tiltX = 0, tiltY = 0) {
+    if (this.surfacePlacement?.source === source) {
+      this.surfacePlacement.angle = angle;
+      this.surfacePlacement.depth = depth;
+      this.surfacePlacement.tiltX = tiltX;
+      this.surfacePlacement.tiltY = tiltY;
+      this.updateSurfaceAttachment();
+      this.updateSurfaceGhost();
+      return;
+    }
+    if (this.surfacePlacement) {
+      this.surfacePlacement.ghost.removeFromParent();
+      this.surfacePlacement.ghost.geometry.dispose();
+      (this.surfacePlacement.ghost.material as THREE.Material).dispose();
+      this.surfacePlacement = null;
+    }
+    const view = source ? this.parts.get(source) : undefined;
+    if (!view || !source) {
+      this.renderer.domElement.style.cursor = "";
+      this.applyMaterials();
+      return;
+    }
+    const ghost = new THREE.Mesh(view.mesh.geometry.clone(), new THREE.MeshStandardMaterial({color:0x29b8bb,transparent:true,opacity:0.5,depthWrite:false,side:THREE.DoubleSide}));
+    ghost.scale.copy(view.group.scale);
+    ghost.visible = false;
+    this.scene.add(ghost);
+    this.surfacePlacement = {source,target:null,ghost,angle,depth,tiltX,tiltY,attachment:null,base:new THREE.Vector3(),localRotation:new THREE.Quaternion(),patch:null,lastHit:null};
+    this.updateSurfaceAttachment();
+    // Keep the chosen source unmistakably active while the user is being
+    // asked to pick its attachment face, even when that object's own edge
+    // lines are normally hidden.
+    this.applyMaterials();
+  }
+
+  /** Recompute support only when controls change, not on each pointer move. */
+  private updateSurfaceAttachment() {
+    const s = this.surfacePlacement;
+    if (!s) return;
+    s.localRotation.setFromAxisAngle(new THREE.Vector3(0,0,1),s.angle*DEG)
+      .multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(s.tiltX*DEG,s.tiltY*DEG,0)));
+    if (s.attachment) {
+      s.localRotation.multiply(new THREE.Quaternion().setFromUnitVectors(s.attachment.normal,new THREE.Vector3(0,0,-1)));
+      s.base.copy(s.attachment.point).multiply(s.ghost.scale).applyQuaternion(s.localRotation);
+      return;
+    }
+    const bounds = new THREE.Box3();
+    const vertex = new THREE.Vector3();
+    const positions = s.ghost.geometry.getAttribute("position");
+    for (let i=0;i<positions.count;i++) bounds.expandByPoint(vertex.fromBufferAttribute(positions,i).multiply(s.ghost.scale).applyQuaternion(s.localRotation));
+    bounds.getCenter(s.base);
+    s.base.z = bounds.min.z;
+  }
+
+  private updateSurfaceGhost() {
+    const session = this.surfacePlacement;
+    if (!session?.lastHit) return;
+    const view = this.parts.get(session.source);
+    if (!view) return;
+    const {point,normal} = session.lastHit;
+    const alignment = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,0,1),normal);
+    const q = alignment.clone().multiply(session.localRotation);
+    const base = session.base.clone().applyQuaternion(alignment);
+    session.ghost.quaternion.copy(q);
+    session.ghost.position.copy(point).addScaledVector(normal,-session.depth).sub(base);
+    session.ghost.visible = true;
+    const origin = session.ghost.position.clone().sub(view.pivot.clone().applyQuaternion(q));
+    const e = new THREE.Euler().setFromQuaternion(q,"XYZ");
+    session.patch = {position:origin.toArray() as Vec3,rotation:[e.x/DEG,e.y/DEG,e.z/DEG]};
+  }
+
+  private surfaceObjectPointer(e: PointerEvent, commit: boolean) {
+    const session = this.surfacePlacement;
+    if (!session) return;
+    // A picked target locks the preview while the user adjusts the panel.
+    if (session.target && !commit) return;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.set((e.clientX-rect.left)/rect.width*2-1,-(e.clientY-rect.top)/rect.height*2+1);
+    this.raycaster.setFromCamera(this.pointer,this.camera);
+    if (session.target) {
+      // The target itself is the handle for an anchored placement. This is
+      // easier to acquire than a translucent ghost, especially on curves.
+      const targetMeshes = [...this.parts.entries()]
+        .filter(([id, view]) => view.group.visible && this.findRootOwner(id) === session.target)
+        .map(([, view]) => view.mesh);
+      const hit = this.raycaster.intersectObjects(targetMeshes, false)[0];
+      if (hit?.face) {
+        const normal = hit.face.normal.clone()
+          .applyMatrix3(new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld))
+          .normalize();
+        // A click repositions the ghost immediately, then releases it so it
+        // resumes following the pointer. The next surface click pins it.
+        session.lastHit = { point: hit.point.clone(), normal };
+        this.updateSurfaceGhost();
+        session.target = null;
+        this.onSurfaceTargetPicked?.(null);
+      }
+      return;
+    }
+    const candidates = [...this.parts.entries()].filter(([id,v]) => v.group.visible && (session.attachment ? id !== session.source : id === session.source));
+    const hit = this.raycaster.intersectObjects(candidates.map(([,v])=>v.mesh),false)[0];
+    if (!hit?.face) return;
+    if (!session.attachment) {
+      if (!commit) return;
+      const point = hit.object.worldToLocal(hit.point.clone());
+      const scaleNormal = new THREE.Matrix3().getNormalMatrix(new THREE.Matrix4().makeScale(...session.ghost.scale.toArray() as Vec3));
+      session.attachment = {point,normal:hit.face.normal.clone().applyMatrix3(scaleNormal).normalize()};
+      this.updateSurfaceAttachment();
+      this.renderer.domElement.style.cursor = "";
+      this.applyMaterials();
+      this.onSurfaceSourceFacePicked?.();
+      return;
+    }
+    const id = candidates.find(([,v])=>v.mesh===hit.object)![0];
+    if (commit) {session.target=this.findRootOwner(id);this.onSurfaceTargetPicked?.(session.target);}
+    const normal = hit.face.normal.clone().applyMatrix3(new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld)).normalize();
+    session.lastHit={point:hit.point.clone(),normal};
+    this.updateSurfaceGhost();
+    // Apply in the panel commits; canvas clicks only choose an attachment point.
+  }
+  private pathPreview: THREE.Group | null = null;
+  private pathPreviewSource: { group: THREE.Group; visible: boolean } | null = null;
+
+  setPathPatternPreview(source: { id: string; position: Vec3; rotation: Vec3 }, placements: { position: Vec3; rotation: Vec3 }[]) {
+    this.pathPreview?.removeFromParent();
+    this.pathPreview = null;
+    if (this.pathPreviewSource) this.pathPreviewSource.group.visible = this.pathPreviewSource.visible;
+    this.pathPreviewSource = null;
+    const view = this.parts.get(source.id);
+    if (!view || !placements.length) return;
+    const rotation = (v: Vec3) => new THREE.Quaternion().setFromEuler(new THREE.Euler(v[0]*DEG,v[1]*DEG,v[2]*DEG));
+    const oldFrame = new THREE.Matrix4().compose(new THREE.Vector3(...source.position), rotation(source.rotation), new THREE.Vector3(1,1,1)).invert();
+    view.group.updateWorldMatrix(true,true);
+    const relative = oldFrame.multiply(view.group.matrixWorld);
+    const preview = new THREE.Group();
+    for (const placement of placements) {
+      const copy = view.group.clone(true);
+      copy.visible = true;
+      const matrix = new THREE.Matrix4().compose(new THREE.Vector3(...placement.position),rotation(placement.rotation),new THREE.Vector3(1,1,1)).multiply(relative);
+      copy.matrixAutoUpdate = false;
+      copy.matrix.copy(matrix);
+      preview.add(copy);
+    }
+    this.pathPreviewSource = { group: view.group, visible: view.group.visible };
+    view.group.visible = false;
+    this.pathPreview = preview;
+    this.scene.add(preview);
+  }
   private displayQuality = readViewportQuality();
   private lastRenderTime = 0;
   /** Rendered-frame timestamps from roughly the last second, purely so
@@ -1274,6 +1437,13 @@ export class Scene {
   private collisionContactOwnerId: string | null = null;
   private collisionContactCache = new Map<string, import("../snapping/snap").ActiveSnap[]>();
   private showSelectedCollisionContacts = true;
+  /** Only meaningful for a coincident flat face, which can be shown as a
+   *  translucent fill, an outline, or both. A curved or angled contact (e.g.
+   *  a cylinder's side plunging into a box) has no flat area to fill — it's
+   *  only ever a traced curve — so this setting doesn't affect those; they
+   *  keep showing regardless, since hiding them would silence a real
+   *  collision with no fill to show in its place. */
+  private collisionHighlightStyle: CollisionHighlightStyle = "both";
   /** Edge and point contact markers: thin, so drawn over everything. */
   private collisionContactMaterial = new THREE.MeshBasicMaterial({
     color: 0xff6b35,
@@ -1284,22 +1454,23 @@ export class Scene {
     side: THREE.DoubleSide,
   });
   /**
-   * A shared contact face, filled. It is depth-tested and pulled just in front
-   * of the coincident target surface, so it shows only where nothing covers
-   * it — through a see-through part, say. Drawn over everything, the fill lay
-   * across the selected part's FRONT face while really sitting at its back,
-   * and slid over that face as the camera turned: a thin part like an
-   * extruded sketch looked as though it twisted while orbiting.
+   * A shared contact face, filled, drawn over everything like the outline.
+   * An earlier depth-tested version hid itself behind two ordinary touching
+   * solids entirely — that internal plane sits behind both parts' own
+   * outward faces from every outside angle, by definition — which made the
+   * fill effectively invisible for the common case. Depth-testing it was
+   * originally meant to avoid a different glitch (an always-on-top fill for
+   * the selected part's FRONT face, while really sitting at its back, slid
+   * across that face as the camera turned — a thin part like an extruded
+   * sketch looked as though it twisted while orbiting), but showing nothing
+   * at all is worse, so this trades that risk back in.
    */
   private collisionFaceMaterial = new THREE.MeshBasicMaterial({
     color: 0xff6b35,
     transparent: true,
     opacity: 0.85,
-    depthTest: true,
+    depthTest: false,
     depthWrite: false,
-    polygonOffset: true,
-    polygonOffsetFactor: -2,
-    polygonOffsetUnits: -4,
     side: THREE.DoubleSide,
   });
   /**
@@ -2869,6 +3040,7 @@ export class Scene {
   private applyMaterials() {
     for (const [id, view] of this.parts) {
       const isDirectlySelected = this.selectedIds.includes(id);
+      const isPlacementSource = this.surfacePlacement?.source === id && !this.surfacePlacement.attachment;
       const node = findNode(this.lastNodes, id);
       const isParentGroupSelected = this.selectedIds.some((sId) => {
         const p = findNode(this.lastNodes, sId);
@@ -2878,7 +3050,7 @@ export class Scene {
         return containsChild(p);
       });
       const isChildSelected = !!(node && isGroup(node) && node.children.some((c) => this.selectedIds.includes(c.id)));
-      const sel = isDirectlySelected || isParentGroupSelected || isChildSelected;
+      const sel = isDirectlySelected || isParentGroupSelected || isChildSelected || isPlacementSource;
 
       if (node) {
         view.lastColor = resolveNodeColor(node);
@@ -2999,7 +3171,9 @@ export class Scene {
         // "Hide lines" is for the shaded view only. The wireframe styles are
         // nothing but lines, and the edge tool needs them to pick from.
         const hideLines = this.hideAllLines || (!!node && resolveNodeHideLines(node));
-        view.wire.visible = !(hideLines && !isWire && !isEdgesOnly && this.toolMode !== "edge");
+        view.wire.visible = isPlacementSource || !(hideLines && !isWire && !isEdgesOnly && this.toolMode !== "edge");
+        view.mesh.visible = view.displayMesh === null || this.displayQuality !== "draft";
+        if (view.displayMesh) view.displayMesh.visible = this.displayQuality === "draft";
       }
     }
     for (const [id, groupObj] of this.assemblyGroups) {
@@ -4087,8 +4261,21 @@ export class Scene {
 
     const found = this.raycastFace(e);
     if (!found) {
+      if (this.surfacePlacement && !this.surfacePlacement.attachment) this.renderer.domElement.style.cursor = "";
       this.clearFaceHover();
       return;
+    }
+    // Step 1 of Place on object accepts only the source. Highlighting faces
+    // on every other object suggested that they were clickable even though
+    // the placement raycast correctly ignored them.
+    if (this.surfacePlacement && !this.surfacePlacement.attachment) {
+      const sourceView = this.parts.get(this.surfacePlacement.source);
+      if (found.view !== sourceView) {
+        this.renderer.domElement.style.cursor = "";
+        this.clearFaceHover();
+        return;
+      }
+      this.renderer.domElement.style.cursor = "crosshair";
     }
     if (this.hoverFace && this.hoverFace.view === found.view && this.hoverFace.groupIndex === found.groupIndex) {
       return; // same face as last frame — nothing to change
@@ -4131,6 +4318,7 @@ export class Scene {
   }
 
   private placeAt(e: PointerEvent) {
+    if (this.surfacePlacement) {this.surfaceObjectPointer(e,true);return;}
     const placement = this.placementAt(e);
     if (placement) {
       if (this.placementPreview) this.placementPreview.visible = false;
@@ -4144,6 +4332,7 @@ export class Scene {
   }
 
   private updatePlacementPreview(e: PointerEvent) {
+    if (this.surfacePlacement) {this.surfaceObjectPointer(e,false);return;}
     if (!this.placementPreview) {
       this.setPlacementTarget(null);
       return;
@@ -6613,6 +6802,11 @@ export class Scene {
     else if (!this.grab?.active) this.clearCollisionContacts();
   }
 
+  setCollisionHighlightStyle(style: CollisionHighlightStyle) {
+    this.collisionHighlightStyle = style;
+    if (this.showSelectedCollisionContacts) this.refreshSelectedCollisionContacts();
+  }
+
   setWireframe(v: WireframeMode | boolean) {
     const mode: WireframeMode = typeof v === "boolean" ? (v ? "edges" : "off") : v;
     if (this.wireframe === mode) return;
@@ -6957,6 +7151,11 @@ export class Scene {
   private onDraggingChanged = (e: { value: unknown }) => {
     const dragging = !!e.value;
     this.controls.enabled = !dragging;
+    if (dragging && this.gizmo.mode === "rotate") {
+      this.beginRotateSpeedFix();
+    } else if (!dragging) {
+      this.endRotateSpeedFix();
+    }
     if (!dragging) {
       this.guides.clear();
       this.assemblyDragStart = null;
@@ -7646,40 +7845,43 @@ export class Scene {
       // inside their bounds; painting the target through that empty area is a
       // false collision. Both meshes must contribute overlapping triangles.
       if (!vertices.length) continue;
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
-      const patch = new THREE.Mesh(geometry, this.collisionFaceMaterial);
-      // Before a see-through part (renderOrder 1), which then blends over it.
-      patch.renderOrder = 0;
-      patch.frustumCulled = false;
-      this.collisionContacts.add(patch);
+      if (this.collisionHighlightStyle !== "outline") {
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
+        const patch = new THREE.Mesh(geometry, this.collisionFaceMaterial);
+        patch.renderOrder = 10;
+        patch.frustumCulled = false;
+        this.collisionContacts.add(patch);
+      }
 
       // Outline of the shared area: each part's own face boundary, kept where
       // it lies on the other part's face.
-      const outline: number[] = [];
-      const addSegment = (p: [number, number], q: [number, number]) => {
-        for (const [u, w] of [p, q]) {
-          const point = [0, 0, 0];
-          point[axis] = plane;
-          point[others[0]] = u;
-          point[others[1]] = w;
-          outline.push(point[0], point[1], point[2]);
+      if (this.collisionHighlightStyle !== "face") {
+        const outline: number[] = [];
+        const addSegment = (p: [number, number], q: [number, number]) => {
+          for (const [u, w] of [p, q]) {
+            const point = [0, 0, 0];
+            point[axis] = plane;
+            point[others[0]] = u;
+            point[others[1]] = w;
+            outline.push(point[0], point[1], point[2]);
+          }
+        };
+        for (const [a, b] of this.boundaryEdges(movingTriangles)) {
+          for (const [p, q] of this.clipSegmentToTriangles(a, b, targetTriangles)) addSegment(p, q);
         }
-      };
-      for (const [a, b] of this.boundaryEdges(movingTriangles)) {
-        for (const [p, q] of this.clipSegmentToTriangles(a, b, targetTriangles)) addSegment(p, q);
-      }
-      for (const [a, b] of this.boundaryEdges(targetTriangles)) {
-        for (const [p, q] of this.clipSegmentToTriangles(a, b, movingTriangles)) addSegment(p, q);
-      }
-      if (outline.length) {
-        const lineGeometry = new LineSegmentsGeometry();
-        lineGeometry.setPositions(outline);
-        this.collisionOutlineMaterial.resolution.set(this.host.clientWidth, this.host.clientHeight);
-        const lines = new LineSegments2(lineGeometry, this.collisionOutlineMaterial);
-        lines.renderOrder = 10;
-        lines.frustumCulled = false;
-        this.collisionContacts.add(lines);
+        for (const [a, b] of this.boundaryEdges(targetTriangles)) {
+          for (const [p, q] of this.clipSegmentToTriangles(a, b, movingTriangles)) addSegment(p, q);
+        }
+        if (outline.length) {
+          const lineGeometry = new LineSegmentsGeometry();
+          lineGeometry.setPositions(outline);
+          this.collisionOutlineMaterial.resolution.set(this.host.clientWidth, this.host.clientHeight);
+          const lines = new LineSegments2(lineGeometry, this.collisionOutlineMaterial);
+          lines.renderOrder = 10;
+          lines.frustumCulled = false;
+          this.collisionContacts.add(lines);
+        }
       }
       faceTargets.add(snap.targetId);
     }
@@ -9487,6 +9689,56 @@ export class Scene {
     this.gizmo.enabled = true;
   };
 
+  /** How far from the target a rotate drag should feel calibrated for — see
+   *  beginRotateSpeedFix. */
+  private static readonly ROTATE_REFERENCE_DISTANCE = 300;
+  /** The gizmo's own camera reference while beginRotateSpeedFix has swapped
+   *  it out, so endRotateSpeedFix can put the real one back. */
+  private rotateSpeedRealCamera: THREE.Camera | null = null;
+
+  /**
+   * TransformControls scales rotate-drag sensitivity by 20 / distance-to-
+   * camera (see ROTATION_SPEED in its source) — a heuristic that assumes
+   * camera distance tracks how "zoomed in" the view feels, which is true for
+   * a perspective camera but not an orthographic one: our orthographic
+   * camera's zoom (not its distance) controls framing, so scene.ts parks it
+   * at least 3000 units from the target regardless of what the user is
+   * actually looking at (see the `Math.max(3000, distance)` in the
+   * orthographic camera setup) purely to keep it clear of the near plane.
+   * TransformControls has no way to know that distance is arbitrary, so it
+   * reads "camera very far away" and makes rotation drags barely respond —
+   * requiring a large, unintuitive amount of cursor movement, regardless of
+   * the browser or its window size.
+   *
+   * The fix hands TransformControls a stand-in camera for the duration of a
+   * rotate drag: same orientation, zoom and frustum as the real one (so the
+   * ring the user is looking at and the raycast hit-testing against it are
+   * pixel-identical — for an orthographic camera, sliding the eye along its
+   * own view axis changes neither), just moved to a reasonable reference
+   * distance from the orbit target along that same axis. TransformControls
+   * only reads the stand-in for its own internal math; the real camera never
+   * moves and nothing else about the render is touched.
+   */
+  private beginRotateSpeedFix() {
+    const real = this.camera;
+    if (!(real instanceof THREE.OrthographicCamera)) return;
+    const target = this.controls.target;
+    const viewDir = real.position.clone().sub(target);
+    if (viewDir.lengthSq() < 1e-6) return;
+    viewDir.normalize();
+    const proxy = real.clone();
+    proxy.position.copy(target).addScaledVector(viewDir, Scene.ROTATE_REFERENCE_DISTANCE);
+    proxy.updateMatrixWorld(true);
+    this.rotateSpeedRealCamera = this.gizmo.camera;
+    this.gizmo.camera = proxy;
+  }
+
+  private endRotateSpeedFix() {
+    if (!this.rotateSpeedRealCamera) return;
+    this.gizmo.camera = this.rotateSpeedRealCamera;
+    this.rotateSpeedRealCamera = null;
+  }
+
   private capturePointer(e: PointerEvent) {
     try {
       this.renderer.domElement.setPointerCapture(e.pointerId);
@@ -9808,6 +10060,7 @@ export class Scene {
   }
 
   dispose() {
+    this.setSurfaceObjectPlacement(null);
     this.tape.dispose();
     this.clearFaceResizeHandles();
     cancelAnimationFrame(this.frame);

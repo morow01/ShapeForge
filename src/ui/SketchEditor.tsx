@@ -136,6 +136,7 @@ function mirroredPath(path: SketchPath, axis: 0 | 1): SketchPath {
 }
 
 interface Props {
+  guideOnly?: boolean;
   title: string;
   /** Overrides the apply button's label (Update, when editing). */
   applyLabel?: string;
@@ -150,7 +151,7 @@ interface Props {
   onApply: (sketch: SketchData, depth: number, shape: SketchShape) => void;
 }
 
-export function SketchEditor({ title, applyLabel, initialShape, initial, initialDepth, guides = [], displayUnit, decimals, onCancel, onApply }: Props) {
+export function SketchEditor({ guideOnly = false, title, applyLabel, initialShape, initial, initialDepth, guides = [], displayUnit, decimals, onCancel, onApply }: Props) {
   const [paths, setPaths] = useState<SketchPath[]>(() => clonePaths(initial.paths));
   const [depth, setDepth] = useState(initialDepth);
   const [shape, setShape] = useState<SketchShape>(initialShape);
@@ -1057,7 +1058,7 @@ export function SketchEditor({ title, applyLabel, initialShape, initial, initial
         <div className="sketch-header-start">
           <div className="sketch-title">
             <strong>{title}</strong>
-            <span>Draw closed shapes, then extrude them. A shape inside another becomes a hole.</span>
+            <span>{guideOnly ? "Draw an open curve or closed loop. Use guide to preview objects along it." : "Draw closed shapes, then extrude them. A shape inside another becomes a hole."}</span>
           </div>
           <div className="topbar-group sketch-history" role="group" aria-label="History">
             <button type="button" className="topbar-icon-btn" onClick={undo} disabled={!past.current.length} title="Undo (Ctrl+Z)" aria-label="Undo">
@@ -1075,8 +1076,8 @@ export function SketchEditor({ title, applyLabel, initialShape, initial, initial
           <button
             type="button"
             className="primary"
-            disabled={!closedCount || revolveBlocked}
-            title={!closedCount
+            disabled={guideOnly ? !paths.some(p => p.anchors.length > 1) : !closedCount || revolveBlocked}
+            title={guideOnly ? "Use open or closed curves as pattern guides" : !closedCount
               ? `Close at least one path to ${shape.revolve ? "revolve" : "extrude"} it`
               : revolveBlocked ? "A shape crosses the revolve axis" : undefined}
             onClick={() => { finishPath(); onApply({ paths: pathsRef.current.filter((p) => p.anchors.length > 1) }, depth, shape); }}
@@ -1290,7 +1291,7 @@ export function SketchEditor({ title, applyLabel, initialShape, initial, initial
             <p className="sketch-hint">Anchors always snap to other anchors{guides.length ? " and to the corners of the face you picked (grey)" : ""}. Hold Shift for 45° angles.</p>
           </section>
 
-          <section className="sketch-section sketch-extrude">
+          {!guideOnly && <section className="sketch-section sketch-extrude">
             <div className="field-label">Make solid{shape.revolve ? "" : ` (${unit})`}</div>
             <div className="sketch-segmented" role="radiogroup" aria-label="Make solid by">
               <button type="button" role="radio" aria-checked={!shape.revolve} className={`sketch-icon-button sketch-solid-button ${!shape.revolve ? "active" : ""}`} onClick={() => setShape((s) => ({ ...s, revolve: false }))} title="Push the shapes straight out of the sketch plane"><ShapeActionGlyph kind="extrude" /><span>Extrude</span></button>
@@ -1372,7 +1373,7 @@ export function SketchEditor({ title, applyLabel, initialShape, initial, initial
                 </p>
               </>
             )}
-          </section>
+          </section>}
         </aside>
       </div>
     </div>

@@ -3,6 +3,8 @@ import { createPortal } from "react-dom";
 import * as THREE from "three";
 import { EXPORT_MESHES_WATCHDOG_MS, EXPORT_WATCHDOG_MS, kernel, KernelTimeoutError, SCENE_TOTAL_MS } from "./kernel/client";
 import { Viewport } from "./viewport/Viewport";
+import { PathPatternPanel } from "./ui/PathPatternPanel";
+import type { PathPlacement } from "./geometry/pathPattern";
 import { readViewportQuality, VIEWPORT_QUALITY_KEY, type ViewportQuality } from "./viewport/quality";
 import type { FaceBounds, FaceResizeFrame } from "./viewport/FaceResizeHandles";
 import { Inspector } from "./ui/Inspector";
@@ -97,7 +99,7 @@ import { loadCameraState } from "./document/persist";
 import type { EditOp, GroupNode, PrimitiveKind, SceneNode, ShellOp, ResizeFaceOp, SketchData, Vec3 } from "./document/types";
 import { RETRYABLE_MESH_ERROR } from "./kernel/types";
 import type { EditSpec, ExportQuality, NodeSpec, PreviewBuild, ScenePart } from "./kernel/types";
-import type { CameraMode, DuplicateResult, Scene, ToolMode, WireframeMode } from "./viewport/scene";
+import type { CameraMode, CollisionHighlightStyle, DuplicateResult, Scene, ToolMode, WireframeMode } from "./viewport/scene";
 import { cellColour, DEFAULT_CELL_DISPLAY, type CellDisplay } from "./viewport/cellColours";
 import { APP_NAME, APP_VERSION } from "./version";
 
@@ -326,6 +328,7 @@ const EXPORT_FORMAT_KEY = "cad.exportFormat";
 const SNAP_KEY = "cad.smartGuides";
 const GRID_SNAP_KEY = "cad.gridSnap";
 const SELECTED_COLLISIONS_KEY = "cad.showSelectedCollisions";
+const COLLISION_HIGHLIGHT_STYLE_KEY = "cad.collisionHighlightStyle";
 const HIDE_ALL_LINES_KEY = "cad.hideAllLines";
 const RANDOM_NEW_OBJECT_COLORS_KEY = "cad.randomNewObjectColors";
 const RANDOM_NEW_OBJECT_COLORS_MIGRATED_KEY = "cad.randomNewObjectColors.v2";
@@ -453,6 +456,14 @@ export function App() {
 
   const [projectsModalOpen, setProjectsModalOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [surfaceSource, setSurfaceSource] = useState<string | null>(null);
+  const [surfaceTarget, setSurfaceTarget] = useState<string | null>(null);
+  const [surfaceFacePicked, setSurfaceFacePicked] = useState(false);
+  const [surfaceAngle, setSurfaceAngle] = useState(0);
+  const [surfaceTiltX, setSurfaceTiltX] = useState(0);
+  const [surfaceTiltY, setSurfaceTiltY] = useState(0);
+  const [surfaceDepth, setSurfaceDepth] = useState(0);
+  const [pathPatternSource, setPathPatternSource] = useState<SceneNode | null>(null);
   const [viewportQuality, setViewportQuality] = useState<ViewportQuality>(readViewportQuality);
   const [exportModalOpen, setExportModalOpen] = useState(false);
   const [newDesignPromptOpen, setNewDesignPromptOpen] = useState(false);
@@ -956,6 +967,10 @@ export function App() {
   const [hideAllLines, setHideAllLines] = useState(
     () => localStorage.getItem(HIDE_ALL_LINES_KEY) === "on",
   );
+  const [collisionHighlightStyle, setCollisionHighlightStyle] = useState<CollisionHighlightStyle>(() => {
+    const saved = localStorage.getItem(COLLISION_HIGHLIGHT_STYLE_KEY);
+    return saved === "outline" || saved === "face" ? saved : "both";
+  });
   const [randomNewObjectColors, setRandomNewObjectColors] = useState(
     // v0.4.19 accidentally persisted the old disabled default. Migrate that
     // legacy value once so existing sessions get the restored random colours.
@@ -1059,7 +1074,7 @@ export function App() {
   const [autoJointVerticalOffset, setAutoJointVerticalOffset] = useState<number>(0);
   const [autoJointOrientation, setAutoJointOrientation] = useState<"horizontal" | "vertical" | "grid">("horizontal");
   const [autoJointDominoRotation, setAutoJointDominoRotation] = useState<number>(0);
-  const [autoJointHingeEdge, setAutoJointHingeEdge] = useState<"edge1" | "center" | "edge2">("edge1");
+  const [autoJointHingeEdge, setAutoJointHingeEdge] = useState<"left" | "right" | "top" | "bottom">("left");
   const [autoJointHingeSides, setAutoJointHingeSides] = useState<number>(64);
   const [blueprintOpen, setBlueprintOpen] = useState(false);
   const [explodeAmount, setExplodeAmount] = useState<number>(0);
@@ -1360,7 +1375,7 @@ export function App() {
     setAutoJointCustomSpacing(null);
     setAutoJointCustomVerticalSpacing(null);
     setAutoJointVerticalOffset(0);
-    setAutoJointHingeEdge("edge1");
+    setAutoJointHingeEdge("left");
   }, [autoJointShape, selectedIds[0], selectedIds[1], connectorSwapped]);
 
   // Builds a Plug + Socket pair centred on the shared wall between two
@@ -1372,7 +1387,7 @@ export function App() {
     clearance: number,
     dovetailStopped = true,
     dovetailStopEnd = 0,
-    hingeEdge: "edge1" | "center" | "edge2" = "edge1",
+    hingeEdge: "left" | "right" | "top" | "bottom" = "left",
     orientation: "horizontal" | "vertical" | "grid" = "horizontal",
     dominoRotation: number = 0,
     verticalOffset: number = 0,
@@ -1384,7 +1399,10 @@ export function App() {
     const xAxis = new THREE.Vector3().crossVectors(yAxis, zAxis).normalize();
     yAxis = new THREE.Vector3().crossVectors(zAxis, xAxis).normalize();
 
-    const rotMatrix = new THREE.Matrix4().makeBasis(xAxis, yAxis, zAxis);
+    const hingeRunsAcrossWidth = shape === 5 && (hingeEdge === "top" || hingeEdge === "bottom");
+    const localX = hingeRunsAcrossWidth ? yAxis.clone().negate() : xAxis;
+    const localY = hingeRunsAcrossWidth ? xAxis : yAxis;
+    const rotMatrix = new THREE.Matrix4().makeBasis(localX, localY, zAxis);
     const euler = new THREE.Euler().setFromRotationMatrix(rotMatrix, "XYZ");
     let rotZDeg = (euler.z / Math.PI) * 180;
     if (shape === 3 && dominoRotation === 90) {
@@ -1482,7 +1500,7 @@ export function App() {
     } else if (shape === 3) {
       itemWidth = isUpright ? effDominoT : effDominoW;
       itemHeight = isUpright ? effDominoW : effDominoT;
-    } else if (shape === 6 || shape === 1 || shape === 2) {
+    } else if (shape === 6 || shape === 5 || shape === 1 || shape === 2) {
       const maxR = Math.min(
         ((wallHeight - 2 * wallMargin) / 2) * 0.75,
         ((wallWidth - 2 * wallMargin) / 2) * 0.75
@@ -1549,14 +1567,15 @@ export function App() {
         }
       }
     } else if (shape === 5) {
-      const hingeOffsetDist = wallWidth / 2;
-      const hingeOffset = hingeEdge === "edge1"
-        ? hingeOffsetDist
-        : (hingeEdge === "edge2" ? -hingeOffsetDist : 0);
+      const alongX = hingeEdge === "left" || hingeEdge === "right";
+      const offsetAxis = alongX ? xAxis : yAxis;
+      const offsetDistance = (alongX ? wallWidth : wallHeight) / 2;
+      const sign = hingeEdge === "left" || hingeEdge === "top" ? 1 : -1;
+      const hingeOffset = offsetDistance * sign;
       targetPoints.push([
-        point[0] + xAxis.x * hingeOffset,
-        point[1] + xAxis.y * hingeOffset,
-        point[2] + xAxis.z * hingeOffset,
+        point[0] + offsetAxis.x * hingeOffset,
+        point[1] + offsetAxis.y * hingeOffset,
+        point[2] + offsetAxis.z * hingeOffset,
       ]);
     } else if (effectiveCount === 1) {
       targetPoints.push([
@@ -1608,7 +1627,7 @@ export function App() {
     const autoLength = shape === 0
       ? dovetailLen
       : (shape === 5
-          ? Math.max(8, Math.round(wallHeight))
+          ? Math.max(8, Math.round(hingeRunsAcrossWidth ? wallWidth : wallHeight))
           : (shape === 3
               ? 20
               : (hasValidMaterialDepth
@@ -1619,7 +1638,9 @@ export function App() {
       ? autoJointCustomLength
       : autoLength;
 
-    const isPunchThrough = hasValidMaterialDepth && (effLength + clearance >= materialDepth!);
+    // Hinge length runs along the face boundary, so it cannot punch through
+    // the receiving wall in the way a pin, key, or pocket can.
+    const isPunchThrough = shape !== 5 && hasValidMaterialDepth && (effLength + clearance >= materialDepth!);
 
     // Auto diameter/width/radius:
     const autoRadius = (shape === 5 || shape === 1 || shape === 2 || shape === 6)
@@ -1716,7 +1737,7 @@ export function App() {
     setAutoJointVerticalOffset(0);
     setAutoJointOrientation("horizontal");
     setAutoJointDominoRotation(0);
-    setAutoJointHingeEdge("edge1");
+    setAutoJointHingeEdge("left");
     setAutoJointHingeSides(64);
   }, [autoJointShape]);
 
@@ -2018,6 +2039,22 @@ export function App() {
 
   const sceneRef = useRef<Scene | null>(null);
   useEffect(() => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+    scene.setSurfaceObjectPlacement(toolMode === "place" ? surfaceSource : null, surfaceAngle, surfaceDepth, surfaceTiltX, surfaceTiltY);
+    scene.onSurfaceTargetPicked = id => setSurfaceTarget(id);
+    scene.onSurfaceSourceFacePicked = () => setSurfaceFacePicked(true);
+    scene.onSurfaceObjectPlaced = (id, patch) => {
+      scene.setSurfaceObjectPlacement(null);
+      useDoc.getState().setTransform(id,patch);
+      setSurfaceSource(null);setSurfaceTarget(null);setSurfaceFacePicked(false);setToolMode("select");
+    };
+    if (toolMode !== "place" && surfaceSource) {setSurfaceSource(null);setSurfaceTarget(null);setSurfaceFacePicked(false);}
+  }, [surfaceSource, surfaceAngle, surfaceDepth, surfaceTiltX, surfaceTiltY, toolMode]);
+  const previewPathPattern = useCallback((placements: PathPlacement[]) => {
+    if (pathPatternSource) sceneRef.current?.setPathPatternPreview(pathPatternSource, placements);
+  }, [pathPatternSource]);
+  useEffect(() => {
     sceneRef.current?.setDisplayQuality(viewportQuality);
     try { localStorage.setItem(VIEWPORT_QUALITY_KEY, viewportQuality); } catch { /* Keep the preference for this session. */ }
   }, [viewportQuality]);
@@ -2212,6 +2249,15 @@ export function App() {
       // Private mode / blocked storage: the choice just won't be remembered.
     }
   }, [hideAllLines]);
+
+  useEffect(() => {
+    sceneRef.current?.setCollisionHighlightStyle(collisionHighlightStyle);
+    try {
+      localStorage.setItem(COLLISION_HIGHLIGHT_STYLE_KEY, collisionHighlightStyle);
+    } catch {
+      // Private mode / blocked storage: the choice just won't be remembered.
+    }
+  }, [collisionHighlightStyle]);
 
   useEffect(() => {
     try {
@@ -3918,6 +3964,14 @@ export function App() {
           <div className="topbar-divider" aria-hidden="true" />
 
           <div className="topbar-group" role="group" aria-label="Arrange">
+            <button className="topbar-icon-btn" aria-label="Place on object" title="Place on object — attach the selected object's bottom to another surface"
+              disabled={selectedIds.length !== 1 || !selected || selected.type === "group" || !nodes.some(n => n.id === selected.id) || treeChangeBusy}
+              onClick={() => { if (selected) {setPendingPrimitive(null);setSurfaceSource(selected.id);setSurfaceTarget(null);setSurfaceFacePicked(false);setSurfaceAngle(0);setSurfaceTiltX(0);setSurfaceTiltY(0);setSurfaceDepth(0);setToolMode("place");} }}>
+              <svg className="topbar-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><path d="M3 20q9-9 18 0M12 3v10m-4-4 4 4 4-4"/><path d="m8 3 4-2 4 2"/></svg>
+            </button>
+            <button className="topbar-icon-btn" aria-label="Along Path" title="Along Path is parked while its workflow is redesigned" disabled>
+              <svg className="topbar-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><path d="M3 19C3 3 21 21 21 5"/><circle cx="3" cy="19" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="21" cy="5" r="2"/></svg>
+            </button>
             <button
               className="topbar-icon-btn"
               onClick={groupSelected}
@@ -4810,7 +4864,7 @@ export function App() {
 
       <aside className="panel tools-panel">
         <div className="tape-panel-host" ref={tapePanelRef} hidden={toolMode !== "measure"} />
-        <div className="tools-panel-tabs" role="tablist" style={{ order: -1 }}>
+        {!(toolMode === "place" && surfaceSource) && <div className="tools-panel-tabs" role="tablist" style={{ order: -1 }}>
           <button
             type="button"
             role="tab"
@@ -4832,7 +4886,83 @@ export function App() {
               <span className="tools-panel-tab-badge">{selectedIds.length}</span>
             )}
           </button>
-        </div>
+        </div>}
+
+        {toolMode === "place" && surfaceSource && (
+          <section className="surface-placement-panel" aria-label="Place on object">
+            <div className="surface-placement-header">
+              <div>
+                <h1>Place on object</h1>
+                <p>Attach one object to another surface</p>
+              </div>
+              <button
+                type="button"
+                className="surface-placement-close"
+                aria-label="Cancel placement"
+                title="Cancel"
+                onClick={() => {
+                  sceneRef.current?.setSurfaceObjectPlacement(null);
+                  setSurfaceSource(null);
+                  setSurfaceTarget(null);
+                  setSurfaceFacePicked(false);
+                  setToolMode("select");
+                }}
+              >×</button>
+            </div>
+
+            <ol className="surface-placement-steps" aria-label="Placement steps">
+              <li className={surfaceFacePicked ? "complete" : "active"}>
+                <span className="surface-step-number" aria-hidden="true">{surfaceFacePicked ? "✓" : "1"}</span>
+                <span><strong>Source face</strong><small>{findNode(nodes, surfaceSource)?.name ?? "Selected object"}</small></span>
+              </li>
+              <li className={surfaceTarget ? "complete" : surfaceFacePicked ? "active" : ""}>
+                <span className="surface-step-number" aria-hidden="true">{surfaceTarget ? "✓" : "2"}</span>
+                <span><strong>Target face</strong><small>{surfaceTarget ? (findNode(nodes, surfaceTarget)?.name ?? "Target object") : "Choose where it should attach"}</small></span>
+              </li>
+            </ol>
+
+            <div className="surface-placement-prompt" role="status">
+              <span className="surface-placement-cursor" aria-hidden="true">
+                {surfaceTarget ? "✓" : surfaceFacePicked ? "2" : "1"}
+              </span>
+              <div>
+                <strong>{surfaceTarget ? "Placement pinned" : surfaceFacePicked ? "Select the target face" : "Select the source face"}</strong>
+                <p>{surfaceTarget
+                  ? "Click another point on the target to move the preview there and keep following the pointer."
+                  : surfaceFacePicked
+                    ? "Move over another object, then click the face where this object should sit."
+                    : "Click the face on the selected object that should touch the target. Right-drag to orbit."}</p>
+              </div>
+            </div>
+
+            <fieldset className="surface-placement-controls" disabled={!surfaceFacePicked}>
+              <legend>Orientation</legend>
+              <div className="surface-preset-buttons" role="group" aria-label="Orientation presets">
+                <button type="button" onClick={() => { setSurfaceTiltX(0); setSurfaceTiltY(0); }}>Upright</button>
+                <button type="button" onClick={() => { setSurfaceTiltX(0); setSurfaceTiltY(90); }}>Sideways</button>
+                <button type="button" onClick={() => { setSurfaceTiltX(180); setSurfaceTiltY(0); }}>Flip</button>
+              </div>
+              <div className="surface-placement-fields">
+                <label>Tilt X (°)<input type="number" value={surfaceTiltX} onChange={e => setSurfaceTiltX(Number(e.target.value) || 0)} /></label>
+                <label>Tilt Y (°)<input type="number" value={surfaceTiltY} onChange={e => setSurfaceTiltY(Number(e.target.value) || 0)} /></label>
+                <label>Spin (°)<input type="number" value={surfaceAngle} onChange={e => setSurfaceAngle(Number(e.target.value) || 0)} /></label>
+                <label>Depth (mm)<input type="number" step="0.1" value={surfaceDepth} onChange={e => setSurfaceDepth(Number(e.target.value) || 0)} /></label>
+              </div>
+              <p className="surface-depth-help">Positive depth sinks the source into the target. Negative depth leaves a gap.</p>
+            </fieldset>
+
+            <div className="surface-placement-actions">
+              <button className="primary" disabled={!surfaceTarget} onClick={() => sceneRef.current?.applySurfaceObjectPlacement()}>Apply placement</button>
+              <button onClick={() => {
+                sceneRef.current?.setSurfaceObjectPlacement(null);
+                setSurfaceSource(null);
+                setSurfaceTarget(null);
+                setSurfaceFacePicked(false);
+                setToolMode("select");
+              }}>Cancel</button>
+            </div>
+          </section>
+        )}
 
         {toolMode === "build" && (
           <div className="face-settings-panel build-settings-panel">
@@ -5491,7 +5621,7 @@ export function App() {
             </div>
           );
         })()}
-        {toolMode !== "measure" && toolMode !== "face" && toolMode !== "edge" && toolMode !== "build" && rightPanelTab === "shapes" && (
+        {toolMode !== "measure" && toolMode !== "face" && toolMode !== "edge" && toolMode !== "build" && !(toolMode === "place" && surfaceSource) && rightPanelTab === "shapes" && (
           <section className="tool-section shape-library">
           <div className="panel-heading compact shape-library-header">
             <div><h1>Shape library</h1><p>Drag or click to add</p></div>
@@ -5574,7 +5704,7 @@ export function App() {
             if (file) void importSTLFile(file);
           }}
         />
-        {toolMode !== "measure" && toolMode !== "face" && toolMode !== "edge" && toolMode !== "build" && rightPanelTab === "properties" && (
+        {toolMode !== "measure" && toolMode !== "face" && toolMode !== "edge" && toolMode !== "build" && !(toolMode === "place" && surfaceSource) && rightPanelTab === "properties" && (
           <div className="tools-panel-inspector-wrap">
             <section className="tool-section inspector-section">
           <div className="panel-heading compact">
@@ -5584,6 +5714,7 @@ export function App() {
             </div>
           </div>
           {selected ? (
+            <>
             <Inspector
               node={selected}
               localSize={selectedLocalSize}
@@ -5689,6 +5820,7 @@ export function App() {
               displayUnit={displayUnit}
               decimalPlaces={decimalPlaces}
             />
+            </>
           ) : (
             <div className="inspector-empty-state">
               <div className="inspector-empty-icon">↖</div>
@@ -5953,7 +6085,7 @@ export function App() {
                       </span>
                       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                         <span style={{ fontSize: 11, fontWeight: 600, color: "#00a7a5" }}>
-                          {joineryLayout.effPitchX.toFixed(1)} mm
+                          {joineryLayout.effPitchX.toFixed(decimalPlaces)} mm
                         </span>
                         {autoJointCustomSpacing !== null && (
                           <button
@@ -5970,18 +6102,18 @@ export function App() {
                     <div className="pin-slider-row">
                       <input
                         type="range"
-                        min={Math.max(1, Number(joineryLayout.minPitchX.toFixed(1)))}
-                        max={Math.max(Number(joineryLayout.minPitchX.toFixed(1)) + 1, Number(joineryLayout.maxPitchX.toFixed(1)))}
+                        min={Math.max(1, Number(joineryLayout.minPitchX.toFixed(decimalPlaces)))}
+                        max={Math.max(Number(joineryLayout.minPitchX.toFixed(decimalPlaces)) + 1, Number(joineryLayout.maxPitchX.toFixed(decimalPlaces)))}
                         step={0.5}
                         value={joineryLayout.effPitchX}
                         onChange={(e) => setAutoJointCustomSpacing(Number(e.target.value))}
                       />
                       <input
                         type="number"
-                        min={Math.max(1, Number(joineryLayout.minPitchX.toFixed(1)))}
-                        max={Math.max(Number(joineryLayout.minPitchX.toFixed(1)) + 1, Number(joineryLayout.maxPitchX.toFixed(1)) + 10)}
+                        min={Math.max(1, Number(joineryLayout.minPitchX.toFixed(decimalPlaces)))}
+                        max={Math.max(Number(joineryLayout.minPitchX.toFixed(decimalPlaces)) + 1, Number(joineryLayout.maxPitchX.toFixed(decimalPlaces)) + 10)}
                         step={0.5}
-                        value={Number(joineryLayout.effPitchX.toFixed(1))}
+                        value={Number(joineryLayout.effPitchX.toFixed(decimalPlaces))}
                         onChange={(e) => setAutoJointCustomSpacing(Math.max(1, Number(e.target.value) || 1))}
                       />
                     </div>
@@ -5997,7 +6129,7 @@ export function App() {
                       </span>
                       <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                         <span style={{ fontSize: 11, fontWeight: 600, color: "#00a7a5" }}>
-                          {joineryLayout.effPitchY.toFixed(1)} mm
+                          {joineryLayout.effPitchY.toFixed(decimalPlaces)} mm
                         </span>
                         {autoJointCustomVerticalSpacing !== null && (
                           <button
@@ -6014,18 +6146,18 @@ export function App() {
                     <div className="pin-slider-row">
                       <input
                         type="range"
-                        min={Math.max(1, Number(joineryLayout.minPitchY.toFixed(1)))}
-                        max={Math.max(Number(joineryLayout.minPitchY.toFixed(1)) + 1, Number(joineryLayout.maxPitchY.toFixed(1)))}
+                        min={Math.max(1, Number(joineryLayout.minPitchY.toFixed(decimalPlaces)))}
+                        max={Math.max(Number(joineryLayout.minPitchY.toFixed(decimalPlaces)) + 1, Number(joineryLayout.maxPitchY.toFixed(decimalPlaces)))}
                         step={0.5}
                         value={joineryLayout.effPitchY}
                         onChange={(e) => setAutoJointCustomVerticalSpacing(Number(e.target.value))}
                       />
                       <input
                         type="number"
-                        min={Math.max(1, Number(joineryLayout.minPitchY.toFixed(1)))}
-                        max={Math.max(Number(joineryLayout.minPitchY.toFixed(1)) + 1, Number(joineryLayout.maxPitchY.toFixed(1)) + 10)}
+                        min={Math.max(1, Number(joineryLayout.minPitchY.toFixed(decimalPlaces)))}
+                        max={Math.max(Number(joineryLayout.minPitchY.toFixed(decimalPlaces)) + 1, Number(joineryLayout.maxPitchY.toFixed(decimalPlaces)) + 10)}
                         step={0.5}
-                        value={Number(joineryLayout.effPitchY.toFixed(1))}
+                        value={Number(joineryLayout.effPitchY.toFixed(decimalPlaces))}
                         onChange={(e) => setAutoJointCustomVerticalSpacing(Math.max(1, Number(e.target.value) || 1))}
                       />
                     </div>
@@ -6043,7 +6175,7 @@ export function App() {
                   </span>
                   <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                     <span style={{ fontSize: 11, fontWeight: 600, color: autoJointVerticalOffset === 0 ? "#64748b" : "#00a7a5" }}>
-                      {autoJointVerticalOffset > 0 ? `+${autoJointVerticalOffset.toFixed(1)} mm (Up)` : (autoJointVerticalOffset < 0 ? `${autoJointVerticalOffset.toFixed(1)} mm (Down)` : "Centered (0 mm)")}
+                      {autoJointVerticalOffset > 0 ? `+${autoJointVerticalOffset.toFixed(decimalPlaces)} mm (Up)` : (autoJointVerticalOffset < 0 ? `${autoJointVerticalOffset.toFixed(decimalPlaces)} mm (Down)` : "Centered (0 mm)")}
                     </span>
                     {autoJointVerticalOffset !== 0 && (
                       <button
@@ -6060,16 +6192,16 @@ export function App() {
                 <div className="pin-slider-row">
                   <input
                     type="range"
-                    min={-Number(joineryLayout.maxVerticalShift.toFixed(1))}
-                    max={Number(joineryLayout.maxVerticalShift.toFixed(1))}
+                    min={-Number(joineryLayout.maxVerticalShift.toFixed(decimalPlaces))}
+                    max={Number(joineryLayout.maxVerticalShift.toFixed(decimalPlaces))}
                     step={0.5}
                     value={autoJointVerticalOffset}
                     onChange={(e) => setAutoJointVerticalOffset(Number(e.target.value))}
                   />
                   <input
                     type="number"
-                    min={-Number(joineryLayout.maxVerticalShift.toFixed(1))}
-                    max={Number(joineryLayout.maxVerticalShift.toFixed(1))}
+                    min={-Number(joineryLayout.maxVerticalShift.toFixed(decimalPlaces))}
+                    max={Number(joineryLayout.maxVerticalShift.toFixed(decimalPlaces))}
                     step={0.5}
                     value={autoJointVerticalOffset}
                     onChange={(e) => setAutoJointVerticalOffset(Number(e.target.value) || 0)}
@@ -6078,41 +6210,32 @@ export function App() {
               </div>
             )}
 
-            {/* Hinge Pivot Axis Alignment (Edge vs Center) */}
+            {/* A hinge belongs on a boundary edge of the touching face. */}
             {autoJointShape === 5 && (
               <div style={{ marginBottom: 12 }}>
                 <span className="field-label" style={{ display: "block", marginBottom: 5, fontSize: 11, fontWeight: 600, color: "#475569" }}>
-                  Hinge Pivot Alignment
+                  Hinge Edge
                 </span>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6 }}>
-                  <button
-                    type="button"
-                    className={`tolerance-card ${autoJointHingeEdge === "edge1" ? "active" : ""}`}
-                    onClick={() => setAutoJointHingeEdge("edge1")}
-                    style={{ padding: "6px 4px", textAlign: "center" }}
-                  >
-                    <span style={{ fontWeight: 600, fontSize: 11 }}>Outer Edge</span>
-                    <span style={{ fontSize: 9, opacity: 0.8 }}>Folds 180°</span>
-                  </button>
-                  <button
-                    type="button"
-                    className={`tolerance-card ${autoJointHingeEdge === "center" ? "active" : ""}`}
-                    onClick={() => setAutoJointHingeEdge("center")}
-                    style={{ padding: "6px 4px", textAlign: "center" }}
-                  >
-                    <span style={{ fontWeight: 600, fontSize: 11 }}>Center</span>
-                    <span style={{ fontSize: 9, opacity: 0.8 }}>Flush</span>
-                  </button>
-                  <button
-                    type="button"
-                    className={`tolerance-card ${autoJointHingeEdge === "edge2" ? "active" : ""}`}
-                    onClick={() => setAutoJointHingeEdge("edge2")}
-                    style={{ padding: "6px 4px", textAlign: "center" }}
-                  >
-                    <span style={{ fontWeight: 600, fontSize: 11 }}>Opposite Edge</span>
-                    <span style={{ fontSize: 9, opacity: 0.8 }}>Folds 180°</span>
-                  </button>
+                <div className="hinge-edge-grid">
+                  {([
+                    ["top", "↑", "Top edge"],
+                    ["right", "→", "Right edge"],
+                    ["bottom", "↓", "Bottom edge"],
+                    ["left", "←", "Left edge"],
+                  ] as const).map(([edge, arrow, label]) => (
+                    <button
+                      key={edge}
+                      type="button"
+                      className={`tolerance-card ${autoJointHingeEdge === edge ? "active" : ""}`}
+                      onClick={() => setAutoJointHingeEdge(edge)}
+                      title={`Place the hinge along the ${label.toLowerCase()} of the touching face`}
+                    >
+                      <span className="hinge-edge-arrow" aria-hidden="true">{arrow}</span>
+                      <span>{label}</span>
+                    </button>
+                  ))}
                 </div>
+                <p className="hint hinge-edge-hint">Choose any boundary of the touching face. The live preview shows which edge the label refers to in the current view.</p>
               </div>
             )}
 
@@ -6214,10 +6337,10 @@ export function App() {
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: 10, color: "#64748b", marginBottom: 8, padding: "3px 6px", background: "#f1f5f9", borderRadius: 4, border: "1px solid #e2e8f0" }}>
                   <span>Material Wall:</span>
                   <span>
-                    <strong>{joineryLayout.materialDepth.toFixed(1)} mm</strong>
+                    <strong>{joineryLayout.materialDepth.toFixed(decimalPlaces)} mm</strong>
                     {joineryLayout.maxSafeDepth < joineryLayout.materialDepth && (
                       <span style={{ color: "#00a7a5", marginLeft: 6, fontWeight: 600 }}>
-                        (Safe: ≤ {joineryLayout.maxSafeDepth.toFixed(1)} mm)
+                        (Safe: ≤ {joineryLayout.maxSafeDepth.toFixed(decimalPlaces)} mm)
                       </span>
                     )}
                   </span>
@@ -6334,14 +6457,14 @@ export function App() {
                           type="button"
                           onClick={() => setAutoJointCustomLength(null)}
                           style={{ fontSize: 9, padding: "1px 5px", background: "#f1f5f9", border: "1px solid #cbd5e1", borderRadius: 3, cursor: "pointer", color: "#64748b" }}
-                          title={`Reset to auto calculated ${joineryLayout.autoLength.toFixed(1)} mm`}
+                          title={`Reset to auto calculated ${joineryLayout.autoLength.toFixed(decimalPlaces)} mm`}
                         >
-                          ↺ Auto ({joineryLayout.autoLength.toFixed(1)}mm)
+                          ↺ Auto ({joineryLayout.autoLength.toFixed(decimalPlaces)}mm)
                         </button>
                       )}
                     </div>
                     <span style={{ fontSize: 11, fontWeight: 600, color: joineryLayout.isPunchThrough ? "#dc2626" : "#00a7a5" }}>
-                      {joineryLayout.effLength.toFixed(1)} mm
+                      {joineryLayout.effLength.toFixed(decimalPlaces)} mm
                     </span>
                   </div>
                   <div className="pin-slider-row" style={{ marginBottom: 2 }}>
@@ -6358,7 +6481,7 @@ export function App() {
                       min={0.5}
                       max={60}
                       step={0.2}
-                      value={Number(joineryLayout.effLength.toFixed(1))}
+                      value={Number(joineryLayout.effLength.toFixed(decimalPlaces))}
                       onChange={(e) => setAutoJointCustomLength(Math.max(0.5, Number(e.target.value) || 1.0))}
                     />
                   </div>
@@ -6368,10 +6491,10 @@ export function App() {
                       {joineryLayout.materialDepth !== undefined && joineryLayout.maxSafeDepth < joineryLayout.materialDepth && (
                         <button
                           type="button"
-                          onClick={() => setAutoJointCustomLength(Number(joineryLayout.maxSafeDepth.toFixed(1)))}
+                          onClick={() => setAutoJointCustomLength(Number(joineryLayout.maxSafeDepth.toFixed(decimalPlaces)))}
                           style={{ background: "#fee2e2", border: "1px solid #fca5a5", color: "#991b1b", padding: "2px 6px", borderRadius: 4, cursor: "pointer", fontSize: 10, fontWeight: 600 }}
                         >
-                          Set Safe {joineryLayout.maxSafeDepth.toFixed(1)}mm
+                          Set Safe {joineryLayout.maxSafeDepth.toFixed(decimalPlaces)}mm
                         </button>
                       )}
                     </div>
@@ -6391,14 +6514,14 @@ export function App() {
                         type="button"
                         onClick={() => setAutoJointCustomSize(null)}
                         style={{ fontSize: 9, padding: "1px 5px", background: "#f1f5f9", border: "1px solid #cbd5e1", borderRadius: 3, cursor: "pointer", color: "#64748b" }}
-                        title={`Reset to auto calculated ${(autoJointShape === 1 || autoJointShape === 5 || autoJointShape === 6 ? joineryLayout.autoRadius * 2 : joineryLayout.autoWidth).toFixed(1)} mm`}
+                        title={`Reset to auto calculated ${(autoJointShape === 1 || autoJointShape === 5 || autoJointShape === 6 ? joineryLayout.autoRadius * 2 : joineryLayout.autoWidth).toFixed(decimalPlaces)} mm`}
                       >
-                        ↺ Auto ({(autoJointShape === 1 || autoJointShape === 5 || autoJointShape === 6 ? joineryLayout.autoRadius * 2 : joineryLayout.autoWidth).toFixed(1)}mm)
+                        ↺ Auto ({(autoJointShape === 1 || autoJointShape === 5 || autoJointShape === 6 ? joineryLayout.autoRadius * 2 : joineryLayout.autoWidth).toFixed(decimalPlaces)}mm)
                       </button>
                     )}
                   </div>
                   <span style={{ fontSize: 11, fontWeight: 600, color: "#00a7a5" }}>
-                    {(autoJointShape === 1 || autoJointShape === 5 || autoJointShape === 6 ? joineryLayout.effRadius * 2 : joineryLayout.effWidth).toFixed(1)} mm
+                    {(autoJointShape === 1 || autoJointShape === 5 || autoJointShape === 6 ? joineryLayout.effRadius * 2 : joineryLayout.effWidth).toFixed(decimalPlaces)} mm
                   </span>
                 </div>
                 <div className="pin-slider-row" style={{ marginBottom: 2 }}>
@@ -6415,7 +6538,7 @@ export function App() {
                     min={1.0}
                     max={50}
                     step={0.5}
-                    value={Number((autoJointShape === 1 || autoJointShape === 5 || autoJointShape === 6 ? joineryLayout.effRadius * 2 : joineryLayout.effWidth).toFixed(1))}
+                    value={Number((autoJointShape === 1 || autoJointShape === 5 || autoJointShape === 6 ? joineryLayout.effRadius * 2 : joineryLayout.effWidth).toFixed(decimalPlaces))}
                     onChange={(e) => setAutoJointCustomSize(Math.max(1.0, Number(e.target.value) || 1.0))}
                   />
                 </div>
@@ -6434,14 +6557,14 @@ export function App() {
                           type="button"
                           onClick={() => setAutoJointCustomThickness(null)}
                           style={{ fontSize: 9, padding: "1px 5px", background: "#f1f5f9", border: "1px solid #cbd5e1", borderRadius: 3, cursor: "pointer", color: "#64748b" }}
-                          title={`Reset to auto calculated ${joineryLayout.autoThickness.toFixed(1)} mm`}
+                          title={`Reset to auto calculated ${joineryLayout.autoThickness.toFixed(decimalPlaces)} mm`}
                         >
-                          ↺ Auto ({joineryLayout.autoThickness.toFixed(1)}mm)
+                          ↺ Auto ({joineryLayout.autoThickness.toFixed(decimalPlaces)}mm)
                         </button>
                       )}
                     </div>
                     <span style={{ fontSize: 11, fontWeight: 600, color: "#00a7a5" }}>
-                      {joineryLayout.effThickness.toFixed(1)} mm
+                      {joineryLayout.effThickness.toFixed(decimalPlaces)} mm
                     </span>
                   </div>
                   <div className="pin-slider-row" style={{ marginBottom: 2 }}>
@@ -6458,7 +6581,7 @@ export function App() {
                       min={0.8}
                       max={30}
                       step={0.2}
-                      value={Number(joineryLayout.effThickness.toFixed(1))}
+                      value={Number(joineryLayout.effThickness.toFixed(decimalPlaces))}
                       onChange={(e) => setAutoJointCustomThickness(Math.max(0.8, Number(e.target.value) || 1.0))}
                     />
                   </div>
@@ -6478,14 +6601,14 @@ export function App() {
                           type="button"
                           onClick={() => setAutoJointCustomHeight(null)}
                           style={{ fontSize: 9, padding: "1px 5px", background: "#f1f5f9", border: "1px solid #cbd5e1", borderRadius: 3, cursor: "pointer", color: "#64748b" }}
-                          title={`Reset to auto calculated ${joineryLayout.autoHeight.toFixed(1)} mm`}
+                          title={`Reset to auto calculated ${joineryLayout.autoHeight.toFixed(decimalPlaces)} mm`}
                         >
-                          ↺ Auto ({joineryLayout.autoHeight.toFixed(1)}mm)
+                          ↺ Auto ({joineryLayout.autoHeight.toFixed(decimalPlaces)}mm)
                         </button>
                       )}
                     </div>
                     <span style={{ fontSize: 11, fontWeight: 600, color: "#00a7a5" }}>
-                      {joineryLayout.effHeight.toFixed(1)} mm
+                      {joineryLayout.effHeight.toFixed(decimalPlaces)} mm
                     </span>
                   </div>
                   <div className="pin-slider-row" style={{ marginBottom: 2 }}>
@@ -6502,7 +6625,7 @@ export function App() {
                       min={0.4}
                       max={20}
                       step={0.2}
-                      value={Number(joineryLayout.effHeight.toFixed(1))}
+                      value={Number(joineryLayout.effHeight.toFixed(decimalPlaces))}
                       onChange={(e) => setAutoJointCustomHeight(Math.max(0.4, Number(e.target.value) || 0.5))}
                     />
                   </div>
@@ -6856,6 +6979,7 @@ export function App() {
         snapToGrid={gridSnapEnabled}
         snapToObjects={snapEnabled}
         showSelectedCollisionContacts={showSelectedCollisionContacts}
+        collisionHighlightStyle={collisionHighlightStyle}
         randomNewObjectColors={randomNewObjectColors}
         hideAllLines={hideAllLines}
         onUnit={setDisplayUnit}
@@ -6866,6 +6990,7 @@ export function App() {
         onSnapToGrid={setGridSnapEnabled}
         onSnapToObjects={setSnapEnabled}
         onShowSelectedCollisionContacts={setShowSelectedCollisionContacts}
+        onCollisionHighlightStyle={setCollisionHighlightStyle}
         onRandomNewObjectColors={setRandomNewObjectColors}
         onHideAllLines={setHideAllLines}
         onClose={() => setSettingsOpen(false)}
@@ -6915,6 +7040,9 @@ export function App() {
           onImport={confirmSvgImport}
         />
       )}
+      {pathPatternSource && <PathPatternPanel source={pathPatternSource} nodes={nodes} unit={displayUnit} decimals={decimalPlaces}
+        onPreview={previewPathPattern} onClose={() => {previewPathPattern([]);setPathPatternSource(null);}}
+        onApply={placements => {previewPathPattern([]);useDoc.getState().createPathPattern(pathPatternSource.id,placements);setPathPatternSource(null);}} />}
       {sketchSession && (
         <SketchEditor
           title={sketchSession.title}

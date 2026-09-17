@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { AppearancePreference, DisplayUnit } from "../measurement";
 import type { ViewportQuality } from "../viewport/quality";
+import type { CollisionHighlightStyle } from "../viewport/scene";
 
 export interface BuildPlateSize {
   width: number;
@@ -32,6 +33,7 @@ interface Props {
   snapToGrid: boolean;
   snapToObjects: boolean;
   showSelectedCollisionContacts: boolean;
+  collisionHighlightStyle: CollisionHighlightStyle;
   randomNewObjectColors: boolean;
   /** Global performance override: forces every object's edge lines off,
    *  regardless of each one's own "Hide lines on this object" setting. */
@@ -44,6 +46,7 @@ interface Props {
   onSnapToGrid: (enabled: boolean) => void;
   onSnapToObjects: (enabled: boolean) => void;
   onShowSelectedCollisionContacts: (enabled: boolean) => void;
+  onCollisionHighlightStyle: (style: CollisionHighlightStyle) => void;
   onRandomNewObjectColors: (enabled: boolean) => void;
   onHideAllLines: (enabled: boolean) => void;
   onClose: () => void;
@@ -94,6 +97,7 @@ export function SettingsModal({
   snapToGrid,
   snapToObjects,
   showSelectedCollisionContacts,
+  collisionHighlightStyle,
   randomNewObjectColors,
   hideAllLines,
   onUnit,
@@ -104,6 +108,7 @@ export function SettingsModal({
   onSnapToGrid,
   onSnapToObjects,
   onShowSelectedCollisionContacts,
+  onCollisionHighlightStyle,
   onRandomNewObjectColors,
   onHideAllLines,
   onClose,
@@ -331,6 +336,23 @@ export function SettingsModal({
                   <span><strong>Show selected collisions</strong><small>Keeps touching areas highlighted after selecting an object</small></span>
                   <SettingsToggle checked={showSelectedCollisionContacts} onChange={onShowSelectedCollisionContacts} label="Show selected collisions" />
                 </div>
+                <label className="settings-row">
+                  <span>
+                    <strong>Collision highlight style</strong>
+                    <small>
+                      How a touching, coincident face is drawn. A curved or angled contact has no flat
+                      area to fill, so it always shows as an outline regardless of this setting.
+                    </small>
+                  </span>
+                  <select
+                    value={collisionHighlightStyle}
+                    onChange={(e) => onCollisionHighlightStyle(e.target.value as CollisionHighlightStyle)}
+                  >
+                    <option value="outline">Outline</option>
+                    <option value="face">Filled face</option>
+                    <option value="both">Both</option>
+                  </select>
+                </label>
               </div>
             )}
           </div>

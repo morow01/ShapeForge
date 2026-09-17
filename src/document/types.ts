@@ -53,6 +53,10 @@ export interface ParamField {
    *  actually the point and being a fraction of a unit off rarely matters
    *  the way a structural dimension does. */
   noSlider?: boolean;
+  /** Multiplies the stored value for display and divides edited values before
+   *  saving. Circular sizes use 2 so the UI speaks in measured diameters while
+   *  existing documents and geometry continue storing radii. */
+  displayScale?: number;
 }
 
 export interface PrimitiveDef {
@@ -68,6 +72,16 @@ const dim = (key: string, label: string, max = 1000): ParamField => ({
   max,
   step: 0.5,
   noSlider: true,
+});
+
+const diam = (key: string, label: string, max = 1000): ParamField => ({
+  key,
+  label,
+  min: 1,
+  max,
+  step: 0.5,
+  noSlider: true,
+  displayScale: 2,
 });
 
 const angle = (key: string, label: string, showIf?: ParamField["showIf"]): ParamField => ({
@@ -137,7 +151,7 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
     label: "Cylinder",
     defaults: { radius: 10, height: 20, sides: 48, sideEdges: 0, topFillet: 0, bottomFillet: 0 },
     fields: [
-      dim("radius", "Radius"),
+      diam("radius", "Diameter"),
       dim("height", "Height"),
       { key: "sides", label: "Roundness", min: 8, max: 96, step: 1 },
       {
@@ -159,7 +173,7 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
     label: "Sphere",
     defaults: { radius: 10, surfaceSteps: 48, surfaceEdges: 0 },
     fields: [
-      dim("radius", "Radius"),
+      diam("radius", "Diameter"),
       { key: "surfaceSteps", label: "Surface steps", min: 8, max: 64, step: 1 },
       {
         key: "surfaceEdges", label: "Surface lines", min: 0, max: 1, step: 1,
@@ -174,8 +188,8 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
       topFillet: 0, bottomFillet: 0,
     },
     fields: [
-      { key: "bottomRadius", label: "Bottom radius", min: 0, max: 1000, step: 0.5, noSlider: true },
-      { key: "topRadius", label: "Top radius", min: 0, max: 1000, step: 0.5, noSlider: true },
+      { key: "bottomRadius", label: "Bottom diameter", min: 0, max: 1000, step: 0.5, noSlider: true, displayScale: 2 },
+      { key: "topRadius", label: "Top diameter", min: 0, max: 1000, step: 0.5, noSlider: true, displayScale: 2 },
       dim("height", "Height"),
       { key: "sides", label: "Roundness", min: 8, max: 96, step: 1 },
       {
@@ -256,8 +270,8 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
     label: "Torus",
     defaults: { radius: 15, tubeRadius: 5, ringSteps: 48, tubeSteps: 32, surfaceEdges: 0 },
     fields: [
-      dim("radius", "Ring radius"),
-      dim("tubeRadius", "Tube radius"),
+      diam("radius", "Ring diameter"),
+      diam("tubeRadius", "Tube diameter"),
       { key: "ringSteps", label: "Ring steps", min: 8, max: 128, step: 1 },
       { key: "tubeSteps", label: "Tube steps", min: 8, max: 128, step: 1 },
       {
@@ -285,7 +299,7 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
           { value: 1, label: "Shown" },
         ],
       },
-      dim("radius", "Radius"),
+      diam("radius", "Base diameter"),
       dim("height", "Height"),
       { key: "topFillet", label: "Top corner radius", min: 0, max: 500, step: 0.5 },
       { key: "bottomFillet", label: "Bottom corner radius", min: 0, max: 500, step: 0.5 },
@@ -319,7 +333,7 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
     },
     fields: [
       { key: "sides", label: "Base sides", min: 3, max: 32, step: 1 },
-      dim("radius", "Radius"),
+      diam("radius", "Base diameter"),
       dim("height", "Height"),
       { key: "fillet", label: "Side corner radius", min: 0, max: 500, step: 0.5 },
       { key: "topFillet", label: "Top corner radius", min: 0, max: 500, step: 0.5 },
@@ -335,7 +349,7 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
     label: "Dome",
     defaults: { radius: 10, bottomFillet: 0, surfaceSteps: 24, surfaceEdges: 0 },
     fields: [
-      dim("radius", "Radius"),
+      diam("radius", "Diameter"),
       { key: "bottomFillet", label: "Bottom corner radius", min: 0, max: 500, step: 0.5 },
       { key: "surfaceSteps", label: "Surface steps", min: 4, max: 64, step: 1 },
       {
@@ -348,7 +362,7 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
     label: "Capsule",
     defaults: { radius: 5, height: 20, surfaceSteps: 48, surfaceEdges: 0 },
     fields: [
-      dim("radius", "Radius"),
+      diam("radius", "Diameter"),
       dim("height", "Height"),
       { key: "surfaceSteps", label: "Surface steps", min: 8, max: 64, step: 1 },
       {
@@ -365,7 +379,7 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
       cornerEdges: 0,
     },
     fields: [
-      dim("radius", "Outer radius"),
+      diam("radius", "Outer diameter"),
       { key: "wallThickness", label: "Wall thickness", min: 0.1, max: 1000, step: 0.1, noSlider: true },
       dim("height", "Height"),
       { key: "sides", label: "Sides", min: 3, max: 64, step: 1 },
@@ -383,7 +397,7 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
     label: "Paraboloid",
     defaults: { radius: 10, height: 20, bottomFillet: 0, surfaceSteps: 32, surfaceEdges: 0 },
     fields: [
-      dim("radius", "Radius"),
+      diam("radius", "Diameter"),
       dim("height", "Height"),
       { key: "bottomFillet", label: "Bottom corner radius", min: 0, max: 500, step: 0.5 },
       { key: "surfaceSteps", label: "Surface steps", min: 4, max: 64, step: 1 },
@@ -500,7 +514,7 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
       { ...dim("length", "Rail Length"), showIf: { key: "shape", oneOf: [0] } },
 
       // Round Pin params
-      { ...dim("radius", "Pin Radius"), showIf: { key: "shape", oneOf: [1] } },
+      { ...diam("radius", "Pin Diameter"), showIf: { key: "shape", oneOf: [1] } },
       { ...dim("length", "Pin Length"), showIf: { key: "shape", oneOf: [1] } },
       {
         key: "chamfer",
@@ -540,8 +554,8 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
       },
 
       // Screw Boss / Standoff params
-      { ...dim("outerRadius", "Boss Outer Radius"), showIf: { key: "shape", oneOf: [4] } },
-      { ...dim("innerRadius", "Pilot Hole Radius"), showIf: { key: "shape", oneOf: [4] } },
+      { ...diam("outerRadius", "Boss Outer Diameter"), showIf: { key: "shape", oneOf: [4] } },
+      { ...diam("innerRadius", "Pilot Hole Diameter"), showIf: { key: "shape", oneOf: [4] } },
       { ...dim("length", "Boss Height"), showIf: { key: "shape", oneOf: [4] } },
 
       // Cantilever Snap-Fit params (shape 6)
@@ -797,8 +811,8 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
         ],
       },
       { key: "points", label: "Points", min: 3, max: 32, step: 1 },
-      dim("outerRadius", "Outer radius"),
-      dim("innerRadius", "Inner radius"),
+      diam("outerRadius", "Outer diameter"),
+      diam("innerRadius", "Inner diameter"),
       dim("height", "Height"),
       { key: "outerFillet", label: "Outer point radius", min: 0, max: 500, step: 0.5, showIf: { key: "style", oneOf: [0] } },
       { key: "innerFillet", label: "Inner corner radius", min: 0, max: 500, step: 0.5, showIf: { key: "style", oneOf: [0] } },
@@ -832,11 +846,11 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
         max: 1,
         step: 1,
         options: [
-          { value: 0, label: "By Radius (Wheel Size)" },
+          { value: 0, label: "By Diameter (Wheel Size)" },
           { value: 1, label: "By Module (Engineering Pitch)" },
         ],
       },
-      { ...dim("radius", "Radius"), showIf: { key: "sizeBy", oneOf: [0] } },
+      { ...diam("radius", "Diameter"), showIf: { key: "sizeBy", oneOf: [0] } },
       { ...dim("height", "Thickness"), showIf: { key: "sizeBy", oneOf: [0] } },
       { ...dim("height", "Thickness"), showIf: { key: "sizeBy", oneOf: [1] } },
       { key: "teeth", label: "Teeth", min: 5, max: 100, step: 1 },
@@ -873,15 +887,15 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
           { value: 2, label: "Square Shaft" },
         ],
       },
-      { key: "boreRadius", label: "Bore radius", min: 0, max: 200, step: 0.25, suffix: "mm", noSlider: true },
+      { key: "boreRadius", label: "Bore diameter", min: 0, max: 200, step: 0.25, suffix: "mm", noSlider: true, displayScale: 2 },
     ],
   },
   washer: {
     label: "Washer",
     defaults: { outerRadius: 10, innerRadius: 4, height: 2 },
     fields: [
-      dim("outerRadius", "Outer radius"),
-      dim("innerRadius", "Bore radius"),
+      diam("outerRadius", "Outer diameter"),
+      diam("innerRadius", "Bore diameter"),
       dim("height", "Thickness"),
     ],
   },
@@ -926,8 +940,8 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
           { value: 6000, label: "6000 (10x26x8mm - 10mm Shaft)" },
         ],
       },
-      { ...dim("outerRadius", "Outer radius"), showIf: { key: "preset", oneOf: [0] } },
-      { ...dim("innerRadius", "Bore radius"), showIf: { key: "preset", oneOf: [0] } },
+      { ...diam("outerRadius", "Outer diameter"), showIf: { key: "preset", oneOf: [0] } },
+      { ...diam("innerRadius", "Bore diameter"), showIf: { key: "preset", oneOf: [0] } },
       { ...dim("height", "Width"), showIf: { key: "preset", oneOf: [0] } },
       {
         key: "cage",
@@ -998,9 +1012,9 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
     label: "Ellipsoid",
     defaults: { radiusX: 15, radiusY: 10, radiusZ: 10, surfaceSteps: 48, surfaceEdges: 0 },
     fields: [
-      dim("radiusX", "Radius X"),
-      dim("radiusY", "Radius Y"),
-      dim("radiusZ", "Radius Z"),
+      diam("radiusX", "Diameter X"),
+      diam("radiusY", "Diameter Y"),
+      diam("radiusZ", "Diameter Z"),
       { key: "surfaceSteps", label: "Surface steps", min: 8, max: 64, step: 1 },
       {
         key: "surfaceEdges",
@@ -1027,9 +1041,9 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
       wireShape: 0,
     },
     fields: [
-      dim("radius", "Bottom radius"),
-      dim("topRadius", "Top radius"),
-      dim("wireRadius", "Wire radius"),
+      diam("radius", "Bottom diameter"),
+      diam("topRadius", "Top diameter"),
+      diam("wireRadius", "Wire diameter"),
       dim("height", "Height"),
       { key: "turns", label: "Active Coils", min: 1, max: 40, step: 0.5 },
       {
@@ -1707,4 +1721,10 @@ export interface ProjectFile {
     target: Vec3;
     zoom?: number;
   } | null;
+  // Base64-encoded bytes for every "import" node's blobId, so an imported
+  // STL/3MF/SVG survives being reopened on another machine or after browser
+  // storage is cleared — without this, only the file's name and size are
+  // saved and the geometry itself exists nowhere but the exporting browser's
+  // IndexedDB.
+  blobs?: Record<string, string>;
 }

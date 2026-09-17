@@ -797,8 +797,8 @@ export function Inspector({
                 <span className="field-label">{axis}</span>
                 <MathNumInput
                   className="num"
-                  step={15}
-                  value={round(node.rotation[i])}
+                  step={decimalPlaces === 0 ? 1 : 10 ** -decimalPlaces}
+                  value={node.rotation[i].toFixed(decimalPlaces)}
                   onFocus={beginHistoryBatch}
                   onBlur={endHistoryBatch}
                   onCommit={(v) => setAxis("rotation", i, v)}
@@ -832,7 +832,7 @@ export function Inspector({
             </span>
           </label>
 
-          <LowPolySection lowPoly={node.lowPoly} onLowPoly={onLowPoly} />
+          <LowPolySection lowPoly={node.lowPoly} onLowPoly={onLowPoly} decimalPlaces={decimalPlaces} />
         </>
       )}
       {isMulti && selectionBounds && (
@@ -1371,6 +1371,7 @@ function ObjectParams({
       </div>
       {groupDimensionFields(fields.map((f) => {
         let base = node.params[f.key] ?? 0;
+        const displayScale = f.displayScale ?? 1;
         if ((node.kind === "cylinder" || node.kind === "cone") && f.key === "sides" && node.params.sides == null) {
           base = 48;
         }
@@ -1481,6 +1482,14 @@ function ObjectParams({
             )
           : 0;
         const shown = isCornerRadius ? { ...f, max: alignedCornerMax } : f;
+        const displayField = displayScale === 1
+          ? shown
+          : {
+              ...shown,
+              min: shown.min * displayScale,
+              max: shown.max * displayScale,
+              step: shown.step * displayScale,
+            };
         // The kernel caps a corner radius at what the current size can take
         // (filletLimit here, and makePrimitive's own clamp when it builds).
         // Resizing a box smaller therefore shrinks the radius it really uses
@@ -1489,14 +1498,14 @@ function ObjectParams({
         // the shape actually has. The stored value is deliberately left
         // alone: grow the box again and the radius originally asked for
         // comes back, which is what makes resizing non-destructive.
-        const shownValue = isCornerRadius ? Math.min(base, shown.max) : base;
+        const shownValue = (isCornerRadius ? Math.min(base, shown.max) : base) * displayScale;
         if (!axes || !uniform || base <= 0) {
           return {
-            field: shown,
+            field: displayField,
             el: (
               <Field
                 key={f.key}
-                field={shown}
+                field={displayField}
                 value={shownValue}
                 lockable={isAngleField}
                 locked={isLocked}
@@ -1505,27 +1514,28 @@ function ObjectParams({
                 disabled={isConstrained3rdAngle || (node.kind === "threadedNut" && f.key === "clearance" && (node.params.fit ?? 1) !== 3)}
                 dotColorClass={dotColorClass}
                 axis={singleAxis}
-                onChange={(v) => onParam(f.key, Math.min(v, shown.max))}
+                onChange={(v) => onParam(f.key, Math.min(v / displayScale, shown.max))}
                 displayUnit={displayUnit}
                 decimalPlaces={decimalPlaces}
+                screwHoleIcon={node.kind === "screwHole" && SCREW_HOLE_COMPACT_KEYS.has(f.key)}
                 isLength={!shown.options && shown.suffix !== "°" && !["sides", "points", "cornerSteps", "surfaceSteps", "teeth", "ballCount", "turns"].includes(shown.key)}
               />
             ),
           };
         }
         const factor = node.scale[axes[0]];
-        const currentVal = round(base * factor);
-        const maxVal = Math.max(f.max, Math.ceil(currentVal / 50) * 50);
+        const currentVal = round(base * factor * displayScale);
+        const maxVal = Math.max(displayField.max, Math.ceil(currentVal / 50) * 50);
         return {
-          field: f,
+          field: displayField,
           el: (
             <Field
               key={f.key}
               field={{
-                ...f,
-                min: f.min,
+                ...displayField,
+                min: displayField.min,
                 max: maxVal,
-                step: f.step,
+                step: displayField.step,
               }}
               value={currentVal}
               lockable={isAngleField}
@@ -1534,9 +1544,10 @@ function ObjectParams({
               lockDisabled={lockDisabled}
               axis={singleAxis}
               onChange={(v) => {
-                if (!Number.isFinite(v) || v <= 0) return;
+                const internalValue = v / displayScale;
+                if (!Number.isFinite(internalValue) || internalValue <= 0) return;
                 if (node.kind === "triangle" && (node.params.lockAngleLeft || node.params.lockAngleRight || node.params.lockAngleApex)) {
-                  const nextFactor = Math.max(0.0001, v / base);
+                  const nextFactor = Math.max(0.0001, internalValue / base);
                   const scale = (resizeConstrained || f.key === "base")
                     ? ([nextFactor, nextFactor, resizeConstrained ? nextFactor : node.scale[2]] as Vec3)
                     : (node.scale.map((val, at) => (axes.includes(at) ? nextFactor : val)) as Vec3);
@@ -1551,18 +1562,19 @@ function ObjectParams({
                     }
                   }
                 }
-                onParam(f.key, v);
+                onParam(f.key, internalValue);
                 if (node.scale.some((s) => Math.abs(s - 1) > 1e-4)) {
                   onTransform({ scale: [1, 1, 1] });
                 }
               }}
               displayUnit={displayUnit}
               decimalPlaces={decimalPlaces}
+              screwHoleIcon={node.kind === "screwHole" && SCREW_HOLE_COMPACT_KEYS.has(f.key)}
               isLength={!f.options && f.suffix !== "°" && !["sides", "points", "cornerSteps", "surfaceSteps", "teeth", "ballCount", "turns"].includes(f.key)}
             />
           ),
         };
-      }))}
+      }), node.kind === "screwHole")}
       {node.kind === "triangle" && (
         <TriangleReadout params={node.params} scale={node.scale} displayUnit={displayUnit} />
       )}
@@ -1665,7 +1677,31 @@ function TriangleReadout({
  * the compact layout — corner radius genuinely needs a slider's width, and
  * a dropdown is a different kind of control entirely.
  */
-function groupDimensionFields(entries: { field: ParamField; el: React.ReactNode }[]): React.ReactNode[] {
+const SCREW_HOLE_COMPACT_KEYS = new Set(["holeDia", "depth", "headDia", "pocketDepth"]);
+
+function groupDimensionFields(
+  entries: { field: ParamField; el: React.ReactNode }[],
+  compactScrewHole = false,
+): React.ReactNode[] {
+  if (compactScrewHole) {
+    const compact = entries.filter(({ field }) => SCREW_HOLE_COMPACT_KEYS.has(field.key));
+    if (compact.length >= 2) {
+      const first = entries.findIndex(({ field }) => SCREW_HOLE_COMPACT_KEYS.has(field.key));
+      const before = groupDimensionFields(entries.slice(0, first));
+      const after = groupDimensionFields(entries.slice(first).filter(({ field }) => !SCREW_HOLE_COMPACT_KEYS.has(field.key)));
+      return [
+        ...before,
+        <div
+          className="screw-hole-dimensions"
+          style={{ gridTemplateColumns: `repeat(${compact.length}, minmax(0, 1fr))` }}
+          key="screw-hole-dimensions"
+        >
+          {compact.map(({ el }) => el)}
+        </div>,
+        ...after,
+      ];
+    }
+  }
   const rows: React.ReactNode[] = [];
   let run: React.ReactNode[] = [];
   const flushRun = () => {
@@ -1684,6 +1720,19 @@ function groupDimensionFields(entries: { field: ParamField; el: React.ReactNode 
   return rows;
 }
 
+function ScrewHoleDimensionIcon({ kind }: { kind: string }) {
+  if (kind === "holeDia") {
+    return <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="6"/><path d="M3 12h18M3 12l3-2m-3 2 3 2m15-2-3-2m3 2-3 2"/></svg>;
+  }
+  if (kind === "depth") {
+    return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16M7 5v14h10V5M12 7v10m0 0-2-3m2 3 2-3"/></svg>;
+  }
+  if (kind === "headDia") {
+    return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M5 6l5 6v6h4v-6l5-6M3 9h18M3 9l3-2m-3 2 3 2m15-2-3-2m3 2-3 2"/></svg>;
+  }
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h6v5h6V5h6M9 10v9h6v-9M18 6v11m0 0-2-3m2 3 2-3"/></svg>;
+}
+
 const fmt = (n: number) => (Math.round(n * 100) / 100).toString();
 
 function Field({
@@ -1700,6 +1749,7 @@ function Field({
   displayUnit,
   decimalPlaces,
   isLength = false,
+  screwHoleIcon = false,
 }: {
   field: ParamField;
   value: number;
@@ -1716,6 +1766,7 @@ function Field({
   displayUnit: DisplayUnit;
   decimalPlaces: number;
   isLength?: boolean;
+  screwHoleIcon?: boolean;
 }) {
   const radiusField = [
     "fillet", "topFillet", "bottomFillet", "leftFillet", "rightFillet", "apexFillet",
@@ -1906,8 +1957,9 @@ function Field({
     );
   }
 
-  const stepDecimals = field.step ? (field.step.toString().split(".")[1]?.length ?? 0) : 0;
-  const precision = Math.max(decimalPlaces, stepDecimals);
+  // Length display precision is a user preference. A 0-decimal setting must
+  // show whole measurements even when the underlying edit step is fractional.
+  const precision = decimalPlaces;
   const shownValue = isLength ? fromMillimetres(value, displayUnit) : value;
   const shownMin = isLength ? fromMillimetres(field.min, displayUnit) : field.min;
   const shownMax = isLength ? fromMillimetres(field.max, displayUnit) : field.max;
@@ -1915,7 +1967,7 @@ function Field({
     ? (isLength ? Math.min(fromMillimetres(field.step, displayUnit), displayStep(displayUnit, decimalPlaces)) : field.step)
     : (isLength ? displayStep(displayUnit, decimalPlaces) : field.step);
   const commit = (shown: number) => onChange(isLength ? toMillimetres(shown, displayUnit) : shown);
-  const formattedValue = isLength ? shownValue.toFixed(precision) : String(shownValue);
+  const formattedValue = isLength || field.suffix === "°" ? shownValue.toFixed(precision) : String(shownValue);
   const [draftValue, setDraftValue] = useState(formattedValue);
   const [editingValue, setEditingValue] = useState(false);
   useEffect(() => {
@@ -1939,10 +1991,10 @@ function Field({
   return (
     <div className={axis === undefined ? "field" : `field axis-${axis}`}>
       <div className="field-header">
-        <span className="field-label">
+        <span className={`field-label${screwHoleIcon ? " screw-hole-icon-label" : ""}`} title={screwHoleIcon ? field.label : undefined}>
           {dotColorClass && <span className={`corner-dot ${dotColorClass}`}></span>}
-          {field.label}
-          {!isLength && !radiusField && field.suffix ? ` (${field.suffix})` : ""}
+          {screwHoleIcon ? <ScrewHoleDimensionIcon kind={field.key} /> : field.label}
+          {!screwHoleIcon && !isLength && !radiusField && field.suffix ? ` (${field.suffix})` : ""}
         </span>
         {lockable && (
           <button
@@ -1992,6 +2044,7 @@ function Field({
         <div className="num-stepper-wrap">
           <input
             className="num"
+            aria-label={field.label}
             type="text"
             inputMode="decimal"
             value={draftValue}
@@ -2298,9 +2351,11 @@ function SketchQuality({
 function LowPolySection({
   lowPoly,
   onLowPoly,
+  decimalPlaces,
 }: {
   lowPoly?: LowPoly;
   onLowPoly: (lowPoly: LowPoly | undefined) => void;
+  decimalPlaces: number;
 }) {
   const on = !!lowPoly;
   const value = lowPoly ?? LOW_POLY_DEFAULT;
@@ -2323,7 +2378,7 @@ function LowPolySection({
           <div className="field">
             <div className="field-header">
               <span className="field-label">Facet size</span>
-              <span className="field-value">{value.facet.toFixed(2)} mm</span>
+              <span className="field-value">{value.facet.toFixed(decimalPlaces)} mm</span>
             </div>
             <input
               type="range"
@@ -2340,7 +2395,7 @@ function LowPolySection({
           <div className="field">
             <div className="field-header">
               <span className="field-label">Evenness</span>
-              <span className="field-value">{value.even > 0 ? `${value.even.toFixed(1)} mm` : "off"}</span>
+              <span className="field-value">{value.even > 0 ? `${value.even.toFixed(decimalPlaces)} mm` : "off"}</span>
             </div>
             <input
               type="range"

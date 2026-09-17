@@ -20,6 +20,7 @@ import {
   loadCameraState,
   loadProject,
   parseProjectFile,
+  restoreProjectFileBlobs,
   saveProject,
   setActiveProjectId,
 } from "./persist";
@@ -705,7 +706,7 @@ interface DocState {
   renameProject: (name: string) => void;
   duplicateProject: (id: string) => string | null;
   deleteProject: (id: string) => boolean;
-  exportCurrentProject: () => void;
+  exportCurrentProject: () => Promise<void>;
   importProjectFile: (file: File) => Promise<boolean>;
   importProjectData: (data: ProjectData) => string;
   refreshProjectsList: () => void;
@@ -747,6 +748,7 @@ interface DocState {
    *  them, and selects the new copies. Returns the new top-level ids, in the
    *  same order as `source`. */
   duplicateNodes: (source: SceneNode[], offset: Vec3) => string[];
+  createPathPattern: (sourceId: string, placements: { position: Vec3; rotation: Vec3 }[]) => void;
   /** Exact in-place duplicate (no offset) of one object node, with `params`
    *  merged into the copy's own params before it is ever built — atomic, so
    *  there is no window where the clone briefly exists with the source's
@@ -923,7 +925,7 @@ export const useDoc = create<DocState>()(
         return true;
       },
 
-      exportCurrentProject: () => {
+      exportCurrentProject: async () => {
         flushSave();
         const s = get();
         const proj: ProjectData = {
@@ -935,7 +937,7 @@ export const useDoc = create<DocState>()(
           nodes: s.nodes,
           camera: loadCameraState(),
         };
-        exportProjectFile(proj);
+        await exportProjectFile(proj);
       },
 
       importProjectFile: async (file) => {
@@ -944,6 +946,7 @@ export const useDoc = create<DocState>()(
           const fallback = file.name.replace(/\.(shapeforge|json)$/i, "");
           const proj = parseProjectFile(text, fallback);
           if (!proj) return false;
+          await restoreProjectFileBlobs(text);
           get().importProjectData(proj);
           return true;
         } catch {
@@ -1206,6 +1209,17 @@ export const useDoc = create<DocState>()(
         set((s) => ({ nodes: [...s.nodes, ...clones], selectedIds: clones.map((c) => c.id) }));
         afterBatchedMutation();
         return clones.map((c) => c.id);
+      },
+
+      createPathPattern: (sourceId, placements) => {
+        const source = get().nodes.find(n => n.id === sourceId);
+        if (!source || source.type === "group" || !placements.length || placements.length > 300) return;
+        if (placements.some(p => [...p.position, ...p.rotation].some(v => !Number.isFinite(v)))) return;
+        const children = placements.map((p, i) => ({ ...(i === 0 ? source : cloneSubtree(source, [0,0,0])), position: p.position, rotation: p.rotation }));
+        const group: GroupNode = { id: nextId(), name: `Along Path (${children.length})`, type: "group", op: "assembly", children,
+          position: [0,0,0], rotation: [0,0,0], scale: [1,1,1], isHole: false };
+        set(s => ({ nodes: s.nodes.map(n => n.id === sourceId ? group : n), selectedIds: [group.id] }));
+        afterBatchedMutation();
       },
 
       duplicateWithParams: (id, params, overrides) => {

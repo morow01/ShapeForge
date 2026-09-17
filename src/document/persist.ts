@@ -1,5 +1,6 @@
 import { PRIMITIVES } from "./types";
 import { parseSketch } from "../sketch/geometry";
+import { getBlob, putBlob } from "./blobStore";
 import type {
   BooleanOp,
   CameraMode,
@@ -440,8 +441,44 @@ export function saveCameraState(state: StoredCamera): boolean {
   }
 }
 
+function collectImportBlobIds(nodes: SceneNode[], ids: Set<string>) {
+  for (const n of nodes) {
+    if (n.type === "import") ids.add(n.blobId);
+    else if (n.type === "group") collectImportBlobIds(n.children, ids);
+    else if (n.type === "build") collectImportBlobIds(n.sources, ids);
+    else if (n.type === "edit") collectImportBlobIds([n.base], ids);
+  }
+}
+
+// btoa/atob only accept one code unit per call's worth of stack, so a large
+// STL has to go through in chunks rather than String.fromCharCode(...bytes).
+function arrayBufferToBase64(buf: ArrayBuffer): string {
+  const bytes = new Uint8Array(buf);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+function base64ToArrayBuffer(b64: string): ArrayBuffer {
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes.buffer;
+}
+
 /** Exports project to a downloadable .shapeforge file. */
-export function exportProjectFile(project: ProjectData) {
+export async function exportProjectFile(project: ProjectData) {
+  const blobIds = new Set<string>();
+  collectImportBlobIds(project.nodes, blobIds);
+  const blobs: Record<string, string> = {};
+  for (const id of blobIds) {
+    const bytes = await getBlob(id);
+    if (bytes) blobs[id] = arrayBufferToBase64(bytes);
+  }
+
   const fileData: ProjectFile = {
     format: "shapeforge",
     version: VERSION,
@@ -450,6 +487,7 @@ export function exportProjectFile(project: ProjectData) {
     exportedAt: Date.now(),
     nodes: project.nodes,
     camera: project.camera ?? loadCameraState(),
+    ...(Object.keys(blobs).length ? { blobs } : {}),
   };
 
   const jsonStr = JSON.stringify(fileData, null, 2);
@@ -511,5 +549,34 @@ export function parseProjectFile(content: string, fallbackName = "Imported Proje
   } catch {
     return null;
   }
+}
+
+/**
+ * Writes back any blobs a .shapeforge file carries (see exportProjectFile)
+ * into IndexedDB, keyed by the same blobId the import nodes reference, so
+ * they resolve on this machine exactly as they did on the one that exported
+ * the file. Call alongside parseProjectFile when loading from a file — a
+ * project whose nodes came from localStorage instead already has its blobs.
+ */
+export async function restoreProjectFileBlobs(content: string): Promise<void> {
+  let raw: Record<string, unknown>;
+  try {
+    raw = JSON.parse(content) as Record<string, unknown>;
+  } catch {
+    return;
+  }
+  const blobs = raw.blobs;
+  if (!blobs || typeof blobs !== "object") return;
+  await Promise.all(
+    Object.entries(blobs as Record<string, unknown>).map(async ([id, b64]) => {
+      if (typeof b64 !== "string") return;
+      try {
+        await putBlob(id, base64ToArrayBuffer(b64));
+      } catch {
+        // Best effort — a failed restore leaves just that one import broken,
+        // same as if the file had never carried it.
+      }
+    }),
+  );
 }
 
