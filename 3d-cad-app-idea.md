@@ -35,8 +35,11 @@ A browser-based 3D modeling tool for 3D printing, inspired by TinkerCAD (base UI
 - Multi-select move — selecting more than one object and dragging moves only a single object; the whole selection should move together
 
 ## Deferred / Future Features
-- Revolve
-- Array/copy along a path
+- Slice a model into smaller pieces so an oversized print fits the build plate — approach not decided yet, discuss before implementing
+
+## Resume Next (as of 2026-09-17)
+- Revolve — sketch revolve already exists (v0.4.20); come back to it, but confirm with the user what's still outstanding rather than assuming
+- Move an object along a path — a Path Pattern tool (guide-sketch mode, `PathPatternPanel`, `createPathPattern`/`setPathPatternPreview`) already exists as of v0.4.22; check its current behavior before assuming this is unbuilt
 
 ## Engine / Architecture Notes
 - Three.js alone is only a renderer — it doesn't handle real solid geometry (no proper booleans, fillets, or precise measurement on its own)
