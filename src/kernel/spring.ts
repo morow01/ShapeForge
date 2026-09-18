@@ -1,4 +1,4 @@
-﻿import { MeshShape, getManifold } from "replicad";
+import { MeshShape, getManifold } from "replicad";
 
 /**
  * Builds a 100% watertight, non-self-intersecting 2-manifold helical spring solid.
@@ -13,10 +13,12 @@ export function makeSpringSolid(p: Record<string, number>): MeshShape {
   const turns = Math.max(p.turns ?? 6, 0.5);
   const endStyle = p.endStyle ?? 0;
   const wireShape = p.wireShape ?? 0;
+  const surfaceSteps = Math.max(4, Math.min(48, Math.round(p.surfaceSteps ?? 16)));
 
   const Theta = 2 * Math.PI * turns;
-  const K = Math.max(16, Math.min(1000, Math.round(turns * 36)));
-  const M = wireShape === 1 ? 4 : 16;
+  const stepsPerTurn = Math.max(12, Math.round(surfaceSteps * 2.25));
+  const K = Math.max(16, Math.min(1000, Math.round(turns * stepsPerTurn)));
+  const M = wireShape === 1 ? 4 : surfaceSteps;
   const verts: number[] = [];
   const tris: number[] = [];
 

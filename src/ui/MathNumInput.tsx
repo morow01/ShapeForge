@@ -13,6 +13,8 @@ export function StepperButtons({ onStep, onStart, onEnd, disabled }: StepperButt
   const timerRef = useRef<number | null>(null);
   const intervalRef = useRef<number | null>(null);
   const activeRef = useRef(false);
+  const onStepRef = useRef(onStep);
+  onStepRef.current = onStep;
 
   const stop = useCallback(() => {
     if (timerRef.current !== null) {
@@ -32,16 +34,17 @@ export function StepperButtons({ onStep, onStart, onEnd, disabled }: StepperButt
   const handlePointerDown = (dir: 1 | -1, e: React.PointerEvent) => {
     if (disabled) return;
     e.preventDefault();
+    (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
     activeRef.current = true;
     onStart?.();
     const shift = e.shiftKey;
     const alt = e.altKey;
-    onStep(dir, shift, alt);
+    onStepRef.current(dir, shift, alt);
     timerRef.current = window.setTimeout(() => {
       intervalRef.current = window.setInterval(() => {
-        onStep(dir, shift, alt);
-      }, 60);
-    }, 350);
+        onStepRef.current(dir, shift, alt);
+      }, 50);
+    }, 300);
   };
 
   useEffect(() => stop, [stop]);
@@ -57,7 +60,6 @@ export function StepperButtons({ onStep, onStart, onEnd, disabled }: StepperButt
         aria-label="Increment"
         onPointerDown={(e) => handlePointerDown(1, e)}
         onPointerUp={stop}
-        onPointerLeave={stop}
         onPointerCancel={stop}
       >
         <svg width="8" height="5" viewBox="0 0 8 5" fill="currentColor" aria-hidden="true">
@@ -71,7 +73,6 @@ export function StepperButtons({ onStep, onStart, onEnd, disabled }: StepperButt
         aria-label="Decrement"
         onPointerDown={(e) => handlePointerDown(-1, e)}
         onPointerUp={stop}
-        onPointerLeave={stop}
         onPointerCancel={stop}
       >
         <svg width="8" height="5" viewBox="0 0 8 5" fill="currentColor" aria-hidden="true">
@@ -105,9 +106,11 @@ export function MathNumInput({
 }: MathNumInputProps) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(String(value));
+  const currentValRef = useRef<number>(Number(value) || 0);
 
   useEffect(() => {
     if (!editing) {
+      currentValRef.current = Number(value) || 0;
       setDraft(String(value));
     }
   }, [value, editing]);
@@ -118,6 +121,7 @@ export function MathNumInput({
       let finalVal = evaluated;
       if (min !== undefined) finalVal = Math.max(min, finalVal);
       if (max !== undefined) finalVal = Math.min(max, finalVal);
+      currentValRef.current = finalVal;
       onCommit(finalVal);
     } else {
       setDraft(String(value));
@@ -126,13 +130,14 @@ export function MathNumInput({
   };
 
   const stepValue = (dir: 1 | -1, shift: boolean, alt: boolean) => {
-    const parsed = evaluateMathExpression(editing ? draft : String(value));
-    const cur = parsed !== null && Number.isFinite(parsed) ? parsed : Number(value) || 0;
+    const parsed = editing ? evaluateMathExpression(draft) : null;
+    const cur = parsed !== null && Number.isFinite(parsed) ? parsed : currentValRef.current;
     const stp = typeof step === "number" ? step : Number(step) || 1;
     const delta = dir * (shift ? stp * 10 : alt ? stp / 10 : stp);
     let next = Math.round((cur + delta) * 1e6) / 1e6;
     if (min !== undefined) next = Math.max(min, next);
     if (max !== undefined) next = Math.min(max, next);
+    currentValRef.current = next;
     const decimals = String(stp).split(".")[1]?.length ?? 0;
     setDraft(decimals > 0 ? next.toFixed(decimals) : String(next));
     setEditing(false);

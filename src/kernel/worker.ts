@@ -1526,6 +1526,12 @@ const api = {
               ) {
                 candidate = withSphereSurfaceLines(candidate, baseSpec.params);
               }
+              if (
+                baseSpec && baseSpec.kind === "spring" &&
+                (baseSpec.params.sideEdges ?? 0) === 0
+              ) {
+                candidate = { ...candidate, edges: { lines: new Float32Array(0), edgeGroups: [] } };
+              }
               const candidateBounds = meshBounds(candidate);
               if (
                 candidateBounds &&
@@ -2171,6 +2177,78 @@ const api = {
   async simplifyMesh(blobId: string, ratio: number) {
     await init();
     return simplifyImport(blobId, ratio);
+  },
+
+  /**
+   * Slices a scene solid by a plane into two watertight 2-manifold pieces.
+   */
+  async splitByPlane(
+    spec: NodeSpec,
+    planePoint: Vec3,
+    planeNormal: Vec3,
+  ): Promise<{
+    part1: { buffer: ArrayBuffer; bbox: { min: Vec3; max: Vec3; center: Vec3 } } | null;
+    part2: { buffer: ArrayBuffer; bbox: { min: Vec3; max: Vec3; center: Vec3 } } | null;
+  }> {
+    await init();
+    const solid = await makeWorld(spec);
+    if (!solid) return { part1: null, part2: null };
+
+    const meshSolid: MeshShape = isMesh(solid)
+      ? solid
+      : (solid as Shape3D).meshShape(EXPORT_QUALITY);
+
+    const manifold = (meshSolid as any).wrapped;
+    if (!manifold || manifold.isEmpty()) return { part1: null, part2: null };
+
+    const len = Math.hypot(planeNormal[0], planeNormal[1], planeNormal[2]);
+    if (len === 0) return { part1: null, part2: null };
+    const norm: Vec3 = [planeNormal[0] / len, planeNormal[1] / len, planeNormal[2] / len];
+    const offset = planePoint[0] * norm[0] + planePoint[1] * norm[1] + planePoint[2] * norm[2];
+
+    let half1: any = null;
+    let half2: any = null;
+    try {
+      const splitRes = (manifold as any).splitByPlane(norm, offset);
+      if (Array.isArray(splitRes)) {
+        half1 = splitRes[0];
+        half2 = splitRes[1];
+      } else if (splitRes && typeof splitRes === "object") {
+        half1 = splitRes.first ?? splitRes[0] ?? (splitRes.get ? splitRes.get(0) : null);
+        half2 = splitRes.second ?? splitRes[1] ?? (splitRes.get ? splitRes.get(1) : null);
+      }
+    } catch (e) {
+      console.error("manifold.splitByPlane failed:", e);
+      return { part1: null, part2: null };
+    }
+
+    const processHalf = async (m: any) => {
+      if (!m || (typeof m.isEmpty === "function" && m.isEmpty()) || (typeof m.numTri === "function" && m.numTri() === 0)) return null;
+      try {
+        const ms = new MeshShape(m);
+        const blob = ms.blobSTL({ binary: true });
+        const buffer = await blob.arrayBuffer();
+        const b = m.boundingBox();
+        const min: Vec3 = [
+          b.min[0] ?? (b.min as any).x ?? 0,
+          b.min[1] ?? (b.min as any).y ?? 0,
+          b.min[2] ?? (b.min as any).z ?? 0,
+        ];
+        const max: Vec3 = [
+          b.max[0] ?? (b.max as any).x ?? 0,
+          b.max[1] ?? (b.max as any).y ?? 0,
+          b.max[2] ?? (b.max as any).z ?? 0,
+        ];
+        const center: Vec3 = [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2];
+        return { buffer, bbox: { min, max, center } };
+      } catch (err) {
+        console.error("processHalf failed:", err);
+        return null;
+      }
+    };
+
+    const [part1, part2] = await Promise.all([processHalf(half1), processHalf(half2)]);
+    return { part1, part2 };
   },
 };
 

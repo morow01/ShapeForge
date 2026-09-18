@@ -1518,6 +1518,7 @@ function ObjectParams({
                 displayUnit={displayUnit}
                 decimalPlaces={decimalPlaces}
                 screwHoleIcon={node.kind === "screwHole" && SCREW_HOLE_COMPACT_KEYS.has(f.key)}
+                springIcon={node.kind === "spring" && SPRING_COMPACT_KEYS.has(f.key)}
                 isLength={!shown.options && shown.suffix !== "°" && !["sides", "points", "cornerSteps", "surfaceSteps", "teeth", "ballCount", "turns"].includes(shown.key)}
               />
             ),
@@ -1570,11 +1571,12 @@ function ObjectParams({
               displayUnit={displayUnit}
               decimalPlaces={decimalPlaces}
               screwHoleIcon={node.kind === "screwHole" && SCREW_HOLE_COMPACT_KEYS.has(f.key)}
+              springIcon={node.kind === "spring" && SPRING_COMPACT_KEYS.has(f.key)}
               isLength={!f.options && f.suffix !== "°" && !["sides", "points", "cornerSteps", "surfaceSteps", "teeth", "ballCount", "turns"].includes(f.key)}
             />
           ),
         };
-      }), node.kind === "screwHole")}
+      }), node.kind === "screwHole", node.kind === "spring")}
       {node.kind === "triangle" && (
         <TriangleReadout params={node.params} scale={node.scale} displayUnit={displayUnit} />
       )}
@@ -1678,10 +1680,12 @@ function TriangleReadout({
  * a dropdown is a different kind of control entirely.
  */
 const SCREW_HOLE_COMPACT_KEYS = new Set(["holeDia", "depth", "headDia", "pocketDepth"]);
+const SPRING_COMPACT_KEYS = new Set(["radius", "topRadius", "wireRadius", "height"]);
 
 function groupDimensionFields(
   entries: { field: ParamField; el: React.ReactNode }[],
   compactScrewHole = false,
+  compactSpring = false,
 ): React.ReactNode[] {
   if (compactScrewHole) {
     const compact = entries.filter(({ field }) => SCREW_HOLE_COMPACT_KEYS.has(field.key));
@@ -1695,6 +1699,25 @@ function groupDimensionFields(
           className="screw-hole-dimensions"
           style={{ gridTemplateColumns: `repeat(${compact.length}, minmax(0, 1fr))` }}
           key="screw-hole-dimensions"
+        >
+          {compact.map(({ el }) => el)}
+        </div>,
+        ...after,
+      ];
+    }
+  }
+  if (compactSpring) {
+    const compact = entries.filter(({ field }) => SPRING_COMPACT_KEYS.has(field.key));
+    if (compact.length >= 2) {
+      const first = entries.findIndex(({ field }) => SPRING_COMPACT_KEYS.has(field.key));
+      const before = groupDimensionFields(entries.slice(0, first));
+      const after = groupDimensionFields(entries.slice(first).filter(({ field }) => !SPRING_COMPACT_KEYS.has(field.key)));
+      return [
+        ...before,
+        <div
+          className="spring-dimensions"
+          style={{ gridTemplateColumns: `repeat(${compact.length}, minmax(0, 1fr))` }}
+          key="spring-dimensions"
         >
           {compact.map(({ el }) => el)}
         </div>,
@@ -1733,6 +1756,49 @@ function ScrewHoleDimensionIcon({ kind }: { kind: string }) {
   return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h6v5h6V5h6M9 10v9h6v-9M18 6v11m0 0-2-3m2 3 2-3"/></svg>;
 }
 
+function SpringDimensionIcon({ kind }: { kind: string }) {
+  if (kind === "radius") {
+    return (
+      <svg viewBox="0 0 28 28" aria-hidden="true">
+        <path d="M9 5 L4 17 H24 L19 5" strokeDasharray="2 2" opacity="0.45" strokeWidth="1.8" />
+        <path d="M2.5 22.5 H25.5" strokeWidth="2.2" />
+        <path d="M6 19.5 L2.5 22.5 L6 25.5" strokeWidth="2.2" />
+        <path d="M22 19.5 L25.5 22.5 L22 25.5" strokeWidth="2.2" />
+      </svg>
+    );
+  }
+  if (kind === "topRadius") {
+    return (
+      <svg viewBox="0 0 28 28" aria-hidden="true">
+        <path d="M9 11 L4 23 H24 L19 11" strokeDasharray="2 2" opacity="0.45" strokeWidth="1.8" />
+        <path d="M4.5 5.5 H23.5" strokeWidth="2.2" />
+        <path d="M8 2.5 L4.5 5.5 L8 8.5" strokeWidth="2.2" />
+        <path d="M20 2.5 L23.5 5.5 L20 8.5" strokeWidth="2.2" />
+      </svg>
+    );
+  }
+  if (kind === "wireRadius") {
+    return (
+      <svg viewBox="0 0 28 28" aria-hidden="true">
+        <circle cx="14" cy="14" r="6.5" strokeWidth="2.2" />
+        <path d="M2.5 14 H7" strokeWidth="2.2" />
+        <path d="M5.5 11.5 L8 14 L5.5 16.5" strokeWidth="2.2" />
+        <path d="M21 14 H25.5" strokeWidth="2.2" />
+        <path d="M22.5 11.5 L20 14 L22.5 16.5" strokeWidth="2.2" />
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 28 28" aria-hidden="true">
+      <path d="M5 4 H23" strokeWidth="2.2" />
+      <path d="M5 24 H23" strokeWidth="2.2" />
+      <path d="M14 4 V24" strokeWidth="2.2" />
+      <path d="M10.5 8 L14 4 L17.5 8" strokeWidth="2.2" />
+      <path d="M10.5 20 L14 24 L17.5 20" strokeWidth="2.2" />
+    </svg>
+  );
+}
+
 const fmt = (n: number) => (Math.round(n * 100) / 100).toString();
 
 function Field({
@@ -1750,6 +1816,7 @@ function Field({
   decimalPlaces,
   isLength = false,
   screwHoleIcon = false,
+  springIcon = false,
 }: {
   field: ParamField;
   value: number;
@@ -1767,12 +1834,84 @@ function Field({
   decimalPlaces: number;
   isLength?: boolean;
   screwHoleIcon?: boolean;
+  springIcon?: boolean;
 }) {
   const radiusField = [
     "fillet", "topFillet", "bottomFillet", "leftFillet", "rightFillet", "apexFillet",
     "outerFillet", "innerFillet", "cornerRadius", "internalFillet",
     "outerTopFillet", "outerBottomFillet", "innerTopFillet", "innerBottomFillet",
   ].includes(field.key);
+  if (field.key === "wireShape" && field.options?.length === 2) {
+    return (
+      <div className="field">
+        <span className="field-label">{field.label}</span>
+        <div className="binary-choice icon-choice" role="group" aria-label={field.label}>
+          {field.options.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={value === option.value ? "on" : ""}
+              aria-label={option.label}
+              title={option.label}
+              aria-pressed={value === option.value}
+              onClick={() => onChange(option.value)}
+            >
+              <svg viewBox="0 0 32 32" aria-hidden="true">
+                {option.value === 0 ? (
+                  <circle cx="16" cy="16" r="8.5" strokeWidth="2.2" />
+                ) : (
+                  <rect x="7.5" y="7.5" width="17" height="17" rx="2" strokeWidth="2.2" />
+                )}
+              </svg>
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+  if (field.key === "endStyle" && field.options?.length === 2) {
+    return (
+      <div className="field">
+        <span className="field-label">{field.label}</span>
+        <div className="binary-choice icon-choice" role="group" aria-label={field.label}>
+          {field.options.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={value === option.value ? "on" : ""}
+              aria-label={option.label}
+              title={option.label}
+              aria-pressed={value === option.value}
+              onClick={() => onChange(option.value)}
+            >
+              <svg viewBox="0 0 32 32" aria-hidden="true">
+                {option.value === 0 ? (
+                  <>
+                    <path
+                      d="M6 10 C11 6, 21 6, 26 10 C20 16, 12 16, 6 22 C11 26, 21 26, 26 22"
+                      strokeWidth="2.2"
+                      strokeLinecap="round"
+                    />
+                    <path d="M5 12 L7 8" strokeWidth="1.8" strokeLinecap="round" opacity="0.5" />
+                    <path d="M25 24 L27 20" strokeWidth="1.8" strokeLinecap="round" opacity="0.5" />
+                  </>
+                ) : (
+                  <>
+                    <path d="M5 6 H27 M5 26 H27" strokeWidth="2.2" strokeLinecap="round" />
+                    <path
+                      d="M8 6 H21 C17 12, 13 12, 7 18 C11 22, 18 24, 24 26"
+                      strokeWidth="2.2"
+                      strokeLinecap="round"
+                    />
+                  </>
+                )}
+              </svg>
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
   if (field.key === "chamfer" && field.options?.length === 2) {
     return (
       <div className="field">
@@ -1970,9 +2109,12 @@ function Field({
   const formattedValue = isLength || field.suffix === "°" ? shownValue.toFixed(precision) : String(shownValue);
   const [draftValue, setDraftValue] = useState(formattedValue);
   const [editingValue, setEditingValue] = useState(false);
+  const currentStepValRef = useRef(shownValue);
+
   useEffect(() => {
+    currentStepValRef.current = shownValue;
     if (!editingValue) setDraftValue(formattedValue);
-  }, [editingValue, formattedValue]);
+  }, [editingValue, formattedValue, shownValue]);
 
   const finishNumericEdit = () => {
     const parsed = evaluateMathExpression(draftValue);
@@ -1981,20 +2123,42 @@ function Field({
       // expensive threaded primitive after the first digit (typing 15 first
       // produced a complete 1 mm nut) can leave a long-running, visibly
       // malformed intermediate result ahead of the intended build.
-      commit(Math.min(shownMax, Math.max(shownMin, parsed)));
+      const val = Math.min(shownMax, Math.max(shownMin, parsed));
+      currentStepValRef.current = val;
+      commit(val);
     }
     else setDraftValue(formattedValue);
     setEditingValue(false);
     endHistoryBatch();
   };
 
+  const doStep = (dir: 1 | -1, shift: boolean, alt: boolean) => {
+    const stp = shownStep ?? 1;
+    const delta = dir * (shift ? stp * 10 : alt ? stp / 10 : stp);
+    const parsed = editingValue ? evaluateMathExpression(draftValue) : null;
+    const current = parsed !== null && Number.isFinite(parsed) ? parsed : currentStepValRef.current;
+    const next = Math.min(shownMax, Math.max(shownMin, Math.round((current + delta) * 1e6) / 1e6));
+    currentStepValRef.current = next;
+    setDraftValue(next.toFixed(precision));
+    commit(next);
+  };
+
   return (
     <div className={axis === undefined ? "field" : `field axis-${axis}`}>
       <div className="field-header">
-        <span className={`field-label${screwHoleIcon ? " screw-hole-icon-label" : ""}`} title={screwHoleIcon ? field.label : undefined}>
+        <span
+          className={`field-label${screwHoleIcon ? " screw-hole-icon-label" : ""}${springIcon ? " spring-icon-label" : ""}`}
+          title={screwHoleIcon || springIcon ? field.label : undefined}
+        >
           {dotColorClass && <span className={`corner-dot ${dotColorClass}`}></span>}
-          {screwHoleIcon ? <ScrewHoleDimensionIcon kind={field.key} /> : field.label}
-          {!screwHoleIcon && !isLength && !radiusField && field.suffix ? ` (${field.suffix})` : ""}
+          {screwHoleIcon ? (
+            <ScrewHoleDimensionIcon kind={field.key} />
+          ) : springIcon ? (
+            <SpringDimensionIcon kind={field.key} />
+          ) : (
+            field.label
+          )}
+          {!screwHoleIcon && !springIcon && !isLength && !radiusField && field.suffix ? ` (${field.suffix})` : ""}
         </span>
         {lockable && (
           <button
@@ -2066,12 +2230,7 @@ function Field({
               if (e.key === "ArrowUp" || e.key === "ArrowDown") {
                 e.preventDefault();
                 beginHistoryBatch();
-                const stp = shownStep ?? 1;
-                const delta = (e.key === "ArrowUp" ? 1 : -1) * (e.shiftKey ? stp * 10 : e.altKey ? stp / 10 : stp);
-                const current = evaluateMathExpression(draftValue) ?? shownValue;
-                const next = Math.min(shownMax, Math.max(shownMin, Math.round((current + delta) * 1e6) / 1e6));
-                setDraftValue(next.toFixed(precision));
-                commit(next);
+                doStep(e.key === "ArrowUp" ? 1 : -1, e.shiftKey, e.altKey);
                 endHistoryBatch();
               }
             }}
@@ -2081,14 +2240,7 @@ function Field({
           />
           {!disabled && (
             <StepperButtons
-              onStep={(dir, shift, alt) => {
-                const stp = shownStep ?? 1;
-                const delta = dir * (shift ? stp * 10 : alt ? stp / 10 : stp);
-                const current = evaluateMathExpression(draftValue) ?? shownValue;
-                const next = Math.min(shownMax, Math.max(shownMin, Math.round((current + delta) * 1e6) / 1e6));
-                setDraftValue(next.toFixed(precision));
-                commit(next);
-              }}
+              onStep={doStep}
               onStart={beginHistoryBatch}
               onEnd={endHistoryBatch}
               disabled={disabled}

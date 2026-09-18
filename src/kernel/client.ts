@@ -2,6 +2,7 @@ import * as Comlink from "comlink";
 import type { KernelAPI } from "./worker";
 import { RETRYABLE_MESH_ERROR } from "./types";
 import type { DisplayedSceneItem, ExportQuality, NodeSpec, SceneBuild } from "./types";
+import type { Vec3 } from "../document/types";
 
 function spawnWorker() {
   const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
@@ -489,4 +490,6 @@ export const kernel = {
   pruneDeadOps: (spec: NodeSpec) => withWatchdog("scene", (raw) => raw.pruneDeadOps(spec)),
   simplifyMesh: (blobId: string, ratio: number) =>
     withWatchdog("scene", (raw) => raw.simplifyMesh(blobId, ratio)),
+  splitByPlane: (spec: NodeSpec, planePoint: Vec3, planeNormal: Vec3) =>
+    withWatchdog("heavy", (raw) => raw.splitByPlane(spec, planePoint, planeNormal), EXPORT_WATCHDOG_MS),
 };

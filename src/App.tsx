@@ -63,9 +63,15 @@ import {
   ZoomToFitIcon,
   BlueprintIcon,
   ExplodeIcon,
+  CutToolIcon,
+  SplitToolIcon,
+  KeepHalfIcon,
+  CutPlaneIcon,
+  LayFlatIcon,
 } from "./ui/icons";
 import type { DropDirection } from "./ui/icons";
 import { buildThreeMF } from "./export/threemf";
+import { placeCutPieces } from "./document/cutPlacement";
 import { SvgImportModal } from "./ui/SvgImportModal";
 import { TextModal } from "./ui/TextModal";
 import { SketchEditor, type SketchShape } from "./ui/SketchEditor";
@@ -96,7 +102,7 @@ import { findAssemblyOwner, findNode, parentOf, resolveNodeTransparent, resolveN
 import { bakeScale } from "./document/bake";
 import { putBlob } from "./document/blobStore";
 import { loadCameraState } from "./document/persist";
-import type { EditOp, GroupNode, PrimitiveKind, SceneNode, ShellOp, ResizeFaceOp, SketchData, Vec3 } from "./document/types";
+import type { EditOp, GroupNode, ImportNode, PrimitiveKind, SceneNode, ShellOp, ResizeFaceOp, SketchData, Vec3 } from "./document/types";
 import { RETRYABLE_MESH_ERROR } from "./kernel/types";
 import type { EditSpec, ExportQuality, NodeSpec, PreviewBuild, ScenePart } from "./kernel/types";
 import type { CameraMode, CollisionHighlightStyle, DuplicateResult, Scene, ToolMode, WireframeMode } from "./viewport/scene";
@@ -453,7 +459,7 @@ export function App() {
   const savedAt = useDoc((s) => s.savedAt);
   const storageBlocked = useDoc((s) => s.storageBlocked);
   const projectName = useDoc((s) => s.projectName);
-
+  const sceneRef = useRef<Scene | null>(null);
   const [projectsModalOpen, setProjectsModalOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [surfaceSource, setSurfaceSource] = useState<string | null>(null);
@@ -1079,6 +1085,20 @@ export function App() {
   const [autoJointHingeSides, setAutoJointHingeSides] = useState<number>(64);
   const [blueprintOpen, setBlueprintOpen] = useState(false);
   const [explodeAmount, setExplodeAmount] = useState<number>(0);
+  const [cutPlaneAxis, setCutPlaneAxis] = useState<"xy" | "xz" | "yz" | "custom">("xy");
+  const [cutPlanePercent, setCutPlanePercent] = useState<number>(50);
+  const [cutPlaneAngle, setCutPlaneAngle] = useState<number>(0);
+  const [cutMode, setCutMode] = useState<"split" | "keep_pos" | "keep_neg">("split");
+  const [cutAutoSeparate, setCutAutoSeparate] = useState<boolean>(true);
+  const [cutSeparateGap, setCutSeparateGap] = useState<number>(15);
+  const [cutAutoLayFlat, setCutAutoLayFlat] = useState<boolean>(false);
+  const [cutCustomNormal, setCutCustomNormal] = useState<Vec3 | null>(null);
+  const [cutCustomPoint, setCutCustomPoint] = useState<Vec3 | null>(null);
+  /** The object a picked face belongs to, and how thick it is across that face. */
+  const [cutCustomId, setCutCustomId] = useState<string | null>(null);
+  const [cutCustomSize, setCutCustomSize] = useState<number>(0);
+  const [cutBusy, setCutBusy] = useState<boolean>(false);
+  const [cutError, setCutError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   /**
    * Why the edit just applied was refused. Kept apart from `error` because
@@ -1951,6 +1971,24 @@ export function App() {
     }
   }, [toolMode, selectedIds.length, connectorSeam]);
 
+  // "Cut & Add Joints" asks for the Joinery tool before the halves exist as
+  // meshes, so connectorSeam is null at that moment. Wait here for it instead.
+  const pendingJoineryRef = useRef<string[] | null>(null);
+  useEffect(() => {
+    const pending = pendingJoineryRef.current;
+    if (!pending) return;
+    const stillSelected = selectedIds.length === 2 && pending.every((id) => selectedIds.includes(id));
+    if (!stillSelected) {
+      pendingJoineryRef.current = null;
+    } else if (connectorSeam) {
+      pendingJoineryRef.current = null;
+      setToolMode("join");
+    } else if (pending.every((id) => parts.some((p) => p.id === id))) {
+      // Both halves are built and share no wall — nothing to join.
+      pendingJoineryRef.current = null;
+    }
+  }, [connectorSeam, selectedIds, parts]);
+
   const joineryLayout = useMemo(() => {
     if (!connectorSeam) return null;
     return computeJoineryLayout(
@@ -1966,6 +2004,226 @@ export function App() {
       autoJointVerticalOffset,
     );
   }, [connectorSeam, autoJointShape, autoJointCount, autoJointClearance, autoJointDovetailStopped, autoJointDovetailStopEnd, autoJointHingeEdge, autoJointOrientation, autoJointDominoRotation, autoJointVerticalOffset, computeJoineryLayout]);
+
+  const cutTargetNode = useMemo(() => {
+    if (selectedIds.length !== 1) return null;
+    return findNode(nodes, selectedIds[0]) ?? null;
+  }, [nodes, selectedIds]);
+
+  const cutTargetBounds = useMemo(() => {
+    if (!cutTargetNode) return null;
+    return sceneRef.current?.getObjectBounds(cutTargetNode.id) ?? null;
+  }, [cutTargetNode, toolMode, nodes]);
+
+  const cutPlaneGeometry = useMemo(() => {
+    if (!cutTargetBounds) return null;
+    const { min, max } = cutTargetBounds;
+    const sizeX = Math.max(1, max[0] - min[0]);
+    const sizeY = Math.max(1, max[1] - min[1]);
+    const sizeZ = Math.max(1, max[2] - min[2]);
+    const midX = (min[0] + max[0]) / 2;
+    const midY = (min[1] + max[1]) / 2;
+    const midZ = (min[2] + max[2]) / 2;
+
+    let center: Vec3 = [midX, midY, midZ];
+    let baseNormal: Vec3 = [0, 0, 1];
+    let size: [number, number] = [Math.max(sizeX, sizeY) * 1.5 + 20, Math.max(sizeX, sizeY) * 1.5 + 20];
+    let axisMin = min[2], axisMax = max[2], axisLength = sizeZ;
+
+    if (cutPlaneAxis === "xy") {
+      baseNormal = [0, 0, 1];
+      axisMin = min[2];
+      axisMax = max[2];
+      axisLength = sizeZ;
+      const z = min[2] + axisLength * (cutPlanePercent / 100);
+      center = [midX, midY, z];
+      size = [Math.max(sizeX, sizeY) * 1.5 + 20, Math.max(sizeX, sizeY) * 1.5 + 20];
+    } else if (cutPlaneAxis === "xz") {
+      baseNormal = [0, 1, 0];
+      axisMin = min[1];
+      axisMax = max[1];
+      axisLength = sizeY;
+      const y = min[1] + axisLength * (cutPlanePercent / 100);
+      center = [midX, y, midZ];
+      size = [Math.max(sizeX, sizeZ) * 1.5 + 20, Math.max(sizeX, sizeZ) * 1.5 + 20];
+    } else if (cutPlaneAxis === "yz") {
+      baseNormal = [1, 0, 0];
+      axisMin = min[0];
+      axisMax = max[0];
+      axisLength = sizeX;
+      const x = min[0] + axisLength * (cutPlanePercent / 100);
+      center = [x, midY, midZ];
+      size = [Math.max(sizeY, sizeZ) * 1.5 + 20, Math.max(sizeY, sizeZ) * 1.5 + 20];
+    } else if (cutPlaneAxis === "custom" && cutCustomNormal && cutCustomPoint) {
+      baseNormal = cutCustomNormal;
+      // The picked point is on the face itself, so a plane there would cut
+      // nothing. The slider measures how far in from that face the plane sits.
+      axisMin = 0;
+      axisLength = cutCustomSize > 0 ? cutCustomSize : Math.max(sizeX, sizeY, sizeZ);
+      const inward = axisLength * (cutPlanePercent / 100);
+      center = [
+        cutCustomPoint[0] - cutCustomNormal[0] * inward,
+        cutCustomPoint[1] - cutCustomNormal[1] * inward,
+        cutCustomPoint[2] - cutCustomNormal[2] * inward,
+      ];
+      const maxDim = Math.max(sizeX, sizeY, sizeZ);
+      size = [maxDim * 1.6 + 20, maxDim * 1.6 + 20];
+    }
+
+    let finalNormal = new THREE.Vector3(...baseNormal);
+    if (cutPlaneAngle !== 0) {
+      let rotAxis = new THREE.Vector3(1, 0, 0);
+      if (Math.abs(baseNormal[0]) > 0.8) rotAxis = new THREE.Vector3(0, 1, 0);
+      finalNormal.applyAxisAngle(rotAxis, (cutPlaneAngle * Math.PI) / 180);
+    }
+    const norm: Vec3 = [finalNormal.x, finalNormal.y, finalNormal.z];
+    return {
+      center,
+      normal: norm,
+      size,
+      axisMin,
+      axisMax,
+      axisLength,
+      currentOffsetMm: axisMin + axisLength * (cutPlanePercent / 100),
+    };
+  }, [cutTargetBounds, cutPlaneAxis, cutPlanePercent, cutPlaneAngle, cutCustomNormal, cutCustomPoint, cutCustomSize]);
+
+  // Live preview for cutting plane in 3D viewport
+  useEffect(() => {
+    if (toolMode !== "cut" || !cutPlaneGeometry) {
+      sceneRef.current?.setCutPlanePreview(null);
+      return;
+    }
+    sceneRef.current?.setCutPlanePreview({
+      center: cutPlaneGeometry.center,
+      normal: cutPlaneGeometry.normal,
+      size: cutPlaneGeometry.size,
+      visible: true,
+      // Keeping the + side throws away the - side, and the other way round.
+      discard: cutTargetNode && cutMode !== "split"
+        ? { id: cutTargetNode.id, side: cutMode === "keep_pos" ? -1 : 1 }
+        : null,
+    });
+    return () => {
+      sceneRef.current?.setCutPlanePreview(null);
+    };
+  }, [toolMode, cutPlaneGeometry, cutMode, cutTargetNode?.id]);
+
+  // What each Keep button keeps, named the way the rest of the app names
+  // directions (the nav cube: Front = -Y, Back = +Y, Left = -X, Right = +X,
+  // Top = +Z) — a plane's + side is along its normal.
+  const cutKeepButtons = useMemo(() => {
+    const names = {
+      xy: { pos: "Top", neg: "Bottom" },
+      xz: { pos: "Back", neg: "Front" },
+      yz: { pos: "Right", neg: "Left" },
+      custom: { pos: "Outside", neg: "Inside" },
+    }[cutPlaneAxis];
+    const pos = { mode: "keep_pos" as const, label: names.pos };
+    const neg = { mode: "keep_neg" as const, label: names.neg };
+    // Read in the usual order: Top before Bottom, Front before Back, Left before Right.
+    return {
+      stacked: cutPlaneAxis === "xy",
+      buttons: cutPlaneAxis === "xy" || cutPlaneAxis === "custom" ? [pos, neg] : [neg, pos],
+    };
+  }, [cutPlaneAxis]);
+
+  // A plane lined up with a picked face belongs to the part it was picked on.
+  // Selecting another part without clicking a face (the object list, say)
+  // would otherwise leave it hanging where it was.
+  useEffect(() => {
+    if (cutPlaneAxis === "custom" && cutCustomId !== (cutTargetNode?.id ?? null)) {
+      setCutPlaneAxis("xy");
+      setCutCustomNormal(null);
+      setCutCustomPoint(null);
+      setCutCustomId(null);
+    }
+  }, [cutTargetNode?.id, cutPlaneAxis, cutCustomId]);
+
+  // If selection changes away from 1 object while in "cut" toolMode, return to "select"
+  useEffect(() => {
+    if (toolMode === "cut" && selectedIds.length !== 1) {
+      setToolMode("select");
+    }
+  }, [toolMode, selectedIds.length]);
+
+  const executeCut = useCallback(async (andOpenJoinery = false) => {
+    if (!cutTargetNode || !cutPlaneGeometry || cutBusy) return;
+    setCutBusy(true);
+    setCutError(null);
+    try {
+      const spec = toSpec(cutTargetNode);
+      const res = await kernel.splitByPlane(spec, cutPlaneGeometry.center, cutPlaneGeometry.normal);
+      if (!res || (!res.part1 && !res.part2)) {
+        setCutError("Could not split model at this plane position. Ensure the plane cuts through the object.");
+        setCutBusy(false);
+        return;
+      }
+
+      const newNodes: ImportNode[] = [];
+      const baseName = cutTargetNode.name || "Model";
+
+      const pieces: { data: NonNullable<typeof res.part1>; suffix: string; side: 1 | -1 }[] = [];
+      if ((cutMode === "split" || cutMode === "keep_pos") && res.part1) {
+        pieces.push({ data: res.part1, suffix: "Part A", side: 1 });
+      }
+      if ((cutMode === "split" || cutMode === "keep_neg") && res.part2) {
+        pieces.push({ data: res.part2, suffix: "Part B", side: -1 });
+      }
+
+      const placements = placeCutPieces(
+        pieces.map(({ data, side }) => ({ data, side })),
+        {
+          // Joinery needs the two halves touching at the cut face, so that
+          // path leaves them where they were instead of laying them out.
+          layFlat: cutAutoLayFlat && cutAutoSeparate && !andOpenJoinery,
+          separate: cutAutoSeparate && !andOpenJoinery,
+          gap: cutSeparateGap,
+          planeNormal: cutPlaneGeometry.normal,
+        },
+      );
+
+      for (let i = 0; i < pieces.length; i++) {
+        const { data, suffix } = pieces[i];
+        const blobId = `cut-${crypto.randomUUID()}`;
+        await putBlob(blobId, data.buffer);
+        newNodes.push({
+          type: "import",
+          id: `n-${crypto.randomUUID()}`,
+          blobId,
+          fileName: `${baseName} - ${suffix}.stl`,
+          byteSize: data.buffer.byteLength,
+          name: `${baseName} - ${suffix}`,
+          position: placements[i].position,
+          rotation: placements[i].rotation,
+          scale: [1, 1, 1],
+          isHole: cutTargetNode.isHole,
+          color: cutTargetNode.color,
+        });
+      }
+
+      if (!newNodes.length) {
+        setCutError("Slice produced no geometry. Please adjust plane offset.");
+        setCutBusy(false);
+        return;
+      }
+
+      useDoc.getState().replaceNodeWithSplitParts(cutTargetNode.id, newNodes);
+
+      // The seam between the halves is only known once the kernel has built
+      // them, which happens after this returns; opening the tool now would
+      // be undone at once by the guard effect above. See pendingJoineryRef.
+      pendingJoineryRef.current = andOpenJoinery && newNodes.length === 2
+        ? newNodes.map((n) => n.id)
+        : null;
+      setToolMode("select");
+    } catch (err) {
+      console.error("Cut error:", err);
+      setCutError(err instanceof Error ? err.message : "Failed to cut model");
+    } finally {
+      setCutBusy(false);
+    }
+  }, [cutTargetNode, cutPlaneGeometry, cutBusy, cutMode, cutAutoSeparate, cutSeparateGap, cutAutoLayFlat]);
 
   // Deleting a skipped node should let its id go, not leak it for the rest
   // of the session — otherwise re-importing the same file under a new node
@@ -2038,7 +2296,6 @@ export function App() {
     [buildableNodes, textRebuildNonce],
   );
 
-  const sceneRef = useRef<Scene | null>(null);
   useEffect(() => {
     const scene = sceneRef.current;
     if (!scene) return;
@@ -3735,6 +3992,9 @@ export function App() {
       } else if (!mod && e.key.toLowerCase() === "j") {
         e.preventDefault();
         setToolMode((prev) => prev === "join" ? "select" : "join");
+      } else if (!mod && e.key.toLowerCase() === "c") {
+        e.preventDefault();
+        setToolMode((prev) => prev === "cut" ? "select" : "cut");
       } else if (e.key === "Enter" && useDoc.getState().selectedIds.length >= 0 && toolModeRef.current === "build") {
         e.preventDefault();
         commitBuild();
@@ -4454,6 +4714,19 @@ export function App() {
         >
           <JoineryToolIcon />
         </button>
+        <button
+          className={toolMode === "cut" ? "active" : ""}
+          onClick={() => setToolMode((m) => (m === "cut" ? "select" : "cut"))}
+          title={
+            selectedIds.length !== 1
+              ? "Cut / Split (C) — select 1 model to slice"
+              : "Cut / Split: slice model with interactive plane for 3D printing (C)"
+          }
+          aria-label="Cut / Split tool"
+          disabled={selectedIds.length !== 1}
+        >
+          <CutToolIcon />
+        </button>
 
         <span className="tool-rail-sep" role="separator" />
 
@@ -4641,6 +4914,19 @@ export function App() {
             const next = id && point && normal ? { id, point, normal, size, edges } : null;
             if (next) lastFace.current = next;
             setFaceSelection(next);
+            if (toolModeRef.current === "cut" && id && point && normal) {
+              // The face comes in the part's own frame; the plane needs world.
+              const world = sceneRef.current?.faceToWorld(id, point, normal);              if (world) {
+                setCutCustomPoint(world.point);
+                setCutCustomNormal(world.normal);
+                setCutCustomId(id);
+                setCutCustomSize(size);
+                // Lined up with the face and halfway through the part.
+                setCutPlanePercent(50);
+                setCutPlaneAngle(0);
+                setCutPlaneAxis("custom");
+              }
+            }
           }}
           onPlaceSurface={placePrimitive}
           onPlaceSurfaceSized={placePrimitive}
@@ -5632,7 +5918,7 @@ export function App() {
             </div>
           );
         })()}
-        {toolMode !== "measure" && toolMode !== "face" && toolMode !== "edge" && toolMode !== "build" && !(toolMode === "place" && surfaceSource) && rightPanelTab === "shapes" && (
+        {toolMode !== "measure" && toolMode !== "face" && toolMode !== "edge" && toolMode !== "build" && toolMode !== "cut" && !(toolMode === "place" && surfaceSource) && rightPanelTab === "shapes" && (
           <section className="tool-section shape-library">
           <div className="panel-heading compact shape-library-header">
             <div><h1>Shape library</h1><p>Drag or click to add</p></div>
@@ -5715,8 +6001,10 @@ export function App() {
             if (file) void importSTLFile(file);
           }}
         />
-        {toolMode !== "measure" && toolMode !== "face" && toolMode !== "edge" && toolMode !== "build" && !(toolMode === "place" && surfaceSource) && rightPanelTab === "properties" && (
+        {toolMode !== "measure" && toolMode !== "face" && toolMode !== "edge" && toolMode !== "build" && !(toolMode === "place" && surfaceSource) && (rightPanelTab === "properties" || toolMode === "cut") && (
           <div className="tools-panel-inspector-wrap">
+            {/* Cut mode shows only the Cut / Split panel below, not the inspector. */}
+            {toolMode !== "cut" && (
             <section className="tool-section inspector-section">
           <div className="panel-heading compact">
             <div>
@@ -5845,12 +6133,322 @@ export function App() {
             </div>
           )}
         </section>
+            )}
 
         {/* Parked: selecting the wall this is meant to attach to did not work
          *  as expected and needs a rethink, not a quick patch. Left visible-
          *  but-disabled rather than removed so the feature is easy to pick
          *  back up. See connectorSeam/addConnectorJoint above, still intact
          *  and unused while this stays disabled. */}
+        {/* Dedicated Cut / Slicing Panel when toolMode === 'cut' */}
+        {toolMode === "cut" && cutTargetNode && (
+          <section className="tool-section cut-section">
+            <div className="panel-heading compact" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div>
+                <h1>Cut / Split Model</h1>
+                <p style={{ margin: 0, fontSize: 11, color: "#64748b" }}>Slice model into printable pieces</p>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCutPlaneAxis("xy");
+                    setCutPlanePercent(50);
+                    setCutPlaneAngle(0);
+                    setCutCustomNormal(null);
+                    setCutCustomPoint(null);
+                  }}
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 3,
+                    fontSize: 10,
+                    fontWeight: 600,
+                    padding: "3px 8px",
+                    background: "#f1f5f9",
+                    border: "1px solid #cbd5e1",
+                    borderRadius: 5,
+                    cursor: "pointer",
+                    color: "#334155",
+                  }}
+                  title="Reset cutting plane to horizontal 50%"
+                >
+                  ↺ Reset
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setToolMode("select")}
+                  style={{ background: "transparent", border: "none", fontSize: 18, color: "#94a3b8", cursor: "pointer", padding: "2px 6px" }}
+                  title="Close cut tool (Esc)"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+
+            <div className="cut-live-badge">
+              <span style={{ fontSize: 13 }}>✂️</span>
+              <span>Interactive Cutting Plane in 3D Viewport</span>
+            </div>
+
+            {/* Target Object Name Badge */}
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12, padding: "5px 8px", background: "#f8fafc", borderRadius: 6, border: "1px solid #e2e8f0", fontSize: 11 }}>
+              <span style={{ color: "#64748b" }}>Target:</span>
+              <strong style={{ color: "#0f172a" }}>{cutTargetNode.name}</strong>
+            </div>
+
+            {/* 1. Cutting Plane Orientation */}
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+                <span className="field-label" style={{ fontSize: 11, fontWeight: 700, color: "#334155", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+                  Plane Orientation
+                </span>
+                {cutPlaneAxis === "custom" && (
+                  <span style={{ fontSize: 10, color: "#ea580c", fontWeight: 600 }}>Picked Face</span>
+                )}
+              </div>
+              <div className="cut-plane-grid">
+                <button
+                  type="button"
+                  className={`cut-plane-btn ${cutPlaneAxis === "xy" ? "active" : ""}`}
+                  onClick={() => { setCutPlaneAxis("xy"); setCutPlaneAngle(0); }}
+                  title="Horizontal cut (Top / Bottom)"
+                >
+                  <CutPlaneIcon plane="xy" />
+                  <span>XY Plane</span>
+                  <small style={{ fontSize: 9, opacity: 0.8 }}>Horizontal</small>
+                </button>
+                <button
+                  type="button"
+                  className={`cut-plane-btn ${cutPlaneAxis === "xz" ? "active" : ""}`}
+                  onClick={() => { setCutPlaneAxis("xz"); setCutPlaneAngle(0); }}
+                  title="Vertical cut (Front / Back)"
+                >
+                  <CutPlaneIcon plane="xz" />
+                  <span>XZ Plane</span>
+                  <small style={{ fontSize: 9, opacity: 0.8 }}>Front/Back</small>
+                </button>
+                <button
+                  type="button"
+                  className={`cut-plane-btn ${cutPlaneAxis === "yz" ? "active" : ""}`}
+                  onClick={() => { setCutPlaneAxis("yz"); setCutPlaneAngle(0); }}
+                  title="Vertical cut (Left / Right)"
+                >
+                  <CutPlaneIcon plane="yz" />
+                  <span>YZ Plane</span>
+                  <small style={{ fontSize: 9, opacity: 0.8 }}>Left/Right</small>
+                </button>
+              </div>
+              <p style={{ margin: "2px 0 0", fontSize: 10, color: "#64748b" }}>
+                💡 Tip: Click any flat face in the 3D viewport to align the cutting plane to it.
+              </p>
+            </div>
+
+            {/* 2. Position & Angle Controls */}
+            <div style={{ marginBottom: 12, padding: "10px", background: "#f8fafc", borderRadius: 8, border: "1px solid #e2e8f0" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                <span className="field-label" style={{ fontSize: 11, fontWeight: 700, color: "#334155", textTransform: "uppercase", letterSpacing: "0.5px" }}>
+                  Plane Position & Angle
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setCutPlanePercent(50)}
+                  style={{ fontSize: 9, padding: "2px 6px", background: "#f1f5f9", border: "1px solid #cbd5e1", borderRadius: 4, cursor: "pointer", color: "#334155", fontWeight: 600 }}
+                  title="Center cut plane at 50%"
+                >
+                  Snap 50% (Center)
+                </button>
+              </div>
+
+              {/* Position Slider */}
+              <div style={{ marginBottom: 8 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
+                  <span className="field-label" style={{ fontSize: 11, color: "#475569" }}>
+                    Cut Position ({cutPlanePercent}%)
+                  </span>
+                  <span style={{ fontSize: 11, fontWeight: 600, color: "#ea580c" }}>
+                    {cutPlaneGeometry ? `${cutPlaneGeometry.currentOffsetMm.toFixed(decimalPlaces)} mm` : ""}
+                  </span>
+                </div>
+                <div className="pin-slider-row" style={{ marginBottom: 2 }}>
+                  <input
+                    type="range"
+                    min={1}
+                    max={99}
+                    step={1}
+                    value={cutPlanePercent}
+                    onChange={(e) => setCutPlanePercent(Number(e.target.value))}
+                  />
+                  <input
+                    type="number"
+                    min={1}
+                    max={99}
+                    step={1}
+                    value={cutPlanePercent}
+                    onChange={(e) => setCutPlanePercent(Math.max(1, Math.min(99, Number(e.target.value) || 50)))}
+                  />
+                </div>
+              </div>
+
+              {/* Angle Slider */}
+              <div style={{ marginBottom: 8 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 3 }}>
+                  <span className="field-label" style={{ fontSize: 11, color: "#475569" }}>
+                    Plane Tilt Angle
+                  </span>
+                  <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                    {cutPlaneAngle !== 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setCutPlaneAngle(0)}
+                        style={{ fontSize: 9, padding: "1px 5px", background: "#f1f5f9", border: "1px solid #cbd5e1", borderRadius: 3, cursor: "pointer", color: "#64748b" }}
+                      >
+                        0°
+                      </button>
+                    )}
+                    <span style={{ fontSize: 11, fontWeight: 600, color: "#ea580c" }}>
+                      {cutPlaneAngle}°
+                    </span>
+                  </div>
+                </div>
+                <div className="pin-slider-row" style={{ marginBottom: 2 }}>
+                  <input
+                    type="range"
+                    min={-60}
+                    max={60}
+                    step={1}
+                    value={cutPlaneAngle}
+                    onChange={(e) => setCutPlaneAngle(Number(e.target.value))}
+                  />
+                  <input
+                    type="number"
+                    min={-85}
+                    max={85}
+                    step={1}
+                    value={cutPlaneAngle}
+                    onChange={(e) => setCutPlaneAngle(Math.max(-85, Math.min(85, Number(e.target.value) || 0)))}
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* 3. Cut Mode */}
+            <div style={{ marginBottom: 12 }}>
+              <span className="field-label" style={{ display: "block", fontSize: 11, fontWeight: 700, color: "#334155", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 5 }}>
+                Cut Mode
+              </span>
+              <div className="cut-mode-grid">
+                <button
+                  type="button"
+                  className={`cut-mode-card ${cutMode === "split" ? "active" : ""}`}
+                  onClick={() => setCutMode("split")}
+                >
+                  <SplitToolIcon />
+                  <span>Split 2 Parts</span>
+                </button>
+                {cutKeepButtons.buttons.map((b, i) => (
+                  <button
+                    key={b.mode}
+                    type="button"
+                    className={`cut-mode-card ${cutMode === b.mode ? "active" : ""}`}
+                    onClick={() => setCutMode(b.mode)}
+                    title={`Keep the ${b.label.toLowerCase()} half and discard the other`}
+                  >
+                    <KeepHalfIcon keep={i === 0 ? "first" : "second"} stacked={cutKeepButtons.stacked} />
+                    <span>Keep {b.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* 4. 3D Printing Post-Cut Helpers */}
+            <div style={{ marginBottom: 12, padding: "8px 10px", background: "#f0fdf4", borderRadius: 8, border: "1px solid #bbf7d0" }}>
+              <span style={{ display: "block", fontSize: 10, fontWeight: 700, color: "#166534", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 6 }}>
+                3D Print Helpers
+              </span>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: "#166534", cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={cutAutoSeparate}
+                    onChange={(e) => {
+                      setCutAutoSeparate(e.target.checked);
+                      // Lay Flat is a child option: it needs the pieces kept apart.
+                      if (!e.target.checked) setCutAutoLayFlat(false);
+                    }}
+                  />
+                  <span>Separate pieces on bed</span>
+                </label>
+                {cutAutoSeparate && (
+                  <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
+                    <input
+                      type="number"
+                      min={1}
+                      max={100}
+                      step={1}
+                      value={cutSeparateGap}
+                      onChange={(e) => setCutSeparateGap(Math.max(1, Number(e.target.value) || 10))}
+                      style={{ width: 44, padding: "2px 4px", fontSize: 10, textAlign: "center", border: "1px solid #86efac", borderRadius: 4, background: "#ffffff" }}
+                    />
+                    <span style={{ fontSize: 10, color: "#166534" }}>mm</span>
+                  </div>
+                )}
+              </div>
+              <label
+                title={cutAutoSeparate ? undefined : "Turn on “Separate pieces on bed” first"}
+                style={{
+                  display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: "#166534",
+                  marginLeft: 20, paddingLeft: 8, borderLeft: "2px solid #bbf7d0",
+                  cursor: cutAutoSeparate ? "pointer" : "not-allowed",
+                  opacity: cutAutoSeparate ? 1 : 0.5,
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={cutAutoLayFlat && cutAutoSeparate}
+                  disabled={!cutAutoSeparate}
+                  onChange={(e) => setCutAutoLayFlat(e.target.checked)}
+                />
+                <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                  <LayFlatIcon className="tool-icon" style={{ width: 14, height: 14, color: "#166534" }} />
+                  <span>Lay cut faces flat on print bed (Z=0)</span>
+                </span>
+              </label>
+            </div>
+
+            {cutError && (
+              <div style={{ padding: "6px 10px", marginBottom: 10, background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 6, color: "#dc2626", fontSize: 11, fontWeight: 600 }}>
+                {cutError}
+              </div>
+            )}
+
+            {/* Action Buttons */}
+            <div className="cut-actions">
+              <button
+                type="button"
+                className="cut-primary-btn"
+                disabled={cutBusy || !cutPlaneGeometry}
+                onClick={() => executeCut(false)}
+                style={{ padding: "9px 12px", borderRadius: 6, cursor: "pointer", fontSize: 12 }}
+              >
+                {cutBusy ? "Slicing Model…" : "✂️ Split Model (Execute Cut)"}
+              </button>
+              {cutMode === "split" && (
+                <button
+                  type="button"
+                  className="cut-join-btn"
+                  disabled={cutBusy || !cutPlaneGeometry}
+                  onClick={() => executeCut(true)}
+                  style={{ padding: "8px 12px", borderRadius: 6, cursor: "pointer", fontSize: 11 }}
+                  title="Split into two parts and immediately open Joinery tool to add alignment pins/dowels"
+                >
+                  ⚡ Cut & Add Joints (Joinery)...
+                </button>
+              )}
+            </div>
+          </section>
+        )}
+
         {/* Dedicated Joinery Panel when toolMode === 'join' */}
         {toolMode === "join" && connectorSeam && joineryLayout && (
           <section className="tool-section joinery-section">

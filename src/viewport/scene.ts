@@ -29,12 +29,23 @@ import type { DisplayUnit } from "../measurement";
 import { evaluateMathExpression } from "../utils/mathExpr";
 
 export type { CameraMode } from "../document/types";
-export type ToolMode = "measure" | "select" | "face" | "edge" | "place" | "move" | "rotate" | "align" | "build" | "join";
+export type ToolMode = "measure" | "select" | "face" | "edge" | "place" | "move" | "rotate" | "align" | "build" | "join" | "cut";
 export type AlignAxis = 0 | 1 | 2;
 export type AlignAnchor = "min" | "center" | "max";
 export type AlignSubMode = "box" | "points";
 export type WireframeMode = "off" | "outlined" | "edges" | "mesh" | "xray" | "transparent";
 export type CollisionHighlightStyle = "outline" | "face" | "both";
+
+export interface CutPlanePreviewData {
+  center: Vec3;
+  normal: Vec3;
+  size: [number, number];
+  visible: boolean;
+  /** Keep modes: the object whose half on `side` of the plane (+1 along the
+   *  normal, -1 against it) will be thrown away. It is tinted so that it is
+   *  visible which half stays. */
+  discard?: { id: string; side: 1 | -1 } | null;
+}
 
 export interface JoineryPreviewItem {
   position: Vec3;
@@ -873,16 +884,48 @@ export interface DuplicateResult {
   nodes?: SceneNode[];
 }
 
-/** Basic shapes that support drag-to-size placement. Two families share the
- *  footprint mechanics: a corner-drag rectangle (box-like) or a
- *  center-and-drag radius (cylinder-like); sphere uses the radius family but
- *  has no separate height phase, since its radius already is its height. */
-type ShapeDragKind = "box" | "wedge" | "triangle" | "cylinder" | "cone" | "pyramid" | "sphere";
+/** Shapes that support drag-to-size placement. Footprint mechanics:
+ *  - corner-drag rectangle (box-like)
+ *  - center-and-drag ellipse (ellipsoid)
+ *  - center-and-drag radius (cylinder/dome/capsule-like)
+ *  Sphere and hemisphere finalize on release since footprint radius is their whole shape. */
+type ShapeDragKind =
+  | "box"
+  | "wedge"
+  | "triangle"
+  | "cylinder"
+  | "cone"
+  | "pyramid"
+  | "sphere"
+  | "hemisphere"
+  | "capsule"
+  | "ellipsoid"
+  | "paraboloid"
+  | "torus"
+  | "tube"
+  | "spring";
 const SHAPE_DRAG_RECT_KINDS: readonly ShapeDragKind[] = ["box", "wedge", "triangle"];
-const SHAPE_DRAG_RADIUS_KINDS: readonly ShapeDragKind[] = ["cylinder", "cone", "pyramid", "sphere"];
-const SHAPE_DRAG_NO_HEIGHT_KINDS: readonly ShapeDragKind[] = ["sphere"];
+const SHAPE_DRAG_ELLIPSE_KINDS: readonly ShapeDragKind[] = ["ellipsoid"];
+const SHAPE_DRAG_RADIUS_KINDS: readonly ShapeDragKind[] = [
+  "cylinder",
+  "cone",
+  "pyramid",
+  "sphere",
+  "hemisphere",
+  "capsule",
+  "paraboloid",
+  "torus",
+  "tube",
+  "spring",
+];
+const SHAPE_DRAG_NO_HEIGHT_KINDS: readonly ShapeDragKind[] = ["sphere", "hemisphere"];
 function isShapeDragKind(kind: string | null): kind is ShapeDragKind {
-  return !!kind && ((SHAPE_DRAG_RECT_KINDS as string[]).includes(kind) || (SHAPE_DRAG_RADIUS_KINDS as string[]).includes(kind));
+  return (
+    !!kind &&
+    ((SHAPE_DRAG_RECT_KINDS as string[]).includes(kind) ||
+      (SHAPE_DRAG_ELLIPSE_KINDS as string[]).includes(kind) ||
+      (SHAPE_DRAG_RADIUS_KINDS as string[]).includes(kind))
+  );
 }
 
 export class Scene {
@@ -917,6 +960,10 @@ export class Scene {
     height: number;
     heightScreenY: number;
     mesh: THREE.Mesh;
+    secondaryParam?: number;
+    ctrlAnchorDist?: number;
+    ctrlBaseParam?: number;
+    ctrlWasUsed?: boolean;
   } | null = null;
 
   private getSolidMaterial(
@@ -1629,6 +1676,12 @@ export class Scene {
   private navDrag: NavDrag | null = null;
   private navAnimFrame = 0;
   private joineryPreviewGroup = new THREE.Group();
+  private cutPreviewGroup = new THREE.Group();
+  /** Keep modes: the parts whose discarded half is being previewed, and the
+   *  planes that hide it on the real part / limit the ghost to it. */
+  private cutDiscard: { ids: string[]; hide: THREE.Plane; ghost: THREE.Plane } | null = null;
+  /** Clipped copies of the shared materials, made only for that preview. */
+  private cutClipClones = new Map<THREE.Material, THREE.Material>();
   private joineryTransparentIds = new Set<string>();
   private hollowPreviewId: string | null = null;
   private hollowTransparentId: string | null = null;
@@ -1838,6 +1891,7 @@ export class Scene {
     // DOM-side overlays set up above.
     this.setupMoveReadout();
     this.scene.add(this.joineryPreviewGroup);
+    this.scene.add(this.cutPreviewGroup);
 
     const savedCam = loadCameraState();
     const mode = savedCam?.mode ?? "perspective";
@@ -2819,6 +2873,174 @@ export class Scene {
     this.applyMaterials();
   }
 
+  /** The materials are shared singletons, so clipping one would clip every
+   *  part that uses it. Give the previewed parts clipped copies instead. */
+  private clippedClone(src: THREE.Material, plane: THREE.Plane): THREE.Material {
+    let clone = this.cutClipClones.get(src);
+    if (!clone) {
+      clone = src.clone();
+      clone.clippingPlanes = [plane];
+      this.cutClipClones.set(src, clone);
+    }
+    return clone;
+  }
+
+  /** Runs at the end of applyMaterials(), which assigns the shared materials
+   *  afresh on every selection or hover change. */
+  private applyCutDiscardClipping() {
+    if (!this.cutDiscard) return;
+    for (const id of this.cutDiscard.ids) {
+      const view = this.parts.get(id);
+      if (!view) continue;
+      for (const obj of [view.mesh, view.wire]) {
+        const m = obj.material;
+        obj.material = Array.isArray(m)
+          ? m.map((x) => this.clippedClone(x, this.cutDiscard!.hide))
+          : this.clippedClone(m, this.cutDiscard!.hide);
+      }
+    }
+  }
+
+  private clearCutDiscard() {
+    if (!this.cutDiscard) return;
+    this.cutDiscard = null;
+    for (const clone of this.cutClipClones.values()) clone.dispose();
+    this.cutClipClones.clear();
+    this.applyMaterials();
+  }
+
+  setCutPlanePreview(preview: CutPlanePreviewData | null) {
+    while (this.cutPreviewGroup.children.length > 0) {
+      const child = this.cutPreviewGroup.children[0];
+      this.cutPreviewGroup.remove(child);
+      if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments || child instanceof THREE.Line || child instanceof THREE.Group) {
+        child.traverse((c) => {
+          if (c instanceof THREE.Mesh || c instanceof THREE.LineSegments || c instanceof THREE.Line) {
+            // A tint overlay draws the object's own geometry — not ours to free.
+            if (!c.userData.sharedGeometry) c.geometry?.dispose();
+            if (Array.isArray(c.material)) c.material.forEach((m) => m.dispose());
+            else c.material?.dispose();
+          }
+        });
+      }
+    }
+
+    if (!preview || !preview.visible || !preview.discard) this.clearCutDiscard();
+    if (!preview || !preview.visible) return;
+
+    const [cx, cy, cz] = preview.center;
+    const [nx, ny, nz] = preview.normal;
+    let norm = new THREE.Vector3(nx, ny, nz);
+    if (norm.lengthSq() < 0.0001) norm.set(0, 0, 1);
+    else norm.normalize();
+
+    const [w, h] = preview.size;
+    const planeGeom = new THREE.PlaneGeometry(w, h);
+    
+    // Vibrant translucent cutting plane
+    const planeMat = new THREE.MeshBasicMaterial({
+      color: 0xff761a,
+      transparent: true,
+      opacity: 0.28,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+    const planeMesh = new THREE.Mesh(planeGeom, planeMat);
+
+    // Glowing border outline
+    const edgesGeom = new THREE.EdgesGeometry(planeGeom);
+    const edgesMat = new THREE.LineBasicMaterial({
+      color: 0xffa040,
+      transparent: true,
+      opacity: 0.95,
+    });
+    const edgesMesh = new THREE.LineSegments(edgesGeom, edgesMat);
+    planeMesh.add(edgesMesh);
+
+    // Grid markings on the cutting plane
+    const gridDivs = Math.max(4, Math.min(24, Math.round(Math.max(w, h) / 10)));
+    const gridHelper = new THREE.GridHelper(Math.max(w, h), gridDivs, 0xff761a, 0xffaa55);
+    gridHelper.rotation.x = Math.PI / 2;
+    if (gridHelper.material instanceof THREE.Material) {
+      gridHelper.material.transparent = true;
+      gridHelper.material.opacity = 0.35;
+      gridHelper.material.depthWrite = false;
+    }
+    planeMesh.add(gridHelper);
+
+    // Normal arrow pointing in positive cut direction
+    const arrowDir = new THREE.Vector3(0, 0, 1);
+    const arrowLen = Math.min(w, h) * 0.35 + 10;
+    const arrowHelper = new THREE.ArrowHelper(arrowDir, new THREE.Vector3(0, 0, 0), arrowLen, 0x00c4cc, arrowLen * 0.25, arrowLen * 0.15);
+    planeMesh.add(arrowHelper);
+
+    // Orient plane: PlaneGeometry faces +Z by default
+    const defaultNormal = new THREE.Vector3(0, 0, 1);
+    const q = new THREE.Quaternion().setFromUnitVectors(defaultNormal, norm);
+    planeMesh.quaternion.copy(q);
+    planeMesh.position.set(cx, cy, cz);
+
+    this.cutPreviewGroup.add(planeMesh);
+
+    if (!preview.discard) return;
+
+    // The half being thrown away: hidden on the real part, and drawn instead
+    // as a faint see-through ghost with just its outline, so it reads as gone
+    // but you can still see what it was.
+    const { id, side } = preview.discard;
+    const leaves = (n: SceneNode): string[] => (isGroup(n) ? n.children.flatMap(leaves) : [n.id]);
+    const node = findNode(this.lastNodes, id);
+    const ids = this.parts.has(id) ? [id] : node ? leaves(node) : [];
+    const centre = new THREE.Vector3(cx, cy, cz);
+    const d = norm.dot(centre);
+    // Clipping keeps the points at a non-negative distance from the plane:
+    // `ghost` keeps the discarded side, `hide` keeps everything else.
+    const ghost = new THREE.Plane(norm.clone().multiplyScalar(side), -side * d);
+    const hide = new THREE.Plane(norm.clone().multiplyScalar(-side), side * d);
+    if (this.cutDiscard && this.cutDiscard.ids.join() === ids.join()) {
+      // Same part, plane moved: the clipped materials hold these very planes.
+      this.cutDiscard.hide.copy(hide);
+      this.cutDiscard.ghost.copy(ghost);
+    } else {
+      this.clearCutDiscard();
+      this.renderer.localClippingEnabled = true;
+      this.cutDiscard = { ids, hide, ghost };
+      this.applyMaterials();
+    }
+
+    const ghostFaces = new THREE.MeshBasicMaterial({
+      color: 0x8aa0b8,
+      transparent: true,
+      opacity: 0.16,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      clippingPlanes: [this.cutDiscard.ghost],
+    });
+    const ghostLines = new THREE.LineBasicMaterial({
+      color: 0x5b7088,
+      transparent: true,
+      opacity: 0.6,
+      clippingPlanes: [this.cutDiscard.ghost],
+    });
+    for (const partId of ids) {
+      const view = this.parts.get(partId);
+      if (!view || !view.group.visible) continue;
+      const copies: THREE.Object3D[] = [
+        new THREE.Mesh(view.mesh.geometry, ghostFaces),
+        new THREE.LineSegments(view.wire.geometry, ghostLines),
+      ];
+      const sources = [view.mesh, view.wire];
+      copies.forEach((copy, i) => {
+        sources[i].updateWorldMatrix(true, false);
+        copy.matrixAutoUpdate = false;
+        copy.matrix.copy(sources[i].matrixWorld);
+        copy.userData.sharedGeometry = true;
+        copy.renderOrder = 2;
+        this.cutPreviewGroup.add(copy);
+      });
+    }
+  }
+
   setMeasurementFormat(unit: DisplayUnit, decimalPlaces: number) {
     this.displayUnit = unit;
     this.decimalPlaces = Math.max(0, Math.min(3, decimalPlaces));
@@ -3223,6 +3445,7 @@ export class Scene {
         if (view.displayMesh) view.displayMesh.visible = this.displayQuality === "draft";
       }
     }
+    this.applyCutDiscardClipping();
     for (const [id, groupObj] of this.assemblyGroups) {
       const node = findNode(this.lastNodes, id);
       groupObj.visible = !node?.hidden;
@@ -4012,6 +4235,20 @@ export class Scene {
       .normalize();
   }
 
+  /** A face point and normal as onSelectFace reports them — in the part's own
+   *  kernel-local frame — in world space, where a cutting plane lives. Using
+   *  them raw put the plane at the wrong spot for any part that is not
+   *  sitting at the origin, and pointed it wrong for a rotated one. */
+  faceToWorld(id: string, point: Vec3, normal: Vec3): { point: Vec3; normal: Vec3 } | null {
+    const view = this.parts.get(id);
+    if (!view) return null;
+    view.group.updateWorldMatrix(true, false);
+    return {
+      point: this.kernelLocalToWorld(view, point).toArray() as Vec3,
+      normal: this.kernelNormalToWorld(view, normal).toArray() as Vec3,
+    };
+  }
+
   /** Visual centre of the exact triangle group the user clicked. CAD face
    * anchors are ideal for replaying an edit, but after earlier modifiers an
    * interior topology point can lie close to another visible side. Handles
@@ -4448,6 +4685,7 @@ export class Scene {
       case "pyramid": {
         const sides = Math.max(3, Math.round(getEffectiveDefaults("pyramid").sides ?? 4));
         const g = new THREE.ConeGeometry(1, 1, sides);
+        if (sides === 4) g.rotateY(Math.PI / 4);
         g.rotateX(Math.PI / 2).translate(0, 0, 0.5);
         return g;
       }
@@ -4457,6 +4695,88 @@ export class Scene {
         // own radius (1, pre-scale) puts the bottom at local Z=0 instead of
         // straddling it.
         return new THREE.SphereGeometry(1, 24, 16).translate(0, 0, 1);
+      case "hemisphere":
+        return new THREE.SphereGeometry(1, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2).rotateX(Math.PI / 2);
+      case "capsule":
+        return new THREE.CapsuleGeometry(1, 0.001, 16, 32).rotateX(Math.PI / 2).scale(1, 1, 0.5).translate(0, 0, 0.5);
+      case "ellipsoid":
+        return new THREE.SphereGeometry(1, 24, 16).translate(0, 0, 1);
+      case "paraboloid": {
+        const segs = 32;
+        const rings = 16;
+        const positions: number[] = [];
+        for (let k = 0; k < segs; k++) {
+          const a1 = (k * 2 * Math.PI) / segs;
+          const a2 = ((k + 1) * 2 * Math.PI) / segs;
+          positions.push(0, 0, 0, Math.cos(a2), Math.sin(a2), 0, Math.cos(a1), Math.sin(a1), 0);
+        }
+        for (let ring = 0; ring < rings; ring++) {
+          const t0 = ring / rings;
+          const t1 = (ring + 1) / rings;
+          const r0 = 1 - t0;
+          const r1 = 1 - t1;
+          const z0 = 1 - r0 * r0;
+          const z1 = 1 - r1 * r1;
+          for (let k = 0; k < segs; k++) {
+            const a1 = (k * 2 * Math.PI) / segs;
+            const a2 = ((k + 1) * 2 * Math.PI) / segs;
+            const c1 = Math.cos(a1), s1 = Math.sin(a1);
+            const c2 = Math.cos(a2), s2 = Math.sin(a2);
+            positions.push(
+              r0 * c1, r0 * s1, z0,
+              r0 * c2, r0 * s2, z0,
+              r1 * c1, r1 * s1, z1,
+              r1 * c1, r1 * s1, z1,
+              r0 * c2, r0 * s2, z0,
+              r1 * c2, r1 * s2, z1,
+            );
+          }
+        }
+        const g = new THREE.BufferGeometry();
+        g.setAttribute("position", new THREE.BufferAttribute(Float32Array.from(positions), 3));
+        g.computeVertexNormals();
+        return g;
+      }
+      case "tube": {
+        const shape = new THREE.Shape();
+        shape.absarc(0, 0, 1, 0, Math.PI * 2, false);
+        const hole = new THREE.Path();
+        hole.absarc(0, 0, 0.7, 0, Math.PI * 2, true);
+        shape.holes = [hole];
+        return new THREE.ExtrudeGeometry(shape, { depth: 1, bevelEnabled: false, curveSegments: 32 });
+      }
+      case "torus":
+        return new THREE.TorusGeometry(1, 0.3, 24, 48).translate(0, 0, 0.3);
+      case "spring": {
+        const turns = 5;
+        const segments = 120;
+        const positions: number[] = [];
+        const wireR = 0.08;
+        const tubeSides = 6;
+        const dTheta = (turns * 2 * Math.PI) / segments;
+        const dZ = 1 / segments;
+        for (let i = 0; i < segments; i++) {
+          const z0 = i * dZ;
+          const z1 = (i + 1) * dZ;
+          const th0 = i * dTheta;
+          const th1 = (i + 1) * dTheta;
+          for (let j = 0; j < tubeSides; j++) {
+            const phi0 = (j * 2 * Math.PI) / tubeSides;
+            const phi1 = ((j + 1) * 2 * Math.PI) / tubeSides;
+            const nr0 = wireR * Math.cos(phi0), nz0 = wireR * Math.sin(phi0);
+            const nr1 = wireR * Math.cos(phi1), nz1 = wireR * Math.sin(phi1);
+            const v00 = [(1 + nr0) * Math.cos(th0), (1 + nr0) * Math.sin(th0), z0 + nz0];
+            const v01 = [(1 + nr1) * Math.cos(th0), (1 + nr1) * Math.sin(th0), z0 + nz1];
+            const v10 = [(1 + nr0) * Math.cos(th1), (1 + nr0) * Math.sin(th1), z1 + nz0];
+            const v11 = [(1 + nr1) * Math.cos(th1), (1 + nr1) * Math.sin(th1), z1 + nz1];
+            positions.push(...v00, ...v10, ...v11, ...v00, ...v11, ...v01);
+          }
+        }
+        const g = new THREE.BufferGeometry();
+        g.setAttribute("position", new THREE.BufferAttribute(Float32Array.from(positions), 3));
+        g.computeVertexNormals();
+        return g;
+      }
     }
   }
 
@@ -4500,55 +4820,279 @@ export class Scene {
   }
 
   /** Live-updates width/depth (rect kinds) or radius (radius kinds) from the
-   *  pointer while the footprint-drag button is still held. */
+   *  pointer while the footprint-drag button is still held.
+   *  Holding Ctrl allows dynamically adjusting secondary parameters (e.g. tube wall thickness,
+   *  cone top radius/frustum, spring taper) relative to their last set values without jumping or resetting. */
   private updateShapeDragFootprint(e: PointerEvent) {
     const d = this.shapeDrag;
     if (!d) return;
     const cur = this.rayPlaneHit(e, d.plane);
     if (!cur) return;
     const delta = cur.clone().sub(d.anchor);
-    if ((SHAPE_DRAG_RECT_KINDS as string[]).includes(d.kind)) {
-      // Box, wedge, and triangle (via TRI_BY_SIDE_ANGLE + a fixed 90° angle)
-      // all place their kernel-normalized origin at the center of their own
-      // unrounded construction bounding box — confirmed for triangle by
-      // kernel/shape.ts's `fixedXYCentre`, which is the *midpoint* of its
-      // base/apex points, not a corner. So all three use the same center
-      // math: the signed half-delta keeps the mesh centered on the anchor
-      // regardless of which direction the drag went, while width/depth stay
-      // magnitudes.
-      const dx = delta.dot(d.right);
-      const dy = delta.dot(d.forward);
-      d.width = Math.max(Math.abs(dx), 1);
-      d.depth = Math.max(Math.abs(dy), 1);
-      d.mesh.position.copy(d.anchor).addScaledVector(d.right, dx / 2).addScaledVector(d.forward, dy / 2);
+    const dist = delta.length();
+    if (e.ctrlKey) {
+      d.ctrlWasUsed = true;
+      if (d.ctrlAnchorDist === undefined) {
+        d.ctrlAnchorDist = dist;
+        d.ctrlBaseParam =
+          d.secondaryParam ??
+          (d.kind === "tube"
+            ? Math.min(3, Math.max(0.5, d.radius * 0.2))
+            : d.kind === "cone"
+              ? 0
+              : d.kind === "pyramid"
+                ? (getEffectiveDefaults("pyramid").sides ?? 4)
+                : d.radius);
+      }
+      const deltaDist = dist - d.ctrlAnchorDist;
+      if (d.kind === "tube") {
+        // Moving inward (cursor closer to center) increases wall thickness;
+        // moving outward decreases wall thickness.
+        const wall = (d.ctrlBaseParam ?? 3) - deltaDist;
+        d.secondaryParam = Math.max(0.2, Math.min(d.radius - 0.2, wall));
+      } else if (d.kind === "cone") {
+        // Moving outward increases top radius, moving inward decreases top radius
+        const topR = (d.ctrlBaseParam ?? 0) + deltaDist;
+        d.secondaryParam = Math.max(0, topR);
+      } else if (d.kind === "spring") {
+        // Moving outward increases top radius (taper), moving inward decreases top radius
+        const topR = (d.ctrlBaseParam ?? d.radius) + deltaDist;
+        d.secondaryParam = Math.max(0.5, topR);
+      } else if (d.kind === "pyramid") {
+        // Moving outward increases base sides (3, 4, 5, 6, ...), moving inward decreases
+        const step = Math.round(deltaDist / 6);
+        const sides = Math.max(3, Math.min(24, Math.round((d.ctrlBaseParam ?? 4) + step)));
+        d.secondaryParam = sides;
+      }
     } else {
-      d.radius = Math.max(delta.length(), 1);
-      d.mesh.position.copy(d.anchor);
+      d.ctrlAnchorDist = undefined;
+      d.ctrlBaseParam = undefined;
+      if (!d.ctrlWasUsed) {
+        if ((SHAPE_DRAG_RECT_KINDS as string[]).includes(d.kind)) {
+          // Box, wedge, and triangle (via TRI_BY_SIDE_ANGLE + a fixed 90° angle)
+          // all place their kernel-normalized origin at the center of their own
+          // unrounded construction bounding box — confirmed for triangle by
+          // kernel/shape.ts's `fixedXYCentre`, which is the *midpoint* of its
+          // base/apex points, not a corner. So all three use the same center
+          // math: the signed half-delta keeps the mesh centered on the anchor
+          // regardless of which direction the drag went, while width/depth stay
+          // magnitudes.
+          let dx = delta.dot(d.right);
+          let dy = delta.dot(d.forward);
+          if (e.shiftKey) {
+            const side = Math.max(Math.abs(dx), Math.abs(dy));
+            dx = (dx < 0 ? -1 : 1) * side;
+            dy = (dy < 0 ? -1 : 1) * side;
+          }
+          d.width = Math.max(Math.abs(dx), 1);
+          d.depth = Math.max(Math.abs(dy), 1);
+          d.mesh.position.copy(d.anchor).addScaledVector(d.right, dx / 2).addScaledVector(d.forward, dy / 2);
+        } else if ((SHAPE_DRAG_ELLIPSE_KINDS as string[]).includes(d.kind)) {
+          let dx = delta.dot(d.right);
+          let dy = delta.dot(d.forward);
+          if (e.shiftKey) {
+            const side = Math.max(Math.abs(dx), Math.abs(dy));
+            dx = (dx < 0 ? -1 : 1) * side;
+            dy = (dy < 0 ? -1 : 1) * side;
+          }
+          d.width = Math.max(Math.abs(dx), 1);
+          d.depth = Math.max(Math.abs(dy), 1);
+          d.mesh.position.copy(d.anchor);
+        } else {
+          d.radius = Math.max(dist, 1);
+          d.mesh.position.copy(d.anchor);
+          if (d.kind === "cone" && d.phase === "footprint") {
+            d.height = d.radius * 2;
+          }
+          if (d.kind === "tube" && d.secondaryParam === undefined) {
+            d.secondaryParam = Math.min(3, Math.max(0.5, d.radius * 0.2));
+          } else if (d.kind === "tube" && d.secondaryParam !== undefined) {
+            // Clamp customized wall thickness if outer radius is shrunk below wall thickness + 0.2
+            d.secondaryParam = Math.min(d.secondaryParam, Math.max(0.2, d.radius - 0.2));
+          }
+        }
+      }
     }
     this.updateShapeDragMesh();
   }
 
-  /** Live-updates height from vertical mouse movement while no button is
+  /** Live-updates height (or secondary parameters when holding Ctrl) while no button is
    *  held — the second phase of the drag, after the footprint was released.
-   *  Never runs for a no-height kind (sphere), which finalizes on release. */
+   *  Never runs for a no-height kind (sphere, hemisphere), which finalizes on release. */
   private updateShapeDragHeight(e: PointerEvent) {
     const d = this.shapeDrag;
     if (!d) return;
     const pxPerUnit = this.pixelsPerWorldUnit(d.anchor, d.normal);
     const dyPixels = d.heightScreenY - e.clientY;
-    d.height = Math.max(1, dyPixels / pxPerUnit);
+    if (e.ctrlKey) {
+      if (d.ctrlAnchorDist === undefined) {
+        d.ctrlAnchorDist = e.clientY;
+        d.ctrlBaseParam =
+          d.secondaryParam ??
+          (d.kind === "tube"
+            ? Math.min(3, Math.max(0.5, d.radius * 0.2))
+            : d.kind === "cone"
+              ? 0
+              : d.kind === "pyramid"
+                ? (getEffectiveDefaults("pyramid").sides ?? 4)
+                : d.radius);
+      }
+      const dy = (d.ctrlAnchorDist - e.clientY) / pxPerUnit;
+      if (d.kind === "tube") {
+        const wall = (d.ctrlBaseParam ?? 3) + dy;
+        d.secondaryParam = Math.max(0.2, Math.min(d.radius - 0.2, wall));
+      } else if (d.kind === "cone") {
+        const topR = (d.ctrlBaseParam ?? 0) + dy;
+        d.secondaryParam = Math.max(0, topR);
+      } else if (d.kind === "spring") {
+        const topR = (d.ctrlBaseParam ?? d.radius) + dy;
+        d.secondaryParam = Math.max(0.5, topR);
+      } else if (d.kind === "pyramid") {
+        const step = Math.round(dy / 6);
+        const sides = Math.max(3, Math.min(24, Math.round((d.ctrlBaseParam ?? 4) + step)));
+        d.secondaryParam = sides;
+      }
+    } else {
+      d.ctrlAnchorDist = undefined;
+      d.ctrlBaseParam = undefined;
+      if (d.kind === "capsule" || d.kind === "cone") {
+        const baseH = d.radius * 2;
+        d.height = Math.max(1, baseH + dyPixels / pxPerUnit);
+      } else if (d.kind === "tube") {
+        const baseH = Math.max(d.radius * 0.6, 5);
+        d.height = Math.max(1, baseH + dyPixels / pxPerUnit);
+      } else if (d.kind === "torus") {
+        const cur = this.rayPlaneHit(e, d.plane);
+        const maxTube = Math.max(0.5, d.radius * 0.85);
+        if (cur) {
+          const dist = cur.clone().sub(d.anchor).length();
+          const deltaDist = dist - d.radius;
+          const baseTube = Math.max(0.5, d.radius / 3);
+          d.height = Math.max(0.5, Math.min(maxTube, baseTube + deltaDist));
+        } else {
+          const baseTube = Math.max(0.5, d.radius / 3);
+          d.height = Math.max(0.5, Math.min(maxTube, baseTube + dyPixels / pxPerUnit));
+        }
+      } else {
+        d.height = Math.max(1, dyPixels / pxPerUnit);
+      }
+    }
     this.updateShapeDragMesh();
   }
 
   private updateShapeDragMesh() {
     const d = this.shapeDrag;
     if (!d) return;
-    if (d.kind === "sphere") d.mesh.scale.set(d.radius, d.radius, d.radius);
-    else if ((SHAPE_DRAG_RECT_KINDS as string[]).includes(d.kind)) d.mesh.scale.set(d.width, d.depth, Math.max(d.height, 0.01));
-    else d.mesh.scale.set(d.radius, d.radius, Math.max(d.height, 0.01));
+    if (d.kind === "capsule") {
+      // Rebuild true capsule geometry with exact hemispherical ends rather than
+      // stretching a unit mesh along Z (which distorts spherical caps into ellipsoids).
+      const r = Math.max(d.radius, 0.1);
+      const totalH = Math.max(d.height, r * 2);
+      const cylinderH = Math.max(totalH - 2 * r, 0.001);
+      const nextGeo = new THREE.CapsuleGeometry(r, cylinderH, 12, 24);
+      nextGeo.rotateX(Math.PI / 2).translate(0, 0, totalH / 2);
+      d.mesh.geometry.dispose();
+      d.mesh.geometry = nextGeo;
+      d.mesh.scale.set(1, 1, 1);
+    } else if (d.kind === "torus") {
+      // Rebuild true torus with circular tube cross-section instead of affine scale
+      const ringR = Math.max(d.radius, 0.5);
+      const defaultTube = Math.max(0.5, ringR / 3);
+      const tubeR = Math.min(
+        Math.max(d.phase === "footprint" ? (d.secondaryParam ?? defaultTube) : d.height, 0.5),
+        ringR * 0.85
+      );
+      const nextGeo = new THREE.TorusGeometry(ringR, tubeR, 24, 48).translate(0, 0, tubeR);
+      d.mesh.geometry.dispose();
+      d.mesh.geometry = nextGeo;
+      d.mesh.scale.set(1, 1, 1);
+    } else if (d.kind === "tube") {
+      // Rebuild tube with clean ExtrudeGeometry (outer ring with inner circular hole)
+      const rOut = Math.max(d.radius, 0.5);
+      const wall = Math.min(Math.max(d.secondaryParam ?? Math.min(3, rOut * 0.2), 0.2), rOut - 0.2);
+      const rIn = Math.max(rOut - wall, 0.1);
+      const h = d.phase === "footprint" ? Math.max(d.radius * 0.6, 2) : Math.max(d.height, 0.5);
+      const shape = new THREE.Shape();
+      shape.absarc(0, 0, rOut, 0, Math.PI * 2, false);
+      const hole = new THREE.Path();
+      hole.absarc(0, 0, rIn, 0, Math.PI * 2, true);
+      shape.holes = [hole];
+      const nextGeo = new THREE.ExtrudeGeometry(shape, { depth: h, bevelEnabled: false, curveSegments: 32 });
+      d.mesh.geometry.dispose();
+      d.mesh.geometry = nextGeo;
+      d.mesh.scale.set(1, 1, 1);
+    } else if (d.kind === "cone") {
+      // Rebuild cone with live top radius, bottom radius, and height
+      const rBottom = Math.max(d.radius, 0.5);
+      const rTop = Math.max(d.secondaryParam ?? 0, 0);
+      const h = Math.max(d.height, 0.5);
+      const sides = Math.max(8, Math.round(getEffectiveDefaults("cone").sides ?? 48));
+      const nextGeo = new THREE.CylinderGeometry(rTop, rBottom, h, sides);
+      nextGeo.rotateX(Math.PI / 2).translate(0, 0, h / 2);
+      d.mesh.geometry.dispose();
+      d.mesh.geometry = nextGeo;
+      d.mesh.scale.set(1, 1, 1);
+    } else if (d.kind === "spring") {
+      // Rebuild spring with live top radius taper
+      const rBottom = Math.max(d.radius, 0.5);
+      const rTop = Math.max(d.secondaryParam ?? d.radius, 0.5);
+      const h = Math.max(d.height, 0.5);
+      const turns = 5;
+      const segments = 120;
+      const positions: number[] = [];
+      const wireR = Math.max(0.2, Math.min(rBottom, rTop) * 0.08);
+      const tubeSides = 6;
+      const dTheta = (turns * 2 * Math.PI) / segments;
+      const dZ = h / segments;
+      for (let i = 0; i < segments; i++) {
+        const t0 = i / segments;
+        const t1 = (i + 1) / segments;
+        const r0 = rBottom + (rTop - rBottom) * t0;
+        const r1 = rBottom + (rTop - rBottom) * t1;
+        const z0 = i * dZ;
+        const z1 = (i + 1) * dZ;
+        const th0 = i * dTheta;
+        const th1 = (i + 1) * dTheta;
+        for (let j = 0; j < tubeSides; j++) {
+          const phi0 = (j * 2 * Math.PI) / tubeSides;
+          const phi1 = ((j + 1) * 2 * Math.PI) / tubeSides;
+          const nr0 = wireR * Math.cos(phi0), nz0 = wireR * Math.sin(phi0);
+          const nr1 = wireR * Math.cos(phi1), nz1 = wireR * Math.sin(phi1);
+          const v00 = [(r0 + nr0) * Math.cos(th0), (r0 + nr0) * Math.sin(th0), z0 + nz0];
+          const v01 = [(r0 + nr1) * Math.cos(th0), (r0 + nr1) * Math.sin(th0), z0 + nz1];
+          const v10 = [(r1 + nr0) * Math.cos(th1), (r1 + nr0) * Math.sin(th1), z1 + nz0];
+          const v11 = [(r1 + nr1) * Math.cos(th1), (r1 + nr1) * Math.sin(th1), z1 + nz1];
+          positions.push(...v00, ...v10, ...v11, ...v00, ...v11, ...v01);
+        }
+      }
+      const nextGeo = new THREE.BufferGeometry();
+      nextGeo.setAttribute("position", new THREE.BufferAttribute(Float32Array.from(positions), 3));
+      nextGeo.computeVertexNormals();
+      d.mesh.geometry.dispose();
+      d.mesh.geometry = nextGeo;
+      d.mesh.scale.set(1, 1, 1);
+    } else if (d.kind === "pyramid") {
+      const sides = Math.max(3, Math.round(d.secondaryParam ?? getEffectiveDefaults("pyramid").sides ?? 4));
+      const r = Math.max(d.radius, 0.5);
+      const h = Math.max(d.height, 0.5);
+      const nextGeo = new THREE.ConeGeometry(r, h, sides);
+      if (sides === 4) nextGeo.rotateY(Math.PI / 4);
+      nextGeo.rotateX(Math.PI / 2).translate(0, 0, h / 2);
+      d.mesh.geometry.dispose();
+      d.mesh.geometry = nextGeo;
+      d.mesh.scale.set(1, 1, 1);
+    } else if (d.kind === "sphere" || d.kind === "hemisphere") {
+      d.mesh.scale.set(d.radius, d.radius, d.radius);
+    } else if (d.kind === "ellipsoid") {
+      d.mesh.scale.set(d.width, d.depth, Math.max(d.height, 0.01));
+    } else if ((SHAPE_DRAG_RECT_KINDS as string[]).includes(d.kind)) {
+      d.mesh.scale.set(d.width, d.depth, Math.max(d.height, 0.01));
+    } else {
+      d.mesh.scale.set(d.radius, d.radius, Math.max(d.height, 0.01));
+    }
   }
 
-  /** The footprint-drag button was released: for a no-height kind (sphere)
+  /** The footprint-drag button was released: for no-height kinds (sphere, hemisphere)
    *  the footprint radius IS the whole shape, so finalize immediately.
    *  Everything else locks in width/depth or radius and switches to the
    *  height phase, which tracks the pointer with no button held until a
@@ -4563,7 +5107,11 @@ export class Scene {
     }
     d.phase = "height";
     d.heightScreenY = e.clientY;
-    d.height = 0.5;
+    d.height = (d.kind === "capsule" || d.kind === "cone" || d.kind === "pyramid")
+      ? d.radius * 2
+      : d.kind === "torus"
+        ? Math.max(0.5, d.radius / 3)
+        : 0.5;
     this.updateShapeDragMesh();
   }
 
@@ -4578,9 +5126,36 @@ export class Scene {
         base: round(d.width), sideLeft: round(d.depth), thickness: round(d.height),
       };
       case "cylinder": return { radius: round(d.radius), height: round(d.height) };
-      case "cone": return { bottomRadius: round(d.radius), topRadius: 0, height: round(d.height) };
-      case "pyramid": return { radius: round(d.radius), height: round(d.height) };
+      case "cone": return {
+        bottomRadius: round(d.radius),
+        topRadius: round(d.secondaryParam ?? 0),
+        height: round(d.height),
+      };
+      case "pyramid": return {
+        radius: round(d.radius),
+        height: round(d.height),
+        sides: Math.round(d.secondaryParam ?? getEffectiveDefaults("pyramid").sides ?? 4),
+      };
       case "sphere": return { radius: round(d.radius) };
+      case "hemisphere": return { radius: round(d.radius) };
+      case "capsule": return { radius: round(d.radius), height: round(Math.max(d.height, d.radius * 2)) };
+      case "ellipsoid": return { radiusX: round(d.width), radiusY: round(d.depth), radiusZ: round(d.height) };
+      case "paraboloid": return { radius: round(d.radius), height: round(d.height) };
+      case "tube": return {
+        radius: round(d.radius),
+        wallThickness: round(d.secondaryParam ?? Math.min(3, Math.max(0.5, d.radius * 0.2))),
+        height: round(d.height),
+      };
+      case "torus": {
+        const ringR = round(d.radius);
+        const tubeR = Math.min(Math.max(round(d.height), 0.5), Math.max(0.5, round(ringR * 0.85)));
+        return { radius: ringR, tubeRadius: tubeR };
+      }
+      case "spring": return {
+        radius: round(d.radius),
+        topRadius: round(d.secondaryParam ?? d.radius),
+        height: round(d.height),
+      };
     }
   }
 
@@ -4660,6 +5235,7 @@ export class Scene {
     } else if (kind === "pyramid") {
       const sides = p.sides ?? 4;
       geometry = new THREE.ConeGeometry(p.radius ?? 10, p.height, sides);
+      if (sides === 4) geometry.rotateY(Math.PI / 4);
       geometry.rotateX(Math.PI / 2).translate(0, 0, p.height / 2);
     } else if (kind === "wedge") {
       const w = p.width / 2;
@@ -4700,42 +5276,12 @@ export class Scene {
       const wall = Math.min(Math.max(p.wallThickness ?? 3, 0.05), rOut - 0.05);
       const rIn = Math.max(rOut - wall, 0.01);
       const h = Math.max(p.height ?? 10, 0.1);
-      const sides = Math.max(3, Math.min(64, Math.round(p.sides ?? 32)));
-
-      const positions: number[] = [];
-      const dTheta = (2 * Math.PI) / sides;
-
-      for (let i = 0; i < sides; i++) {
-        const a0 = i * dTheta;
-        const a1 = (i + 1) * dTheta;
-        const c0 = Math.cos(a0), s0 = Math.sin(a0);
-        const c1 = Math.cos(a1), s1 = Math.sin(a1);
-
-        const out0 = [rOut * c0, rOut * s0];
-        const out1 = [rOut * c1, rOut * s1];
-        const in0 = [rIn * c0, rIn * s0];
-        const in1 = [rIn * c1, rIn * s1];
-
-        // 1. Outer wall (z = 0 to z = h)
-        positions.push(out0[0], out0[1], 0, out1[0], out1[1], 0, out1[0], out1[1], h);
-        positions.push(out0[0], out0[1], 0, out1[0], out1[1], h, out0[0], out0[1], h);
-
-        // 2. Inner wall (z = 0 to z = h, facing inward)
-        positions.push(in0[0], in0[1], 0, in1[0], in1[1], h, in1[0], in1[1], 0);
-        positions.push(in0[0], in0[1], 0, in0[0], in0[1], h, in1[0], in1[1], h);
-
-        // 3. Bottom ring cap at z = 0
-        positions.push(out0[0], out0[1], 0, in0[0], in0[1], 0, out1[0], out1[1], 0);
-        positions.push(out1[0], out1[1], 0, in0[0], in0[1], 0, in1[0], in1[1], 0);
-
-        // 4. Top ring cap at z = h
-        positions.push(out0[0], out0[1], h, out1[0], out1[1], h, in0[0], in0[1], h);
-        positions.push(out1[0], out1[1], h, in1[0], in1[1], h, in0[0], in0[1], h);
-      }
-
-      geometry = new THREE.BufferGeometry();
-      geometry.setAttribute("position", new THREE.BufferAttribute(Float32Array.from(positions), 3));
-      geometry.computeVertexNormals();
+      const shape = new THREE.Shape();
+      shape.absarc(0, 0, rOut, 0, Math.PI * 2, false);
+      const hole = new THREE.Path();
+      hole.absarc(0, 0, rIn, 0, Math.PI * 2, true);
+      shape.holes = [hole];
+      geometry = new THREE.ExtrudeGeometry(shape, { depth: h, bevelEnabled: false, curveSegments: 32 });
     } else if (kind === "paraboloid") {
       const R = p.radius ?? 10;
       const h = p.height ?? 20;
@@ -9678,10 +10224,8 @@ export class Scene {
       this.placeAt(e);
       return;
     }
-    // Only the face tool turns a click into a face pick. Under the select
-    // tool a click on an object is just a click on the OBJECT — which is
-    // what makes plain dragging reliably move things.
-    if (this.toolMode === "face" && !(e.ctrlKey || e.metaKey || e.shiftKey) && this.selectFaceAt(e)) return;
+    // Face mode and Cut mode allow clicking a face to select it / align cut plane.
+    if ((this.toolMode === "face" || this.toolMode === "cut") && !(e.ctrlKey || e.metaKey || e.shiftKey) && this.selectFaceAt(e)) return;
     if (this.toolMode === "align" && this.alignSubMode === "box" && !(e.ctrlKey || e.metaKey || e.shiftKey)) {
       const hitId = this.hitTest(e);
       const rootId = hitId ? this.findRootOwner(hitId) : null;

@@ -809,6 +809,8 @@ interface DocState {
   /** Puts the document back as it was — used to undo a grouping that turned
    *  out to change the model rather than just its arrangement. */
   restoreNodes: (nodes: SceneNode[], selectedIds: string[]) => void;
+  /** Replaces a sliced node with the resulting split parts in an undoable history batch. */
+  replaceNodeWithSplitParts: (targetId: string, partNodes: ImportNode[]) => void;
   clearAll: () => void;
 }
 
@@ -1657,6 +1659,27 @@ export const useDoc = create<DocState>()(
         }),
 
       restoreNodes: (nodes, selectedIds) => set({ nodes, selectedIds }),
+
+      replaceNodeWithSplitParts: (targetId, partNodes) => {
+        set((s) => {
+          const replaceInList = (list: SceneNode[]): SceneNode[] => {
+            const out: SceneNode[] = [];
+            for (const n of list) {
+              if (n.id === targetId) {
+                out.push(...partNodes);
+              } else if (isGroup(n)) {
+                out.push({ ...n, children: replaceInList(n.children) });
+              } else {
+                out.push(n);
+              }
+            }
+            return out;
+          };
+          const nodes = replaceInList(s.nodes);
+          return { nodes, selectedIds: partNodes.map((p) => p.id) };
+        });
+        afterBatchedMutation();
+      },
 
       clearAll: () => {
         set({ nodes: [], selectedIds: [] });

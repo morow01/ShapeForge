@@ -1039,6 +1039,8 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
       turns: 6,
       endStyle: 0,
       wireShape: 0,
+      sideEdges: 0,
+      surfaceSteps: 16,
     },
     fields: [
       diam("radius", "Bottom diameter"),
@@ -1046,6 +1048,7 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
       diam("wireRadius", "Wire diameter"),
       dim("height", "Height"),
       { key: "turns", label: "Active Coils", min: 1, max: 40, step: 0.5 },
+      { key: "surfaceSteps", label: "Roundness", min: 4, max: 48, step: 1 },
       {
         key: "endStyle",
         label: "Ends",
@@ -1066,6 +1069,17 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
         options: [
           { value: 0, label: "Round Wire" },
           { value: 1, label: "Square Wire" },
+        ],
+      },
+      {
+        key: "sideEdges",
+        label: "Side lines",
+        min: 0,
+        max: 1,
+        step: 1,
+        options: [
+          { value: 0, label: "Hidden" },
+          { value: 1, label: "Shown" },
         ],
       },
     ],

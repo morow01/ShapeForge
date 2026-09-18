@@ -925,7 +925,7 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
         const axialProfile = [...bottomProfile, ...capProfile.slice(1)];
         const polygonSketch = (radius: number, z: number) => {
           const points: [number, number][] = Array.from({ length: sides }, (_, i) => {
-            const angle = 2 * Math.PI * i / sides;
+            const angle = 2 * Math.PI * i / sides + (sides === 4 ? Math.PI / 4 : 0);
             return [radius * Math.cos(angle), radius * Math.sin(angle)];
           });
           let pen = draw(points[0]);
@@ -943,7 +943,7 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
         // linear extrusion profile scales that polygon to the requested top
         // radius, including all the way to a true point.
         const profile: [number, number][] = Array.from({ length: sides }, (_, i) => {
-          const angle = 2 * Math.PI * i / sides;
+          const angle = 2 * Math.PI * i / sides + (sides === 4 ? Math.PI / 4 : 0);
           return [rb * Math.cos(angle), rb * Math.sin(angle)];
         });
         let pen = draw(profile[0]);

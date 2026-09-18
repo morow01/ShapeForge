@@ -2172,14 +2172,18 @@ button.stepper-btn:disabled {
 .triple .field { min-width: 0; }
 .triple .field-row,
 .triple .num { min-width: 0; width: 100%; box-sizing: border-box; }
-.screw-hole-dimensions {
+.screw-hole-dimensions,
+.spring-dimensions {
   display: grid;
   gap: 7px;
   margin-bottom: 9px;
 }
-.screw-hole-dimensions .field { min-width: 0; margin-bottom: 0; }
-.screw-hole-dimensions .field-header { min-height: 28px; justify-content: center; margin-bottom: 4px; }
-.screw-hole-dimensions .screw-hole-icon-label {
+.screw-hole-dimensions .field,
+.spring-dimensions .field { min-width: 0; margin-bottom: 0; }
+.screw-hole-dimensions .field-header,
+.spring-dimensions .field-header { min-height: 32px; justify-content: center; margin-bottom: 4px; }
+.screw-hole-dimensions .screw-hole-icon-label,
+.spring-dimensions .spring-icon-label {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2188,19 +2192,24 @@ button.stepper-btn:disabled {
   color: #607582;
   cursor: help;
 }
-.screw-hole-dimensions .screw-hole-icon-label svg {
-  width: 25px;
-  height: 25px;
+.screw-hole-dimensions .screw-hole-icon-label svg,
+.spring-dimensions .spring-icon-label svg {
+  width: 28px;
+  height: 28px;
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.6;
+  stroke-width: 1.8;
   stroke-linecap: round;
   stroke-linejoin: round;
 }
 .screw-hole-dimensions .field-row,
 .screw-hole-dimensions .num-stepper-wrap,
-.screw-hole-dimensions .num { min-width: 0; width: 100%; box-sizing: border-box; }
-.screw-hole-dimensions .num { padding-left: 7px; padding-right: 18px !important; }
+.screw-hole-dimensions .num,
+.spring-dimensions .field-row,
+.spring-dimensions .num-stepper-wrap,
+.spring-dimensions .num { min-width: 0; width: 100%; box-sizing: border-box; }
+.screw-hole-dimensions .num,
+.spring-dimensions .num { padding-left: 6px; padding-right: 18px !important; }
 .triangle-mode { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
 .triangle-mode button { min-height: 42px; padding: 5px; font-size: 9px; line-height: 1.15; }
 .triangle-hint { margin-top: 6px; }
@@ -4524,3 +4533,114 @@ button.stepper-btn:disabled {
 }
 .hinge-edge-arrow { color: #00a7a5; font-size: 15px; line-height: 1; }
 .hinge-edge-hint { margin: 6px 1px 0; font-size: 9px; line-height: 1.4; }
+
+/* --- Dedicated Cut / Split Tool Styling --- */
+.cut-section {
+  background: #ffffff;
+  border-top: 1px solid #e2e8f0;
+  padding: 12px;
+}
+.cut-live-badge {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+  padding: 6px 10px;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 6px;
+  color: #c2410c;
+  font-size: 11px;
+  font-weight: 500;
+}
+.cut-plane-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.cut-plane-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 8px 4px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #334155;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-size: 11px;
+  font-weight: 600;
+}
+.cut-plane-btn:hover {
+  border-color: #ff761a;
+  background: #fffaf5;
+}
+.cut-plane-btn.active {
+  border-color: #ff761a;
+  background: #fff3e6;
+  color: #ea580c;
+  box-shadow: 0 0 0 1px #ff761a;
+}
+.cut-mode-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.cut-mode-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 8px 4px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #ffffff;
+  color: #475569;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 600;
+  text-align: center;
+  transition: all 0.15s ease;
+}
+.cut-mode-card:hover {
+  border-color: #ff761a;
+  background: #fffaf5;
+}
+.cut-mode-card.active {
+  border-color: #ff761a;
+  background: #fff3e6;
+  color: #ea580c;
+  box-shadow: 0 0 0 1px #ff761a;
+}
+.cut-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #e2e8f0;
+}
+.cut-actions button.cut-primary-btn {
+  background: #ea580c;
+  border-color: #c2410c;
+  color: #ffffff;
+  font-weight: 700;
+}
+.cut-actions button.cut-primary-btn:hover {
+  background: #c2410c;
+}
+.cut-actions button.cut-join-btn {
+  background: #00a7a5;
+  border-color: #008785;
+  color: #ffffff;
+  font-weight: 700;
+}
+.cut-actions button.cut-join-btn:hover {
+  background: #008785;
+}

@@ -1735,4 +1735,110 @@ export function ExplodeIcon({ className = "tool-icon" }: { className?: string })
   );
 }
 
+/** Interactive Plane Cut / Slicing Tool Icon */
+export function CutToolIcon({ className = "tool-icon", style }: { className?: string; style?: React.CSSProperties }) {
+  return (
+    <svg className={className} style={style} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      {/* Top half of split cube */}
+      <path d="M 5 9 L 12 5 L 19 9 L 12 13 Z" fill="currentColor" fillOpacity="0.3" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M 5 9 V 10.5 L 12 14.5 L 19 10.5 V 9" stroke="currentColor" strokeWidth="1.3" />
+      {/* Cutting laser / blade plane */}
+      <line x1="2" y1="12" x2="22" y2="12" stroke="#ff761a" strokeWidth="2" strokeDasharray="3 2" className="icon-accent" />
+      {/* Bottom half of split cube */}
+      <path d="M 5 13.5 L 12 17.5 L 19 13.5" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M 5 13.5 V 17 L 12 21 L 19 17 V 13.5" fill="currentColor" fillOpacity="0.2" stroke="currentColor" strokeWidth="1.3" />
+      <line x1="12" y1="17.5" x2="12" y2="21" stroke="currentColor" strokeWidth="1.3" />
+    </svg>
+  );
+}
+
+/** Split 2 Parts Icon */
+export function SplitToolIcon({ className = "tool-icon", style }: { className?: string; style?: React.CSSProperties }) {
+  return (
+    <svg className={className} style={style} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <rect x="4" y="4" width="16" height="6" rx="1.5" fill="currentColor" fillOpacity="0.25" />
+      <rect x="4" y="14" width="16" height="6" rx="1.5" fill="currentColor" fillOpacity="0.25" />
+      <path d="M12 10v4M9 12h6" stroke="#ff761a" strokeWidth="1.8" className="icon-accent" />
+    </svg>
+  );
+}
+
+/** Keep Top / Keep Bottom Icon — the Split icon's two slabs, with the half the
+ *  cut throws away faded, dashed and crossed out. */
+export function KeepHalfIcon({ keep, stacked = true, className = "tool-icon", style }: {
+  /** Which slab survives: the top / left one ("first") or the bottom / right one ("second"). */
+  keep: "first" | "second";
+  /** Slabs one above the other (a horizontal cut) rather than side by side. */
+  stacked?: boolean;
+  className?: string;
+  style?: React.CSSProperties;
+}) {
+  const firstKept = keep === "first";
+  const dropped = { fill: "currentColor", fillOpacity: 0.06, strokeOpacity: 0.45, strokeDasharray: "2 2" } as const;
+  const kept = { fill: "currentColor", fillOpacity: 0.25 } as const;
+  // Slab rectangles and the centre of the one that gets crossed out.
+  const slabs = stacked
+    ? [{ x: 4, y: 4, w: 16, h: 6, cx: 12, cy: 7 }, { x: 4, y: 14, w: 16, h: 6, cx: 12, cy: 17 }]
+    : [{ x: 4, y: 4, w: 7, h: 16, cx: 7.5, cy: 12 }, { x: 13, y: 4, w: 7, h: 16, cx: 16.5, cy: 12 }];
+  const gone = slabs[firstKept ? 1 : 0];
+  const dx = stacked ? 2.5 : 2;
+  const dy = stacked ? 2 : 2.5;
+  return (
+    <svg className={className} style={style} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      {slabs.map((s, i) => (
+        <rect key={i} x={s.x} y={s.y} width={s.w} height={s.h} rx="1.5" {...((i === 0) === firstKept ? kept : dropped)} />
+      ))}
+      <path
+        d={`M${gone.cx - dx} ${gone.cy - dy}L${gone.cx + dx} ${gone.cy + dy}M${gone.cx + dx} ${gone.cy - dy}L${gone.cx - dx} ${gone.cy + dy}`}
+        stroke="#ff761a"
+        strokeWidth="1.8"
+        className="icon-accent"
+      />
+    </svg>
+  );
+}
+
+/** Cut-plane orientation icon: a small isometric box with a translucent plane
+ *  through its middle. Z is up; XZ is the face turned toward the viewer and YZ
+ *  the side face, so each icon shows where that cut goes through the model. */
+export function CutPlaneIcon({ plane, className = "cut-plane-icon", style }: { plane: "xy" | "xz" | "yz"; className?: string; style?: React.CSSProperties }) {
+  const pt = (x: number, y: number, z: number) =>
+    `${(5 + 6.93 * (x + y)).toFixed(2)} ${(15 + 4 * (x - y) - 8 * z).toFixed(2)}`;
+  const lo = -0.1;
+  const hi = 1.1;
+  const corners: Record<typeof plane, [number, number, number][]> = {
+    xy: [[lo, lo, 0.5], [hi, lo, 0.5], [hi, hi, 0.5], [lo, hi, 0.5]],
+    xz: [[lo, 0.5, lo], [hi, 0.5, lo], [hi, 0.5, hi], [lo, 0.5, hi]],
+    yz: [[0.5, lo, lo], [0.5, hi, lo], [0.5, hi, hi], [0.5, lo, hi]],
+  };
+  const planePath = `M${corners[plane].map(([x, y, z]) => pt(x, y, z)).join("L")}Z`;
+  return (
+    <svg className={className} style={style} width="30" height="30" viewBox="0 0 24 24" fill="none" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      {/* Box: silhouette plus the three edges meeting at the near corner. */}
+      <path
+        d={`M${pt(0, 0, 0)}L${pt(1, 0, 0)}L${pt(1, 1, 0)}L${pt(1, 1, 1)}L${pt(0, 1, 1)}L${pt(0, 0, 1)}ZM${pt(1, 0, 1)}L${pt(0, 0, 1)}M${pt(1, 0, 1)}L${pt(1, 1, 1)}M${pt(1, 0, 1)}L${pt(1, 0, 0)}`}
+        stroke="currentColor"
+        strokeOpacity="0.55"
+        strokeWidth="1.1"
+      />
+      <path d={planePath} fill="#ff761a" fillOpacity="0.38" stroke="#ff761a" strokeWidth="1.3" />
+    </svg>
+  );
+}
+
+/** Lay Flat on Bed Icon */
+export function LayFlatIcon({ className = "tool-icon", style }: { className?: string; style?: React.CSSProperties }) {
+  return (
+    <svg className={className} style={style} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      {/* Build plate bed line */}
+      <line x1="3" y1="20" x2="21" y2="20" stroke="currentColor" strokeWidth="2" strokeDasharray="2 2" opacity="0.6" />
+      {/* Model resting flat */}
+      <path d="M 6 20 L 8 10 L 16 10 L 18 20 Z" fill="currentColor" fillOpacity="0.3" stroke="currentColor" strokeWidth="1.5" />
+      {/* Downward alignment arrow */}
+      <path d="M 12 4 V 14 M 9 11 L 12 14 L 15 11" stroke="#00c4cc" strokeWidth="1.8" className="icon-accent" />
+    </svg>
+  );
+}
+
+
 
