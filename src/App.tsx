@@ -815,7 +815,7 @@ export function App() {
     }
   }, []);
 
-  const placePrimitive = useCallback((point: Vec3, normal: Vec3, targetId?: string) => {
+  const placePrimitive = useCallback((point: Vec3, normal: Vec3, targetId?: string, sizeOverride?: Record<string, number>) => {
     if (!pendingPrimitive) return;
     const n = new THREE.Vector3(...normal).normalize();
     // Every kernel primitive is normalised with its base on local Z=0.
@@ -857,6 +857,7 @@ export function App() {
       pendingPrimitive,
       base.toArray() as Vec3,
       [rotation.x / Math.PI * 180, rotation.y / Math.PI * 180, rotation.z / Math.PI * 180],
+      sizeOverride,
     );
     const newId = useDoc.getState().selectedIds[0];
     if ((pendingPrimitive === "screwHole" || pendingPrimitive === "domino") && targetId && newId) {
@@ -4642,6 +4643,7 @@ export function App() {
             setFaceSelection(next);
           }}
           onPlaceSurface={placePrimitive}
+          onPlaceSurfaceSized={placePrimitive}
           onDragChange={onDragChange}
         />
         {explodeAmount > 0 && (
@@ -4672,7 +4674,16 @@ export function App() {
         {toolMode === "place" && pendingPrimitive && (
           <div className="edge-bar placement-bar">
             <strong>{pendingPrimitive === "sketch" ? "New sketch" : `Place ${PRIMITIVES[pendingPrimitive].label}`}</strong>
-            <span>{pendingPrimitive === "sketch" ? "Click the workplane or a flat face to draw on" : "Choose a face or the workplane"}</span>
+            <span>
+              {pendingPrimitive === "sketch"
+                ? "Click the workplane or a flat face to draw on"
+                : pendingPrimitive === "sphere"
+                  ? "Click to place at default size, or drag to set size"
+                  : pendingPrimitive === "box" || pendingPrimitive === "wedge" || pendingPrimitive === "triangle"
+                    || pendingPrimitive === "cylinder" || pendingPrimitive === "cone" || pendingPrimitive === "pyramid"
+                    ? "Click to place at default size, or drag to set size then height"
+                    : "Choose a face or the workplane"}
+            </span>
             <button onClick={() => { setPendingPrimitive(null); setToolMode("select"); }}>Cancel</button>
           </div>
         )}

@@ -711,7 +711,7 @@ interface DocState {
   importProjectData: (data: ProjectData) => string;
   refreshProjectsList: () => void;
 
-  addPrimitive: (kind: PrimitiveKind, position?: Vec3, rotation?: Vec3) => void;
+  addPrimitive: (kind: PrimitiveKind, position?: Vec3, rotation?: Vec3, paramsOverride?: Record<string, number>) => void;
   /** Adds a node for a file already written to blobStore — the caller reads
    *  and stores the bytes first (both are async), so this stays a plain
    *  synchronous mutation like every other store action. */
@@ -976,7 +976,7 @@ export const useDoc = create<DocState>()(
         set({ projects: listProjects() });
       },
 
-      addPrimitive: (kind, position, rotation) => {
+      addPrimitive: (kind, position, rotation, paramsOverride) => {
         set((s) => {
           const def = PRIMITIVES[kind];
           let randomColor: string | undefined;
@@ -1001,7 +1001,7 @@ export const useDoc = create<DocState>()(
             id: nextId(),
             kind,
             name: `${def.label} ${n}`,
-            params: getEffectiveDefaults(kind),
+            params: { ...getEffectiveDefaults(kind), ...paramsOverride },
             // Offset each new part so they do not stack invisibly.
             position: position ?? [s.nodes.length * 6, 0, 0],
             rotation: rotation ?? [0, 0, 0],

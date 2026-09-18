@@ -61,6 +61,9 @@ interface Props {
   onSelectEdges: (id: string | null, points: Vec3[]) => void;
   onSelectFace: (id: string | null, point: Vec3 | null, normal: Vec3 | null, size: number, edges: Vec3[]) => void;
   onPlaceSurface: (point: Vec3, normal: Vec3) => void;
+  /** Fired instead of onPlaceSurface when the box/cylinder placement tool was
+   *  used as a drag (footprint size, then height) rather than a plain click. */
+  onPlaceSurfaceSized?: (point: Vec3, normal: Vec3, targetId: string | undefined, sizeOverride: Record<string, number>) => void;
   onSelectAnchor?: (id: string | null) => void;
   /** Handed the Scene on mount and null on unmount. A keyboard action like
    *  Drop has to call INTO the scene (it needs the built geometry), which the
@@ -99,6 +102,8 @@ export function Viewport(props: Props) {
     scene.onSelectEdges = (id, points) => latest.current.onSelectEdges(id, points);
     scene.onSelectFace = (id, point, normal, size, edges) => latest.current.onSelectFace(id, point, normal, size, edges);
     scene.onPlaceSurface = (point, normal) => latest.current.onPlaceSurface(point, normal);
+    scene.onPlaceSurfaceSized = (point, normal, targetId, sizeOverride) =>
+      latest.current.onPlaceSurfaceSized?.(point, normal, targetId, sizeOverride);
     scene.onSelectAnchor = (id) => latest.current.onSelectAnchor?.(id);
     scene.onCellsChanged = (cells) => latest.current.onCellsChanged?.(cells);
 

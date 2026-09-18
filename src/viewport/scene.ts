@@ -15,7 +15,7 @@ import { clearHighlights, getEdgeIndex, getFaceIndex, highlightInGeometry, syncG
 import type { ReplicadMesh, ThreeGeometry } from "replicad-threejs-helper";
 import type { CellPart, FaceInfo, KernelMesh, PreviewBuild, ScenePart } from "../kernel/types";
 import type { CameraMode, GroupNode, PrimitiveKind, SceneNode, Vec3 } from "../document/types";
-import { DEFAULT_OBJECT_COLOR, isGroup } from "../document/types";
+import { DEFAULT_OBJECT_COLOR, isGroup, TRI_BY_SIDE_ANGLE } from "../document/types";
 import { findNode, resolveNodeColor, resolveNodeHideLines, resolveNodeTransparent } from "../document/tree";
 import { loadCameraState, saveCameraState } from "../document/persist";
 import { getEffectiveDefaults } from "../document/store";
@@ -873,9 +873,51 @@ export interface DuplicateResult {
   nodes?: SceneNode[];
 }
 
+/** Basic shapes that support drag-to-size placement. Two families share the
+ *  footprint mechanics: a corner-drag rectangle (box-like) or a
+ *  center-and-drag radius (cylinder-like); sphere uses the radius family but
+ *  has no separate height phase, since its radius already is its height. */
+type ShapeDragKind = "box" | "wedge" | "triangle" | "cylinder" | "cone" | "pyramid" | "sphere";
+const SHAPE_DRAG_RECT_KINDS: readonly ShapeDragKind[] = ["box", "wedge", "triangle"];
+const SHAPE_DRAG_RADIUS_KINDS: readonly ShapeDragKind[] = ["cylinder", "cone", "pyramid", "sphere"];
+const SHAPE_DRAG_NO_HEIGHT_KINDS: readonly ShapeDragKind[] = ["sphere"];
+function isShapeDragKind(kind: string | null): kind is ShapeDragKind {
+  return !!kind && ((SHAPE_DRAG_RECT_KINDS as string[]).includes(kind) || (SHAPE_DRAG_RADIUS_KINDS as string[]).includes(kind));
+}
+
 export class Scene {
   private solidMaterialCache = new Map<string, THREE.MeshStandardMaterial>();
   private placementPreview: THREE.Mesh | null = null;
+  /** Armed on pointerdown for a drag-sizable placement, before it's known
+   *  whether this will turn into a click (default size) or a drag (custom
+   *  size) — mirrors the passive-then-active pattern used by body-drag. */
+  private shapeDragCandidate: {
+    kind: ShapeDragKind;
+    anchor: THREE.Vector3;
+    normal: THREE.Vector3;
+    targetId?: string;
+  } | null = null;
+  /** An active drag-to-size placement. "footprint" tracks the held-button
+   *  drag that sets width/depth (rect kinds) or radius (radius kinds); once
+   *  released it becomes "height" — with no button held, mouse movement sets
+   *  the height and a follow-up click confirms it. Sphere has no height
+   *  phase: its footprint drag finalizes the moment the button is released. */
+  private shapeDrag: {
+    kind: ShapeDragKind;
+    phase: "footprint" | "height";
+    anchor: THREE.Vector3;
+    normal: THREE.Vector3;
+    targetId?: string;
+    plane: THREE.Plane;
+    right: THREE.Vector3;
+    forward: THREE.Vector3;
+    width: number;
+    depth: number;
+    radius: number;
+    height: number;
+    heightScreenY: number;
+    mesh: THREE.Mesh;
+  } | null = null;
 
   private getSolidMaterial(
     colorHex: string = DEFAULT_OBJECT_COLOR,
@@ -1468,7 +1510,7 @@ export class Scene {
   private collisionFaceMaterial = new THREE.MeshBasicMaterial({
     color: 0xff6b35,
     transparent: true,
-    opacity: 0.85,
+    opacity: 0.35,
     depthTest: false,
     depthWrite: false,
     side: THREE.DoubleSide,
@@ -1707,6 +1749,11 @@ export class Scene {
    *  face, which is what a FaceFinder needs to re-find it after a rebuild. */
   onSelectFace: ((id: string | null, point: Vec3 | null, normal: Vec3 | null, size: number, edges: Vec3[]) => void) | null = null;
   onPlaceSurface: ((point: Vec3, normal: Vec3, targetId?: string) => void) | null = null;
+  /** Fired instead of onPlaceSurface when a box/cylinder placement was
+   *  dragged (footprint, then height) rather than clicked at default size. */
+  onPlaceSurfaceSized:
+    | ((point: Vec3, normal: Vec3, targetId: string | undefined, sizeOverride: Record<string, number>) => void)
+    | null = null;
 
   constructor(host: HTMLElement) {
     this.host = host;
@@ -4331,6 +4378,242 @@ export class Scene {
     }
   }
 
+  /** How many screen pixels correspond to one world-space mm along `axis`,
+   *  measured at `worldPoint` — lets a 2D mouse delta drive a 3D dimension
+   *  (the height drag) the same way a resize-handle drag already does. */
+  private pixelsPerWorldUnit(worldPoint: THREE.Vector3, axis: THREE.Vector3): number {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const toScreen = (p: THREE.Vector3) => {
+      const v = p.clone().project(this.camera);
+      return { x: (v.x + 1) / 2 * rect.width, y: (1 - v.y) / 2 * rect.height };
+    };
+    const a = toScreen(worldPoint);
+    const b = toScreen(worldPoint.clone().addScaledVector(axis, 1));
+    return Math.max(1e-6, Math.hypot(b.x - a.x, b.y - a.y));
+  }
+
+  /** Pointer moved past the click threshold while a box/cylinder placement
+   *  was armed: turn it into a footprint drag, replacing the static hover
+   *  preview with a live-sized one. */
+  /** A unit-scale (1mm) version of the kind's real shape, built with the same
+   *  construction math as the hover-preview geometry below, so the drag
+   *  preview scales into an accurate cone/pyramid/wedge/triangle rather than
+   *  a generic box or cylinder standing in for the whole family. */
+  private buildShapeDragGeometry(kind: ShapeDragKind): THREE.BufferGeometry {
+    switch (kind) {
+      case "box":
+        return new THREE.BoxGeometry(1, 1, 1).translate(0, 0, 0.5);
+      case "wedge": {
+        const w = 0.5, l = 0.5, h = 1;
+        const v0 = [-w, -l, 0], v1 = [w, -l, 0], v2 = [w, l, 0], v3 = [-w, l, 0];
+        const v4 = [-w, l, h], v5 = [w, l, h];
+        const positions = new Float32Array([
+          ...v0, ...v3, ...v2, ...v0, ...v2, ...v1,
+          ...v2, ...v3, ...v4, ...v2, ...v4, ...v5,
+          ...v0, ...v1, ...v5, ...v0, ...v5, ...v4,
+          ...v0, ...v4, ...v3,
+          ...v1, ...v2, ...v5,
+        ]);
+        const g = new THREE.BufferGeometry();
+        g.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+        g.computeVertexNormals();
+        return g;
+      }
+      case "triangle": {
+        // A right-triangle prism: base along local X, sideLeft along local Y,
+        // thickness along local Z — matches shapeDragOverrides' param mapping.
+        // The mesh's own position represents the *center* of the triangle's
+        // XY bounding box (matching the kernel's fixedXYCentre convention,
+        // same as box/wedge), so the geometry is shifted by (-0.5,-0.5) —
+        // it does not sit corner-at-origin like the box/cylinder unit shapes.
+        const positions = new Float32Array([
+          0, 0, 0, 1, 0, 0, 0, 1, 0,
+          0, 0, 1, 0, 1, 1, 1, 0, 1,
+          0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 1,
+          1, 0, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 1,
+          0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 1,
+        ]);
+        const g = new THREE.BufferGeometry();
+        g.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+        g.translate(-0.5, -0.5, 0);
+        g.computeVertexNormals();
+        return g;
+      }
+      case "cylinder":
+        return new THREE.CylinderGeometry(1, 1, 1, 32).rotateX(Math.PI / 2).translate(0, 0, 0.5);
+      case "cone": {
+        const sides = Math.max(8, Math.round(getEffectiveDefaults("cone").sides ?? 48));
+        return new THREE.CylinderGeometry(0, 1, 1, sides).rotateX(Math.PI / 2).translate(0, 0, 0.5);
+      }
+      case "pyramid": {
+        const sides = Math.max(3, Math.round(getEffectiveDefaults("pyramid").sides ?? 4));
+        const g = new THREE.ConeGeometry(1, 1, sides);
+        g.rotateX(Math.PI / 2).translate(0, 0, 0.5);
+        return g;
+      }
+      case "sphere":
+        // Base-anchored like every other kind (and the real sphere solid,
+        // which sits with its base at its node position): translating by its
+        // own radius (1, pre-scale) puts the bottom at local Z=0 instead of
+        // straddling it.
+        return new THREE.SphereGeometry(1, 24, 16).translate(0, 0, 1);
+    }
+  }
+
+  private beginShapeDrag(e: PointerEvent) {
+    const c = this.shapeDragCandidate;
+    if (!c) return;
+    this.shapeDragCandidate = null;
+    if (this.placementPreview) this.placementPreview.visible = false;
+    this.setPlacementTarget(null);
+    const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), c.normal);
+    const geometry = this.buildShapeDragGeometry(c.kind);
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({
+      color: 0x4a90e2,
+      transparent: true,
+      opacity: 0.45,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    }));
+    mesh.renderOrder = 20;
+    mesh.position.copy(c.anchor);
+    mesh.quaternion.copy(q);
+    mesh.scale.set(0.5, 0.5, 0.01);
+    this.scene.add(mesh);
+    this.shapeDrag = {
+      kind: c.kind,
+      phase: "footprint",
+      anchor: c.anchor,
+      normal: c.normal,
+      targetId: c.targetId,
+      plane: new THREE.Plane().setFromNormalAndCoplanarPoint(c.normal, c.anchor),
+      right: new THREE.Vector3(1, 0, 0).applyQuaternion(q),
+      forward: new THREE.Vector3(0, 1, 0).applyQuaternion(q),
+      width: 0.5,
+      depth: 0.5,
+      radius: 0.5,
+      height: 0.01,
+      heightScreenY: 0,
+      mesh,
+    };
+    this.updateShapeDragFootprint(e);
+  }
+
+  /** Live-updates width/depth (rect kinds) or radius (radius kinds) from the
+   *  pointer while the footprint-drag button is still held. */
+  private updateShapeDragFootprint(e: PointerEvent) {
+    const d = this.shapeDrag;
+    if (!d) return;
+    const cur = this.rayPlaneHit(e, d.plane);
+    if (!cur) return;
+    const delta = cur.clone().sub(d.anchor);
+    if ((SHAPE_DRAG_RECT_KINDS as string[]).includes(d.kind)) {
+      // Box, wedge, and triangle (via TRI_BY_SIDE_ANGLE + a fixed 90° angle)
+      // all place their kernel-normalized origin at the center of their own
+      // unrounded construction bounding box — confirmed for triangle by
+      // kernel/shape.ts's `fixedXYCentre`, which is the *midpoint* of its
+      // base/apex points, not a corner. So all three use the same center
+      // math: the signed half-delta keeps the mesh centered on the anchor
+      // regardless of which direction the drag went, while width/depth stay
+      // magnitudes.
+      const dx = delta.dot(d.right);
+      const dy = delta.dot(d.forward);
+      d.width = Math.max(Math.abs(dx), 1);
+      d.depth = Math.max(Math.abs(dy), 1);
+      d.mesh.position.copy(d.anchor).addScaledVector(d.right, dx / 2).addScaledVector(d.forward, dy / 2);
+    } else {
+      d.radius = Math.max(delta.length(), 1);
+      d.mesh.position.copy(d.anchor);
+    }
+    this.updateShapeDragMesh();
+  }
+
+  /** Live-updates height from vertical mouse movement while no button is
+   *  held — the second phase of the drag, after the footprint was released.
+   *  Never runs for a no-height kind (sphere), which finalizes on release. */
+  private updateShapeDragHeight(e: PointerEvent) {
+    const d = this.shapeDrag;
+    if (!d) return;
+    const pxPerUnit = this.pixelsPerWorldUnit(d.anchor, d.normal);
+    const dyPixels = d.heightScreenY - e.clientY;
+    d.height = Math.max(1, dyPixels / pxPerUnit);
+    this.updateShapeDragMesh();
+  }
+
+  private updateShapeDragMesh() {
+    const d = this.shapeDrag;
+    if (!d) return;
+    if (d.kind === "sphere") d.mesh.scale.set(d.radius, d.radius, d.radius);
+    else if ((SHAPE_DRAG_RECT_KINDS as string[]).includes(d.kind)) d.mesh.scale.set(d.width, d.depth, Math.max(d.height, 0.01));
+    else d.mesh.scale.set(d.radius, d.radius, Math.max(d.height, 0.01));
+  }
+
+  /** The footprint-drag button was released: for a no-height kind (sphere)
+   *  the footprint radius IS the whole shape, so finalize immediately.
+   *  Everything else locks in width/depth or radius and switches to the
+   *  height phase, which tracks the pointer with no button held until a
+   *  follow-up click confirms it. */
+  private finishFootprintDrag(e: PointerEvent) {
+    const d = this.shapeDrag;
+    if (!d) return;
+    this.updateShapeDragFootprint(e);
+    if ((SHAPE_DRAG_NO_HEIGHT_KINDS as string[]).includes(d.kind)) {
+      this.finalizeShapeDrag();
+      return;
+    }
+    d.phase = "height";
+    d.heightScreenY = e.clientY;
+    d.height = 0.5;
+    this.updateShapeDragMesh();
+  }
+
+  /** Per-kind parameter names for the finished shape, rounded to 0.1mm. */
+  private shapeDragOverrides(d: NonNullable<Scene["shapeDrag"]>): Record<string, number> {
+    const round = (n: number) => Math.round(n * 10) / 10;
+    switch (d.kind) {
+      case "box": return { width: round(d.width), depth: round(d.depth), height: round(d.height) };
+      case "wedge": return { width: round(d.width), length: round(d.depth), height: round(d.height) };
+      case "triangle": return {
+        mode: TRI_BY_SIDE_ANGLE, angleLeft: 90,
+        base: round(d.width), sideLeft: round(d.depth), thickness: round(d.height),
+      };
+      case "cylinder": return { radius: round(d.radius), height: round(d.height) };
+      case "cone": return { bottomRadius: round(d.radius), topRadius: 0, height: round(d.height) };
+      case "pyramid": return { radius: round(d.radius), height: round(d.height) };
+      case "sphere": return { radius: round(d.radius) };
+    }
+  }
+
+  /** Reads the finished drag, hands its params off to the placement
+   *  callback, and frees the preview mesh. Shared by the sphere's
+   *  finalize-on-release path and every other kind's finalize-on-click. */
+  private finalizeShapeDrag() {
+    const d = this.shapeDrag;
+    if (!d) return;
+    const overrides = this.shapeDragOverrides(d);
+    // The preview mesh's own position is the footprint's true center (for a
+    // rect kind, that's offset from the drag's start corner) — placing at
+    // d.anchor instead would snap the finished part to that corner.
+    const center = d.mesh.position.toArray() as Vec3;
+    const normal = d.normal.toArray() as Vec3;
+    const targetId = d.targetId;
+    this.disposeShapeDrag();
+    this.onPlaceSurfaceSized?.(center, normal, targetId, overrides);
+  }
+
+  /** Cancels or completes an in-progress shape drag and frees its preview
+   *  mesh. Called both when finalizing a placement and when the place tool
+   *  is left (mode switch, Escape) with a drag still in progress. */
+  private disposeShapeDrag() {
+    this.shapeDragCandidate = null;
+    if (this.shapeDrag) {
+      this.shapeDrag.mesh.removeFromParent();
+      this.shapeDrag.mesh.geometry.dispose();
+      (this.shapeDrag.mesh.material as THREE.Material).dispose();
+      this.shapeDrag = null;
+    }
+  }
+
   private updatePlacementPreview(e: PointerEvent) {
     if (this.surfacePlacement) {this.surfaceObjectPointer(e,false);return;}
     if (!this.placementPreview) {
@@ -4352,6 +4635,7 @@ export class Scene {
   setPlacementPreview(kind: PrimitiveKind | null) {
     this.placementKind = kind;
     this.setPlacementTarget(null);
+    this.disposeShapeDrag();
     if (this.placementPreview) {
       this.placementPreview.removeFromParent();
       this.placementPreview.traverse((child) => {
@@ -4376,7 +4660,6 @@ export class Scene {
     } else if (kind === "pyramid") {
       const sides = p.sides ?? 4;
       geometry = new THREE.ConeGeometry(p.radius ?? 10, p.height, sides);
-      geometry.rotateY(Math.PI / sides);
       geometry.rotateX(Math.PI / 2).translate(0, 0, p.height / 2);
     } else if (kind === "wedge") {
       const w = p.width / 2;
@@ -7040,6 +7323,7 @@ export class Scene {
     if (mode !== "place") {
       if (this.placementPreview) this.placementPreview.visible = false;
       this.setPlacementTarget(null);
+      this.disposeShapeDrag();
     }
     if (mode !== "edge") {
       this.clearEdgeSelection(true);
@@ -8531,6 +8815,22 @@ export class Scene {
     }
     if (this.toolMode === "place") {
       e.preventDefault();
+      if (this.shapeDrag?.phase === "height") {
+        this.finalizeShapeDrag();
+        return;
+      }
+      this.shapeDragCandidate = null;
+      if (isShapeDragKind(this.placementKind)) {
+        const hit = this.placementAt(e);
+        if (hit) {
+          this.shapeDragCandidate = {
+            kind: this.placementKind,
+            anchor: hit.point.clone(),
+            normal: hit.normal.clone().normalize(),
+            targetId: hit.targetId,
+          };
+        }
+      }
       return;
     }
     // Whatever gesture starts here owns the pointer until it ends — none of
@@ -8850,6 +9150,20 @@ export class Scene {
     }
 
     if (this.toolMode === "place") {
+      if (this.shapeDrag?.phase === "height") {
+        this.updateShapeDragHeight(e);
+        return;
+      }
+      if (this.shapeDrag?.phase === "footprint") {
+        this.updateShapeDragFootprint(e);
+        return;
+      }
+      if (this.shapeDragCandidate && (e.buttons & 1) === 1 && this.downAt) {
+        if (Math.hypot(e.clientX - this.downAt.x, e.clientY - this.downAt.y) > CLICK_SLOP_PX) {
+          this.beginShapeDrag(e);
+          return;
+        }
+      }
       this.updateFaceHover(e);
       this.updatePlacementPreview(e);
       return;
@@ -9351,6 +9665,12 @@ export class Scene {
       this.onDragChange?.(false);
       return; // a body-drag happened; this was not a click.
     }
+
+    if (this.shapeDrag?.phase === "footprint") {
+      this.finishFootprintDrag(e);
+      return; // a footprint drag happened; this was not a click.
+    }
+    this.shapeDragCandidate = null;
 
     if (!down || this.gizmo.dragging) return;
     if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > CLICK_SLOP_PX) return;
