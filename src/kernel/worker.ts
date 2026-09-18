@@ -12,6 +12,7 @@ import {
   applyPushPullPreview,
   combine,
   decompose,
+  analyseBuild,
   isEmptySolid,
   tessellatesEmpty,
   unionKeptEverything,
@@ -1042,6 +1043,7 @@ function localKey(spec: NodeSpec): string {
       spec.type,
       spec.sources.map((s) => [localKey(s), s.position, s.rotation, s.scale]),
       spec.keep,
+      spec.piece,
       facets,
       KERNEL_REVISION,
     ]);
@@ -1713,6 +1715,18 @@ const api = {
       mask,
       mesh: toMesh(`cell-${mask}`, solid, EDIT_QUALITY),
     }));
+  },
+
+  /**
+   * Shape Builder commit: what the kept regions come to once they are fused —
+   * one entry per separate solid, naming the source it mostly came from. One
+   * entry means a single built shape; more means each becomes its own object.
+   */
+  async analyseBuild(spec: NodeSpec): Promise<{ owners: number[] }> {
+    await init();
+    if (spec.type !== "build") return { owners: [0] };
+    const { onError } = collector();
+    return analyseBuild(spec, onError);
   },
 
   /** Fast export path used on the interactive worker: it never rebuilds. If

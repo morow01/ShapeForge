@@ -1,10 +1,10 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Scene } from "./scene";
 import type { CameraMode, ToolMode, WireframeMode, AlignSubMode, DuplicateResult } from "./scene";
 import type { PreviewBuild, ScenePart } from "../kernel/types";
 import type { PrimitiveKind, SceneNode, Vec3 } from "../document/types";
 import type { DisplayUnit } from "../measurement";
-import { HomeIcon } from "../ui/icons";
+import { EyeOffIcon, HomeIcon, ZoomToFitIcon } from "../ui/icons";
 
 interface Props {
   parts: ScenePart[];
@@ -32,6 +32,10 @@ interface Props {
   /** Exploded view outward displacement factor (0 to 1). */
   explodeAmount?: number;
   plateVisible?: boolean;
+  /** The view cube and axis triad in the corner (and its Home button). */
+  viewCubeVisible?: boolean;
+  /** The hide button on the view cube's hover toolbar. */
+  onHideViewCube?: () => void;
   plateSize?: { width: number; depth: number };
   displayUnit: DisplayUnit;
   decimalPlaces: number;
@@ -79,6 +83,41 @@ export function Viewport(props: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<Scene | null>(null);
 
+  // The view cube's tools stay out of sight until the pointer is over the
+  // cube. The cube itself is drawn on the canvas, so this watches for the
+  // pointer near its box rather than waiting for a hover on some element.
+  const cubeBoxRef = useRef<HTMLDivElement>(null);
+  const [cubeHover, setCubeHover] = useState(false);
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    let timer = 0;
+    const set = (over: boolean) => {
+      window.clearTimeout(timer);
+      // A short grace period on the way out, so crossing the gap between the
+      // cube and its toolbar does not make it flicker away.
+      if (over) setCubeHover(true);
+      else timer = window.setTimeout(() => setCubeHover(false), 250);
+    };
+    const onMove = (e: PointerEvent) => {
+      const box = cubeBoxRef.current?.getBoundingClientRect();
+      const pad = 12;
+      set(
+        !!box &&
+          e.clientX >= box.left - pad && e.clientX <= box.right + pad &&
+          e.clientY >= box.top - pad && e.clientY <= box.bottom + pad,
+      );
+    };
+    const onLeave = () => set(false);
+    host.addEventListener("pointermove", onMove);
+    host.addEventListener("pointerleave", onLeave);
+    return () => {
+      window.clearTimeout(timer);
+      host.removeEventListener("pointermove", onMove);
+      host.removeEventListener("pointerleave", onLeave);
+    };
+  }, []);
+
   // Latest values, so a remount (React StrictMode double-invokes effects in
   // dev) can restore the scene without waiting for the props to change.
   const latest = useRef(props);
@@ -123,6 +162,7 @@ export function Viewport(props: Props) {
     if (latest.current.plateVisible !== undefined) {
       scene.setPlateVisible(latest.current.plateVisible);
     }
+    scene.setNavCubeVisible(latest.current.viewCubeVisible !== false);
     if (latest.current.plateSize) {
       scene.setPlateSize(latest.current.plateSize.width, latest.current.plateSize.depth);
     }
@@ -205,6 +245,10 @@ export function Viewport(props: Props) {
   }, [props.plateVisible]);
 
   useEffect(() => {
+    sceneRef.current?.setNavCubeVisible(props.viewCubeVisible !== false);
+  }, [props.viewCubeVisible]);
+
+  useEffect(() => {
     if (props.plateSize) {
       sceneRef.current?.setPlateSize(props.plateSize.width, props.plateSize.depth);
     }
@@ -216,16 +260,39 @@ export function Viewport(props: Props) {
 
   return (
     <div className="viewport" ref={hostRef}>
-      <div className="navcube-controls">
-        <button
-          className="navcube-btn navcube-home-btn"
-          onClick={() => sceneRef.current?.resetView()}
-          title="Reset to default view (Home)"
-          aria-label="Reset to default view"
-        >
-          <HomeIcon className="navcube-icon" />
-        </button>
-      </div>
+      {props.viewCubeVisible !== false && (
+        <div className={`navcube-controls${cubeHover ? " is-open" : ""}`} ref={cubeBoxRef}>
+          <div className="navcube-tools" role="toolbar" aria-label="View controls">
+            <button
+              type="button"
+              className="navcube-tool"
+              onClick={() => sceneRef.current?.resetView()}
+              title="Reset to default view (Home)"
+              aria-label="Reset to default view"
+            >
+              <HomeIcon className="navcube-icon" />
+            </button>
+            <button
+              type="button"
+              className="navcube-tool"
+              onClick={() => sceneRef.current?.zoomToFit()}
+              title="Zoom to fit (Z)"
+              aria-label="Zoom to fit"
+            >
+              <ZoomToFitIcon className="navcube-icon" />
+            </button>
+            <button
+              type="button"
+              className="navcube-tool"
+              onClick={() => props.onHideViewCube?.()}
+              title="Hide view cube (show it again from the top bar or Settings)"
+              aria-label="Hide view cube"
+            >
+              <EyeOffIcon className="navcube-icon" />
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

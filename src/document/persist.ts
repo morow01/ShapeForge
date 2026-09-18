@@ -112,7 +112,8 @@ export function parseNode(raw: unknown): SceneNode | null {
       (m): m is number => typeof m === "number" && Number.isInteger(m) && m > 0 && m < limit,
     );
     if (!keep.length) return null;
-    return { ...base, type: "build", sources, keep };
+    const piece = typeof n.piece === "number" && Number.isInteger(n.piece) && n.piece >= 0 ? n.piece : undefined;
+    return { ...base, type: "build", sources, keep, ...(piece !== undefined ? { piece } : {}) };
   }
 
   if (n.type === "import") {

@@ -1527,6 +1527,17 @@ export function BuildPlateIcon({ className = "topbar-icon" }: { className?: stri
   );
 }
 
+/** View cube toggle: an isometric cube with its top face shaded. */
+export function ViewCubeIcon({ className = "topbar-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <path d="M12 3L20 7.5V16.5L12 21L4 16.5V7.5L12 3Z" />
+      <path d="M12 3L20 7.5L12 12L4 7.5L12 3Z" fill="currentColor" fillOpacity="0.22" />
+      <path d="M12 12V21" />
+    </svg>
+  );
+}
+
 /** Folder open icon */
 export function FolderOpenIcon({ className = "tool-icon" }: { className?: string }) {
   return (

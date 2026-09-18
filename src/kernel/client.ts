@@ -476,6 +476,9 @@ export const kernel = {
   // decomposition is 15 cells' worth of booleans and must never queue in
   // front of the interactive rebuilds.
   buildCells: (specs: NodeSpec[]) => withWatchdog("heavy", (raw) => raw.buildCells(specs)),
+  // Shape Builder commit: the separate solids the kept regions make, and which
+  // source each one mostly came from.
+  analyseBuild: (spec: NodeSpec) => withWatchdog("heavy", (raw) => raw.analyseBuild(spec)),
 
   // A live push/pull drag's preview — see previewLocal's own doc comment in
   // worker.ts. Shares the "scene" lane/worker with buildScene (it needs to

@@ -70,6 +70,8 @@ export interface BuildSpec extends SpecBase {
   type: "build";
   sources: NodeSpec[];
   keep: number[];
+  /** Which connected piece of the result this is — see BuildNode.piece. */
+  piece?: number;
 }
 
 export type NodeSpec = ObjectSpec | GroupSpec | ImportSpec | EditSpec | BuildSpec;

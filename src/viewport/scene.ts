@@ -19,10 +19,11 @@ import { DEFAULT_OBJECT_COLOR, isGroup, TRI_BY_SIDE_ANGLE } from "../document/ty
 import { findNode, resolveNodeColor, resolveNodeHideLines, resolveNodeTransparent } from "../document/tree";
 import { loadCameraState, saveCameraState } from "../document/persist";
 import { getEffectiveDefaults } from "../document/store";
-import { snapBounds } from "../snapping/snap";
+import { snapBounds, snapFace } from "../snapping/snap";
 import type { Bounds3, SnapTarget } from "../snapping/snap";
 import { SmartGuides } from "./guides";
 import { CUBE_MARGIN_PX, CUBE_PX, NavCube } from "./navcube";
+import { surfaceOrientation } from "./surfaceOrientation";
 import { findApex, solveScaledTriangle } from "../geometry/triangle";
 import { displayStep, formatLength, toMillimetres } from "../measurement";
 import type { DisplayUnit } from "../measurement";
@@ -964,7 +965,13 @@ export class Scene {
     ctrlAnchorDist?: number;
     ctrlBaseParam?: number;
     ctrlWasUsed?: boolean;
+    /** Where the pointer last was on the plane, and its last screen y — what
+     *  the shape is carried by while Space is held (see moveShapeDragWithSpace). */
+    lastHit?: THREE.Vector3;
+    lastClientY?: number;
   } | null = null;
+  /** Space is down. Mid-placement it moves the shape instead of sizing it. */
+  private spaceDown = false;
 
   private getSolidMaterial(
     colorHex: string = DEFAULT_OBJECT_COLOR,
@@ -1189,11 +1196,10 @@ export class Scene {
     if (!s) return;
     s.localRotation.setFromAxisAngle(new THREE.Vector3(0,0,1),s.angle*DEG)
       .multiply(new THREE.Quaternion().setFromEuler(new THREE.Euler(s.tiltX*DEG,s.tiltY*DEG,0)));
-    if (s.attachment) {
-      s.localRotation.multiply(new THREE.Quaternion().setFromUnitVectors(s.attachment.normal,new THREE.Vector3(0,0,-1)));
-      s.base.copy(s.attachment.point).multiply(s.ghost.scale).applyQuaternion(s.localRotation);
-      return;
-    }
+    // With a face picked, the rotation and the contact point depend on the
+    // surface it is being placed on, so they are worked out per target in
+    // updateSurfaceGhost().
+    if (s.attachment) return;
     const bounds = new THREE.Box3();
     const vertex = new THREE.Vector3();
     const positions = s.ghost.geometry.getAttribute("position");
@@ -1208,9 +1214,23 @@ export class Scene {
     const view = this.parts.get(session.source);
     if (!view) return;
     const {point,normal} = session.lastHit;
-    const alignment = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,0,1),normal);
-    const q = alignment.clone().multiply(session.localRotation);
-    const base = session.base.clone().applyQuaternion(alignment);
+    let q: THREE.Quaternion;
+    let base: THREE.Vector3;
+    if (session.attachment) {
+      // Lay the picked face against the surface with the smallest turn from
+      // how the object is oriented now — see surfaceOrientation().
+      q = surfaceOrientation({
+        current: view.group.getWorldQuaternion(new THREE.Quaternion()),
+        face: session.attachment.normal,
+        targetNormal: normal,
+        angle: session.angle, tiltX: session.tiltX, tiltY: session.tiltY,
+      });
+      base = session.attachment.point.clone().multiply(session.ghost.scale).applyQuaternion(q);
+    } else {
+      const alignment = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,0,1),normal);
+      q = alignment.clone().multiply(session.localRotation);
+      base = session.base.clone().applyQuaternion(alignment);
+    }
     session.ghost.quaternion.copy(q);
     session.ghost.position.copy(point).addScaledVector(normal,-session.depth).sub(base);
     session.ghost.visible = true;
@@ -1669,10 +1689,13 @@ export class Scene {
    *  TinkerCAD's way of selecting several objects at once. */
   private marquee: Marquee | null = null;
   private marqueeEl: HTMLDivElement;
-  /** TinkerCAD-style view cube, rendered into a corner of this same canvas —
-   *  see renderNavCube(). Click a face to snap to it; drag to orbit freely. */
+  /** CAD-style view cube, rendered into a corner of this same canvas — see
+   *  renderNavCube(). Click a face, edge or corner to snap to that view; drag
+   *  to orbit freely. */
   private navCube = new NavCube();
-  private navCubeFrame: HTMLDivElement;
+  private navCubeVisible = true;
+  private navHovering = false;
+  private navCursorSet = false;
   private navDrag: NavDrag | null = null;
   private navAnimFrame = 0;
   private joineryPreviewGroup = new THREE.Group();
@@ -1825,17 +1848,6 @@ export class Scene {
     if (getComputedStyle(host).position === "static") host.style.position = "relative";
     host.appendChild(this.marqueeEl);
 
-    // Purely decorative — a soft panel behind the view cube. CSS anchors it
-    // to the corner directly, so unlike the marquee it never needs updating
-    // on resize; the WebGL viewport it frames is still computed in pixels
-    // (see navRect()), independently, for the actual render and hit-testing.
-    this.navCubeFrame = document.createElement("div");
-    this.navCubeFrame.style.cssText =
-      `position:absolute;top:${CUBE_MARGIN_PX}px;right:${CUBE_MARGIN_PX}px;` +
-      `width:${CUBE_PX}px;height:${CUBE_PX}px;border-radius:12px;pointer-events:none;` +
-      "box-shadow:0 2px 10px rgba(15,30,40,0.18);";
-    host.appendChild(this.navCubeFrame);
-
     // The live push/pull readout ("12.5 mm") — plain DOM/CSS, same reasoning
     // as the marquee rectangle: a 2D overlay is simpler and pixel-exact here.
     // A real number input, styled like the resize handles' own dimension
@@ -1965,9 +1977,12 @@ export class Scene {
 
     this.renderer.domElement.addEventListener("pointerdown", this.onPointerDown);
     this.renderer.domElement.addEventListener("pointermove", this.onPointerMove);
+    // Registered right after onPointerMove so it fires after it.
+    this.renderer.domElement.addEventListener("pointermove", () => this.syncNavCursor());
     this.renderer.domElement.addEventListener("pointerup", this.onPointerUp);
     this.renderer.domElement.addEventListener("pointercancel", this.onPointerCancel);
     this.renderer.domElement.addEventListener("pointerleave", () => {
+      this.updateNavHover(null);
       if (this.placementPreview) this.placementPreview.visible = false;
       this.setPlacementTarget(null);
     });
@@ -1984,6 +1999,8 @@ export class Scene {
     window.addEventListener("blur", this.onWindowBlur);
     window.addEventListener("keydown", this.onModifierChange);
     window.addEventListener("keyup", this.onModifierChange);
+    window.addEventListener("keydown", this.onSpaceKey);
+    window.addEventListener("keyup", this.onSpaceKey);
 
     this.animate();
   }
@@ -4178,6 +4195,14 @@ export class Scene {
     this.updateAlignOverlay();
   }
 
+  /** Ghosts where the selection would land for one of the panel's Min / Mid /
+   *  Max buttons, the way hovering the matching dot does — or clears the
+   *  ghost, with `null`. */
+  previewAlignSelection(axis: AlignAxis, anchor: AlignAnchor | null) {
+    if (anchor === null) this.clearAlignPreview();
+    else this.showAlignPreview(axis, anchor);
+  }
+
   private showAlignPreview(axis: AlignAxis, anchor: AlignAnchor) {
     this.clearAlignPreview();
     for (const { id, obj, delta } of this.alignMoves(axis, anchor)) {
@@ -4826,8 +4851,11 @@ export class Scene {
   private updateShapeDragFootprint(e: PointerEvent) {
     const d = this.shapeDrag;
     if (!d) return;
+    if (this.moveShapeDragWithSpace(e)) return;
     const cur = this.rayPlaneHit(e, d.plane);
     if (!cur) return;
+    d.lastHit = cur.clone();
+    d.lastClientY = e.clientY;
     const delta = cur.clone().sub(d.anchor);
     const dist = delta.length();
     if (e.ctrlKey) {
@@ -4922,6 +4950,7 @@ export class Scene {
   private updateShapeDragHeight(e: PointerEvent) {
     const d = this.shapeDrag;
     if (!d) return;
+    if (this.moveShapeDragWithSpace(e)) return;
     const pxPerUnit = this.pixelsPerWorldUnit(d.anchor, d.normal);
     const dyPixels = d.heightScreenY - e.clientY;
     if (e.ctrlKey) {
@@ -4977,8 +5006,49 @@ export class Scene {
         d.height = Math.max(1, dyPixels / pxPerUnit);
       }
     }
+    d.lastClientY = e.clientY;
+    d.lastHit = this.rayPlaneHit(e, d.plane) ?? d.lastHit;
     this.updateShapeDragMesh();
   }
+
+  /**
+   * Space held during a drag-to-size placement: the shape is carried with the
+   * pointer, keeping its size, the way Space repositions a shape mid-drag in
+   * Illustrator. The anchor and the preview move together along the plane the
+   * shape sits on, so once Space is let go, sizing carries on from where the
+   * shape now is — nothing jumps. Returns whether it took the move over.
+   */
+  private moveShapeDragWithSpace(e: PointerEvent): boolean {
+    const d = this.shapeDrag;
+    if (!d || !this.spaceDown) return false;
+    const cur = this.rayPlaneHit(e, d.plane);
+    if (cur && d.lastHit) {
+      const shift = cur.clone().sub(d.lastHit);
+      d.anchor.add(shift);
+      d.mesh.position.add(shift);
+      d.plane.setFromNormalAndCoplanarPoint(d.normal, d.anchor);
+    }
+    if (cur) d.lastHit = cur;
+    // The height is measured from a screen row; carry that along too, or the
+    // height would jump the moment Space is let go.
+    if (d.phase === "height" && d.lastClientY !== undefined) {
+      d.heightScreenY += e.clientY - d.lastClientY;
+    }
+    d.lastClientY = e.clientY;
+    return true;
+  }
+
+  private onSpaceKey = (e: KeyboardEvent) => {
+    if (e.code !== "Space") return;
+    const target = e.target;
+    if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
+    const down = e.type === "keydown";
+    // Only means something mid-placement; anywhere else Space is left alone.
+    if (down ? !this.shapeDrag : !this.spaceDown) return;
+    this.spaceDown = down;
+    if (down) e.preventDefault();
+    this.renderer.domElement.style.cursor = down ? "move" : "crosshair";
+  };
 
   private updateShapeDragMesh() {
     const d = this.shapeDrag;
@@ -5107,6 +5177,7 @@ export class Scene {
     }
     d.phase = "height";
     d.heightScreenY = e.clientY;
+    d.lastClientY = e.clientY;
     d.height = (d.kind === "capsule" || d.kind === "cone" || d.kind === "pyramid")
       ? d.radius * 2
       : d.kind === "torus"
@@ -7998,19 +8069,7 @@ export class Scene {
         this.multiGizmoPivot.scale.set(1, 1, 1);
         this.multiGizmoPivot.updateMatrixWorld(true);
       }
-      if (this.pendingCollisionId) {
-        if (this.collisionRafId !== null) {
-          cancelAnimationFrame(this.collisionRafId);
-          this.collisionRafId = null;
-        }
-        const pendingId = this.pendingCollisionId;
-        const pendingSnaps = this.pendingCollisionSnaps;
-        this.pendingCollisionId = null;
-        this.pendingCollisionSnaps = [];
-        if (this.showSelectedCollisionContacts) {
-          this.doRefreshCollisionContactsFor(pendingId, pendingSnaps);
-        }
-      }
+      this.flushCollisionRefresh();
     } else {
       this.clearCollisionContacts();
 
@@ -8293,6 +8352,165 @@ export class Scene {
     });
   };
 
+  /** What the object `id` — at `moving` bounds — can snap to: the surfaces of
+   *  every other visible object near it. `travelling` are the ids that are
+   *  moving with it, which are never targets. */
+  private collectSnapTargets(id: string, travelling: Set<string>, moving: Bounds3): SnapTarget[] {
+    const targets: SnapTarget[] = [];
+    const movingRoot = this.assemblyGroups.get(id) ?? this.parts.get(id)?.group;
+    for (const [targetId, view] of this.parts) {
+      if (
+        travelling.has(targetId) || !view.group.visible ||
+        (movingRoot && movingRoot !== view.group && !!movingRoot.getObjectById(view.group.id))
+      ) continue;
+      const targetBounds = this.boundsOf(view.group);
+      const surfaces = this.surfaceSnapTargets(targetId, view.group, moving);
+      if (surfaces.length) targets.push(...surfaces);
+      else {
+        // Curved meshes may have no axis-aligned surface triangles. They can
+        // still use their bounds as a fallback, but only when the two 3D
+        // boxes are genuinely nearby. Previously a matching X or Y value
+        // could magnetise objects that were far apart on another axis.
+        const gapSquared = [0, 1, 2].reduce((sum, axis) => {
+          const gap = moving.max[axis] < targetBounds.min[axis]
+            ? targetBounds.min[axis] - moving.max[axis]
+            : targetBounds.max[axis] < moving.min[axis]
+              ? moving.min[axis] - targetBounds.max[axis]
+              : 0;
+          return sum + gap * gap;
+        }, 0);
+        if (gapSquared <= 4) targets.push({ id: targetId, bounds: targetBounds });
+      }
+    }
+    return targets;
+  }
+
+  /**
+   * Snaps the face(s) a resize handle is dragging onto nearby objects, the way
+   * a move snaps: the dragged face stops on another object's face, edge line or
+   * centre. `factors` is adjusted in place, and `apply` puts the object at
+   * those factors (snapping is solved against the bounds it really has).
+   * Returns the alignments that ended up active.
+   *
+   * Only a face that looks along a world axis has a coordinate to snap; a
+   * tilted object is left alone, as is a uniform scale, where no single face
+   * is being dragged.
+   */
+  private snapResizeFaces(
+    drag: ResizeDrag,
+    view: PartView,
+    faceAxes: number[],
+    factors: Vec3,
+    apply: (factors: Vec3) => void,
+    fromCentre: boolean,
+  ): import("../snapping/snap").ActiveSnap[] {
+    const active: import("../snapping/snap").ActiveSnap[] = [];
+    const worldAxes = ["x", "y", "z"] as const;
+    const targets = this.collectSnapTargets(drag.id, new Set([drag.id]), this.boundsOf(view.group));
+    if (!targets.length) return active;
+    const tolerance = this.worldSnapTolerance(view.group.position);
+    for (const a of faceAxes) {
+      if (!drag.handleSigns[a]) continue;
+      const normal = new THREE.Vector3();
+      normal.setComponent(a, drag.handleSigns[a]);
+      normal.applyQuaternion(drag.rotation);
+      const w = [0, 1, 2].find((i) => Math.abs(normal.getComponent(i)) > 0.999);
+      if (w === undefined) continue;
+      const outward = Math.sign(normal.getComponent(w));
+      const bounds = this.boundsOf(view.group);
+      const hit = snapFace(
+        outward > 0 ? bounds.max[w] : bounds.min[w],
+        worldAxes[w],
+        outward > 0 ? "max" : "min",
+        targets,
+        tolerance,
+      );
+      if (!hit) continue;
+      // The opposite face stays put, so the length changes by exactly how far
+      // this one moves; scaling about the centre moves both faces by that much.
+      const startLength = Math.max(0.01, drag.rawSize[a] * drag.startScale[a]);
+      const length = startLength * factors[a] + hit.distance * outward * (fromCentre ? 2 : 1);
+      factors[a] = Math.max(0.01, length) / startLength;
+      apply(factors);
+      active.push(hit.snap);
+    }
+    return active;
+  }
+
+  /**
+   * The same, for a scale that moves every face at once (proportions locked, or
+   * Shift): snaps whichever face is nearest to another object.
+   *
+   * With a single factor `u`, every face's coordinate is a straight line in
+   * `u`, so two measurements give each face's slope and the factor that
+   * lands it on a target follows directly. `build` turns `u` into the three
+   * factors; `apply` puts the object at them. Only an object whose axes lie
+   * along the world's has faces with a coordinate to snap.
+   */
+  private snapUniformResize(
+    drag: ResizeDrag,
+    view: PartView,
+    u0: number,
+    build: (u: number) => Vec3,
+    apply: (factors: Vec3) => void,
+  ): import("../snapping/snap").ActiveSnap[] {
+    const worldAxes = ["x", "y", "z"] as const;
+    const along = [0, 1, 2].map((a) => {
+      const axis = new THREE.Vector3();
+      axis.setComponent(a, 1);
+      axis.applyQuaternion(drag.rotation);
+      return [0, 1, 2].find((i) => Math.abs(axis.getComponent(i)) > 0.999);
+    });
+    if (along.some((w) => w === undefined) || new Set(along).size !== 3) return [];
+
+    const targets = this.collectSnapTargets(drag.id, new Set([drag.id]), this.boundsOf(view.group));
+    if (!targets.length) return [];
+    const tolerance = this.worldSnapTolerance(view.group.position);
+
+    const boundsAt = (u: number) => {
+      apply(build(u));
+      return this.boundsOf(view.group);
+    };
+    const step = Math.max(0.05, u0 * 0.05);
+    const here = boundsAt(u0);
+    const ahead = boundsAt(u0 + step);
+
+    let best: { distance: number; slope: number; snap: import("../snapping/snap").ActiveSnap } | null = null;
+    for (let w = 0; w < 3; w++) {
+      for (const side of ["min", "max"] as const) {
+        const slope = (ahead[side][w] - here[side][w]) / step;
+        // A face on the fixed side does not move as the scale changes.
+        if (Math.abs(slope) < 1e-6) continue;
+        const hit = snapFace(here[side][w], worldAxes[w], side, targets, tolerance);
+        if (hit && (!best || Math.abs(hit.distance) < Math.abs(best.distance))) {
+          best = { distance: hit.distance, slope, snap: hit.snap };
+        }
+      }
+    }
+    if (!best) {
+      apply(build(u0));
+      return [];
+    }
+    apply(build(Math.max(0.01, u0 + best.distance / best.slope)));
+    return [best.snap];
+  }
+
+  /** Draws whatever contact a finished collision refresh was still waiting to. */
+  private flushCollisionRefresh() {
+    if (!this.pendingCollisionId) return;
+    if (this.collisionRafId !== null) {
+      cancelAnimationFrame(this.collisionRafId);
+      this.collisionRafId = null;
+    }
+    const pendingId = this.pendingCollisionId;
+    const pendingSnaps = this.pendingCollisionSnaps;
+    this.pendingCollisionId = null;
+    this.pendingCollisionSnaps = [];
+    if (this.showSelectedCollisionContacts) {
+      this.doRefreshCollisionContactsFor(pendingId, pendingSnaps);
+    }
+  }
+
   /** Snaps `obj` to the guides around it and returns how far that moved it,
    *  so a multi-object drag can carry the rest of the selection along by the
    *  same amount instead of leaving them behind. */
@@ -8320,32 +8538,7 @@ export class Scene {
       this.grab?.active ? this.grab.items.map((item) => item.id) : [id],
     );
     const moving = this.boundsOf(obj);
-    const targets: SnapTarget[] = [];
-    const movingRoot = this.assemblyGroups.get(id) ?? this.parts.get(id)?.group;
-    for (const [targetId, view] of this.parts) {
-      if (
-        travelling.has(targetId) || !view.group.visible ||
-        (movingRoot && movingRoot !== view.group && !!movingRoot.getObjectById(view.group.id))
-      ) continue;
-      const targetBounds = this.boundsOf(view.group);
-      const surfaces = this.surfaceSnapTargets(targetId, view.group, moving);
-      if (surfaces.length) targets.push(...surfaces);
-      else {
-        // Curved meshes may have no axis-aligned surface triangles. They can
-        // still use their bounds as a fallback, but only when the two 3D
-        // boxes are genuinely nearby. Previously a matching X or Y value
-        // could magnetise objects that were far apart on another axis.
-        const gapSquared = [0, 1, 2].reduce((sum, axis) => {
-          const gap = moving.max[axis] < targetBounds.min[axis]
-            ? targetBounds.min[axis] - moving.max[axis]
-            : targetBounds.max[axis] < moving.min[axis]
-              ? moving.min[axis] - targetBounds.max[axis]
-              : 0;
-          return sum + gap * gap;
-        }, 0);
-        if (gapSquared <= 4) targets.push({ id: targetId, bounds: targetBounds });
-      }
-    }
+    const targets = this.collectSnapTargets(id, travelling, moving);
 
     const result = snapBounds(moving, targets, this.worldSnapTolerance(obj.position));
     const featureDelta = this.meshFeatureSnap(id, travelling, this.worldSnapTolerance(obj.position));
@@ -9089,7 +9282,7 @@ export class Scene {
       this.clearCollisionContacts();
       return;
     }
-    if (this.grab?.active || this.gizmo.dragging) {
+    if (this.grab?.active || this.gizmo.dragging || this.resizeDrag) {
       this.pendingCollisionId = id;
       this.pendingCollisionSnaps = activeSnaps;
       if (this.collisionRafId === null) {
@@ -9303,6 +9496,7 @@ export class Scene {
   /** `e`'s position as clip-space [-1, 1] coordinates within the view cube's
    *  own viewport, or null when it falls outside that corner entirely. */
   private navNdc(e: PointerEvent): { x: number; y: number } | null {
+    if (!this.navCubeVisible) return null;
     const rect = this.renderer.domElement.getBoundingClientRect();
     const nav = this.navRect();
     const px = e.clientX - rect.left - nav.x;
@@ -9387,7 +9581,10 @@ export class Scene {
     this.clearFaceHover();
 
     const navNdc = this.navNdc(e);
-    if (navNdc) {
+    // The cube floats over the model with no panel behind it, so only a press
+    // on the cube itself belongs to it; anywhere else in that corner is the
+    // scene underneath.
+    if (navNdc && this.navCube.hitTest(navNdc.x, navNdc.y)) {
       // A click vs. a drag is only distinguishable in onPointerUp/Move (see
       // the resize/align/body-drag patterns above) — start passive here,
       // same as everything else that begins on the canvas.
@@ -9674,8 +9871,44 @@ export class Scene {
    * click threshold, so a plain click still falls through to pick() exactly
    * as before — this never changes what a non-dragging click does.
    */
+  /** Lights up the cube region under the pointer, and shows it is clickable. */
+  private updateNavHover(e: PointerEvent | null) {
+    let id: string | null = null;
+    if (e && this.navCubeVisible && !this.navDrag && (e.buttons & 1) === 0) {
+      const ndc = this.navNdc(e);
+      const hit = ndc && this.navCube.hitTest(ndc.x, ndc.y);
+      id = hit ? hit.id : null;
+    }
+    this.navCube.setHover(id);
+    this.navHovering = id !== null;
+    if (!this.navHovering) this.syncNavCursor();
+  }
+
+  /** The cube shows a pointer cursor. onPointerMove sets the cursor its own
+   *  way on most of its branches, so this also runs once it has finished. */
+  private syncNavCursor() {
+    const canvas = this.renderer.domElement;
+    if (this.navHovering) {
+      canvas.style.cursor = "pointer";
+      this.navCursorSet = true;
+    } else if (this.navCursorSet) {
+      canvas.style.cursor = "";
+      this.navCursorSet = false;
+    }
+  }
+
+  /** Shows or hides the view cube and its axis triad. */
+  setNavCubeVisible(visible: boolean) {
+    this.navCubeVisible = visible;
+    if (!visible) {
+      this.navDrag = null;
+      this.updateNavHover(null);
+    }
+  }
+
   private onPointerMove = (e: PointerEvent) => {
-    if (this.toolMode === "measure") { this.tape.move(e); return; }
+    if (this.toolMode === "measure") { this.updateNavHover(null); this.tape.move(e); return; }
+    this.updateNavHover(e);
     // Resize Face's own handles are on screen: the face being resized is
     // already shown selected (solid fill), and clicking a handle — not a
     // different face — is the only thing to do here now, so a hover
@@ -9904,37 +10137,74 @@ export class Scene {
           this.onTransformObject?.(target.id, { scale: targetScale, position: targetPosition });
         }
       } else {
-        const scale = [...this.resizeDrag.startScale] as Vec3;
-        for (let i = 0; i < 3; i++) scale[i] = Math.max(0.01, this.resizeDrag.startScale[i] * factors[i]);
-        const view = this.parts.get(this.resizeDrag.id);
-        const localShift = new THREE.Vector3();
-        // Alt held: keep the object's own centre fixed instead of the
-        // opposite handle — every axis grows/shrinks symmetrically about
-        // where it already is, rather than anchoring on whichever corner
-        // or face is diagonally/directly opposite the one being dragged.
-        // A zero shift IS "scale from centre": the shift below exists
-        // specifically to slide the centre so the OPPOSITE handle stays
-        // put, so skipping it is the whole change.
-        if (!e.altKey) {
-          for (let i = 0; i < 3; i++) {
-            localShift.setComponent(
-              i,
-              this.resizeDrag.handleSigns[i] * this.resizeDrag.rawSize[i] *
-                (scale[i] - this.resizeDrag.startScale[i]) / 2,
-            );
+        const drag = this.resizeDrag;
+        const view = this.parts.get(drag.id);
+        // Puts the object at these factors and returns what that is in the
+        // document. Kept as a function so a snap can re-solve it.
+        const place = (f: Vec3): { scale: Vec3; position: Vec3 } => {
+          const scale = [...drag.startScale] as Vec3;
+          for (let i = 0; i < 3; i++) scale[i] = Math.max(0.01, drag.startScale[i] * f[i]);
+          const localShift = new THREE.Vector3();
+          // Alt held: keep the object's own centre fixed instead of the
+          // opposite handle — every axis grows/shrinks symmetrically about
+          // where it already is, rather than anchoring on whichever corner
+          // or face is diagonally/directly opposite the one being dragged.
+          // A zero shift IS "scale from centre": the shift below exists
+          // specifically to slide the centre so the OPPOSITE handle stays
+          // put, so skipping it is the whole change.
+          if (!e.altKey) {
+            for (let i = 0; i < 3; i++) {
+              localShift.setComponent(
+                i,
+                drag.handleSigns[i] * drag.rawSize[i] * (scale[i] - drag.startScale[i]) / 2,
+              );
+            }
+          }
+          const worldShift = localShift.applyQuaternion(drag.rotation);
+          const position: Vec3 = [
+            drag.startPosition[0] + worldShift.x,
+            drag.startPosition[1] + worldShift.y,
+            drag.startPosition[2] + worldShift.z,
+          ];
+          if (view) {
+            view.group.scale.fromArray(scale);
+            view.group.position.copy(drag.startGroupPosition).add(worldShift);
+          }
+          return { scale, position };
+        };
+        let placed = place(factors);
+
+        // Snap the face being dragged onto other objects, and light up the
+        // contact when it lands, exactly as a move does. A resize that drags
+        // one face (or an unlocked corner) snaps that face; a uniform scale
+        // moves every face at once, so it snaps whichever one is nearest.
+        if (view) {
+          if (this.snapEnabled) {
+            let faceAxes: number[] = [];
+            let uniform: ((u: number) => Vec3) | null = null;
+            if (constrainedNow) uniform = (u) => [u, u, u];
+            else if (drag.lockAspectXY) {
+              if (drag.axis === 2) faceAxes = [2];
+              else uniform = (u) => [u, u, 1];
+            } else if (drag.cornerSigns) faceAxes = [0, 1];
+            else if (drag.axis !== null) faceAxes = [drag.axis];
+            else uniform = (u) => [u, u, u];
+            const apply = (f: Vec3) => { placed = place(f); };
+            const active = faceAxes.length
+              ? this.snapResizeFaces(drag, view, faceAxes, factors, apply, e.altKey)
+              : uniform
+                ? this.snapUniformResize(drag, view, factors[0], uniform, apply)
+                : [];
+            if (active.length) this.guides.show(active, this.boundsOf(view.group));
+            else this.guides.clear();
+            if (this.showSelectedCollisionContacts) this.refreshCollisionContactsFor(drag.id, active);
+          } else {
+            this.guides.clear();
+            this.collisionContactCache.delete(drag.id);
+            this.clearCollisionContacts();
           }
         }
-        const worldShift = localShift.applyQuaternion(this.resizeDrag.rotation);
-        const position: Vec3 = [
-          this.resizeDrag.startPosition[0] + worldShift.x,
-          this.resizeDrag.startPosition[1] + worldShift.y,
-          this.resizeDrag.startPosition[2] + worldShift.z,
-        ];
-        if (view) {
-          view.group.scale.fromArray(scale);
-          view.group.position.copy(this.resizeDrag.startGroupPosition).add(worldShift);
-        }
-        this.onTransformObject?.(this.resizeDrag.id, { scale, position });
+        this.onTransformObject?.(drag.id, placed);
       }
       this.updateResizeOverlay();
       return;
@@ -10189,6 +10459,10 @@ export class Scene {
         this.updateDimensionVisibility(this.resizeHoverIndex);
       }
       this.scaleHintEl.style.display = "none";
+      // The alignment guide goes with the drag; the contact highlight stays
+      // if the resized face is touching something.
+      this.guides.clear();
+      this.flushCollisionRefresh();
       return;
     }
 
@@ -10630,6 +10904,7 @@ export class Scene {
 
   private onWindowBlur = () => {
     this.altDown = false;
+    this.spaceDown = false;
     if (this.grab || this.resizeDrag || this.pushPullDrag || this.navDrag || this.marquee || this.alignPointDrag) {
       const g = this.grab;
       this.grab = null;
@@ -10643,6 +10918,8 @@ export class Scene {
         this.gizmo.enabled = true;
         this.onDragChange?.(false);
         this.scaleHintEl.style.display = "none";
+        this.guides.clear();
+        this.flushCollisionRefresh();
       }
       if (this.pushPullDrag) {
         const drag = this.pushPullDrag;
@@ -10901,6 +11178,7 @@ export class Scene {
    *  cost a whole extra renderer for one small overlay. Always mirrors
    *  whichever direction the main camera is currently looking from. */
   private renderNavCube() {
+    if (!this.navCubeVisible) return;
     const offsetDir = this.camera.position.clone().sub(this.controls.target).normalize();
     this.navCube.syncOrientation(offsetDir, this.camera.up);
 
@@ -10910,11 +11188,7 @@ export class Scene {
     // WebGL's viewport/scissor origin is bottom-left; navRect() is top-left
     // (CSS/pointer-event space), so the y coordinate flips here.
     const glY = h - nav.y - nav.h;
-    this.renderer.setScissorTest(true);
-    this.renderer.setScissor(nav.x, glY, nav.w, nav.h);
-    this.renderer.setViewport(nav.x, glY, nav.w, nav.h);
-    this.renderer.render(this.navCube.scene, this.navCube.camera);
-    this.renderer.setScissorTest(false);
+    this.navCube.render(this.renderer, nav.x, glY, nav.w);
     this.renderer.setViewport(0, 0, w, h);
   }
 
@@ -10945,6 +11219,8 @@ export class Scene {
     window.removeEventListener("blur", this.onWindowBlur);
     window.removeEventListener("keydown", this.onModifierChange);
     window.removeEventListener("keyup", this.onModifierChange);
+    window.removeEventListener("keydown", this.onSpaceKey);
+    window.removeEventListener("keyup", this.onSpaceKey);
     this.gizmo.removeEventListener("dragging-changed", this.onDraggingChanged);
     this.gizmo.removeEventListener("objectChange", this.onGizmoChange);
     this.gizmo.dispose();
@@ -10980,7 +11256,6 @@ export class Scene {
     this.solidMaterialCache.clear();
     this.host.removeChild(this.renderer.domElement);
     this.host.removeChild(this.marqueeEl);
-    this.host.removeChild(this.navCubeFrame);
     this.host.removeChild(this.pushPullLabelEl);
   }
 }

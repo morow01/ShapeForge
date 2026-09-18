@@ -29,6 +29,7 @@ interface Props {
   decimals: number;
   appearance: AppearancePreference;
   plateVisible: boolean;
+  viewCubeVisible: boolean;
   plateSize: BuildPlateSize;
   snapToGrid: boolean;
   snapToObjects: boolean;
@@ -42,6 +43,7 @@ interface Props {
   onDecimals: (decimals: number) => void;
   onAppearance: (appearance: AppearancePreference) => void;
   onPlateVisible: (visible: boolean) => void;
+  onViewCubeVisible: (visible: boolean) => void;
   onPlateSize: (size: BuildPlateSize) => void;
   onSnapToGrid: (enabled: boolean) => void;
   onSnapToObjects: (enabled: boolean) => void;
@@ -93,6 +95,7 @@ export function SettingsModal({
   decimals,
   appearance,
   plateVisible,
+  viewCubeVisible,
   plateSize,
   snapToGrid,
   snapToObjects,
@@ -104,6 +107,7 @@ export function SettingsModal({
   onDecimals,
   onAppearance,
   onPlateVisible,
+  onViewCubeVisible,
   onPlateSize,
   onSnapToGrid,
   onSnapToObjects,
@@ -237,6 +241,13 @@ export function SettingsModal({
                     <small>Turns off edge lines on every object at once for significantly faster scene performance</small>
                   </span>
                   <SettingsToggle checked={hideAllLines} onChange={onHideAllLines} label="Hide all lines" />
+                </div>
+                <div className="settings-row">
+                  <span>
+                    <strong>Show view cube</strong>
+                    <small>The orientation cube and axis triad in the top-right of the viewport. The Home key still resets the view when it is hidden</small>
+                  </span>
+                  <SettingsToggle checked={viewCubeVisible} onChange={onViewCubeVisible} label="Show view cube" />
                 </div>
               </div>
             )}

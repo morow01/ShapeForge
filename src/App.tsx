@@ -14,6 +14,7 @@ import {
   AlignNodeIcon,
   AlignToolIcon,
   BuildPlateIcon,
+  ViewCubeIcon,
   ChevronDownIcon,
   CollisionHighlightIcon,
   CombineIcon,
@@ -174,6 +175,7 @@ const toSpec = (n: SceneNode): NodeSpec => {
       id: n.id,
       sources: n.sources.map(toSpec),
       keep: n.keep,
+      piece: n.piece,
       position: n.position,
       rotation: n.rotation,
       scale: n.scale,
@@ -318,7 +320,7 @@ const shapeOf = (n: SceneNode): unknown => {
   // Thickness is part of the shape for artwork, so a change to it rebuilds.
   if (n.type === "import") return [n.id, "import", n.blobId, n.svg?.thickness, facets];
   if (n.type === "edit") return [n.id, "edit", shapeOf(n.base), n.ops, facets];
-  if (n.type === "build") return [n.id, "build", n.sources.map(shapeOf), n.keep, facets];
+  if (n.type === "build") return [n.id, "build", n.sources.map(shapeOf), n.keep, n.piece, facets];
   return [n.id, n.kind, n.params, n.text, n.fontName, n.sketch, facets];
 };
 
@@ -346,6 +348,7 @@ const CELL_DISPLAY_KEY = "cad.shapeBuilderDisplay";
 const DECIMAL_PLACES_KEY = "cad.decimalPlaces.v2";
 const APPEARANCE_KEY = "cad.appearance";
 const BUILD_PLATE_VISIBLE_KEY = "cad.buildPlateVisible";
+const VIEW_CUBE_VISIBLE_KEY = "cad.viewCubeVisible";
 const BUILD_PLATE_SIZE_KEY = "cad.buildPlateSize";
 
 /** What each preset costs, so the choice is not guesswork — measured on a
@@ -997,6 +1000,12 @@ export function App() {
   useEffect(() => {
     localStorage.setItem(BUILD_PLATE_VISIBLE_KEY, plateVisible ? "on" : "off");
   }, [plateVisible]);
+  const [viewCubeVisible, setViewCubeVisible] = useState(
+    () => localStorage.getItem(VIEW_CUBE_VISIBLE_KEY) !== "off",
+  );
+  useEffect(() => {
+    localStorage.setItem(VIEW_CUBE_VISIBLE_KEY, viewCubeVisible ? "on" : "off");
+  }, [viewCubeVisible]);
 
   const [plateSize, setPlateSize] = useState<BuildPlateSize>(() => {
     try {
@@ -3492,16 +3501,44 @@ export function App() {
 
   const keptCount = buildCells.filter((c) => c.kept).length;
 
-  /** Commits the session: the kept regions become one built shape. */
-  const commitBuild = useCallback(() => {
+  /** Commits the session. Kept regions that touch become one built shape;
+   *  regions that end up apart from each other become separate objects. */
+  const commitBuild = useCallback(async () => {
     const kept = sceneRef.current?.keptCells() ?? [];
     if (!kept.length) {
       setError("Click at least one region to put it in the shape, then press Enter.");
       return;
     }
-    if (buildSources) shapeBuild(buildSources, kept);
+    if (!buildSources || buildBusy) return;
+    // How many separate solids the kept regions come to, and which shape each
+    // is mostly made of, is only known once they have been fused — which is
+    // the kernel's to say.
+    let owners: number[] = [];
+    setBuildBusy(true);
+    try {
+      const sources = buildSources
+        .map((id) => findNode(useDoc.getState().nodes, id))
+        .filter((n): n is SceneNode => !!n);
+      ({ owners } = await kernel.analyseBuild({
+        type: "build",
+        id: "build-preview",
+        sources: sources.map(toSpec),
+        keep: kept,
+        position: [0, 0, 0],
+        rotation: [0, 0, 0],
+        scale: [1, 1, 1],
+        isHole: false,
+      }));
+    } catch {
+      // Not being able to tell is no reason to lose the shape: fall back to
+      // the single built shape this always made.
+      owners = [];
+    } finally {
+      setBuildBusy(false);
+    }
+    shapeBuild(buildSources, kept, undefined, owners);
     setToolMode("select");
-  }, [buildSources, shapeBuild]);
+  }, [buildSources, buildBusy, shapeBuild]);
 
   /** Drop (D): let the selection fall onto whatever is underneath it. The
    *  geometry that answers "what is underneath" only exists in the viewport,
@@ -4310,6 +4347,15 @@ export function App() {
               <BuildPlateIcon className="topbar-icon" />
             </button>
             <button
+              className={`topbar-icon-btn ${viewCubeVisible ? "on" : ""}`}
+              onClick={() => setViewCubeVisible((v) => !v)}
+              title={viewCubeVisible ? "Hide view cube" : "Show view cube"}
+              aria-pressed={viewCubeVisible}
+              aria-label="Toggle view cube"
+            >
+              <ViewCubeIcon className="topbar-icon" />
+            </button>
+            <button
               className={`topbar-icon-btn ${gridSnapEnabled ? "on" : ""}`}
               onClick={() => setGridSnapEnabled((v) => !v)}
               title={
@@ -4896,6 +4942,8 @@ export function App() {
           gridSnapEnabled={gridSnapEnabled}
           showSelectedCollisionContacts={showSelectedCollisionContacts}
           plateVisible={plateVisible}
+          viewCubeVisible={viewCubeVisible}
+          onHideViewCube={() => setViewCubeVisible(false)}
           plateSize={plateSize}
           displayUnit={displayUnit}
           decimalPlaces={decimalPlaces}
@@ -4964,119 +5012,13 @@ export function App() {
               {pendingPrimitive === "sketch"
                 ? "Click the workplane or a flat face to draw on"
                 : pendingPrimitive === "sphere"
-                  ? "Click to place at default size, or drag to set size"
+                  ? "Click to place at default size, or drag to set size · hold Space to move it"
                   : pendingPrimitive === "box" || pendingPrimitive === "wedge" || pendingPrimitive === "triangle"
                     || pendingPrimitive === "cylinder" || pendingPrimitive === "cone" || pendingPrimitive === "pyramid"
-                    ? "Click to place at default size, or drag to set size then height"
+                    ? "Click to place at default size, or drag to set size then height · hold Space to move it"
                     : "Choose a face or the workplane"}
             </span>
             <button onClick={() => { setPendingPrimitive(null); setToolMode("select"); }}>Cancel</button>
-          </div>
-        )}
-        {toolMode === "align" && (
-          <div className="edge-bar align-bar">
-            <div className="edge-kind-buttons" role="group" aria-label="Align mode">
-              <button
-                type="button"
-                className={alignSubMode === "box" ? "active" : ""}
-                onClick={() => setAlignSubMode("box")}
-                title="Box Align — align edges, centres, or faces with anchor"
-                aria-label="Box Align"
-              >
-                <span style={{ fontSize: 11, fontWeight: 700 }}>Box</span>
-              </button>
-              <button
-                type="button"
-                className={alignSubMode === "points" ? "active" : ""}
-                onClick={() => setAlignSubMode("points")}
-                title="Node Align — drag node to node"
-                aria-label="Node Align"
-              >
-                <span style={{ fontSize: 11, fontWeight: 700 }}>Node</span>
-              </button>
-            </div>
-
-            {alignSubMode === "box" && (
-              <>
-                {selectedIds.length === 2 && currentAnchorNode && currentMovingNode ? (
-                  <div className="align-bar-objects">
-                    <div className="align-obj-badge anchor" title="Stationary anchor (does not move)">
-                      <span className="align-badge-label">Anchor:</span>
-                      <strong className="align-badge-name">{currentAnchorNode.name}</strong>
-                    </div>
-                    <button
-                      type="button"
-                      className="align-swap-btn"
-                      onClick={handleSwapAlign}
-                      title="Swap anchor and moving object"
-                      aria-label="Swap anchor and moving object"
-                    >
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="m7 16-4-4 4-4M3 12h14M17 8l4 4-4 4M21 12H7" />
-                      </svg>
-                      <span>Swap</span>
-                    </button>
-                    <div className="align-obj-badge moving" title="Moving object (aligns to anchor)">
-                      <span className="align-badge-label">Moving:</span>
-                      <strong className="align-badge-name">{currentMovingNode.name}</strong>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="align-bar-anchor">
-                    <span style={{ color: "#6e828d", fontSize: 11 }}>Anchor:</span>
-                    <strong>{currentAnchorName}</strong>
-                    {selectedIds.length === 2 && (
-                      <button
-                        type="button"
-                        className="align-swap-btn"
-                        onClick={handleSwapAlign}
-                        title="Designate an anchor object"
-                      >
-                        Set Anchor
-                      </button>
-                    )}
-                    {selectedIds.length > 2 && (
-                      <span style={{ color: "#8a9ba5", fontSize: 10 }}>
-                        ({selectedIds.length - (effectiveAlignFixedId ? 1 : 0)} moving)
-                      </span>
-                    )}
-                  </div>
-                )}
-                <div className="align-bar-axes">
-                  <div className="align-axis-group">
-                    <span className="align-axis-badge x">X</span>
-                    <button type="button" className="align-axis-btn" onClick={() => sceneRef.current?.alignSelection(0, "min")} title="Align X Minimum">Min</button>
-                    <button type="button" className="align-axis-btn" onClick={() => sceneRef.current?.alignSelection(0, "center")} title="Align X Centre">Mid</button>
-                    <button type="button" className="align-axis-btn" onClick={() => sceneRef.current?.alignSelection(0, "max")} title="Align X Maximum">Max</button>
-                  </div>
-                  <div className="align-axis-group">
-                    <span className="align-axis-badge y">Y</span>
-                    <button type="button" className="align-axis-btn" onClick={() => sceneRef.current?.alignSelection(1, "min")} title="Align Y Minimum">Min</button>
-                    <button type="button" className="align-axis-btn" onClick={() => sceneRef.current?.alignSelection(1, "center")} title="Align Y Centre">Mid</button>
-                    <button type="button" className="align-axis-btn" onClick={() => sceneRef.current?.alignSelection(1, "max")} title="Align Y Maximum">Max</button>
-                  </div>
-                  <div className="align-axis-group">
-                    <span className="align-axis-badge z">Z</span>
-                    <button type="button" className="align-axis-btn" onClick={() => sceneRef.current?.alignSelection(2, "min")} title="Align Z Minimum">Min</button>
-                    <button type="button" className="align-axis-btn" onClick={() => sceneRef.current?.alignSelection(2, "center")} title="Align Z Centre">Mid</button>
-                    <button type="button" className="align-axis-btn" onClick={() => sceneRef.current?.alignSelection(2, "max")} title="Align Z Maximum">Max</button>
-                  </div>
-                </div>
-              </>
-            )}
-
-            {alignSubMode === "points" && (
-              <span className="align-hint">Drag a coloured node to a target node to snap</span>
-            )}
-
-            <button
-              type="button"
-              className="align-done-btn"
-              onClick={() => setToolMode("select")}
-              title="Finish aligning (Esc)"
-            >
-              Done
-            </button>
           </div>
         )}
         {workingLabel && (
@@ -5259,6 +5201,122 @@ export function App() {
               }}>Cancel</button>
             </div>
           </section>
+        )}
+
+        {toolMode === "align" && (
+          <div className="face-settings-panel align-settings-panel">
+            <strong>Align</strong>
+            <p>
+              {alignSubMode === "points"
+                ? "Drag a coloured node to a target node to snap."
+                : "Line objects up on any axis. Click a dot on an object in the viewport, or use the buttons below."}
+            </p>
+
+            <div className="binary-choice" role="group" aria-label="Align mode">
+              <button
+                type="button"
+                className={alignSubMode === "box" ? "on" : ""}
+                aria-pressed={alignSubMode === "box"}
+                onClick={() => setAlignSubMode("box")}
+                title="Box Align — align edges, centres, or faces with anchor"
+              >
+                Box
+              </button>
+              <button
+                type="button"
+                className={alignSubMode === "points" ? "on" : ""}
+                aria-pressed={alignSubMode === "points"}
+                onClick={() => setAlignSubMode("points")}
+                title="Node Align — drag node to node"
+              >
+                Node
+              </button>
+            </div>
+
+            {alignSubMode === "box" && (
+              <>
+                <div className="align-panel-section">
+                  <span className="field-label">Objects</span>
+                  {selectedIds.length === 2 && currentAnchorNode && currentMovingNode ? (
+                    <>
+                      <div className="align-panel-object anchor" title="Stationary anchor (does not move)">
+                        <span className="align-badge-label">Anchor</span>
+                        <strong>{currentAnchorNode.name}</strong>
+                      </div>
+                      <button
+                        type="button"
+                        className="align-panel-swap"
+                        onClick={handleSwapAlign}
+                        title="Swap anchor and moving object"
+                        aria-label="Swap anchor and moving object"
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <path d="m7 16-4-4 4-4M3 12h14M17 8l4 4-4 4M21 12H7" />
+                        </svg>
+                        Swap anchor and moving
+                      </button>
+                      <div className="align-panel-object moving" title="Moving object (aligns to anchor)">
+                        <span className="align-badge-label">Moving</span>
+                        <strong>{currentMovingNode.name}</strong>
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <div className="align-panel-object anchor">
+                        <span className="align-badge-label">Anchor</span>
+                        <strong>{currentAnchorName}</strong>
+                      </div>
+                      {selectedIds.length === 2 && (
+                        <button
+                          type="button"
+                          className="align-panel-swap"
+                          onClick={handleSwapAlign}
+                          title="Designate an anchor object"
+                        >
+                          Set anchor
+                        </button>
+                      )}
+                      {selectedIds.length > 2 && (
+                        <small>{selectedIds.length - (effectiveAlignFixedId ? 1 : 0)} moving</small>
+                      )}
+                    </>
+                  )}
+                </div>
+
+                <div className="align-panel-section">
+                  <span className="field-label">Align to the anchor</span>
+                  {([["x", 0], ["y", 1], ["z", 2]] as const).map(([name, axis]) => (
+                    <div className="align-panel-axis" key={name}>
+                      <span className={`align-axis-badge ${name}`}>{name.toUpperCase()}</span>
+                      {([["min", "Min", "Minimum"], ["center", "Mid", "Centre"], ["max", "Max", "Maximum"]] as const).map(([anchor, label, word]) => (
+                        <button
+                          key={anchor}
+                          type="button"
+                          className="align-panel-btn"
+                          // Hovering or focusing a button ghosts where the objects would land.
+                          onMouseEnter={() => sceneRef.current?.previewAlignSelection(axis, anchor)}
+                          onMouseLeave={() => sceneRef.current?.previewAlignSelection(axis, null)}
+                          onFocus={() => sceneRef.current?.previewAlignSelection(axis, anchor)}
+                          onBlur={() => sceneRef.current?.previewAlignSelection(axis, null)}
+                          onClick={() => {
+                            sceneRef.current?.alignSelection(axis, anchor);
+                            sceneRef.current?.previewAlignSelection(axis, null);
+                          }}
+                          title={`Align ${name.toUpperCase()} ${word}`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
+            <button type="button" onClick={() => setToolMode("select")} title="Finish aligning (Esc)">
+              Done
+            </button>
+          </div>
         )}
 
         {toolMode === "build" && (
@@ -5918,7 +5976,7 @@ export function App() {
             </div>
           );
         })()}
-        {toolMode !== "measure" && toolMode !== "face" && toolMode !== "edge" && toolMode !== "build" && toolMode !== "cut" && !(toolMode === "place" && surfaceSource) && rightPanelTab === "shapes" && (
+        {toolMode !== "measure" && toolMode !== "face" && toolMode !== "edge" && toolMode !== "build" && toolMode !== "align" && toolMode !== "cut" && !(toolMode === "place" && surfaceSource) && rightPanelTab === "shapes" && (
           <section className="tool-section shape-library">
           <div className="panel-heading compact shape-library-header">
             <div><h1>Shape library</h1><p>Drag or click to add</p></div>
@@ -6001,7 +6059,7 @@ export function App() {
             if (file) void importSTLFile(file);
           }}
         />
-        {toolMode !== "measure" && toolMode !== "face" && toolMode !== "edge" && toolMode !== "build" && !(toolMode === "place" && surfaceSource) && (rightPanelTab === "properties" || toolMode === "cut") && (
+        {toolMode !== "measure" && toolMode !== "face" && toolMode !== "edge" && toolMode !== "build" && toolMode !== "align" && !(toolMode === "place" && surfaceSource) && (rightPanelTab === "properties" || toolMode === "cut") && (
           <div className="tools-panel-inspector-wrap">
             {/* Cut mode shows only the Cut / Split panel below, not the inspector. */}
             {toolMode !== "cut" && (
@@ -7584,6 +7642,7 @@ export function App() {
         decimals={decimalPlaces}
         appearance={appearance}
         plateVisible={plateVisible}
+        viewCubeVisible={viewCubeVisible}
         plateSize={plateSize}
         snapToGrid={gridSnapEnabled}
         snapToObjects={snapEnabled}
@@ -7595,6 +7654,7 @@ export function App() {
         onDecimals={setDecimalPlaces}
         onAppearance={setAppearance}
         onPlateVisible={setPlateVisible}
+        onViewCubeVisible={setViewCubeVisible}
         onPlateSize={setPlateSize}
         onSnapToGrid={setGridSnapEnabled}
         onSnapToObjects={setSnapEnabled}

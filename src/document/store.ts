@@ -2,8 +2,8 @@ import { create } from "zustand";
 import { useStore } from "zustand";
 import { temporal } from "zundo";
 import type { TemporalState } from "zundo";
-import { PRIMITIVES, TINKERCAD_COLORS, isGroup } from "./types";
-import { extractNodes, findAssemblyOwner, findNode, firstRootIndex, updateNode, walk } from "./tree";
+import { DEFAULT_OBJECT_COLOR, PRIMITIVES, TINKERCAD_COLORS, isGroup } from "./types";
+import { extractNodes, findAssemblyOwner, findNode, firstRootIndex, resolveNodeColor, updateNode, walk } from "./tree";
 import { bakeScale } from "./bake";
 import {
   applyMatrix,
@@ -803,9 +803,12 @@ interface DocState {
   ungroup: (centres?: Record<string, Vec3>) => void;
   setShowResult: (v: boolean) => void;
   /** Clears the canvas of the active project. */
-  /** Shape Builder: replaces `sourceIds` with one node holding them frozen
-   *  and the chosen cell masks. Sources keep their relative placement. */
-  shapeBuild: (sourceIds: string[], keep: number[], centres?: Record<string, Vec3>) => void;
+  /** Shape Builder: replaces `sourceIds` with a node holding them frozen and
+   *  the chosen cell masks. Sources keep their relative placement.
+   *  `owners` has one entry per separate solid the kept regions come to, each
+   *  the index (into `sourceIds`) of the shape most of it is made of: several
+   *  entries make several nodes, and every node takes its owner's colour. */
+  shapeBuild: (sourceIds: string[], keep: number[], centres?: Record<string, Vec3>, owners?: number[]) => void;
   /** Puts the document back as it was — used to undo a grouping that turned
    *  out to change the model rather than just its arrangement. */
   restoreNodes: (nodes: SceneNode[], selectedIds: string[]) => void;
@@ -1625,7 +1628,7 @@ export const useDoc = create<DocState>()(
 
       setShowResult: (v) => set({ showResult: v }),
 
-      shapeBuild: (sourceIds, keep, centres) =>
+      shapeBuild: (sourceIds, keep, centres, owners = []) =>
         set((s) => {
           if (sourceIds.length < 2 || !keep.length) return {};
           const ids = new Set(sourceIds);
@@ -1641,21 +1644,33 @@ export const useDoc = create<DocState>()(
           // group's transform with it or it moves.
           const sources = removed.map((n) => liftToWorld(s.nodes, n, centres));
 
-          const buildCount = s.nodes.filter((n) => n.type === "build").length + 1;
-          const node: BuildNode = {
-            type: "build",
-            id: nextId(),
-            name: `Built ${buildCount}`,
-            sources,
-            keep: [...keep].sort((a, b) => a - b),
-            position: [0, 0, 0],
-            rotation: [0, 0, 0],
-            scale: [1, 1, 1],
-            isHole: false,
-          };
+          const buildCount = s.nodes.filter((n) => n.type === "build").length;
+          const count = Math.max(1, owners.length);
+          // Every piece holds its own copy of the sources, so each stays
+          // independent of the others; a single result keeps the originals.
+          const made: BuildNode[] = Array.from({ length: count }, (_, i) => {
+            // A piece keeps the colour of the shape it is mostly made of, so
+            // the block that came from the green box stays green. A shape that
+            // was never coloured has nothing to carry over.
+            const owner = sources[owners[i] ?? 0];
+            const colour = owner ? resolveNodeColor(owner) : DEFAULT_OBJECT_COLOR;
+            return {
+              type: "build",
+              id: nextId(),
+              name: `Built ${buildCount + i + 1}`,
+              sources: i === 0 ? sources : sources.map((n) => cloneSubtree(n, [0, 0, 0])),
+              keep: [...keep].sort((a, b) => a - b),
+              ...(count > 1 ? { piece: i } : {}),
+              ...(colour !== DEFAULT_OBJECT_COLOR ? { color: colour } : {}),
+              position: [0, 0, 0],
+              rotation: [0, 0, 0],
+              scale: [1, 1, 1],
+              isHole: false,
+            };
+          });
           const nodes = [...remaining];
-          nodes.splice(Math.min(at, nodes.length), 0, node);
-          return { nodes, selectedIds: [node.id] };
+          nodes.splice(Math.min(at, nodes.length), 0, ...made);
+          return { nodes, selectedIds: made.map((n) => n.id) };
         }),
 
       restoreNodes: (nodes, selectedIds) => set({ nodes, selectedIds }),

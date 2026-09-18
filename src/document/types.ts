@@ -1683,6 +1683,13 @@ export interface BuildNode extends NodeBase {
   sources: SceneNode[];
   /** Cell masks to keep. Empty means nothing survived, which the UI prevents. */
   keep: number[];
+  /**
+   * When the kept regions fall apart into several separate solids, each one is
+   * its own node holding the same sources and the same `keep`. This says which
+   * of them the node is: an index into the connected pieces, ordered by where
+   * they sit. Absent means the whole result, however many pieces it has.
+   */
+  piece?: number;
 }
 
 export type SceneNode = ObjectNode | GroupNode | ImportNode | EditNode | BuildNode;

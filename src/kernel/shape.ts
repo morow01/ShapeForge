@@ -4952,23 +4952,69 @@ function respin(spec: NodeSpec): NodeSpec {
  * this pipeline that can legitimately run long enough to matter.
  */
 /**
- * Rebuilds a Shape Builder result: evaluate the frozen sources where they
- * stand, cut them into cells, and fuse back the ones that were kept.
+ * The separate solids a shape is made of — the kept regions of a Shape Builder
+ * result fall apart into several when they do not touch. Ordered by where they
+ * sit (x, then y, then z of their lowest corner) so that "piece 2" means the
+ * same solid every time the result is rebuilt. Slivers that are too small or
+ * too thin to be anything but boolean debris — a 0.001 mm plate left where two
+ * shapes sat a hair apart — are not counted as pieces of their own.
  */
-async function makeBuild(
+export function connectedPieces(solid: AnySolid): MeshShape[] {
+  const mesh = isMesh(solid) ? solid : (solid as Shape3D).meshShape(FALLBACK_MESH_QUALITY);
+  const wrapped = (mesh as any).wrapped;
+  const parts: any[] = typeof wrapped.decompose === "function" ? wrapped.decompose() : [wrapped];
+  const MIN_VOLUME = 1e-4;
+  const MIN_THICKNESS = 0.01;
+  const pieces = parts
+    .map((m) => new MeshShape(m))
+    .filter((piece) => {
+      try {
+        const [min, max] = getSolidBounds(piece);
+        const thinnest = Math.min(max[0] - min[0], max[1] - min[1], max[2] - min[2]);
+        return thinnest >= MIN_THICKNESS && Math.abs((piece as any).wrapped.volume()) >= MIN_VOLUME;
+      } catch {
+        return true;
+      }
+    });
+  const round = (v: number) => Math.round(v * 1e4) / 1e4;
+  const at = (s: MeshShape) => getSolidBounds(s)[0].map(round);
+  return pieces.sort((a, b) => {
+    const pa = at(a);
+    const pb = at(b);
+    return pa[0] - pb[0] || pa[1] - pb[1] || pa[2] - pb[2];
+  });
+}
+
+/** Evaluates the frozen sources, cuts them into cells and fuses the kept ones. */
+async function buildSources(
   spec: BuildSpec,
   onError?: (id: string, msg: string) => void,
   onProgress?: (id: string) => void,
-): Promise<AnySolid | null> {
+): Promise<{ solids: AnySolid[]; indices: number[] }> {
   const solids: AnySolid[] = [];
-  for (const source of spec.sources) {
+  // Which of spec.sources each solid came from — a source that failed to build
+  // leaves a gap, so the two lists do not line up on their own.
+  const indices: number[] = [];
+  for (const [index, source] of spec.sources.entries()) {
     try {
       const solid = await makeWorld(source, onError, onProgress);
-      if (solid) solids.push(solid);
+      if (solid) {
+        solids.push(solid);
+        indices.push(index);
+      }
     } catch (e) {
       onError?.(source.id, e instanceof Error ? e.message : String(e));
     }
   }
+  return { solids, indices };
+}
+
+async function mergeBuild(
+  spec: BuildSpec,
+  onError?: (id: string, msg: string) => void,
+  onProgress?: (id: string) => void,
+): Promise<AnySolid | null> {
+  const { solids } = await buildSources(spec, onError, onProgress);
   if (solids.length < 2) return solids[0] ?? null;
 
   const kept = spec.keep
@@ -4979,6 +5025,66 @@ async function makeBuild(
     return null;
   }
   return combine("union", kept.map((solid) => ({ solid, isHole: false })));
+}
+
+/**
+ * Rebuilds a Shape Builder result: evaluate the frozen sources where they
+ * stand, cut them into cells, fuse back the ones that were kept, and — for one
+ * of several pieces — pick out that solid.
+ */
+async function makeBuild(
+  spec: BuildSpec,
+  onError?: (id: string, msg: string) => void,
+  onProgress?: (id: string) => void,
+): Promise<AnySolid | null> {
+  const merged = await mergeBuild(spec, onError, onProgress);
+  if (!merged || spec.piece === undefined) return merged;
+  const pieces = connectedPieces(merged);
+  const piece = pieces[spec.piece];
+  if (!piece) {
+    onError?.(spec.id, "This piece no longer exists — the shapes it was built from have changed.");
+    return null;
+  }
+  return piece;
+}
+
+/** Which of `solids` most of `piece` is made of: the one it shares the most volume with. */
+function dominantSource(piece: MeshShape, solids: AnySolid[]): number {
+  const mine = (piece as any).wrapped;
+  let best = 0;
+  let bestVolume = -1;
+  solids.forEach((solid, i) => {
+    try {
+      const other = (isMesh(solid) ? solid : (solid as Shape3D).meshShape(FALLBACK_MESH_QUALITY)) as any;
+      const shared = Math.abs(mine.intersect(other.wrapped).volume());
+      if (shared > bestVolume + 1e-9) {
+        best = i;
+        bestVolume = shared;
+      }
+    } catch {
+      // A source that cannot be compared simply never wins.
+    }
+  });
+  return best;
+}
+
+/**
+ * What a Shape Builder result comes to once its kept regions are fused: one
+ * entry per separate solid, holding the index (into `spec.sources`) of the
+ * shape most of it came from. Empty when nothing is left.
+ */
+export async function analyseBuild(
+  spec: BuildSpec,
+  onError?: (id: string, msg: string) => void,
+): Promise<{ owners: number[] }> {
+  const merged = await mergeBuild({ ...spec, piece: undefined }, onError);
+  if (!merged) return { owners: [] };
+  // Fresh copies: the boolean steps above are free to have used up their inputs.
+  const { solids, indices } = await buildSources(spec, onError);
+  const asMesh = isMesh(merged) ? merged : (merged as Shape3D).meshShape(FALLBACK_MESH_QUALITY);
+  const pieces = connectedPieces(merged);
+  const parts = pieces.length ? pieces : [asMesh];
+  return { owners: parts.map((piece) => indices[dominantSource(piece, solids)] ?? 0) };
 }
 
 export async function makeLocal(

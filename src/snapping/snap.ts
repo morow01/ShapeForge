@@ -34,6 +34,44 @@ const coordinate = (bounds: Bounds3, axis: number, anchor: SnapAnchor): number =
   return (bounds.min[axis] + bounds.max[axis]) / 2;
 };
 
+/**
+ * Where a single face of a resizing object should stop: the closest
+ * min / centre / max of any target on `axis`, within `tolerance`. `value` is
+ * the face's current coordinate and `face` says which side of the object's
+ * bounds it is. `distance` is how far the face has to move to land on it.
+ */
+export function snapFace(
+  value: number,
+  axis: SnapAxis,
+  face: "min" | "max",
+  targets: SnapTarget[],
+  tolerance: number,
+): { distance: number; snap: ActiveSnap } | null {
+  const axisIndex = AXES.indexOf(axis);
+  let best: { distance: number; snap: ActiveSnap } | null = null;
+  for (const target of targets) {
+    for (const targetAnchor of ANCHORS) {
+      const at = coordinate(target.bounds, axisIndex, targetAnchor);
+      const distance = at - value;
+      if (Math.abs(distance) > tolerance) continue;
+      if (!best || Math.abs(distance) < Math.abs(best.distance)) {
+        best = {
+          distance,
+          snap: {
+            axis,
+            movingAnchor: face,
+            targetAnchor,
+            value: at,
+            targetId: target.id,
+            targetBounds: target.bounds,
+          },
+        };
+      }
+    }
+  }
+  return best;
+}
+
 /** Finds the closest min/centre/max bounds alignment on each world axis. */
 export function snapBounds(moving: Bounds3, targets: SnapTarget[], tolerance: number): SnapResult {
   const delta: [number, number, number] = [0, 0, 0];
