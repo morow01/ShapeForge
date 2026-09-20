@@ -1208,8 +1208,8 @@ export function App() {
     } else if (!wasEmpty && !isNowEmpty && currentKey !== prevSelectionKeyRef.current) {
       setRightPanelTab("properties");
     }
-    if (selectedIds.length === 2) {
-      setSpacingOpen(true);
+    if (currentKey !== prevSelectionKeyRef.current && selectedIds.length !== 2) {
+      setSpacingOpen(false);
     }
     prevSelectionKeyRef.current = currentKey;
   }, [selectedIds]);
