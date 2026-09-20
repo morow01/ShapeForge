@@ -1208,6 +1208,9 @@ export function App() {
     } else if (!wasEmpty && !isNowEmpty && currentKey !== prevSelectionKeyRef.current) {
       setRightPanelTab("properties");
     }
+    if (currentKey !== prevSelectionKeyRef.current && selectedIds.length === 2) {
+      setSpacingOpen(true);
+    }
     prevSelectionKeyRef.current = currentKey;
   }, [selectedIds]);
   // A compound shape (group/edit/build/import) has no width/depth/height
@@ -5250,7 +5253,7 @@ export function App() {
             className={`tools-panel-tab ${rightPanelTab === "properties" ? "active" : ""}`}
             onClick={() => { setToolMode("select"); setRightPanelTab("properties"); }}
           >
-            <span>Properties</span>
+            <span>{selectedIds.length === 2 && spacingOpen ? "Exact Spacing" : "Properties"}</span>
             {selectedIds.length > 0 && (
               <span className="tools-panel-tab-badge">{selectedIds.length}</span>
             )}
@@ -6212,8 +6215,8 @@ export function App() {
         />
         {toolMode !== "measure" && toolMode !== "face" && toolMode !== "edge" && toolMode !== "build" && toolMode !== "align" && !(toolMode === "place" && surfaceSource) && (rightPanelTab === "properties" || toolMode === "cut" || toolMode === "join") && (
           <div className="tools-panel-inspector-wrap">
-            {/* Cut and Join modes show only their dedicated panels below, not the general properties inspector. */}
-            {toolMode !== "cut" && toolMode !== "join" && (
+            {/* Cut, Join, and Exact Spacing modes show only their dedicated panels below, not the general properties inspector. */}
+            {toolMode !== "cut" && toolMode !== "join" && !(spacingOpen && selectedIds.length === 2) && (
             <section className="tool-section inspector-section">
           <div className="panel-heading compact">
             <div>
@@ -7744,7 +7747,7 @@ export function App() {
         )}
 
         {/* When 2 touching pieces are selected but joinery tool is not open yet: clean launch button */}
-        {selectedIds.length === 2 && connectorSeam && toolMode !== "join" && (
+        {selectedIds.length === 2 && connectorSeam && toolMode !== "join" && !spacingOpen && (
           <section className="tool-section connector-section">
             <div className="joinery-launch-bar">
               <button
@@ -7762,7 +7765,7 @@ export function App() {
         )}
 
         {/* When 2 pieces are selected but don't touch at a flat face */}
-        {selectedIds.length === 2 && !connectorSeam && (
+        {selectedIds.length === 2 && !connectorSeam && !spacingOpen && (
           <section className="tool-section connector-section paused" aria-disabled="true">
             <div className="panel-heading compact">
               <div>
@@ -7784,7 +7787,7 @@ export function App() {
             onClick={() => setSpacingOpen((v) => !v)}
             aria-expanded={spacingOpen}
           >
-            <div><h1>Object spacing</h1><p>Set gaps or line up edges</p></div>
+            <div><h1>Exact Spacing & Align</h1><p>Set gaps or line up faces</p></div>
             <span className="disclosure-caret">▸</span>
           </button>
           {spacingOpen && spacingSelection && (
