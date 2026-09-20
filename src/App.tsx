@@ -1208,7 +1208,7 @@ export function App() {
     } else if (!wasEmpty && !isNowEmpty && currentKey !== prevSelectionKeyRef.current) {
       setRightPanelTab("properties");
     }
-    if (currentKey !== prevSelectionKeyRef.current && selectedIds.length === 2) {
+    if (selectedIds.length === 2) {
       setSpacingOpen(true);
     }
     prevSelectionKeyRef.current = currentKey;
