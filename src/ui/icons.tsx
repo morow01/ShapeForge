@@ -1580,6 +1580,19 @@ export function PlusIcon({ className = "tool-icon" }: { className?: string }) {
   );
 }
 
+/** Spacing / Object Spacing Tool Icon: two objects with a gap/alignment dimension indicator */
+export function SpacingToolIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <rect x="3" y="5" width="5.5" height="14" rx="1" fill="currentColor" fillOpacity="0.18" />
+      <rect x="15.5" y="5" width="5.5" height="14" rx="1" fill="currentColor" fillOpacity="0.18" />
+      <path className="icon-accent" d="M8.5 12h7" strokeWidth="1.6" />
+      <path className="icon-accent" d="M10.5 10l-2 2 2 2" strokeWidth="1.6" />
+      <path className="icon-accent" d="M13.5 10l2 2-2 2" strokeWidth="1.6" />
+    </svg>
+  );
+}
+
 /** Joinery Tool Icon: clean interlocking parts with clearance seam */
 export function JoineryToolIcon({ className = "tool-icon" }: { className?: string }) {
   return (

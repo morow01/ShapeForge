@@ -57,6 +57,7 @@ import {
   SettingsIcon,
   ShapeBuilderIcon,
   SolidCubeIcon,
+  SpacingToolIcon,
   TextToolIcon,
   SketchToolIcon,
   TransparencyIcon,
@@ -4875,6 +4876,19 @@ export function App() {
           disabled={selectedIds.length !== 2 || !connectorSeam}
         >
           <JoineryToolIcon />
+        </button>
+        <button
+          className={spacingOpen && selectedIds.length === 2 ? "active" : ""}
+          onClick={() => setSpacingOpen((v) => !v)}
+          title={
+            selectedIds.length !== 2
+              ? "Exact Spacing & Align — select 2 objects"
+              : "Exact Spacing & Align: set gaps, snap flush, or align faces"
+          }
+          aria-label="Exact Spacing and Alignment tool"
+          disabled={selectedIds.length !== 2}
+        >
+          <SpacingToolIcon />
         </button>
         <button
           className={toolMode === "cut" ? "active" : ""}
