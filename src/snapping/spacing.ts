@@ -62,6 +62,144 @@ export function positionWithReferenceGap(
   return positionWithBoundsGap(fixed, movingNode, moving, axis, fixedAnchor, movingAnchor, gap, direction);
 }
 
+export type SpacingAlignmentMode = "surface" | "center" | "align_min" | "align_max";
+
+export type AxisAlignSide = "outside_min" | "align_min" | "center" | "align_max" | "outside_max";
+
+export interface AxisSpacingConfig {
+  enabled: boolean;
+  align: AxisAlignSide;
+  offset: number;
+}
+
+export type MultiAxisSpacing = Record<SnapAxis, AxisSpacingConfig>;
+
+/** Moves the moving object to achieve exact spacing & alignment across multiple axes (X, Y, Z) simultaneously. */
+export function positionWithMultiSurfaceGap(
+  fixedBounds: Bounds3,
+  movingNode: SceneNode,
+  movingBounds: Bounds3,
+  spacing: MultiAxisSpacing,
+): Vec3 {
+  const position = [...movingNode.position] as Vec3;
+  const axes: SnapAxis[] = ["x", "y", "z"];
+
+  axes.forEach((axis, i) => {
+    const config = spacing[axis];
+    if (!config || !config.enabled) return;
+
+    const fixedMin = fixedBounds.min[i];
+    const fixedMax = fixedBounds.max[i];
+    const fixedCenter = (fixedMin + fixedMax) / 2;
+
+    const movingMin = movingBounds.min[i];
+    const movingMax = movingBounds.max[i];
+    const movingCenter = (movingMin + movingMax) / 2;
+
+    const offset = Number.isFinite(config.offset) ? Math.max(0, config.offset) : 0;
+    let delta = 0;
+
+    switch (config.align) {
+      case "outside_min":
+        // Moving sits outside on - side: moving.max = fixed.min - offset
+        delta = (fixedMin - offset) - movingMax;
+        break;
+      case "align_min":
+        // Moving's min face aligns with fixed's min face + offset (Flush Left / Front / Bottom)
+        delta = (fixedMin + offset) - movingMin;
+        break;
+      case "center":
+        // Moving center aligns with fixed center
+        delta = fixedCenter - movingCenter;
+        break;
+      case "align_max":
+        // Moving's max face aligns with fixed's max face - offset (Flush Right / Back / Top)
+        delta = (fixedMax - offset) - movingMax;
+        break;
+      case "outside_max":
+        // Moving sits outside on + side: moving.min = fixed.max + offset
+        delta = (fixedMax + offset) - movingMin;
+        break;
+    }
+
+    position[i] += delta;
+  });
+
+  return position;
+}
+
+/** Moves the moving object to achieve an exact face-to-face clearance gap,
+ *  center-to-center spacing, or edge alignment relative to the fixed object. */
+export function positionWithSurfaceGap(
+  fixedBounds: Bounds3,
+  movingNode: SceneNode,
+  movingBounds: Bounds3,
+  axis: SnapAxis,
+  mode: SpacingAlignmentMode,
+  gap: number,
+  direction: -1 | 1,
+): Vec3 {
+  const i = axis === "x" ? 0 : axis === "y" ? 1 : 2;
+  const fixedMin = fixedBounds.min[i];
+  const fixedMax = fixedBounds.max[i];
+  const fixedCenter = (fixedMin + fixedMax) / 2;
+
+  const movingMin = movingBounds.min[i];
+  const movingMax = movingBounds.max[i];
+  const movingCenter = (movingMin + movingMax) / 2;
+
+  let delta = 0;
+  if (mode === "surface") {
+    // Face-to-Face clearance gap:
+    // If direction is +1: moving's min face sits at fixed's max face + gap
+    // If direction is -1: moving's max face sits at fixed's min face - gap
+    if (direction === 1) {
+      delta = (fixedMax + gap) - movingMin;
+    } else {
+      delta = (fixedMin - gap) - movingMax;
+    }
+  } else if (mode === "center") {
+    const targetCenter = fixedCenter + direction * gap;
+    delta = targetCenter - movingCenter;
+  } else if (mode === "align_min") {
+    delta = (fixedMin + direction * gap) - movingMin;
+  } else if (mode === "align_max") {
+    delta = (fixedMax + direction * gap) - movingMax;
+  }
+
+  const position = [...movingNode.position] as Vec3;
+  position[i] += delta;
+  return position;
+}
+
+/** Measures the current face-to-face gap and natural relative direction along an axis. */
+export function measureCurrentGap(
+  fixedBounds: Bounds3,
+  movingBounds: Bounds3,
+  axis: SnapAxis,
+): { currentGap: number; naturalDirection: -1 | 1; isTouching: boolean } {
+  const i = axis === "x" ? 0 : axis === "y" ? 1 : 2;
+  const fixedMin = fixedBounds.min[i];
+  const fixedMax = fixedBounds.max[i];
+  const fixedCenter = (fixedMin + fixedMax) / 2;
+
+  const movingMin = movingBounds.min[i];
+  const movingMax = movingBounds.max[i];
+  const movingCenter = (movingMin + movingMax) / 2;
+
+  const naturalDirection: -1 | 1 = movingCenter >= fixedCenter ? 1 : -1;
+
+  let currentGap = 0;
+  if (naturalDirection === 1) {
+    currentGap = movingMin - fixedMax;
+  } else {
+    currentGap = fixedMin - movingMax;
+  }
+
+  const isTouching = Math.abs(currentGap) < 0.05;
+  return { currentGap, naturalDirection, isTouching };
+}
+
 /** Moves one chosen reference on the moving object an exact signed distance
  * from a chosen reference on the fixed object, using precomputed world bounds. */
 export function positionWithBoundsGap(
@@ -83,7 +221,7 @@ export function positionWithBoundsGap(
   return position;
 }
 
-function coordinate(bounds: Bounds3, axis: number, anchor: SnapAnchor): number {
+export function coordinate(bounds: Bounds3, axis: number, anchor: SnapAnchor): number {
   if (anchor === "min") return bounds.min[axis];
   if (anchor === "max") return bounds.max[axis];
   return (bounds.min[axis] + bounds.max[axis]) / 2;

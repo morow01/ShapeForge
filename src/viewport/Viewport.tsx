@@ -32,7 +32,7 @@ interface Props {
   /** Exploded view outward displacement factor (0 to 1). */
   explodeAmount?: number;
   plateVisible?: boolean;
-  /** The view cube and axis triad in the corner (and its Home button). */
+  /** The view cube in the corner (and its Home button). */
   viewCubeVisible?: boolean;
   /** The hide button on the view cube's hover toolbar. */
   onHideViewCube?: () => void;

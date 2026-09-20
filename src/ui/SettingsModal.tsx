@@ -245,7 +245,7 @@ export function SettingsModal({
                 <div className="settings-row">
                   <span>
                     <strong>Show view cube</strong>
-                    <small>The orientation cube and axis triad in the top-right of the viewport. The Home key still resets the view when it is hidden</small>
+                    <small>The orientation cube in the top-right of the viewport. The Home key still resets the view when it is hidden</small>
                   </span>
                   <SettingsToggle checked={viewCubeVisible} onChange={onViewCubeVisible} label="Show view cube" />
                 </div>

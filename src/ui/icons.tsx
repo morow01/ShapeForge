@@ -552,9 +552,9 @@ export function ZoomToFitIcon({ className = "tool-icon" }: { className?: string 
 }
 
 /** Open eye — shown on a visible object's row; click to hide it. */
-export function EyeIcon({ className = "tool-icon" }: { className?: string }) {
+export function EyeIcon({ className = "tool-icon", style }: { className?: string; style?: React.CSSProperties }) {
   return (
-    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+    <svg className={className} style={style} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
       <g fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
         <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z" />
         <circle cx="12" cy="12" r="2.6" />
@@ -1583,7 +1583,7 @@ export function PlusIcon({ className = "tool-icon" }: { className?: string }) {
 /** Joinery Tool Icon: clean interlocking parts with clearance seam */
 export function JoineryToolIcon({ className = "tool-icon" }: { className?: string }) {
   return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
       {/* Left block with male interlocking tab */}
       <path d="M 3 5 H 9 V 9 H 16 V 15 H 9 V 19 H 3 Z" fill="currentColor" fillOpacity="0.15" />
       {/* Right block with female mating slot */}
@@ -1595,10 +1595,10 @@ export function JoineryToolIcon({ className = "tool-icon" }: { className?: strin
 /** Round Pin / Dowel Icon */
 export function RoundPinIcon({ className = "tool-icon" }: { className?: string }) {
   return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
       <ellipse cx="12" cy="6" rx="6" ry="2.8" fill="currentColor" fillOpacity="0.15" />
       <path d="M6 6v12c0 1.55 2.69 2.8 6 2.8s6-1.25 6-2.8V6" />
-      <path d="M6 12c0 1.55 2.69 2.8 6 2.8s6-1.25 6-2.8" strokeDasharray="1.5 2" opacity="0.6" />
+      <path d="M6 12c0 1.55 2.69 2.8 6 2.8s6-1.25 6-2.8" strokeDasharray="1.5 2" strokeWidth="1.0" opacity="0.6" />
     </svg>
   );
 }
@@ -1606,10 +1606,10 @@ export function RoundPinIcon({ className = "tool-icon" }: { className?: string }
 /** Square Pin / Key Icon */
 export function SquarePinIcon({ className = "tool-icon" }: { className?: string }) {
   return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
       <path d="M12 3l7 4-7 4-7-4 7-4z" fill="currentColor" fillOpacity="0.15" />
       <path d="M5 7v10l7 4 7-4V7" />
-      <path d="M12 11v10" />
+      <path d="M12 11v10" strokeWidth="1.1" />
     </svg>
   );
 }
@@ -1617,24 +1617,48 @@ export function SquarePinIcon({ className = "tool-icon" }: { className?: string 
 /** Tenon & Mortise Tab Icon */
 export function TenonIcon({ className = "tool-icon" }: { className?: string }) {
   return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
       <rect x="4" y="6" width="16" height="12" rx="3" fill="currentColor" fillOpacity="0.15" />
-      <line x1="4" y1="12" x2="20" y2="12" strokeDasharray="2 2" opacity="0.6" />
-      <circle cx="8" cy="12" r="1.5" fill="currentColor" />
-      <circle cx="16" cy="12" r="1.5" fill="currentColor" />
+      <line x1="4" y1="12" x2="20" y2="12" strokeDasharray="2 2" strokeWidth="1.0" opacity="0.6" />
+      <circle cx="8" cy="12" r="1.3" fill="currentColor" />
+      <circle cx="16" cy="12" r="1.3" fill="currentColor" />
     </svg>
   );
 }
 
-/** Festool Domino / Rounded Tenon Joint Icon */
+/** Festool Domino / Rounded Mortise Joint Icon */
 export function DominoJointIcon({ className = "tool-icon" }: { className?: string }) {
   return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
-      <rect x="3" y="6" width="18" height="12" rx="6" fill="currentColor" fillOpacity="0.15" />
-      <line x1="10" y1="9" x2="10" y2="15" strokeWidth="1.2" opacity="0.7" />
-      <line x1="14" y1="9" x2="14" y2="15" strokeWidth="1.2" opacity="0.7" />
-      <circle cx="6" cy="12" r="1.2" fill="currentColor" />
-      <circle cx="18" cy="12" r="1.2" fill="currentColor" />
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      {/* Joint face */}
+      <rect x="2" y="4" width="20" height="16" rx="2" fill="currentColor" fillOpacity="0.08" strokeWidth="1.1" />
+      {/* Festool Domino routed mortise slot pocket */}
+      <rect x="4.5" y="8" width="15" height="8" rx="4" fill="currentColor" fillOpacity="0.4" strokeWidth="1.2" />
+      {/* Mortise cavity depth floor */}
+      <path d="M7.5 12h9" strokeWidth="1.0" strokeDasharray="2 1.5" opacity="0.75" />
+    </svg>
+  );
+}
+
+/** Mortise Pocket Hole Icon (Festool rounded slot mortise cavity in part face) */
+export function MortiseHoleIcon({ className = "tool-icon", style }: { className?: string; style?: React.CSSProperties }) {
+  return (
+    <svg className={className} style={style} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <rect x="2.5" y="3.5" width="19" height="17" rx="2.5" fill="currentColor" fillOpacity="0.08" strokeWidth="1.1" />
+      <rect x="5.5" y="8" width="13" height="8" rx="4" fill="currentColor" fillOpacity="0.38" strokeWidth="1.2" />
+      <path d="M8.5 12h7" strokeWidth="0.9" strokeDasharray="2 1.5" opacity="0.7" />
+    </svg>
+  );
+}
+
+/** Integrated Tenon Joint Icon (Base body with protruding rounded tenon tab) */
+export function IntegratedTenonIcon({ className = "tool-icon", style }: { className?: string; style?: React.CSSProperties }) {
+  return (
+    <svg className={className} style={style} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <path d="M3 4h5v16H3z" fill="currentColor" fillOpacity="0.12" strokeWidth="1.1" />
+      <path d="M8 7.5h8.5a4.5 4.5 0 0 1 0 9H8" fill="currentColor" fillOpacity="0.32" strokeWidth="1.2" />
+      <line x1="8" y1="4" x2="8" y2="20" strokeWidth="1.2" />
+      <line x1="12" y1="10" x2="12" y2="14" strokeWidth="1.0" opacity="0.7" />
     </svg>
   );
 }
@@ -1642,10 +1666,10 @@ export function DominoJointIcon({ className = "tool-icon" }: { className?: strin
 /** Dovetail Rail Icon */
 export function DovetailRailIcon({ className = "tool-icon" }: { className?: string }) {
   return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
       <path d="M6 19l2.5-12h7L18 19H6z" fill="currentColor" fillOpacity="0.15" />
       <path d="M8.5 7l-2.5 12h12l-2.5-12" />
-      <line x1="6" y1="19" x2="18" y2="19" strokeWidth="2" />
+      <line x1="6" y1="19" x2="18" y2="19" strokeWidth="1.3" />
     </svg>
   );
 }
@@ -1653,7 +1677,7 @@ export function DovetailRailIcon({ className = "tool-icon" }: { className?: stri
 /** Tolerance Tight (0.15mm) Icon */
 export function ToleranceTightIcon({ className = "tool-icon" }: { className?: string }) {
   return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
       <path d="M4 12h5M20 12h-5" />
       <path d="M7 9l-3 3 3 3M17 9l3 3-3 3" />
       <rect x="10" y="7" width="4" height="10" rx="1" fill="currentColor" fillOpacity="0.2" />
@@ -1664,9 +1688,9 @@ export function ToleranceTightIcon({ className = "tool-icon" }: { className?: st
 /** Tolerance Standard (0.20mm) Icon */
 export function ToleranceStandardIcon({ className = "tool-icon" }: { className?: string }) {
   return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
       <circle cx="12" cy="12" r="8" />
-      <path d="M9 12l2 2 4-4" strokeWidth="2" />
+      <path d="M9 12l2 2 4-4" strokeWidth="1.4" />
     </svg>
   );
 }
@@ -1674,7 +1698,7 @@ export function ToleranceStandardIcon({ className = "tool-icon" }: { className?:
 /** Tolerance Loose (0.30mm) Icon */
 export function ToleranceLooseIcon({ className = "tool-icon" }: { className?: string }) {
   return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
       <path d="M9 12H3M15 12h6" />
       <path d="M5 9L2 12l3 3M19 9l3 3-3 3" />
       <rect x="10.5" y="7" width="3" height="10" rx="0.8" fill="currentColor" fillOpacity="0.2" />
@@ -1685,7 +1709,7 @@ export function ToleranceLooseIcon({ className = "tool-icon" }: { className?: st
 /** Print-in-Place Hinge Joint Icon */
 export function HingeJointIcon({ className = "tool-icon" }: { className?: string }) {
   return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
       {/* Left Leaf Plate */}
       <rect x="3" y="6" width="6" height="12" rx="1" fill="currentColor" fillOpacity="0.15" />
       {/* Right Leaf Plate */}
@@ -1695,7 +1719,7 @@ export function HingeJointIcon({ className = "tool-icon" }: { className?: string
       <rect x="9.5" y="10.2" width="5" height="3.5" rx="1" fill="currentColor" fillOpacity="0.2" />
       <rect x="9.5" y="15.5" width="5" height="3.5" rx="1" fill="currentColor" fillOpacity="0.35" />
       {/* Central Pivot Pin Axis */}
-      <line x1="12" y1="3.5" x2="12" y2="20.5" strokeWidth="1.4" />
+      <line x1="12" y1="3.5" x2="12" y2="20.5" strokeWidth="1.1" />
     </svg>
   );
 }
@@ -1703,7 +1727,7 @@ export function HingeJointIcon({ className = "tool-icon" }: { className?: string
 /** Cantilever Snap-Fit Joint Icon for Joinery Tool */
 export function SnapJointIcon({ className = "tool-icon" }: { className?: string }) {
   return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
       {/* Base mounting pad on left */}
       <rect x="3" y="8" width="4" height="8" rx="0.8" fill="currentColor" fillOpacity="0.2" />
       {/* Cantilever flex beam extending right */}
@@ -1850,6 +1874,31 @@ export function LayFlatIcon({ className = "tool-icon", style }: { className?: st
     </svg>
   );
 }
+
+/** Set Gap / Apply Gap tool button icon */
+export function SetGapIcon({ className = "tool-icon", style }: { className?: string; style?: React.CSSProperties }) {
+  return (
+    <svg className={className} style={style} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <rect x="2.5" y="4.5" width="4" height="15" rx="1" fill="currentColor" fillOpacity="0.2" />
+      <rect x="17.5" y="4.5" width="4" height="15" rx="1" fill="currentColor" fillOpacity="0.2" />
+      <line x1="6.5" y1="12" x2="17.5" y2="12" strokeWidth="1.8" />
+      <path d="M9.5 9.5L6.5 12l3 2.5M14.5 9.5l3 2.5-3 2.5" strokeWidth="1.8" />
+    </svg>
+  );
+}
+
+/** Snap Flush (0 mm) tool button icon */
+export function SnapFlushIcon({ className = "tool-icon", style }: { className?: string; style?: React.CSSProperties }) {
+  return (
+    <svg className={className} style={style} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+      <path d="M3.5 5.5h7.5v13H3.5a1 1 0 0 1-1-1v-11a1 1 0 0 1 1-1Z" fill="currentColor" fillOpacity="0.15" />
+      <path d="M13 5.5h7.5a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H13v-13Z" fill="currentColor" fillOpacity="0.25" />
+      <line x1="12" y1="3.5" x2="12" y2="20.5" stroke="#00a7a5" strokeWidth="2" />
+      <path d="M9.5 12h-3M17.5 12h-3" strokeWidth="1.5" strokeDasharray="1.5 1.5" />
+    </svg>
+  );
+}
+
 
 
 

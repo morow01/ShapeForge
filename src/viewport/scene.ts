@@ -51,8 +51,10 @@ export interface CutPlanePreviewData {
 export interface JoineryPreviewItem {
   position: Vec3;
   rotationDeg: Vec3;
+  plugRotationDeg?: Vec3;
   shape: number;
   params: Record<string, number>;
+  style?: "both_holes" | "integrated";
 }
 
 export interface JoineryPreviewData {
@@ -1700,6 +1702,7 @@ export class Scene {
   private navAnimFrame = 0;
   private joineryPreviewGroup = new THREE.Group();
   private cutPreviewGroup = new THREE.Group();
+  private spacingGhostGroup = new THREE.Group();
   /** Keep modes: the parts whose discarded half is being previewed, and the
    *  planes that hide it on the real part / limit the ghost to it. */
   private cutDiscard: { ids: string[]; hide: THREE.Plane; ghost: THREE.Plane } | null = null;
@@ -1904,6 +1907,7 @@ export class Scene {
     this.setupMoveReadout();
     this.scene.add(this.joineryPreviewGroup);
     this.scene.add(this.cutPreviewGroup);
+    this.scene.add(this.spacingGhostGroup);
 
     const savedCam = loadCameraState();
     const mode = savedCam?.mode ?? "perspective";
@@ -2835,59 +2839,205 @@ export class Scene {
       if (preview.socketId) this.joineryTransparentIds.add(preview.socketId);
 
       for (const item of preview.items) {
-        // Plug geometry (cyan semi-transparent solid with edge wire)
-        const plugGeom = buildConnectorPreviewGeometry({ ...item.params, shape: item.shape, fit: 0 });
-        const plugMat = new THREE.MeshStandardMaterial({
-          color: 0x00d2d3,
-          transparent: true,
-          opacity: 0.85,
-          roughness: 0.35,
-          metalness: 0.1,
-          depthWrite: true,
-          side: THREE.DoubleSide,
-        });
-        const plugMesh = new THREE.Mesh(plugGeom, plugMat);
-        plugMesh.position.set(...item.position);
-        plugMesh.rotation.set(
-          (item.rotationDeg[0] * Math.PI) / 180,
-          (item.rotationDeg[1] * Math.PI) / 180,
-          (item.rotationDeg[2] * Math.PI) / 180,
-          "XYZ"
-        );
-        const plugWire = new THREE.LineSegments(
-          new THREE.EdgesGeometry(plugGeom),
-          new THREE.LineBasicMaterial({ color: 0x01579b, transparent: true, opacity: 0.9 })
-        );
-        plugMesh.add(plugWire);
-        this.joineryPreviewGroup.add(plugMesh);
+        if (item.style === "both_holes") {
+          // Socket cutter volume for Part B (translucent red cutter with clearance)
+          const socketGeomB = buildConnectorPreviewGeometry({ ...item.params, shape: item.shape, fit: 1 });
+          const socketMat = new THREE.MeshBasicMaterial({
+            color: 0xff6b6b,
+            transparent: true,
+            opacity: 0.35,
+            depthWrite: false,
+            side: THREE.DoubleSide,
+          });
+          const socketMeshB = new THREE.Mesh(socketGeomB, socketMat);
+          socketMeshB.position.set(...item.position);
+          socketMeshB.rotation.set(
+            (item.rotationDeg[0] * Math.PI) / 180,
+            (item.rotationDeg[1] * Math.PI) / 180,
+            (item.rotationDeg[2] * Math.PI) / 180,
+            "XYZ"
+          );
+          const socketWireB = new THREE.LineSegments(
+            new THREE.EdgesGeometry(socketGeomB),
+            new THREE.LineBasicMaterial({ color: 0xd63031, transparent: true, opacity: 0.7 })
+          );
+          socketMeshB.add(socketWireB);
+          this.joineryPreviewGroup.add(socketMeshB);
 
-        // Socket cutter volume (translucent red/orange cutter with clearance)
-        const socketGeom = buildConnectorPreviewGeometry({ ...item.params, shape: item.shape, fit: 1 });
-        const socketMat = new THREE.MeshBasicMaterial({
-          color: 0xff6b6b,
-          transparent: true,
-          opacity: 0.35,
-          depthWrite: false,
-          side: THREE.DoubleSide,
-        });
-        const socketMesh = new THREE.Mesh(socketGeom, socketMat);
-        socketMesh.position.set(...item.position);
-        socketMesh.rotation.set(
-          (item.rotationDeg[0] * Math.PI) / 180,
-          (item.rotationDeg[1] * Math.PI) / 180,
-          (item.rotationDeg[2] * Math.PI) / 180,
-          "XYZ"
-        );
-        const socketWire = new THREE.LineSegments(
-          new THREE.EdgesGeometry(socketGeom),
-          new THREE.LineBasicMaterial({ color: 0xd63031, transparent: true, opacity: 0.7 })
-        );
-        socketMesh.add(socketWire);
-        this.joineryPreviewGroup.add(socketMesh);
+          // Mortise cutter volume for Part A (translucent red cutter pointing into Part A)
+          const plugRot = item.plugRotationDeg ?? item.rotationDeg;
+          const socketGeomA = buildConnectorPreviewGeometry({ ...item.params, shape: item.shape, fit: 1 });
+          const socketMeshA = new THREE.Mesh(socketGeomA, socketMat);
+          socketMeshA.position.set(...item.position);
+          socketMeshA.rotation.set(
+            (plugRot[0] * Math.PI) / 180,
+            (plugRot[1] * Math.PI) / 180,
+            (plugRot[2] * Math.PI) / 180,
+            "XYZ"
+          );
+          const socketWireA = new THREE.LineSegments(
+            new THREE.EdgesGeometry(socketGeomA),
+            new THREE.LineBasicMaterial({ color: 0xd63031, transparent: true, opacity: 0.7 })
+          );
+          socketMeshA.add(socketWireA);
+          this.joineryPreviewGroup.add(socketMeshA);
+
+          // Loose Domino / Dowel insert ghost (amber loose insert bridging the joint)
+          const looseGeomB = buildConnectorPreviewGeometry({ ...item.params, shape: item.shape, fit: 0 });
+          const looseGeomA = buildConnectorPreviewGeometry({ ...item.params, shape: item.shape, fit: 0 });
+          const looseMat = new THREE.MeshStandardMaterial({
+            color: 0xf59e0b,
+            transparent: true,
+            opacity: 0.65,
+            roughness: 0.4,
+            metalness: 0.05,
+            depthWrite: true,
+            side: THREE.DoubleSide,
+          });
+          const looseMeshB = new THREE.Mesh(looseGeomB, looseMat);
+          looseMeshB.position.set(...item.position);
+          looseMeshB.rotation.set(
+            (item.rotationDeg[0] * Math.PI) / 180,
+            (item.rotationDeg[1] * Math.PI) / 180,
+            (item.rotationDeg[2] * Math.PI) / 180,
+            "XYZ"
+          );
+          const looseMeshA = new THREE.Mesh(looseGeomA, looseMat);
+          looseMeshA.position.set(...item.position);
+          looseMeshA.rotation.set(
+            (plugRot[0] * Math.PI) / 180,
+            (plugRot[1] * Math.PI) / 180,
+            (plugRot[2] * Math.PI) / 180,
+            "XYZ"
+          );
+          const looseWireB = new THREE.LineSegments(
+            new THREE.EdgesGeometry(looseGeomB),
+            new THREE.LineBasicMaterial({ color: 0xb45309, transparent: true, opacity: 0.85 })
+          );
+          looseMeshB.add(looseWireB);
+          const looseWireA = new THREE.LineSegments(
+            new THREE.EdgesGeometry(looseGeomA),
+            new THREE.LineBasicMaterial({ color: 0xb45309, transparent: true, opacity: 0.85 })
+          );
+          looseMeshA.add(looseWireA);
+          this.joineryPreviewGroup.add(looseMeshB);
+          this.joineryPreviewGroup.add(looseMeshA);
+        } else {
+          // Integrated tenon/pin: Plug geometry (cyan semi-transparent solid with edge wire)
+          const plugGeom = buildConnectorPreviewGeometry({ ...item.params, shape: item.shape, fit: 0 });
+          const plugMat = new THREE.MeshStandardMaterial({
+            color: 0x00d2d3,
+            transparent: true,
+            opacity: 0.85,
+            roughness: 0.35,
+            metalness: 0.1,
+            depthWrite: true,
+            side: THREE.DoubleSide,
+          });
+          const plugMesh = new THREE.Mesh(plugGeom, plugMat);
+          plugMesh.position.set(...item.position);
+          plugMesh.rotation.set(
+            (item.rotationDeg[0] * Math.PI) / 180,
+            (item.rotationDeg[1] * Math.PI) / 180,
+            (item.rotationDeg[2] * Math.PI) / 180,
+            "XYZ"
+          );
+          const plugWire = new THREE.LineSegments(
+            new THREE.EdgesGeometry(plugGeom),
+            new THREE.LineBasicMaterial({ color: 0x01579b, transparent: true, opacity: 0.9 })
+          );
+          plugMesh.add(plugWire);
+          this.joineryPreviewGroup.add(plugMesh);
+
+          // Socket cutter volume (translucent red/orange cutter with clearance)
+          const socketGeom = buildConnectorPreviewGeometry({ ...item.params, shape: item.shape, fit: 1 });
+          const socketMat = new THREE.MeshBasicMaterial({
+            color: 0xff6b6b,
+            transparent: true,
+            opacity: 0.35,
+            depthWrite: false,
+            side: THREE.DoubleSide,
+          });
+          const socketMesh = new THREE.Mesh(socketGeom, socketMat);
+          socketMesh.position.set(...item.position);
+          socketMesh.rotation.set(
+            (item.rotationDeg[0] * Math.PI) / 180,
+            (item.rotationDeg[1] * Math.PI) / 180,
+            (item.rotationDeg[2] * Math.PI) / 180,
+            "XYZ"
+          );
+          const socketWire = new THREE.LineSegments(
+            new THREE.EdgesGeometry(socketGeom),
+            new THREE.LineBasicMaterial({ color: 0xd63031, transparent: true, opacity: 0.7 })
+          );
+          socketMesh.add(socketWire);
+          this.joineryPreviewGroup.add(socketMesh);
+        }
       }
     }
 
     this.applyMaterials();
+  }
+
+  private spacingGhostSource: { id: string; view: PartView; originalVisible: boolean } | null = null;
+
+  setSpacingGhostPreview(preview: { movingId: string; targetPosition: Vec3; color?: string } | null) {
+    while (this.spacingGhostGroup.children.length > 0) {
+      const child = this.spacingGhostGroup.children[0];
+      this.spacingGhostGroup.remove(child);
+      if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments) {
+        child.geometry?.dispose();
+      }
+    }
+
+    if (this.spacingGhostSource && (!preview || this.spacingGhostSource.id !== preview.movingId)) {
+      this.spacingGhostSource.view.group.visible = this.spacingGhostSource.originalVisible;
+      this.spacingGhostSource = null;
+    }
+
+    if (!preview) return;
+    const view = this.parts.get(preview.movingId);
+    if (!view || !view.geom[0]?.faces) return;
+
+    if (!this.spacingGhostSource) {
+      this.spacingGhostSource = {
+        id: preview.movingId,
+        view,
+        originalVisible: view.group.visible,
+      };
+    }
+    view.group.visible = false;
+
+    const baseColor = preview.color ? new THREE.Color(preview.color) : new THREE.Color(0x00d2d3);
+    const edgeColor = preview.color
+      ? new THREE.Color(preview.color).multiplyScalar(0.7)
+      : new THREE.Color(0x008e8c);
+
+    const ghostMat = new THREE.MeshStandardMaterial({
+      color: baseColor,
+      transparent: true,
+      opacity: 0.65,
+      roughness: 0.35,
+      metalness: 0.05,
+      depthWrite: true,
+      side: THREE.DoubleSide,
+    });
+
+    const ghostMesh = new THREE.Mesh(view.geom[0].faces.clone(), ghostMat);
+    const rotatedPivot = view.pivot.clone().applyEuler(view.group.rotation);
+    ghostMesh.position.set(
+      preview.targetPosition[0] + rotatedPivot.x,
+      preview.targetPosition[1] + rotatedPivot.y,
+      preview.targetPosition[2] + rotatedPivot.z,
+    );
+    ghostMesh.rotation.copy(view.group.rotation);
+
+    const ghostWire = new THREE.LineSegments(
+      new THREE.EdgesGeometry(view.geom[0].faces),
+      new THREE.LineBasicMaterial({ color: edgeColor, transparent: true, opacity: 0.9 })
+    );
+    ghostMesh.add(ghostWire);
+    this.spacingGhostGroup.add(ghostMesh);
   }
 
   /** The materials are shared singletons, so clipping one would clip every
@@ -9897,7 +10047,7 @@ export class Scene {
     }
   }
 
-  /** Shows or hides the view cube and its axis triad. */
+  /** Shows or hides the view cube. */
   setNavCubeVisible(visible: boolean) {
     this.navCubeVisible = visible;
     if (!visible) {

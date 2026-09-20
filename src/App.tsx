@@ -32,6 +32,8 @@ import {
   RoundPinIcon,
   SquarePinIcon,
   DominoJointIcon,
+  MortiseHoleIcon,
+  IntegratedTenonIcon,
   DovetailRailIcon,
   HingeJointIcon,
   SnapJointIcon,
@@ -81,6 +83,7 @@ import type { BuildPlateSize } from "./ui/SettingsModal";
 import { ExportModal } from "./ui/ExportModal";
 import { BlueprintModal } from "./ui/BlueprintModal";
 import { NewDesignModal } from "./ui/NewDesignModal";
+import { NodeSwatch } from "./ui/NodeSwatch";
 import { StepperButtons } from "./ui/MathNumInput";
 import { formatLength, fromMillimetres, toMillimetres } from "./measurement";
 import type { AppearancePreference, DisplayUnit } from "./measurement";
@@ -130,9 +133,9 @@ import {
   localMeshBounds,
   mergeBinarySTLs,
 } from "./export/stl";
-import { findTouchingSeam, positionWithBoundsGap } from "./snapping/spacing";
+import { findTouchingSeam, coordinate } from "./snapping/spacing";
 import type { TouchingSeam } from "./snapping/spacing";
-import type { SnapAnchor, SnapAxis } from "./snapping/snap";
+import { SpacingPanel, type SpacingSettings } from "./ui/SpacingPanel";
 
 /** Only the fields the kernel cares about — so renaming or collapsing a node
  *  never triggers a rebuild. */
@@ -1063,11 +1066,6 @@ export function App() {
   const [exportQuality, setExportQuality] = useState<ExportQuality>(
     () => (localStorage.getItem(EXPORT_QUALITY_KEY) as ExportQuality | null) ?? "fine",
   );
-  const [gapAxis, setGapAxis] = useState<SnapAxis>("x");
-  const [gapMm, setGapMm] = useState(10);
-  const [fixedAnchor, setFixedAnchor] = useState<SnapAnchor>("max");
-  const [movingAnchor, setMovingAnchor] = useState<SnapAnchor>("min");
-  const [gapDirection, setGapDirection] = useState<-1 | 1>(1);
   const [spacingSwapped, setSpacingSwapped] = useState(false);
   // Collapsed by default — six controls plus a hint line is a lot to force
   // open the instant two objects happen to be selected, when most of the
@@ -1092,6 +1090,8 @@ export function App() {
   const [autoJointDominoRotation, setAutoJointDominoRotation] = useState<number>(0);
   const [autoJointHingeEdge, setAutoJointHingeEdge] = useState<"left" | "right" | "top" | "bottom">("left");
   const [autoJointHingeSides, setAutoJointHingeSides] = useState<number>(64);
+  const [autoJointStyle, setAutoJointStyle] = useState<"both_holes" | "integrated">("both_holes");
+  const [autoJointGenerateLooseInserts, setAutoJointGenerateLooseInserts] = useState<boolean>(false);
   const [blueprintOpen, setBlueprintOpen] = useState(false);
   const [explodeAmount, setExplodeAmount] = useState<number>(0);
   const [cutPlaneAxis, setCutPlaneAxis] = useState<"xy" | "xz" | "yz" | "custom">("xy");
@@ -1444,6 +1444,22 @@ export function App() {
       rotZDeg,
     ];
 
+    // For Part A cutter (pointing into Part A along -zAxis):
+    const plugLocalX = localX.clone().negate();
+    const plugLocalY = localY.clone();
+    const plugZAxis = zAxis.clone().negate();
+    const plugRotMatrix = new THREE.Matrix4().makeBasis(plugLocalX, plugLocalY, plugZAxis);
+    const plugEuler = new THREE.Euler().setFromRotationMatrix(plugRotMatrix, "XYZ");
+    let plugRotZDeg = (plugEuler.z / Math.PI) * 180;
+    if (shape === 3 && dominoRotation === 90) {
+      plugRotZDeg = (plugRotZDeg + 90) % 360;
+    }
+    const plugRotationDeg: Vec3 = [
+      (plugEuler.x / Math.PI) * 180,
+      (plugEuler.y / Math.PI) * 180,
+      plugRotZDeg,
+    ];
+
     const j = (axis + 1) % 3;
     const wallHeight = axis === 2
       ? Math.max(footprint[0], footprint[1])
@@ -1715,6 +1731,7 @@ export function App() {
 
     return {
       rotationDeg,
+      plugRotationDeg,
       targetPoints,
       sizeParams,
       effectiveCount,
@@ -1878,8 +1895,90 @@ export function App() {
       if (plugCombinedId && socketCombinedId) {
         selectMany([plugCombinedId, socketCombinedId], false);
       }
+    } else if (autoJointStyle === "both_holes" && (autoJointShape === 3 || autoJointShape === 1 || autoJointShape === 2)) {
+      // Both pieces get mortise pocket holes (for real Festool Dominoes or dowel pins - no protruding tenon)
+      const plugConnIds: string[] = [];
+      for (const pt of layout.targetPoints) {
+        addPrimitive("connector");
+        const id = useDoc.getState().selectedIds[0];
+        if (id) {
+          setTransform(id, { position: pt, rotation: layout.plugRotationDeg });
+          for (const [k, v] of Object.entries(layout.sizeParams)) setParam(id, k, v);
+          setParam(id, "fit", 1);
+          setHole(id, true);
+          plugConnIds.push(id);
+        }
+      }
+
+      const socketConnIds: string[] = [];
+      for (const pt of layout.targetPoints) {
+        addPrimitive("connector");
+        const id = useDoc.getState().selectedIds[0];
+        if (id) {
+          setTransform(id, { position: pt, rotation: layout.rotationDeg });
+          for (const [k, v] of Object.entries(layout.sizeParams)) setParam(id, k, v);
+          setParam(id, "fit", 1);
+          setHole(id, true);
+          socketConnIds.push(id);
+        }
+      }
+
+      selectMany([plugNode.id, ...plugConnIds], false);
+      combine("union");
+      const plugCombinedId = useDoc.getState().selectedIds[0];
+      const mortiseSuffix = autoJointShape === 3 ? "with Mortise" : (autoJointShape === 1 ? "with Dowel Hole" : "with Key Hole");
+      if (plugCombinedId) rename(plugCombinedId, `${plugNode.name} (${mortiseSuffix})`);
+
+      selectMany([socketNode.id, ...socketConnIds], false);
+      combine("union");
+      const socketCombinedId = useDoc.getState().selectedIds[0];
+      if (socketCombinedId) rename(socketCombinedId, `${socketNode.name} (${mortiseSuffix})`);
+
+      // Optionally generate separate standalone loose printable Domino / Dowel inserts on the bed
+      const looseInsertIds: string[] = [];
+      if (autoJointGenerateLooseInserts) {
+        for (let idx = 0; idx < layout.targetPoints.length; idx++) {
+          const pt = layout.targetPoints[idx];
+          if (autoJointShape === 3) {
+            addPrimitive("domino");
+            const dId = useDoc.getState().selectedIds[0];
+            if (dId) {
+              const fullLen = Math.round(layout.effLength * 2);
+              setParam(dId, "type", 1); // loose tenon insert
+              setParam(dId, "thickness", layout.effThickness);
+              setParam(dId, "width", layout.effWidth);
+              setParam(dId, "length", fullLen);
+              setParam(dId, "clearance", autoJointClearance);
+              setTransform(dId, {
+                position: [pt[0] + (idx + 1) * (layout.effWidth + 10), pt[1], 0],
+                rotation: [0, 0, 0],
+              });
+              rename(dId, `Loose Domino ${layout.effThickness}x${layout.effWidth}x${fullLen}mm`);
+              looseInsertIds.push(dId);
+            }
+          } else {
+            addPrimitive("cylinder");
+            const pId = useDoc.getState().selectedIds[0];
+            if (pId) {
+              const fullLen = Math.round(layout.effLength * 2);
+              setParam(pId, "radius", layout.effRadius - autoJointClearance);
+              setParam(pId, "height", fullLen);
+              setTransform(pId, {
+                position: [pt[0] + (idx + 1) * (layout.effRadius * 2 + 10), pt[1], 0],
+                rotation: [0, 0, 0],
+              });
+              rename(pId, `Loose Dowel Pin D${Math.round(layout.effRadius * 2)}x${fullLen}mm`);
+              looseInsertIds.push(pId);
+            }
+          }
+        }
+      }
+
+      if (plugCombinedId && socketCombinedId) {
+        selectMany([plugCombinedId, socketCombinedId, ...looseInsertIds], false);
+      }
     } else {
-      // Standard joints (Round Pin, Square Key, Tenon, Dovetail, Snap-Fit)
+      // Standard integrated joints (Male tenon on Part A, female socket on Part B)
       const plugConnIds: string[] = [];
       for (const pt of layout.targetPoints) {
         addPrimitive("connector");
@@ -1938,7 +2037,7 @@ export function App() {
 
     sceneRef.current?.setJoineryPreview(null);
     setToolMode("select");
-  }, [connectorSeam, autoJointShape, autoJointCount, autoJointClearance, autoJointDovetailStopped, autoJointDovetailStopEnd, autoJointHingeEdge, autoJointOrientation, autoJointDominoRotation, autoJointVerticalOffset, computeJoineryLayout, addPrimitive, setTransform, setParam, setHole, selectMany, combine, rename]);
+  }, [connectorSeam, autoJointShape, autoJointStyle, autoJointGenerateLooseInserts, autoJointCount, autoJointClearance, autoJointDovetailStopped, autoJointDovetailStopEnd, autoJointHingeEdge, autoJointOrientation, autoJointDominoRotation, autoJointVerticalOffset, computeJoineryLayout, addPrimitive, setTransform, setParam, setHole, selectMany, combine, rename]);
 
   // Live Ghost Preview in 3D viewport while in "join" toolMode
   useEffect(() => {
@@ -1964,14 +2063,16 @@ export function App() {
       items: layout.targetPoints.map((pt) => ({
         position: pt,
         rotationDeg: layout.rotationDeg,
+        plugRotationDeg: layout.plugRotationDeg,
         shape: autoJointShape,
         params: layout.sizeParams,
+        style: (autoJointShape === 3 || autoJointShape === 1 || autoJointShape === 2) ? autoJointStyle : "integrated",
       })),
     });
     return () => {
       sceneRef.current?.setJoineryPreview(null);
     };
-  }, [toolMode, connectorSeam, autoJointShape, autoJointCount, autoJointClearance, autoJointDovetailStopped, autoJointDovetailStopEnd, autoJointHingeEdge, autoJointOrientation, autoJointDominoRotation, autoJointVerticalOffset, computeJoineryLayout]);
+  }, [toolMode, connectorSeam, autoJointShape, autoJointStyle, autoJointCount, autoJointClearance, autoJointDovetailStopped, autoJointDovetailStopEnd, autoJointHingeEdge, autoJointOrientation, autoJointDominoRotation, autoJointVerticalOffset, computeJoineryLayout]);
 
   // If selection changes away from 2 objects while in "join" toolMode, return to "select"
   useEffect(() => {
@@ -2246,24 +2347,39 @@ export function App() {
     });
   }, [nodes]);
 
-  const applyGap = useCallback(() => {
-    if (!spacingSelection || !Number.isFinite(gapMm)) return;
+  const spacingPosition = useCallback((settings: SpacingSettings) => {
+    if (!spacingSelection) return null;
     const fixedBounds = sceneRef.current?.getObjectBounds(spacingSelection.fixedNode.id);
     const movingBounds = sceneRef.current?.getObjectBounds(spacingSelection.movingNode.id);
-    if (!fixedBounds || !movingBounds) return;
-    const position = positionWithBoundsGap(
-      fixedBounds,
-      spacingSelection.movingNode,
-      movingBounds,
-      gapAxis,
-      fixedAnchor,
-      movingAnchor,
-      Math.max(0, gapMm),
-      gapDirection,
-    );
+    if (!fixedBounds || !movingBounds) return null;
+    const position = [...spacingSelection.movingNode.position] as Vec3;
+    for (const [i, axis] of settings.axes.entries()) {
+      if (!axis.enabled) continue;
+      const offset = Number.isFinite(axis.gap) ? Math.max(0, axis.gap) : 0;
+      const fixedRef = coordinate(fixedBounds, i, axis.fixedAnchor);
+      const movingRef = coordinate(movingBounds, i, axis.movingAnchor);
+      let delta = 0;
+      if (axis.fixedAnchor === "min" && axis.movingAnchor === "max") {
+        delta = (fixedRef - offset) - movingRef;
+      } else if (axis.fixedAnchor === "max" && axis.movingAnchor === "max") {
+        delta = (fixedRef - offset) - movingRef;
+      } else {
+        delta = (fixedRef + offset) - movingRef;
+      }
+      position[i] += delta;
+    }
+    return position;
+  }, [spacingSelection, parts]);
+  const previewSpacing = useCallback((settings: SpacingSettings | null) => {
+    const position = settings ? spacingPosition(settings) : null;
+    sceneRef.current?.setSpacingGhostPreview(position && spacingSelection ? { movingId: spacingSelection.movingNode.id, targetPosition: position, color: resolveNodeColor(spacingSelection.movingNode) } : null);
+  }, [spacingPosition, spacingSelection]);
+  const applyGap = useCallback((settings: SpacingSettings) => {
+    const position = spacingPosition(settings);
+    if (!position || !spacingSelection) return;
+    sceneRef.current?.setSpacingGhostPreview(null);
     setTransform(spacingSelection.movingNode.id, { position });
-  }, [fixedAnchor, gapAxis, gapDirection, gapMm, movingAnchor, setTransform, spacingSelection]);
-
+  }, [spacingPosition, spacingSelection, setTransform]);
   const [textRebuildNonce, setTextRebuildNonce] = useState(0);
 
   useEffect(() => {
@@ -5103,7 +5219,7 @@ export function App() {
 
       <aside className="panel tools-panel">
         <div className="tape-panel-host" ref={tapePanelRef} hidden={toolMode !== "measure"} />
-        {!(toolMode === "place" && surfaceSource) && <div className="tools-panel-tabs" role="tablist" style={{ order: -1 }}>
+        {!(toolMode === "place" && surfaceSource) && toolMode !== "join" && <div className="tools-panel-tabs" role="tablist" style={{ order: -1 }}>
           <button
             type="button"
             role="tab"
@@ -5152,11 +5268,23 @@ export function App() {
             <ol className="surface-placement-steps" aria-label="Placement steps">
               <li className={surfaceFacePicked ? "complete" : "active"}>
                 <span className="surface-step-number" aria-hidden="true">{surfaceFacePicked ? "✓" : "1"}</span>
-                <span><strong>Source face</strong><small>{findNode(nodes, surfaceSource)?.name ?? "Selected object"}</small></span>
+                <span>
+                  <strong>Source face</strong>
+                  <small style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                    <NodeSwatch node={findNode(nodes, surfaceSource)} size={10} />
+                    {findNode(nodes, surfaceSource)?.name ?? "Selected object"}
+                  </small>
+                </span>
               </li>
               <li className={surfaceTarget ? "complete" : surfaceFacePicked ? "active" : ""}>
                 <span className="surface-step-number" aria-hidden="true">{surfaceTarget ? "✓" : "2"}</span>
-                <span><strong>Target face</strong><small>{surfaceTarget ? (findNode(nodes, surfaceTarget)?.name ?? "Target object") : "Choose where it should attach"}</small></span>
+                <span>
+                  <strong>Target face</strong>
+                  <small style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                    {surfaceTarget && <NodeSwatch node={findNode(nodes, surfaceTarget)} size={10} />}
+                    {surfaceTarget ? (findNode(nodes, surfaceTarget)?.name ?? "Target object") : "Choose where it should attach"}
+                  </small>
+                </span>
               </li>
             </ol>
 
@@ -5241,7 +5369,10 @@ export function App() {
                     <>
                       <div className="align-panel-object anchor" title="Stationary anchor (does not move)">
                         <span className="align-badge-label">Anchor</span>
-                        <strong>{currentAnchorNode.name}</strong>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 5, minWidth: 0, overflow: "hidden" }}>
+                          <NodeSwatch node={currentAnchorNode} size={11} />
+                          <strong>{currentAnchorNode.name}</strong>
+                        </span>
                       </div>
                       <button
                         type="button"
@@ -5257,14 +5388,20 @@ export function App() {
                       </button>
                       <div className="align-panel-object moving" title="Moving object (aligns to anchor)">
                         <span className="align-badge-label">Moving</span>
-                        <strong>{currentMovingNode.name}</strong>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 5, minWidth: 0, overflow: "hidden" }}>
+                          <NodeSwatch node={currentMovingNode} size={11} />
+                          <strong>{currentMovingNode.name}</strong>
+                        </span>
                       </div>
                     </>
                   ) : (
                     <>
                       <div className="align-panel-object anchor">
                         <span className="align-badge-label">Anchor</span>
-                        <strong>{currentAnchorName}</strong>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 5, minWidth: 0, overflow: "hidden" }}>
+                          {effectiveAlignFixedId && <NodeSwatch node={findNode(nodes, effectiveAlignFixedId)} size={11} />}
+                          <strong>{currentAnchorName}</strong>
+                        </span>
                       </div>
                       {selectedIds.length === 2 && (
                         <button
@@ -5976,7 +6113,7 @@ export function App() {
             </div>
           );
         })()}
-        {toolMode !== "measure" && toolMode !== "face" && toolMode !== "edge" && toolMode !== "build" && toolMode !== "align" && toolMode !== "cut" && !(toolMode === "place" && surfaceSource) && rightPanelTab === "shapes" && (
+        {toolMode !== "measure" && toolMode !== "face" && toolMode !== "edge" && toolMode !== "build" && toolMode !== "align" && toolMode !== "cut" && toolMode !== "join" && !(toolMode === "place" && surfaceSource) && rightPanelTab === "shapes" && (
           <section className="tool-section shape-library">
           <div className="panel-heading compact shape-library-header">
             <div><h1>Shape library</h1><p>Drag or click to add</p></div>
@@ -6059,10 +6196,10 @@ export function App() {
             if (file) void importSTLFile(file);
           }}
         />
-        {toolMode !== "measure" && toolMode !== "face" && toolMode !== "edge" && toolMode !== "build" && toolMode !== "align" && !(toolMode === "place" && surfaceSource) && (rightPanelTab === "properties" || toolMode === "cut") && (
+        {toolMode !== "measure" && toolMode !== "face" && toolMode !== "edge" && toolMode !== "build" && toolMode !== "align" && !(toolMode === "place" && surfaceSource) && (rightPanelTab === "properties" || toolMode === "cut" || toolMode === "join") && (
           <div className="tools-panel-inspector-wrap">
-            {/* Cut mode shows only the Cut / Split panel below, not the inspector. */}
-            {toolMode !== "cut" && (
+            {/* Cut and Join modes show only their dedicated panels below, not the general properties inspector. */}
+            {toolMode !== "cut" && toolMode !== "join" && (
             <section className="tool-section inspector-section">
           <div className="panel-heading compact">
             <div>
@@ -6252,7 +6389,10 @@ export function App() {
             {/* Target Object Name Badge */}
             <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 12, padding: "5px 8px", background: "#f8fafc", borderRadius: 6, border: "1px solid #e2e8f0", fontSize: 11 }}>
               <span style={{ color: "#64748b" }}>Target:</span>
-              <strong style={{ color: "#0f172a" }}>{cutTargetNode.name}</strong>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+                <NodeSwatch node={cutTargetNode} size={11} />
+                <strong style={{ color: "#0f172a" }}>{cutTargetNode.name}</strong>
+              </span>
             </div>
 
             {/* 1. Cutting Plane Orientation */}
@@ -6552,20 +6692,6 @@ export function App() {
               <span>Live Ghost Preview (Parts are transparent)</span>
             </div>
 
-            <div className="spacing-objects" style={{ margin: "8px 0" }}>
-              <div>
-                <span className="field-label">Plug goes on</span>
-                <strong>{connectorSeam.plugNode.name}</strong>
-              </div>
-              <button type="button" onClick={() => setConnectorSwapped((v) => !v)} title="Swap plug and socket">
-                Swap
-              </button>
-              <div>
-                <span className="field-label">Socket goes on</span>
-                <strong>{connectorSeam.socketNode.name}</strong>
-              </div>
-            </div>
-
             {/* Joint Type (5 visual icon cards) */}
             <div style={{ marginBottom: 12 }}>
               <span className="field-label" style={{ display: "block", marginBottom: 5, fontSize: 11, fontWeight: 600, color: "#475569" }}>
@@ -6593,11 +6719,131 @@ export function App() {
                   >
                     {item.icon}
                     <span style={{ fontWeight: 600 }}>{item.label}</span>
-                    <span style={{ fontSize: 9, opacity: 0.75 }}>{item.desc}</span>
                   </button>
                 ))}
               </div>
             </div>
+
+            {/* For Dovetail, Hinge, and Snap Pin: Always integrated male/female - show target piece assignment & swap */}
+            {(autoJointShape === 0 || autoJointShape === 5 || autoJointShape === 6) && (
+              <div className="spacing-objects" style={{ margin: "4px 0 12px" }}>
+                <div>
+                  <span className="field-label">
+                    {autoJointShape === 0 ? "Rail goes on" : (autoJointShape === 5 ? "Outer Knuckles on" : "Snap Tab on")}
+                  </span>
+                  <strong>{connectorSeam.plugNode.name}</strong>
+                </div>
+                <button type="button" onClick={() => setConnectorSwapped((v) => !v)} title="Swap target objects">
+                  ⇄ Swap
+                </button>
+                <div>
+                  <span className="field-label">
+                    {autoJointShape === 0 ? "Slot goes in" : (autoJointShape === 5 ? "Center Knuckles on" : "Snap Catch in")}
+                  </span>
+                  <strong>{connectorSeam.socketNode.name}</strong>
+                </div>
+              </div>
+            )}
+
+            {/* Joint Construction / Style: Mortise Only (Both Sides) vs Integrated Male/Female */}
+            {(autoJointShape === 3 || autoJointShape === 1 || autoJointShape === 2) && (
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+                  <span className="field-label" style={{ fontSize: 11, fontWeight: 600, color: "#475569" }}>
+                    {autoJointShape === 3 ? "Domino Style" : "Joint Construction"}
+                  </span>
+                  <span style={{ fontSize: 10, color: "#00a7a5", fontWeight: 600 }}>
+                    {autoJointStyle === "both_holes" ? "Holes on Both Sides" : "Integrated Male/Female"}
+                  </span>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+                  <button
+                    type="button"
+                    className={`tolerance-card ${autoJointStyle === "both_holes" ? "active" : ""}`}
+                    onClick={() => setAutoJointStyle("both_holes")}
+                    style={{ padding: "8px 6px", textAlign: "center", display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}
+                    title={autoJointShape === 3 ? "Cut mortises into both parts for real wooden Festool Dominoes or loose tenons" : "Holes in both parts for separate dowel pins"}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <MortiseHoleIcon />
+                      <span style={{ fontWeight: 600, fontSize: 11 }}>Mortise Only</span>
+                    </div>
+                    <span style={{ fontSize: 9, opacity: 0.8 }}>Holes on Both Sides (Real Domino)</span>
+                  </button>
+                  <button
+                    type="button"
+                    className={`tolerance-card ${autoJointStyle === "integrated" ? "active" : ""}`}
+                    onClick={() => setAutoJointStyle("integrated")}
+                    style={{ padding: "8px 6px", textAlign: "center", display: "flex", flexDirection: "column", alignItems: "center", gap: 3 }}
+                    title="Print protruding tenon on Part A, mortise on Part B"
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                      <IntegratedTenonIcon />
+                      <span style={{ fontWeight: 600, fontSize: 11 }}>Integrated</span>
+                    </div>
+                    <span style={{ fontSize: 9, opacity: 0.8 }}>Tenon on A, Mortise on B</span>
+                  </button>
+                </div>
+
+                {/* When Integrated is chosen: Show where tenon is attached and where mortise is cut, with Swap button */}
+                {autoJointStyle === "integrated" && (
+                  <div className="spacing-objects" style={{ margin: "8px 0 0" }}>
+                    <div>
+                      <span className="field-label">
+                        {autoJointShape === 3 ? "Tenon integrated on" : (autoJointShape === 1 ? "Pin attached to" : "Key attached to")}
+                      </span>
+                      <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 2 }}>
+                        <NodeSwatch node={connectorSeam.plugNode} size={11} />
+                        <strong style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{connectorSeam.plugNode.name}</strong>
+                      </div>
+                    </div>
+                    <button type="button" onClick={() => setConnectorSwapped((v) => !v)} title="Swap which object gets the tenon and which gets the mortise">
+                      ⇄ Swap
+                    </button>
+                    <div>
+                      <span className="field-label">
+                        {autoJointShape === 3 ? "Mortise cut into" : (autoJointShape === 1 ? "Hole cut into" : "Slot cut into")}
+                      </span>
+                      <div style={{ display: "flex", alignItems: "center", gap: 5, marginTop: 2 }}>
+                        <NodeSwatch node={connectorSeam.socketNode} size={11} />
+                        <strong style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{connectorSeam.socketNode.name}</strong>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* When Mortise Only is chosen: Inform user and offer optional loose Domino insert */}
+                {autoJointStyle === "both_holes" && (
+                  <div style={{ marginTop: 8, padding: "8px 10px", background: "#f8fafc", borderRadius: 6, border: "1px solid #e2e8f0" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "#334155", fontWeight: 500, marginBottom: 6 }}>
+                      <MortiseHoleIcon style={{ width: 14, height: 14, flexShrink: 0 }} />
+                      <span style={{ display: "inline-flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
+                        Mortises cut into both
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+                          <NodeSwatch node={connectorSeam.plugNode} size={10} />
+                          <strong>{connectorSeam.plugNode.name}</strong>
+                        </span>
+                        &amp;
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}>
+                          <NodeSwatch node={connectorSeam.socketNode} size={10} />
+                          <strong>{connectorSeam.socketNode.name}</strong>
+                        </span>
+                      </span>
+                    </div>
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, color: "#334155", cursor: "pointer", paddingTop: 6, borderTop: "1px dashed #cbd5e1" }}>
+                      <input
+                        type="checkbox"
+                        checked={autoJointGenerateLooseInserts}
+                        onChange={(e) => setAutoJointGenerateLooseInserts(e.target.checked)}
+                      />
+                      <span>
+                        Also generate separate printable {autoJointShape === 3 ? "Domino insert(s)" : "dowel pin(s)"} on bed
+                      </span>
+                    </label>
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Quantity Slider (for dovetails, pins, tenons, and hinges) */}
             <div style={{ marginBottom: 12 }}>
@@ -7473,7 +7719,11 @@ export function App() {
                 }}
                 title={joineryLayout.isPunchThrough ? "Warning: Hole will punch through back wall" : undefined}
               >
-                {joineryLayout.isPunchThrough ? "⚠️ Apply (Through-Hole)" : "⚡ Apply Joint"}
+                {joineryLayout.isPunchThrough
+                  ? "⚠️ Apply (Through-Hole)"
+                  : autoJointStyle === "both_holes" && (autoJointShape === 3 || autoJointShape === 1 || autoJointShape === 2)
+                    ? "⚡ Apply Mortises (Both Sides)"
+                    : "⚡ Apply Joint"}
               </button>
             </div>
           </section>
@@ -7512,7 +7762,7 @@ export function App() {
           </section>
         )}
 
-        {selectedIds.length === 2 && (
+        {selectedIds.length === 2 && toolMode !== "join" && (
         <section className="tool-section spacing-section">
           <button
             type="button"
@@ -7520,96 +7770,18 @@ export function App() {
             onClick={() => setSpacingOpen((v) => !v)}
             aria-expanded={spacingOpen}
           >
-            <div><h1>Exact spacing</h1><p>Set the gap between two objects</p></div>
+            <div><h1>Object spacing</h1><p>Set gaps or line up edges</p></div>
             <span className="disclosure-caret">▸</span>
           </button>
-          {spacingOpen && (
-          <>
-          <div className="spacing-objects">
-          <div>
-            <span className="field-label">Stays fixed</span>
-            <strong>{spacingSelection?.fixedNode.name ?? "First selected object"}</strong>
-          </div>
-          <button
-            disabled={!spacingSelection}
-            onClick={() => setSpacingSwapped((v) => !v)}
-            title="Exchange the fixed and moving objects"
-          >
-            Swap
-          </button>
-          <div>
-            <span className="field-label">Moves</span>
-            <strong>{spacingSelection?.movingNode.name ?? "Second selected object"}</strong>
-          </div>
-          </div>
-          <div className="row axis-row">
-          {(["x", "y", "z"] as SnapAxis[]).map((axis) => (
-            <button
-              key={axis}
-              className={gapAxis === axis ? "on" : ""}
-              onClick={() => setGapAxis(axis)}
-            >
-              {axis.toUpperCase()}
-            </button>
-          ))}
-          </div>
-          <label className="field">
-          <span className="field-label">Measure from fixed object</span>
-          <select
-            className="num"
-            value={fixedAnchor}
-            onChange={(e) => setFixedAnchor(e.target.value as SnapAnchor)}
-          >
-            <option value="min">Minimum edge</option>
-            <option value="center">Centre</option>
-            <option value="max">Maximum edge</option>
-          </select>
-          </label>
-          <label className="field">
-          <span className="field-label">Measure to moving object</span>
-          <select
-            className="num"
-            value={movingAnchor}
-            onChange={(e) => setMovingAnchor(e.target.value as SnapAnchor)}
-          >
-            <option value="min">Minimum edge</option>
-            <option value="center">Centre</option>
-            <option value="max">Maximum edge</option>
-          </select>
-          </label>
-          <span className="field-label">Direction from fixed reference</span>
-          <div className="row">
-          <button className={gapDirection === -1 ? "on" : ""} onClick={() => setGapDirection(-1)}>
-            Negative
-          </button>
-          <button className={gapDirection === 1 ? "on" : ""} onClick={() => setGapDirection(1)}>
-            Positive
-          </button>
-          </div>
-          <label className="field">
-          {/* In the chosen unit like every other length in the app: this was
-              fixed to mm, so with inches selected a gap had to be typed in a
-              different unit from the positions it was measured against. */}
-          <span className="field-label">Gap ({displayUnit})</span>
-          <SignedMeasurementInput
-            valueMm={gapMm}
-            unit={displayUnit}
-            decimals={decimalPlaces}
-            min={0}
-            step={0.5}
-            onValue={(value) => setGapMm(Math.max(0, value))}
-            onEnter={applyGap}
-          />
-          </label>
-          <button className="primary" disabled={!spacingSelection} onClick={applyGap}>Set exact gap</button>
-          <p className="hint spacing-hint">
-          {spacingSelection
-            ? `${spacingSelection.fixedNode.name} stays fixed; ${spacingSelection.movingNode.name} moves along ${gapAxis.toUpperCase()}.`
-            : "Select exactly two top-level objects. The first stays fixed."}
-          </p>
-          </>
-          )}
-        </section>
+          {spacingOpen && spacingSelection && (
+            <SpacingPanel
+              fixedName={spacingSelection.fixedNode.name}
+              movingName={spacingSelection.movingNode.name}
+              onSwap={() => setSpacingSwapped(v => !v)}
+              onApply={applyGap}
+              onPreview={previewSpacing}
+            />
+          )}        </section>
         )}
           </div>
         )}

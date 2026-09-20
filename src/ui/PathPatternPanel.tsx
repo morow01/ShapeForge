@@ -5,6 +5,7 @@ import { fromMillimetres, toMillimetres, UNIT_LABEL } from "../measurement";
 import { anchor } from "../sketch/geometry";
 import { pathPlacements, type PathPlacement } from "../geometry/pathPattern";
 import { SketchEditor } from "./SketchEditor";
+import { NodeSwatch } from "./NodeSwatch";
 
 interface Props {
   source: SceneNode; nodes: SceneNode[]; unit: DisplayUnit; decimals: number;
@@ -39,7 +40,14 @@ export function PathPatternPanel({ source, nodes, unit, decimals, onPreview, onA
     onApply={value => { setSketch(value); setPathIndex(0); setEditing(false); }} />;
   return <section className="path-pattern-panel" role="dialog" aria-label="Along Path">
     <header><h2>Along Path</h2><button onClick={onClose} aria-label="Close path pattern">×</button></header>
-    <p>Repeat <strong>{source.name}</strong> along a 2D curve. The scene shows the result before you apply.</p>
+    <p style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
+      <span>Repeat</span>
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+        <NodeSwatch node={source} size={11} />
+        <strong>{source.name}</strong>
+      </span>
+      <span>along a 2D curve. The scene shows the result before you apply.</span>
+    </p>
     <label>Guide<select value={guide} onChange={e => {setGuide(e.target.value);setPathIndex(0);}}><option value="custom">Draw a guide (XY plane)</option>{guides.map(n => <option key={n.id} value={n.id}>{n.name}</option>)}</select></label>
     {guide === "custom" && <><button onClick={() => setEditing(true)}>Edit guide in Sketch</button><p>The guide’s origin is the source object’s position. Open paths are supported.</p></>}
     {data.paths.length > 1 && <label>Path<select value={pathIndex} onChange={e => setPathIndex(Number(e.target.value))}>{data.paths.map((p,i) => <option key={p.id} value={i}>Path {i+1} · {p.closed ? "closed" : "open"}</option>)}</select></label>}

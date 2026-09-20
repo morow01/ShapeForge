@@ -2,8 +2,8 @@ import * as THREE from "three";
 
 /**
  * CAD-style view cube: a small, slightly see-through cube in a corner of the
- * main canvas that always shows the same orientation as the main camera, with
- * a small axis triad beside it. It looks like a plain cube — no ruled lines —
+ * main canvas that always shows the same orientation as the main camera.
+ * It looks like a plain cube — no ruled lines —
  * but every face, edge and corner is its own click target: face for a
  * straight-on view, edge or corner for an angled one. The edge and corner
  * zones are invisible until the pointer is over them, when they light up.
@@ -31,10 +31,6 @@ export const FACE_DIRECTIONS: { dir: THREE.Vector3; label: string }[] = [
 export const CUBE_PX = 150;
 export const CUBE_MARGIN_PX = 18;
 
-/** Side of the square the axis triad renders into, in the lower-left corner
- *  of the cube's own viewport — CSS pixels. */
-const TRIAD_PX = 44;
-
 /** Half the cube's side length, and how wide the invisible edge and corner
  *  zones are on each face (a fraction of the face). */
 const HALF = 0.5;
@@ -50,12 +46,6 @@ const FACE_OPACITY = 0.8;
 const HOVER_COLOR = 0x86d8d5;
 const OUTLINE_COLOR = 0x7d8e9b;
 const LABEL_COLOR = "#43525e";
-
-const AXES: { dir: THREE.Vector3; color: number; label: string }[] = [
-  { dir: new THREE.Vector3(1, 0, 0), color: 0xd94f4f, label: "X" },
-  { dir: new THREE.Vector3(0, 1, 0), color: 0x4caf6a, label: "Y" },
-  { dir: new THREE.Vector3(0, 0, 1), color: 0x3d8bd4, label: "Z" },
-];
 
 export interface NavHit {
   /** Stable name of the region, for hover bookkeeping. The two cells that
@@ -97,33 +87,6 @@ function makeFaceLabel(text: string): THREE.CanvasTexture {
   return tex;
 }
 
-function makeAxisLabel(text: string, color: number): THREE.Sprite {
-  const size = 64;
-  const canvas = document.createElement("canvas");
-  canvas.width = size;
-  canvas.height = size;
-  const ctx = canvas.getContext("2d")!;
-  ctx.font = "800 40px system-ui, -apple-system, Segoe UI, sans-serif";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.lineJoin = "round";
-  ctx.lineWidth = 7;
-  ctx.strokeStyle = "rgba(255,255,255,0.92)";
-  ctx.strokeText(text, size / 2, size / 2 + 2);
-  ctx.fillStyle = `#${color.toString(16).padStart(6, "0")}`;
-  ctx.fillText(text, size / 2, size / 2 + 2);
-  const tex = new THREE.CanvasTexture(canvas);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  const sprite = new THREE.Sprite(
-    new THREE.SpriteMaterial({ map: tex, depthTest: false, sizeAttenuation: false }),
-  );
-  sprite.renderOrder = 10;
-  // The triad's camera is orthographic, where a sprite's scale is in world
-  // units — in its 44 px view, 0.72 of them comes to about 10 px.
-  sprite.scale.set(0.72, 0.72, 1);
-  return sprite;
-}
-
 /** A flat quad with a fixed outward normal, wound counter-clockwise as seen
  *  from outside so the front-side-only material shows it from there. */
 function quadGeometry(points: THREE.Vector3[], normal: THREE.Vector3): THREE.BufferGeometry {
@@ -143,8 +106,6 @@ function quadGeometry(points: THREE.Vector3[], normal: THREE.Vector3): THREE.Buf
 export class NavCube {
   readonly scene = new THREE.Scene();
   readonly camera: THREE.OrthographicCamera;
-  private readonly triadScene = new THREE.Scene();
-  private triadCamera!: THREE.OrthographicCamera;
   private readonly light: THREE.DirectionalLight;
   private regions: Region[] = [];
   private hoverId: string | null = null;
@@ -158,7 +119,6 @@ export class NavCube {
     this.camera.up.set(0, 0, 1);
 
     this.buildCube();
-    this.buildTriad();
 
     // Lit from the viewer's upper left rather than from the world, so
     // whichever faces turn toward you are the bright ones as the cube spins.
@@ -263,40 +223,6 @@ export class NavCube {
     this.scene.add(outline);
   }
 
-  private buildTriad() {
-    const half = 1.6;
-    this.triadCamera = new THREE.OrthographicCamera(-half, half, half, -half, 0.1, 20);
-    this.triadCamera.up.set(0, 0, 1);
-
-    const shaftLength = 0.78;
-    const headLength = 0.3;
-    const shaft = this.track(new THREE.CylinderGeometry(0.05, 0.05, shaftLength, 12));
-    const head = this.track(new THREE.ConeGeometry(0.12, headLength, 16));
-    for (const axis of AXES) {
-      const material = this.track(new THREE.MeshBasicMaterial({ color: axis.color }));
-      // Cylinders and cones stand along +Y; turn that onto the axis.
-      const orient = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), axis.dir);
-      const shaftMesh = new THREE.Mesh(shaft, material);
-      shaftMesh.quaternion.copy(orient);
-      shaftMesh.position.copy(axis.dir).multiplyScalar(shaftLength / 2);
-      const headMesh = new THREE.Mesh(head, material);
-      headMesh.quaternion.copy(orient);
-      headMesh.position.copy(axis.dir).multiplyScalar(shaftLength + headLength / 2);
-      this.triadScene.add(shaftMesh, headMesh);
-
-      const label = makeAxisLabel(axis.label, axis.color);
-      label.position.copy(axis.dir).multiplyScalar(shaftLength + headLength + 0.28);
-      this.triadScene.add(label);
-      this.track(label.material);
-      this.textures.push(label.material.map!);
-    }
-    const hub = new THREE.Mesh(
-      this.track(new THREE.SphereGeometry(0.09, 16, 12)),
-      this.track(new THREE.MeshBasicMaterial({ color: 0x6b7986 })),
-    );
-    this.triadScene.add(hub);
-  }
-
   /** Points the cube the same way the main camera is currently pointing, so
    *  whatever face you're looking at in the main view is the one facing you
    *  here too. Distance is fixed (the cube's own orthographic camera has no
@@ -308,12 +234,11 @@ export class NavCube {
     // that shot so the cube never flips or freezes at the poles.
     const parallel = Math.abs(offsetDir.dot(up)) > 0.999;
     const camUp = parallel ? new THREE.Vector3(0, 1, 0) : up;
-    for (const camera of [this.camera, this.triadCamera]) {
-      camera.position.copy(offsetDir).multiplyScalar(DIST);
-      camera.up.copy(camUp);
-      camera.lookAt(0, 0, 0);
-      camera.updateMatrixWorld();
-    }
+    this.camera.position.copy(offsetDir).multiplyScalar(DIST);
+    this.camera.up.copy(camUp);
+    this.camera.lookAt(0, 0, 0);
+    this.camera.updateMatrixWorld();
+
     const right = new THREE.Vector3().setFromMatrixColumn(this.camera.matrixWorld, 0);
     const above = new THREE.Vector3().setFromMatrixColumn(this.camera.matrixWorld, 1);
     const toCamera = offsetDir.clone().normalize();
@@ -339,10 +264,9 @@ export class NavCube {
     return true;
   }
 
-  /** Draws the cube, and the axis triad in its lower-left corner, into the
-   *  square of the renderer's canvas whose lower-left corner is (x, y) and
-   *  whose side is `size` — CSS pixels, y measured from the bottom. Draws
-   *  over whatever is already there, with no background of its own. */
+  /** Draws the cube into the square of the renderer's canvas whose lower-left
+   *  corner is (x, y) and whose side is `size` — CSS pixels, y measured from
+   *  the bottom. Draws over whatever is already there, with no background of its own. */
   render(renderer: THREE.WebGLRenderer, x: number, y: number, size: number) {
     const autoClear = renderer.autoClear;
     renderer.autoClear = false;
@@ -352,11 +276,6 @@ export class NavCube {
     renderer.setViewport(x, y, size, size);
     renderer.clearDepth();
     renderer.render(this.scene, this.camera);
-
-    renderer.setScissor(x, y, TRIAD_PX, TRIAD_PX);
-    renderer.setViewport(x, y, TRIAD_PX, TRIAD_PX);
-    renderer.clearDepth();
-    renderer.render(this.triadScene, this.triadCamera);
 
     renderer.setScissorTest(false);
     renderer.autoClear = autoClear;
