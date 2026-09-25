@@ -3837,12 +3837,20 @@ export class Scene {
           const ax = rawApex.x;
           const ay = rawApex.y;
           const thickness = singleNode.params.thickness ?? 5;
-
+          // The kernel re-bases a triangle so the centre of its sharp
+          // construction triangle's bounds is the local origin (see
+          // fixedXYCentre in kernel/shape.ts). The corners must be shifted the
+          // same way, or every badge floats off by half the triangle's size.
+          const centre = new THREE.Vector3(
+            (Math.min(0, b, ax) + Math.max(0, b, ax)) / 2,
+            ay / 2,
+            0,
+          );
           const localCorners = [
-            new THREE.Vector3(0, 0, thickness).sub(view.pivot),
-            new THREE.Vector3(b, 0, thickness).sub(view.pivot),
-            new THREE.Vector3(ax, ay, thickness).sub(view.pivot),
-          ];
+            new THREE.Vector3(0, 0, thickness),
+            new THREE.Vector3(b, 0, thickness),
+            new THREE.Vector3(ax, ay, thickness),
+          ].map((corner) => corner.sub(centre).sub(view.pivot));
 
           const lockFlags = [
             !!singleNode.params.lockAngleLeft,

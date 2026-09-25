@@ -99,6 +99,21 @@ export function meshShellOpening(solid: MeshShape, point: Vec3, normal: Vec3, th
   return profile.extrude(depth + 0.01).transform([...x, 0, ...y, 0, ...n, 0, ...origin, 1]);
 }
 
+/** The clicked planar patch's outline (grown by `grow`, negative to inset)
+ *  extruded along its normal from `from` to `to` mm relative to the face.
+ *  'Round' matches the corners of meshShellOpening's pocket outline. */
+export function meshOpeningPrism(solid: MeshShape, point: Vec3, normal: Vec3, from: number, to: number, grow = 0, join: 'Miter' | 'Round' = 'Miter') {
+  const patch = planarPatch(solid, point, normal);
+  if (!patch) return null;
+  const profile = !grow ? patch.section
+    : join === 'Round' ? patch.section.offset(grow, 'Round', 2, 32)
+    : patch.section.offset(grow, 'Miter', 8);
+  if (profile.isEmpty()) return null;
+  const { x, y, n } = patch;
+  const origin = point.map((value, i) => value + from * n[i]) as Vec3;
+  return profile.extrude(to - from).transform([...x, 0, ...y, 0, ...n, 0, ...origin, 1]);
+}
+
 /** Offset the planar border and taper adjoining planar patches to their far edge. */
 export function resizeMeshFace(solid: MeshShape, op: ResizeFaceOp, onError?: (reason: string) => void): MeshShape | null {
   try {

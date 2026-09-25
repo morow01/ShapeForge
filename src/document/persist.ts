@@ -187,7 +187,12 @@ function parseOp(raw: unknown): EditOp | null {
     // rather than quietly turning back into a closed bottom.
     const bottomThickness = typeof o.bottomThickness === "number" && Number.isFinite(o.bottomThickness) && o.bottomThickness >= 0 ? o.bottomThickness : undefined;
     const openingInset = typeof o.openingInset === "number" && Number.isFinite(o.openingInset) && o.openingInset >= 0 ? o.openingInset : undefined;
-    return { kind: "shell", thickness: o.thickness, points, normal, bottomThickness, openingInset };
+    const r = o.rim as { kind?: unknown; width?: unknown; depth?: unknown } | undefined;
+    const rim = r && (r.kind === "ledge" || r.kind === "lip") &&
+      [r.width, r.depth].every((v) => typeof v === "number" && Number.isFinite(v) && v > 0)
+      ? { kind: r.kind as "ledge" | "lip", width: r.width as number, depth: r.depth as number }
+      : undefined;
+    return { kind: "shell", thickness: o.thickness, points, normal, bottomThickness, openingInset, rim };
   }
   if (o.kind === "resizeFace") {
     if (!isVec3(o.point) || !isVec3(o.normal)) return null;

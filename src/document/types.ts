@@ -1595,11 +1595,29 @@ export interface EdgeOp {
  * the same reason EdgeOp anchors edges that way: indices do not survive a
  * rebuild, a point does.
  */
+/**
+ * A step around a hollow's opening, `depth` deep from the opened face:
+ * - "ledge": the opening is `width` wider on every side than the pocket, so
+ *   a drop-in lid has a shelf to sit on (the top of the wall is thinned).
+ * - "lip": the opening is `width` narrower, leaving an overhang that holds
+ *   something in, like a press-fit magnet or a snap-in part.
+ */
+export interface HollowRim {
+  kind: "ledge" | "lip";
+  width: number;
+  depth: number;
+}
+
 export interface ShellOp {
   kind: "shell";
   thickness: number;
   bottomThickness?: number;
+  /** Legacy: distance from the face border to the opening over the top
+   *  `thickness` of the wall. No longer offered in the UI (Rim replaced it),
+   *  but still honoured so older documents rebuild unchanged. */
   openingInset?: number;
+  /** Optional step around the opening, cut after the plain hollow. */
+  rim?: HollowRim;
   /** One point on each face to open. Empty means a fully closed hollow. */
   points: Vec3[];
   /** Actual outward direction of the selected opening face. Older saved

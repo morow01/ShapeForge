@@ -4,6 +4,7 @@ import * as THREE from "three";
 import { EXPORT_MESHES_WATCHDOG_MS, EXPORT_WATCHDOG_MS, kernel, KernelTimeoutError, SCENE_TOTAL_MS } from "./kernel/client";
 import { Viewport } from "./viewport/Viewport";
 import { PathPatternPanel } from "./ui/PathPatternPanel";
+import { ToolPreviewLayer } from "./ui/ToolPreview";
 import type { PathPlacement } from "./geometry/pathPattern";
 import { readViewportQuality, VIEWPORT_QUALITY_KEY, type ViewportQuality } from "./viewport/quality";
 import type { FaceBounds, FaceResizeFrame } from "./viewport/FaceResizeHandles";
@@ -107,7 +108,7 @@ import { findAssemblyOwner, findNode, parentOf, resolveNodeTransparent, resolveN
 import { bakeScale } from "./document/bake";
 import { putBlob } from "./document/blobStore";
 import { loadCameraState } from "./document/persist";
-import type { EditOp, GroupNode, ImportNode, PrimitiveKind, SceneNode, ShellOp, ResizeFaceOp, SketchData, Vec3 } from "./document/types";
+import type { EditOp, GroupNode, ImportNode, PrimitiveKind, SceneNode, ShellOp, HollowRim, ResizeFaceOp, SketchData, Vec3 } from "./document/types";
 import { RETRYABLE_MESH_ERROR } from "./kernel/types";
 import type { EditSpec, ExportQuality, NodeSpec, PreviewBuild, ScenePart } from "./kernel/types";
 import type { CameraMode, CollisionHighlightStyle, DuplicateResult, Scene, ToolMode, WireframeMode } from "./viewport/scene";
@@ -3888,11 +3889,15 @@ export function App() {
     return ()=>{cancelled=true; window.clearTimeout(timer);};
   },[resizeFaceKey,resizeValueKey,nodes]);
   const [wallBottom, setWallBottom] = useState<number | null>(null);
-  // The floor opposite a hollow's opening. 0 opens that end too; anything else
-  // is at least the wall, since the cavity cannot come closer to the far face
-  // than it does to every other face.
-  const hollowBottom = wallBottom === 0 ? 0 : Math.max(faceValue, wallBottom ?? faceValue);
-  const [wallInset, setWallInset] = useState<number | null>(null);
+  // The floor opposite a hollow's opening, set independently of the wall; 0
+  // opens that end too. Until it is edited it starts out equal to the wall.
+  const hollowBottom = wallBottom ?? faceValue;
+  // Optional step around the opening: a ledge for a drop-in lid to sit on,
+  // or a lip that overhangs to hold something in.
+  const [rimKind, setRimKind] = useState<"none" | "ledge" | "lip">("none");
+  const [rimWidth, setRimWidth] = useState(1);
+  const [rimDepth, setRimDepth] = useState(2);
+  const hollowRim: HollowRim | undefined = rimKind === "none" ? undefined : { kind: rimKind, width: rimWidth, depth: rimDepth };
   const [wallPreview, setWallPreview] = useState(true);
   const [wallTransparency, setWallTransparency] = useState(true);
   useEffect(() => {
@@ -3923,7 +3928,7 @@ export function App() {
         if (!node || node.type === "import" || node.type === "build") throw new Error("Preview is unavailable for this object.");
         const op: ShellOp = { kind: "shell", thickness: Math.max(0.1, faceValue),
           bottomThickness: hollowBottom,
-          openingInset: wallInset ?? faceValue,
+          rim: hollowRim,
           points: [faceSelection.point], normal: faceSelection.normal };
         let base = toSpec(node);
         if (node.type !== "edit") base = { ...base, position: [0,0,0], rotation: [0,0,0], scale: [1,1,1] };
@@ -3940,7 +3945,7 @@ export function App() {
       }
     }, 450);
     return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [toolMode, faceOp, faceSelection, faceValue, wallBottom, wallInset, wallPreview, nodes]);
+  }, [toolMode, faceOp, faceSelection, faceValue, wallBottom, rimKind, rimWidth, rimDepth, wallPreview, nodes]);
   // Live preview for Round (fillet) and Bevel (chamfer) Face Border, built the
   // same way the Wall preview is: the exact op Apply would add, run through
   // previewLocal once the size has paused, shown in place of the object and
@@ -4621,6 +4626,7 @@ export function App() {
         </div>
       )}
 
+      <ToolPreviewLayer />
       <div className="tool-rail" role="toolbar" aria-label="Design tools">
         {/* Category 1: Selection & Transform */}
         <button
@@ -4807,7 +4813,7 @@ export function App() {
         {/* Category 2: Direct Geometry Editing (Face & Edge) */}
         {([
           ["push", "Push/Pull", "Select a face to push or pull (F)"],
-          ["wall", "Wall", "Hollow a shape through the selected face"],
+          ["wall", "Hollow", "Hollow a shape out through the selected face"],
           ["resize", "Resize Face", "Resize the selected face"],
           ["offset", "Offset & Extrude", "Offset and extrude the selected face"],
         ] as const).map(([operation, label, title]) => (
@@ -5719,31 +5725,52 @@ export function App() {
             {faceOp === "wall" && <>
               <div className="hollow-dimensions">
                 <label>Wall <span>({displayUnit})</span>
-                  <SignedMeasurementInput valueMm={faceValue} unit={displayUnit} decimals={decimalPlaces} min={0.1} step={0.5} onValue={setFaceValue} onEnter={() => faceApplyButtonRef.current?.click()} />
+                  <SignedMeasurementInput valueMm={faceValue} unit={displayUnit} decimals={decimalPlaces} min={0.1} step={0.5}
+                    onValue={(value) => {
+                      // Bottom starts out matching the wall; once the wall
+                      // changes it keeps its own value rather than following.
+                      if (wallBottom === null) setWallBottom(faceValue);
+                      setFaceValue(value);
+                    }}
+                    onEnter={() => faceApplyButtonRef.current?.click()} />
                 </label>
-                <label title="Thickness opposite the opening: at least the wall thickness, or 0 to open that end too">Bottom <span>({displayUnit})</span>
+                <label title="Thickness opposite the opening, or 0 to open that end too">Bottom <span>({displayUnit})</span>
                   <SignedMeasurementInput
                     valueMm={hollowBottom}
                     unit={displayUnit}
                     decimals={decimalPlaces}
                     min={0}
                     step={0.5}
-                    onValue={(value) => {
-                      // Between 0 and the wall there is no valid floor, so a
-                      // step down from the wall lands on 0 (open) and a step up
-                      // from 0 lands on the wall, rather than sticking in place.
-                      if (value <= 1e-6) setWallBottom(0);
-                      else if (value >= faceValue) setWallBottom(value);
-                      else setWallBottom(hollowBottom === 0 ? faceValue : 0);
-                    }}
+                    onValue={(value) => setWallBottom(Math.max(0, value))}
                     onEnter={() => faceApplyButtonRef.current?.click()}
                   />
                 </label>
-                <label title="Distance from the face border to the opening">Inset <span>({displayUnit})</span>
-                  <SignedMeasurementInput valueMm={wallInset ?? faceValue} unit={displayUnit} decimals={decimalPlaces} min={0} step={0.5} onValue={setWallInset} onEnter={() => faceApplyButtonRef.current?.click()} />
-                </label>
               </div>
-              <small>Bottom is opposite the opening and cannot be thinner than the wall — set it to 0 to open that end too. Inset controls the opening’s rim.</small>              <label><input type="checkbox" checked={wallPreview} onChange={e => setWallPreview(e.target.checked)} /> Live preview</label>
+              <small>Bottom is the floor opposite the opening — set it to 0 to open that end too.</small>
+              <div className="hollow-rim">
+                <span className="hollow-rim-label">Rim</span>
+                <div className="joint-type-grid hollow-rim-kinds" role="radiogroup" aria-label="Rim around the opening">
+                  {([
+                    ["none", "None", "A plain opening"],
+                    ["ledge", "Ledge", "A step inside the opening for a drop-in lid to sit on"],
+                    ["lip", "Lip", "An overhang around the opening that holds things in"],
+                  ] as const).map(([kind, label, title]) => (
+                    <button key={kind} type="button" role="radio" aria-checked={rimKind === kind}
+                      className={`joint-type-card ${rimKind === kind ? "active" : ""}`} title={title} onClick={() => setRimKind(kind)}>{label}</button>
+                  ))}
+                </div>
+                {rimKind !== "none" && <div className="hollow-dimensions">
+                  <label title={rimKind === "ledge" ? "How far the ledge cuts into the wall — less than the wall" : "How far the lip overhangs the pocket"}>Width <span>({displayUnit})</span>
+                    <SignedMeasurementInput valueMm={rimWidth} unit={displayUnit} decimals={decimalPlaces} min={0.1} step={0.5} onValue={(v) => setRimWidth(Math.max(0.1, v))} onEnter={() => faceApplyButtonRef.current?.click()} />
+                  </label>
+                  <label title="How far down from the opening the rim goes">Depth <span>({displayUnit})</span>
+                    <SignedMeasurementInput valueMm={rimDepth} unit={displayUnit} decimals={decimalPlaces} min={0.1} step={0.5} onValue={(v) => setRimDepth(Math.max(0.1, v))} onEnter={() => faceApplyButtonRef.current?.click()} />
+                  </label>
+                </div>}
+                {rimKind !== "none" && <small>{rimKind === "ledge"
+                  ? "A shelf for a lid: the top of the opening is wider by Width, Depth deep."
+                  : "An overhang: the top of the opening is narrower by Width, Depth deep."}</small>}
+              </div>              <label><input type="checkbox" checked={wallPreview} onChange={e => setWallPreview(e.target.checked)} /> Live preview</label>
               <label><input type="checkbox" checked={wallTransparency} onChange={e => setWallTransparency(e.target.checked)} /> Transparency</label>
               <p role="status" aria-live="polite">
                 {wallPreviewStatus.startsWith("BUILDING")
@@ -5907,7 +5934,7 @@ export function App() {
                     kind: "shell",
                     thickness: Math.max(0.1, faceValue),
                     bottomThickness: hollowBottom,
-                    openingInset: wallInset ?? faceValue,
+                    rim: hollowRim,
                     points: [target.point],
                     normal: target.normal,
                   };

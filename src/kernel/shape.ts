@@ -23,7 +23,7 @@ import { svgMeshSolid, svgRevolveSolid } from "./svgSolid";
 import { makeThreadedRodSolid, makeThreadedNutSolid } from "./threads";
 import { makeSpringSolid } from "./spring";
 import { makeHingeSolid } from "./hinge";
-import { meshShellOpening, offsetExtrudeMesh, resizeMeshFace } from "./meshFace";
+import { meshOpeningPrism, meshShellOpening, offsetExtrudeMesh, resizeMeshFace } from "./meshFace";
 import type { SvgCommand } from "../svg/parse";
 import type { EditOp, OffsetExtrudeOp, PushPullOp, ResizeFaceOp, ShellOp, Vec3 } from "../document/types";
 import { rotateLocalOffset } from "../document/bake";
@@ -3545,23 +3545,72 @@ function finishMeshEdge(
  * Uses Manifold's minkowskiDifference with a sphere to compute the exact inner cavity,
  * and extrudes the selected opening face(s) outward to connect the cavity through the exterior.
  */
-function hollowMesh(solid: MeshShape, op: ShellOp): MeshShape | null {
+function hollowMesh(solid: MeshShape, op: ShellOp, onReason?: (reason: string) => void): MeshShape | null {
   const thickness = Math.max(0.01, op.thickness);
-  const raw = solid.wrapped.getMesh();
-  const numTris = raw.triVerts.length / 3;
-  if (numTris === 0) return null;
+  if (solid.wrapped.getMesh().triVerts.length === 0) return null;
+  // The plain erosion also shrinks the part away from the opening, so a part
+  // less than two walls deep there (a 5 mm triangle with a 2.5 mm wall) has
+  // no core left even though the pocket fits. Only when that fails is the
+  // opening side extended first, so every shape that hollowed before keeps
+  // exactly the same result.
+  const hollow = hollowMeshWith(solid, op, thickness, false) ?? hollowMeshWith(solid, op, thickness, true);
+  if (!hollow || !op.rim) return hollow;
+  return addHollowRim(solid, hollow, op, thickness, onReason);
+}
 
-  const manifold = getManifold() as any;
-  const ball = manifold._Sphere ? manifold._Sphere(thickness, 12) : manifold.sphere(thickness, 12);
-  let inner: any;
+/**
+ * Cuts a ledge into, or adds a lip onto, the top `rim.depth` of a finished
+ * hollow's opening. Both are built from the original (un-hollowed) face's
+ * outline, inset by the wall exactly as the pocket's own opening is, so the
+ * step lines up with the pocket wall.
+ */
+function addHollowRim(original: MeshShape, hollow: MeshShape, op: ShellOp, thickness: number, onReason?: (reason: string) => void): MeshShape | null {
+  const rim = op.rim!;
+  const n = op.normal;
+  if (!n) return null;
+  let lowest = Infinity;
+  const raw = original.wrapped.getMesh();
+  for (let i = 0; i < raw.vertProperties.length; i += raw.numProp) {
+    lowest = Math.min(lowest, n[0] * raw.vertProperties[i] + n[1] * raw.vertProperties[i + 1] + n[2] * raw.vertProperties[i + 2]);
+  }
+  let result = hollow.wrapped;
   try {
-    inner = solid.wrapped.minkowskiDifference(ball);
+    for (const point of op.points ?? []) {
+      const pocketDepth = n[0] * point[0] + n[1] * point[1] + n[2] * point[2] - lowest - (op.bottomThickness ?? thickness);
+      if (rim.depth >= pocketDepth - 0.01) {
+        onReason?.("The rim is as deep as the pocket or deeper. Make the rim shallower or the Bottom thinner. The previous shape was kept.");
+        return null;
+      }
+      if (rim.kind === "ledge") {
+        // The pocket outline, grown outwards by the ledge width.
+        const inset = thickness - rim.width;
+        if (inset < 0.01) {
+          onReason?.("A ledge must be narrower than the wall, or it would cut right through it. The previous shape was kept.");
+          return null;
+        }
+        const cutter = meshOpeningPrism(original, point, n, -rim.depth, 0.02, -inset, "Round");
+        if (!cutter) return null;
+        result = result.subtract(cutter);
+      } else {
+        // A ring from the pocket wall inwards by the lip width.
+        const outer = meshOpeningPrism(original, point, n, -rim.depth, 0, -thickness, "Round");
+        const inner = meshOpeningPrism(original, point, n, -rim.depth - 0.01, 0.02, -(thickness + rim.width), "Round");
+        if (!outer || !inner) {
+          onReason?.("That lip is wide enough to close the opening. Try a narrower lip. The previous shape was kept.");
+          return null;
+        }
+        result = result.add(outer.subtract(inner).intersect(original.wrapped));
+      }
+    }
   } catch {
     return null;
   }
-  if (inner.isEmpty() || inner.volume() <= 1e-6) {
-    return null;
-  }
+  if (result.isEmpty() || result.status() !== "NoError") return null;
+  return new MeshShape(result);
+}
+
+function hollowMeshWith(solid: MeshShape, op: ShellOp, thickness: number, extendOpenings: boolean): MeshShape | null {
+  const raw = solid.wrapped.getMesh();
 
   // The far side of the part along the opening's normal: where the bottom is.
   let lowest = Infinity;
@@ -3571,38 +3620,96 @@ function hollowMesh(solid: MeshShape, op: ShellOp): MeshShape | null {
       lowest = Math.min(lowest, n[0] * raw.vertProperties[i] + n[1] * raw.vertProperties[i + 1] + n[2] * raw.vertProperties[i + 2]);
     }
   }
-  // A bottom of 0 leaves nothing there at all: the cavity runs out through
-  // the far face too. Below that, a floor is never thinner than the wall.
-  if (op.normal && op.bottomThickness !== undefined && op.bottomThickness > 0) {
-    inner = inner.trimByPlane(op.normal, lowest + Math.max(thickness, op.bottomThickness));
-    if (inner.isEmpty()) return null;
-  }
-  const openingCutters = [];
+  // Every opening, as [point on its face, outward normal]. Open-ended: the
+  // far face gets the same opening, with the same rim, cut from directly
+  // opposite each chosen opening — a sleeve rather than a cup. It needs a
+  // flat face there to cut from; without one this is refused rather than
+  // guessed at.
+  const openings: [Vec3, Vec3][] = [];
   for (const point of op.points ?? []) {
     if (!op.normal) return null;
-    const cutter = meshShellOpening(solid, point, op.normal, thickness, op.openingInset ?? thickness);
-    if (!cutter || cutter.intersect(inner).volume() <= 1e-8) return null;
-    openingCutters.push(cutter);
+    openings.push([point, op.normal]);
   }
-  // Open-ended: the far face gets the same opening, with the same rim, cut
-  // from directly opposite each chosen opening — a sleeve rather than a cup.
-  // It needs a flat face there to cut from; without one this is refused
-  // rather than guessed at.
   if (op.normal && op.bottomThickness === 0) {
     const n = op.normal;
     const back: Vec3 = [-n[0], -n[1], -n[2]];
     for (const point of op.points ?? []) {
       const depth = n[0] * point[0] + n[1] * point[1] + n[2] * point[2] - lowest;
-      const opposite = point.map((value, i) => value - n[i] * depth) as Vec3;
-      const cutter = meshShellOpening(solid, opposite, back, thickness, op.openingInset ?? thickness);
-      if (!cutter || cutter.intersect(inner).volume() <= 1e-8) return null;
-      openingCutters.push(cutter);
+      openings.push([point.map((value, i) => value - n[i] * depth) as Vec3, back]);
     }
   }
-  let fullCavity = inner;
-  for (const cutter of openingCutters) {
-    fullCavity = fullCavity.add(cutter);
+
+  const manifold = getManifold() as any;
+  const ball = manifold._Sphere ? manifold._Sphere(thickness, 12) : manifold.sphere(thickness, 12);
+  let inner: any;
+  try {
+    let body = solid.wrapped;
+    if (extendOpenings) {
+      // Stand a copy of each opening's outline on top of it, taller than the
+      // erosion reaches, so the part is only shrunk from its sides and floor.
+      for (const [point, normal] of openings) {
+        const extension = meshOpeningPrism(solid, point, normal, -0.01, 2 * thickness + 0.02);
+        if (!extension) return null;
+        body = body.add(extension);
+      }
+    }
+    // A floor thinner than the wall: overlap a copy of the part sunk by the
+    // difference, so the erosion's floor lands at the bottom thickness while
+    // the side walls keep the full wall thickness.
+    const bottom = op.bottomThickness;
+    if (op.normal && bottom !== undefined && bottom > 0 && bottom < thickness) {
+      const sink = thickness - bottom;
+      const [nx, ny, nz] = op.normal;
+      body = body.add(body.translate([-nx * sink, -ny * sink, -nz * sink]));
+    }
+    inner = body.minkowskiDifference(ball);
+    if (extendOpenings) {
+      // Put back the rim band under each opening; the opening cutter below
+      // decides how much of it is removed, exactly as for a deep part.
+      for (const [point, normal] of openings) {
+        const band = meshOpeningPrism(solid, point, normal, -thickness, 3 * thickness + 0.05, 0.01);
+        if (!band) return null;
+        inner = inner.subtract(band);
+      }
+    }
+  } catch {
+    return null;
   }
+  if (!extendOpenings && (inner.isEmpty() || inner.volume() <= 1e-6)) {
+    return null;
+  }
+
+  // A bottom of 0 leaves nothing there at all: the cavity runs out through
+  // the far face too. Otherwise the floor is the bottom thickness, which is
+  // independent of the wall (the wall is the default when none is given).
+  const floor = op.normal && op.bottomThickness !== 0
+    ? lowest + (op.bottomThickness ?? thickness)
+    : null;
+  // (Only a non-empty core is trimmed: manifold-3d turns an empty one into a
+  // NonFiniteVertex error that then poisons every boolean it touches.)
+  if (op.normal && op.bottomThickness !== undefined && op.bottomThickness > 0 && !inner.isEmpty()) {
+    inner = inner.trimByPlane(op.normal, floor);
+    if (!extendOpenings && inner.isEmpty()) return null;
+  }
+  const openingCutters = [];
+  for (const [point, normal] of openings) {
+    let cutter = meshShellOpening(solid, point, normal, thickness, op.openingInset ?? thickness);
+    if (!cutter) return null;
+    if (extendOpenings) {
+      // In a shallow part the opening may be all the pocket there is, so it
+      // must stop at the floor instead of relying on the core to be deeper.
+      if (floor !== null && op.normal) cutter = cutter.trimByPlane(op.normal, floor);
+      if (cutter.isEmpty() || cutter.volume() <= 1e-8) return null;
+    } else if (cutter.intersect(inner).volume() <= 1e-8) {
+      return null;
+    }
+    openingCutters.push(cutter);
+  }
+  let fullCavity = inner.isEmpty() ? null : inner;
+  for (const cutter of openingCutters) {
+    fullCavity = fullCavity ? fullCavity.add(cutter) : cutter;
+  }
+  if (!fullCavity) return null;
 
   try {
     const shelled = solid.wrapped.subtract(fullCavity);
@@ -3837,14 +3944,15 @@ async function replayEdit(
       continue;
     }
     if (op.kind === "shell") {
-      if (isMesh(solid) || op.bottomThickness !== undefined || op.openingInset !== undefined) {
-        const candidate = hollowMesh(isMesh(solid) ? solid : solid.meshShape(FALLBACK_MESH_QUALITY), op);
+      if (isMesh(solid) || op.bottomThickness !== undefined || op.openingInset !== undefined || op.rim) {
+        let reason: string | null = null;
+        const candidate = hollowMesh(isMesh(solid) ? solid : solid.meshShape(FALLBACK_MESH_QUALITY), op, (why) => { reason = why; });
         if (candidate) {
           solid = candidate;
         } else {
           onError?.(
             spec.id,
-            op.bottomThickness === 0
+            reason ?? op.bottomThickness === 0
               ? "That hollow cannot be opened right through: Bottom 0 needs a flat face directly opposite the opening, and the wall must fit inside. Try a Bottom above 0 or a thinner wall. The previous shape was kept."
               : "That wall cannot fit inside this shape. Try a smaller thickness; tightly rounded corners may need a thinner wall. The previous shape was kept.",
           );

@@ -3202,7 +3202,10 @@ button.stepper-btn:disabled {
 .face-resize-dimensions label { min-width:0; font-size:12px; }
 .face-resize-dimensions .num-stepper-wrap { width:100%; margin-top:6px; }
 .face-settings-panel > button.face-resize-reset { align-self:flex-start; background:transparent; color:#308294; padding:6px 10px; }
-.hollow-dimensions { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; }
+.hollow-dimensions { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+.hollow-rim { display:flex; flex-direction:column; gap:8px; }
+.hollow-rim-label { font-size:12px; font-weight:600; }
+.hollow-rim .joint-type-grid { grid-template-columns:repeat(3,minmax(0,1fr)); margin-bottom:0; }
 .hollow-dimensions label { min-width:0; font-size:12px; line-height:1.5; }
 .hollow-dimensions label > span { color:var(--text-muted,#64748b); }
 .hollow-dimensions .num-stepper-wrap { width:100%; min-width:0; margin-top:6px; }
@@ -4721,3 +4724,75 @@ button.stepper-btn:disabled {
 .sp-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .sp .sp-ghost { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 0 11px; color: #334155; font-size: 12px; font-weight: 600; }
 .sp .sp-apply { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 38px; font-size: 13px; font-weight: 700; }
+
+/* Hover preview cards for toolbar tools (see ui/ToolPreview.tsx). */
+.tool-preview {
+  position: fixed;
+  z-index: 1000;
+  padding: 10px 12px 11px;
+  background: #ffffff;
+  border: 1px solid #d3dce1;
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgb(31 50 62 / 20%);
+  pointer-events: none;
+  animation: tool-preview-in 140ms ease-out;
+}
+@keyframes tool-preview-in {
+  from { opacity: 0; transform: translateY(3px); }
+  to { opacity: 1; transform: none; }
+}
+.tool-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: #0f172a;
+}
+.tool-preview-head kbd {
+  min-width: 18px;
+  padding: 1px 6px;
+  font: 600 11px/16px inherit;
+  text-align: center;
+  color: #475569;
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+}
+.tool-preview-demo {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 7px;
+}
+.tool-preview-what {
+  margin: 8px 0 3px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #334155;
+}
+.tool-preview-how {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #64748b;
+}
+@media (prefers-reduced-motion: reduce) {
+  .tool-preview { animation: none; }
+}
+/* Dev-only review page for every preview card: open the app at #tool-previews. */
+.tool-preview-gallery {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 14px;
+  padding: 16px;
+  overflow: auto;
+  background: #eef2f6;
+}
+.tool-preview-gallery .tool-preview { pointer-events: auto; }
