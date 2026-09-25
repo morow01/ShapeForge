@@ -1244,31 +1244,17 @@ export class Scene {
   private surfaceObjectPointer(e: PointerEvent, commit: boolean) {
     const session = this.surfacePlacement;
     if (!session) return;
-    // A picked target locks the preview while the user adjusts the panel.
+    // A pinned ghost stays put while the pointer moves (e.g. over to the
+    // panel); only a click releases it.
     if (session.target && !commit) return;
     const rect = this.renderer.domElement.getBoundingClientRect();
     this.pointer.set((e.clientX-rect.left)/rect.width*2-1,-(e.clientY-rect.top)/rect.height*2+1);
     this.raycaster.setFromCamera(this.pointer,this.camera);
-    if (session.target) {
-      // The target itself is the handle for an anchored placement. This is
-      // easier to acquire than a translucent ghost, especially on curves.
-      const targetMeshes = [...this.parts.entries()]
-        .filter(([id, view]) => view.group.visible && this.findRootOwner(id) === session.target)
-        .map(([, view]) => view.mesh);
-      const hit = this.raycaster.intersectObjects(targetMeshes, false)[0];
-      if (hit?.face) {
-        const normal = hit.face.normal.clone()
-          .applyMatrix3(new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld))
-          .normalize();
-        // A click repositions the ghost immediately, then releases it so it
-        // resumes following the pointer. The next surface click pins it.
-        session.lastHit = { point: hit.point.clone(), normal };
-        this.updateSurfaceGhost();
-        session.target = null;
-        this.onSurfaceTargetPicked?.(null);
-      }
-      return;
-    }
+    // Clicks toggle: an unpinned ghost follows the pointer over any object
+    // other than the source and a click pins it there; a click on any object
+    // while pinned moves the ghost there and releases it to follow again.
+    // Clicking used to only consider the pinned target, so another object
+    // could never be reached once one had been picked.
     const candidates = [...this.parts.entries()].filter(([id,v]) => v.group.visible && (session.attachment ? id !== session.source : id === session.source));
     const hit = this.raycaster.intersectObjects(candidates.map(([,v])=>v.mesh),false)[0];
     if (!hit?.face) return;
@@ -1284,9 +1270,12 @@ export class Scene {
       return;
     }
     const id = candidates.find(([,v])=>v.mesh===hit.object)![0];
-    if (commit) {session.target=this.findRootOwner(id);this.onSurfaceTargetPicked?.(session.target);}
     const normal = hit.face.normal.clone().applyMatrix3(new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld)).normalize();
     session.lastHit={point:hit.point.clone(),normal};
+    if (commit) {
+      session.target = session.target ? null : this.findRootOwner(id);
+      this.onSurfaceTargetPicked?.(session.target);
+    }
     this.updateSurfaceGhost();
     // Apply in the panel commits; canvas clicks only choose an attachment point.
   }

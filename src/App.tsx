@@ -5312,7 +5312,7 @@ export function App() {
               <div>
                 <strong>{surfaceTarget ? "Placement pinned" : surfaceFacePicked ? "Select the target face" : "Select the source face"}</strong>
                 <p>{surfaceTarget
-                  ? "Click another point on the target to move the preview there and keep following the pointer."
+                  ? "Click any object to release the preview and move it again; click once more to pin."
                   : surfaceFacePicked
                     ? "Move over another object, then click the face where this object should sit."
                     : "Click the face on the selected object that should touch the target. Right-drag to orbit."}</p>
@@ -7774,31 +7774,21 @@ export function App() {
               </div>
             </div>
             <div style={{ padding: "4px 0", color: "#6e8290", fontSize: 11 }}>
-              <p className="hint">Tip: Use the Exact Spacing tool below with Gap = 0 to snap them flush.</p>
+              <p className="hint">Tip: Use the Exact Spacing tool in the toolbar with Gap = 0 to snap them flush.</p>
             </div>
           </section>
         )}
 
-        {selectedIds.length === 2 && toolMode !== "join" && (
+        {selectedIds.length === 2 && toolMode !== "join" && spacingOpen && spacingSelection && (
         <section className="tool-section spacing-section">
-          <button
-            type="button"
-            className={`panel-heading compact disclosure-trigger${spacingOpen ? " open" : ""}`}
-            onClick={() => setSpacingOpen((v) => !v)}
-            aria-expanded={spacingOpen}
-          >
-            <div><h1>Exact Spacing & Align</h1><p>Set gaps or line up faces</p></div>
-            <span className="disclosure-caret">▸</span>
-          </button>
-          {spacingOpen && spacingSelection && (
-            <SpacingPanel
-              fixedName={spacingSelection.fixedNode.name}
-              movingName={spacingSelection.movingNode.name}
-              onSwap={() => setSpacingSwapped(v => !v)}
-              onApply={applyGap}
-              onPreview={previewSpacing}
-            />
-          )}        </section>
+          <SpacingPanel
+            fixedName={spacingSelection.fixedNode.name}
+            movingName={spacingSelection.movingNode.name}
+            onSwap={() => setSpacingSwapped(v => !v)}
+            onApply={applyGap}
+            onPreview={previewSpacing}
+          />
+        </section>
         )}
           </div>
         )}
