@@ -26,9 +26,20 @@ export interface ToolItem {
   choices?: { label: string; title: string; run: () => void }[];
 }
 
+/** A one-click choice shown as a small picture, e.g. a shape to add. */
+export interface ToolTile {
+  id: string;
+  label: string;
+  icon: ReactNode;
+  title?: string;
+  run: () => void;
+}
+
 export interface ToolSection {
   title?: string;
   items: ToolItem[];
+  /** Shown as a grid of pictures above the section's rows. */
+  tiles?: ToolTile[];
 }
 
 export interface ToolSuggestions {
@@ -83,6 +94,16 @@ export function AdaptiveToolPanel({ suggestions }: { suggestions: ToolSuggestion
       {suggestions.sections.map((section, index) => (
         <div key={section.title ?? index} className="adaptive-section">
           {section.title && <p className="adaptive-section-title">{section.title}</p>}
+          {section.tiles && (
+            <div className="adaptive-tiles">
+              {section.tiles.map((tile) => (
+                <button key={tile.id} type="button" className="adaptive-tile" title={tile.title ?? tile.label} onClick={tile.run}>
+                  <span className="adaptive-tile-icon" aria-hidden="true">{tile.icon}</span>
+                  <span className="adaptive-tile-label">{tile.label}</span>
+                </button>
+              ))}
+            </div>
+          )}
           {section.items.map((item) => (
             <ToolRow key={item.id} item={item} primary={item === firstEnabled && !item.active} />
           ))}

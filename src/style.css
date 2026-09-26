@@ -4829,6 +4829,33 @@ button.stepper-btn:disabled {
 .adaptive-heading { margin: 0 6px 8px; font-size: 13px; font-weight: 600; color: #0f172a; }
 .adaptive-section + .adaptive-section { margin-top: 6px; padding-top: 6px; border-top: 1px solid #e2e8f0; }
 .adaptive-section-title { margin: 2px 6px 4px; font-size: 11px; font-weight: 600; color: #64748b; }
+.adaptive-tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin: 0 2px 2px; }
+.adaptive-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  padding: 5px 2px 4px;
+  border: 1px solid #e2e8f0;
+  border-radius: 7px;
+  background: #fff;
+  color: #334155;
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.adaptive-tile:hover { border-color: #7cc9c8; background: #e6f6f6; color: #087a79; }
+.adaptive-tile-icon { width: 28px; height: 28px; display: grid; place-items: center; }
+.adaptive-tile-icon svg { width: 28px; height: 28px; }
+.adaptive-tile-label { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.adaptive-tile-more { font-size: 20px; line-height: 1; color: #64748b; }
+/* "More shapes" points at the library: a brief glow says where it went. */
+.shape-library.flash { animation: shape-library-flash 1.2s ease-out; }
+@keyframes shape-library-flash {
+  0%, 30% { box-shadow: inset 0 0 0 2px #14a3a1; background: #eefafa; }
+  100% { box-shadow: inset 0 0 0 2px transparent; }
+}
 .adaptive-hint { margin: 6px 6px 2px; font-size: 11px; line-height: 1.4; color: #64748b; }
 .adaptive-row { display: flex; align-items: center; border-radius: 7px; }
 .adaptive-row:hover { background: #f1f5f9; }

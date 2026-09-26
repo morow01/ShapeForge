@@ -5,7 +5,7 @@ import { EXPORT_MESHES_WATCHDOG_MS, EXPORT_WATCHDOG_MS, kernel, KernelTimeoutErr
 import { Viewport } from "./viewport/Viewport";
 import { PathPatternPanel } from "./ui/PathPatternPanel";
 import { ToolPreviewLayer } from "./ui/ToolPreview";
-import { AdaptiveToolPanel, ToolContextMenu, type ToolItem, type ToolSuggestions } from "./ui/AdaptiveTools";
+import { AdaptiveToolPanel, ToolContextMenu, type ToolItem, type ToolSuggestions, type ToolTile } from "./ui/AdaptiveTools";
 import type { PathPlacement } from "./geometry/pathPattern";
 import { readViewportQuality, VIEWPORT_QUALITY_KEY, type ViewportQuality } from "./viewport/quality";
 import type { FaceBounds, FaceResizeFrame } from "./viewport/FaceResizeHandles";
@@ -1196,6 +1196,14 @@ export function App() {
   const selected = selectedIds.length ? findNode(nodes, selectedIds[selectedIds.length - 1]) : null;
 
   const [rightPanelTab, setRightPanelTab] = useState<"shapes" | "properties">("shapes");
+  // A short glow on the shape library, so "More shapes" visibly goes somewhere
+  // even when the library was already open.
+  const [libraryFlash, setLibraryFlash] = useState(0);
+  const showShapeLibrary = useCallback(() => {
+    setToolMode("select");
+    setRightPanelTab("shapes");
+    setLibraryFlash((n) => n + 1);
+  }, []);
   const prevSelectionKeyRef = useRef<string>("");
 
   useEffect(() => {
@@ -4318,7 +4326,7 @@ export function App() {
   const enterFace = (op: typeof faceOp) => { setFaceOp(op); setToolMode("face"); };
   const tools = {
     addShape: { id: "addShape", label: "Add a shape", aria: "Add a shape", icon: <PrimitiveShapeIcon kind="box" />, enabled: true,
-      run: () => { setToolMode("select"); setRightPanelTab("shapes"); } },
+      run: showShapeLibrary },
     importFile: { id: "importFile", label: "Import STL, 3MF or SVG", aria: "Import a file", icon: <ImportIcon />, enabled: true,
       run: () => importInputRef.current?.click() },
     sketch: { id: "sketch", label: "Sketch", aria: "Sketch tool", icon: <SketchToolIcon />, enabled: true,
@@ -4384,6 +4392,20 @@ export function App() {
       active: explodeAmount > 0, run: () => setExplodeAmount((v) => (v > 0 ? 0 : 0.5)) },
   } satisfies Record<string, ToolItem>;
   const faceTools = [tools.push, tools.hollow, tools.resize, tools.offset, tools.border];
+  // One click adds a basic shape straight from the panel — the same as its
+  // card in the shape library. "Add a shape" used to only switch the right
+  // panel to the library, which was usually showing already, so it looked
+  // like it did nothing.
+  const shapeTiles: ToolTile[] = [
+    ...PRIMITIVE_CATEGORIES[0].kinds.map((kind) => ({
+      id: kind,
+      label: PRIMITIVES[kind].label,
+      title: `Add a ${PRIMITIVES[kind].label.toLowerCase()} — click where it should go`,
+      icon: <PrimitiveShapeIcon kind={kind} />,
+      run: () => { setPendingPrimitive(kind); setToolMode("place"); select(null); },
+    })),
+    { id: "more-shapes", label: "More", title: "All shapes are in the shape library on the right", icon: <span className="adaptive-tile-more">⋯</span>, run: showShapeLibrary },
+  ];
   // The list follows the SELECTION, never the tool just picked from it:
   // choosing Push/pull with an object selected keeps that object's list and
   // only highlights Push/pull. It used to switch to a face-tools list, so the
@@ -4439,7 +4461,8 @@ export function App() {
       heading: "Nothing selected",
       hint: "Click an object to see what you can do with it.",
       sections: [
-        { items: [tools.addShape, tools.sketch, tools.text, tools.importFile] },
+        { title: "Add a shape", items: [], tiles: shapeTiles },
+        { title: "Create", items: [tools.sketch, tools.text, tools.importFile] },
         { title: "View & measure", items: [tools.measure, tools.zoom, tools.explode] },
       ],
     };
@@ -6391,7 +6414,7 @@ export function App() {
           );
         })()}
         {toolMode !== "measure" && toolMode !== "face" && toolMode !== "edge" && toolMode !== "build" && toolMode !== "align" && toolMode !== "cut" && toolMode !== "join" && !(toolMode === "place" && surfaceSource) && rightPanelTab === "shapes" && (
-          <section className="tool-section shape-library">
+          <section key={libraryFlash} className={`tool-section shape-library${libraryFlash ? " flash" : ""}`}>
           <div className="panel-heading compact shape-library-header">
             <div><h1>Shape library</h1><p>Drag or click to add</p></div>
             <button
