@@ -5,6 +5,7 @@ import { EXPORT_MESHES_WATCHDOG_MS, EXPORT_WATCHDOG_MS, kernel, KernelTimeoutErr
 import { Viewport } from "./viewport/Viewport";
 import { PathPatternPanel } from "./ui/PathPatternPanel";
 import { ToolPreviewLayer } from "./ui/ToolPreview";
+import { AdaptiveToolPanel, ToolContextMenu, type ToolItem, type ToolSuggestions } from "./ui/AdaptiveTools";
 import type { PathPlacement } from "./geometry/pathPattern";
 import { readViewportQuality, VIEWPORT_QUALITY_KEY, type ViewportQuality } from "./viewport/quality";
 import type { FaceBounds, FaceResizeFrame } from "./viewport/FaceResizeHandles";
@@ -2476,6 +2477,32 @@ export function App() {
   const importInputRef = useRef<HTMLInputElement>(null);
   const faceApplyButtonRef = useRef<HTMLButtonElement>(null);
   const edgePreviewRequestRef = useRef(0);
+  // Push/Pull's Distance field previews its result on the part while it is
+  // typed — see Scene.previewTypedPushPull. "" = nothing to say.
+  const [pushPreviewStatus, setPushPreviewStatus] = useState<"" | "building" | "shown" | string>("");
+  const pushPreviewTimer = useRef<number | undefined>(undefined);
+  const pushPreviewRequest = useRef(0);
+  const previewTypedPush = useCallback((valueMm: number | null) => {
+    window.clearTimeout(pushPreviewTimer.current);
+    const request = ++pushPreviewRequest.current;
+    if (valueMm === null || Math.abs(valueMm) < 0.5) {
+      // null just ends the preview; a typed 0 also clears the number the
+      // scene carries on to the next face clicked.
+      void sceneRef.current?.previewTypedPushPull(valueMm);
+      setPushPreviewStatus("");
+      return;
+    }
+    pushPreviewTimer.current = window.setTimeout(async () => {
+      setPushPreviewStatus("building");
+      const reason = await sceneRef.current?.previewTypedPushPull(valueMm) ?? null;
+      if (request === pushPreviewRequest.current) setPushPreviewStatus(reason?.replace(/\s*The previous shape was kept\.$/, "") ?? "shown");
+    }, 150);
+  }, []);
+  // Another face, another tool, or the edit applied: the typed preview is
+  // over. (The scene holds the selection still while it shows one, so this
+  // does not fire from the preview itself.)
+  const pushPreviewFaceKey = faceSelection ? `${faceSelection.id}|${faceSelection.point.join(",")}` : "";
+  useEffect(() => { previewTypedPush(null); }, [pushPreviewFaceKey, faceOp, toolMode, previewTypedPush]);
 
   // A slider fires far more onChange events than there are meaningful
   // rebuilds worth doing — a short debounce coalesces a drag's burst into one
@@ -2753,6 +2780,38 @@ export function App() {
   // Reads useDoc.getState() directly rather than depending on `nodes`, same
   // reasoning as the debounced kernel-call effects above — a fresh read on
   // every call, not a stale one from whenever this callback was last built.
+  /** The edit a push/pull on node `id` would produce, for previewing or
+   *  checking it without touching the document. */
+  const pushPullSpec = useCallback((id: string, op: { point: Vec3; normal: Vec3; distance: number }): EditSpec | null => {
+    const node = findNode(useDoc.getState().nodes, id);
+    if (!node) return null;
+    let base = toSpec(node);
+    if (node.type !== "edit") base = { ...base, position: [0, 0, 0] as Vec3, rotation: [0, 0, 0] as Vec3, scale: [1, 1, 1] as Vec3 };
+    return node.type === "edit"
+      ? { ...(toSpec(node) as EditSpec), ops: [...node.ops, op] }
+      : { type: "edit", id: node.id, base, ops: [op], position: node.position, rotation: node.rotation, scale: node.scale, isHole: node.isHole };
+  }, []);
+  // Curved faces have real limits (they cannot be pushed through their own
+  // centre), so the scene checks a curved push/pull before writing it,
+  // through the same path as the real rebuild; a refusal comes back with its
+  // reason, which is shown instead of silently recording a dead edit.
+  useEffect(() => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+    scene.onCheckPushPull = async (id, op) => {
+      const spec = pushPullSpec(id, op);
+      if (!spec) return null;
+      try {
+        return await kernel.pushPullIssue(spec);
+      } catch {
+        // The check itself could not run (a timeout): let the edit through
+        // to the normal rebuild, which reports its own errors.
+        return null;
+      }
+    };
+    scene.onPushPullRefused = (reason) => setError(reason);
+    return () => { scene.onCheckPushPull = null; scene.onPushPullRefused = null; };
+  });
   const onPreviewPushPull = useCallback(
     async (id: string, op: { point: Vec3; normal: Vec3; distance: number }): Promise<PreviewBuild | null> => {
       const node = findNode(useDoc.getState().nodes, id);
@@ -4248,8 +4307,156 @@ export function App() {
     ? Math.max(0, Math.floor((busyNow - progressStartedAt) / 1000))
     : 0;
 
+  // ---- Adaptive tools: every tool once, then picked per selection ----------
+  // Each entry calls exactly what its toolbar button does; the suggestions
+  // panel, the right-click menu and the full toolbar all stay in step.
+  const one = selectedIds.length === 1;
+  const many = selectedIds.length >= 2;
+  const anySelected = selectedIds.length > 0;
+  const needOne = "Select an object first";
+  const needTwo = "Select 2 or more objects";
+  const enterFace = (op: typeof faceOp) => { setFaceOp(op); setToolMode("face"); };
+  const tools = {
+    addShape: { id: "addShape", label: "Add a shape", aria: "Add a shape", icon: <PrimitiveShapeIcon kind="box" />, enabled: true,
+      run: () => { setToolMode("select"); setRightPanelTab("shapes"); } },
+    importFile: { id: "importFile", label: "Import STL, 3MF or SVG", aria: "Import a file", icon: <ImportIcon />, enabled: true,
+      run: () => importInputRef.current?.click() },
+    sketch: { id: "sketch", label: "Sketch", aria: "Sketch tool", icon: <SketchToolIcon />, enabled: true,
+      active: toolMode === "place" && pendingPrimitive === "sketch",
+      run: () => { setPendingPrimitive("sketch"); setToolMode("place"); select(null); } },
+    text: { id: "text", label: "3D text", aria: "Add text tool", icon: <TextToolIcon />, enabled: true, run: () => void openTextTool() },
+    measure: { id: "measure", label: "Measure", aria: "Measuring tape tool",
+      icon: <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><rect x="3" y="6" width="18" height="12" rx="2" /><path d="M7 6v6m5-6v4m5-4v6M7 18v-3m5 3v-3m5 3v-3" /></svg>, enabled: true,
+      active: toolMode === "measure", run: () => setToolMode((mode) => mode === "measure" ? "select" : "measure") },
+    move: { id: "move", label: "Move", aria: "Move tool", icon: <MoveToolIcon />, keys: "M", enabled: anySelected, reason: needOne,
+      active: toolMode === "move", run: () => setToolMode("move") },
+    rotate: { id: "rotate", label: "Rotate", aria: "Rotate tool", icon: <RotateToolIcon />, keys: "R", enabled: anySelected, reason: needOne,
+      active: toolMode === "rotate", run: () => setToolMode("rotate") },
+    mirror: { id: "mirror", label: "Mirror", aria: "Mirror tool", icon: <MirrorToolIcon />, enabled: anySelected, reason: needOne,
+      run: () => mirrorSelection([true, false, false]),
+      choices: (["X", "Y", "Z"] as const).map((axis, i) => ({
+        label: axis, title: `Mirror across ${axis}`, run: () => mirrorSelection([i === 0, i === 1, i === 2]),
+      })) },
+    drop: { id: "drop", label: `Drop ${dropDirection.label.toLowerCase()}`, aria: `Drop ${dropDirection.label.toLowerCase()}`,
+      icon: <DropIcon direction={dropDirection.label.toLowerCase() as DropDirection} />, keys: "D", enabled: anySelected, reason: needOne,
+      run: dropSelected },
+    place: { id: "place", label: "Place on object", aria: "Place on object",
+      icon: <svg className="topbar-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><path d="M3 20q9-9 18 0M12 3v10m-4-4 4 4 4-4"/><path d="m8 3 4-2 4 2"/></svg>,
+      enabled: one && !!selected && selected.type !== "group" && nodes.some((n) => n.id === selected.id) && !treeChangeBusy,
+      reason: "Select 1 object (not a group)",
+      active: toolMode === "place" && !!surfaceSource,
+      run: () => { if (selected) { setPendingPrimitive(null); setSurfaceSource(selected.id); setSurfaceTarget(null); setSurfaceFacePicked(false); setSurfaceAngle(0); setSurfaceTiltX(0); setSurfaceTiltY(0); setSurfaceDepth(0); setToolMode("place"); } } },
+    cut: { id: "cut", label: "Cut / split", aria: "Cut / Split tool", icon: <CutToolIcon />, keys: "C", enabled: one, reason: "Select 1 object",
+      active: toolMode === "cut", run: () => setToolMode((m) => (m === "cut" ? "select" : "cut")) },
+    push: { id: "push", label: "Push / pull", aria: "Push/Pull", icon: <FaceModifierIcon kind="push" />, keys: "F", enabled: true,
+      active: toolMode === "face" && faceOp === "push", run: () => enterFace("push") },
+    hollow: { id: "hollow", label: "Hollow", aria: "Hollow", icon: <FaceModifierIcon kind="wall" />, enabled: true,
+      active: toolMode === "face" && faceOp === "wall", run: () => enterFace("wall") },
+    resize: { id: "resize", label: "Resize face", aria: "Resize Face", icon: <FaceModifierIcon kind="resize" />, enabled: true,
+      active: toolMode === "face" && faceOp === "resize", run: () => enterFace("resize") },
+    offset: { id: "offset", label: "Offset and extrude", aria: "Offset & Extrude", icon: <FaceModifierIcon kind="offset" />, enabled: true,
+      active: toolMode === "face" && faceOp === "offset", run: () => enterFace("offset") },
+    border: { id: "border", label: "Round / bevel border", aria: "Round / Bevel Face Border", icon: <FaceModifierIcon kind={borderKind} />, enabled: true,
+      active: toolMode === "face" && (faceOp === "fillet" || faceOp === "chamfer"), run: () => enterFace(borderKind) },
+    edge: { id: "edge", label: "Round an edge", aria: "Edge finishing tool", icon: <EdgeToolIcon />, keys: "E", enabled: true,
+      active: toolMode === "edge", run: () => { setToolMode("edge"); setEdgeSelection(null); } },
+    align: { id: "align", label: "Align", aria: "Align tool", icon: <AlignToolIcon />, keys: "A", enabled: many, reason: needTwo,
+      active: toolMode === "align", run: () => setToolMode("align") },
+    spacing: { id: "spacing", label: "Exact spacing", aria: "Exact Spacing and Alignment tool", icon: <SpacingToolIcon />,
+      enabled: selectedIds.length === 2, reason: "Select exactly 2 objects", active: spacingOpen && selectedIds.length === 2,
+      run: () => setSpacingOpen((v) => !v) },
+    combine: { id: "combine", label: "Combine into one", aria: "Combine Solid", icon: <CombineIcon />, keys: "Ctrl+Shift+B",
+      enabled: canCombine && !treeChangeBusy, reason: needTwo, run: () => combineSelected("union") },
+    group: { id: "group", label: "Group", aria: "Group", icon: <GroupIcon />, keys: "Ctrl+G", enabled: canGroup && !treeChangeBusy, reason: needTwo,
+      run: groupSelected },
+    ungroup: { id: "ungroup", label: "Ungroup", aria: "Ungroup", icon: <UngroupIcon />, keys: "Ctrl+Shift+G", enabled: canUngroup && !treeChangeBusy,
+      reason: "Select a group or combined solid", run: ungroupSelected },
+    build: { id: "build", label: "Shape builder", aria: "Shape Builder tool", icon: <ShapeBuilderIcon />, keys: "B", enabled: many, reason: needTwo,
+      active: toolMode === "build", run: () => setToolMode("build") },
+    join: { id: "join", label: "Joinery", aria: "Joinery tool", icon: <JoineryToolIcon />, keys: "J",
+      enabled: selectedIds.length === 2 && !!connectorSeam, reason: "Select 2 parts that touch at a flat face",
+      active: toolMode === "join", run: () => setToolMode((m) => m === "join" ? "select" : "join") },
+    transparency: { id: "transparency", label: "See-through", aria: "Toggle transparency", icon: <TransparencyIcon />, keys: "T",
+      enabled: anySelected, reason: needOne, active: selectionTransparent, run: toggleTransparency },
+    zoom: { id: "zoom", label: anySelected ? "Zoom to selection" : "Zoom to fit", aria: "Zoom to selected", icon: <ZoomToFitIcon />, keys: "Z",
+      enabled: true, run: zoomToSelected },
+    explode: { id: "explode", label: "Exploded view", aria: "Exploded View", icon: <ExplodeIcon />, enabled: true,
+      active: explodeAmount > 0, run: () => setExplodeAmount((v) => (v > 0 ? 0 : 0.5)) },
+  } satisfies Record<string, ToolItem>;
+  const faceTools = [tools.push, tools.hollow, tools.resize, tools.offset, tools.border];
+  // The list follows the SELECTION, never the tool just picked from it:
+  // choosing Push/pull with an object selected keeps that object's list and
+  // only highlights Push/pull. It used to switch to a face-tools list, so the
+  // rows moved under the pointer. A face or edge actually being selected is
+  // a new selection, so that does change it.
+  const edgeCount = edgeSelection?.points.length ?? 0;
+  const suggestions: ToolSuggestions =
+    toolMode === "face" && faceSelection ? {
+      heading: "1 face",
+      sections: [
+        { items: faceTools },
+        { title: "Edges & measuring", items: [tools.edge, tools.measure] },
+      ],
+    } : toolMode === "edge" && edgeSelection ? {
+      heading: `${edgeCount} edge${edgeCount === 1 ? "" : "s"}`,
+      hint: "Set the radius or size in the panel on the right.",
+      sections: [
+        { items: [tools.edge] },
+        { title: "Change a face", items: faceTools },
+        { title: "Measure", items: [tools.measure] },
+      ],
+    } : many ? {
+      heading: `${selectedIds.length} objects`,
+      sections: [
+        { items: [tools.align, tools.spacing, tools.combine, tools.group, tools.build, tools.join].filter((t) => t.enabled || t.id === "join") },
+        { title: "Arrange", items: [tools.move, tools.rotate, tools.mirror, tools.drop, ...(canUngroup ? [tools.ungroup] : [])] },
+        { title: "View", items: [tools.transparency, tools.zoom] },
+      ],
+    } : one ? {
+      heading: selected?.type === "group" ? "1 group" : "1 object",
+      hint: toolMode === "face" ? "Click a face on the object." : toolMode === "edge" ? "Click an edge to round or bevel it. Double-click selects a whole run of connected edges." : undefined,
+      sections: [
+        { items: [tools.move, tools.rotate, tools.mirror, tools.drop, tools.place, tools.cut, ...(canUngroup ? [tools.ungroup] : [])] },
+        { title: "Change a face or edge", items: [...faceTools, tools.edge] },
+        { title: "View", items: [tools.transparency, tools.zoom, ...(selected?.type === "group" ? [tools.explode] : [])] },
+      ],
+    } : toolMode === "face" ? {
+      heading: "Face tools",
+      hint: "Click a face on an object.",
+      sections: [
+        { items: faceTools },
+        { title: "Edges & measuring", items: [tools.edge, tools.measure] },
+      ],
+    } : toolMode === "edge" ? {
+      heading: "Edges",
+      hint: "Click an edge to round or bevel it. Double-click selects a whole run of connected edges.",
+      sections: [
+        { items: [tools.edge] },
+        { title: "Change a face", items: faceTools },
+        { title: "Measure", items: [tools.measure] },
+      ],
+    } : {
+      heading: "Nothing selected",
+      hint: "Click an object to see what you can do with it.",
+      sections: [
+        { items: [tools.addShape, tools.sketch, tools.text, tools.importFile] },
+        { title: "View & measure", items: [tools.measure, tools.zoom, tools.explode] },
+      ],
+    };
+  const [contextMenuAt, setContextMenuAt] = useState<{ x: number; y: number } | null>(null);
+  // The toolbar shows only the always-useful tools; "All tools" expands it to
+  // the full set. Remembered per browser.
+  const [allTools, setAllTools] = useState(() => { try { return localStorage.getItem("shapeforge.allTools") === "1"; } catch { return false; } });
+  useEffect(() => { try { localStorage.setItem("shapeforge.allTools", allTools ? "1" : "0"); } catch { /* per-viewer nicety only */ } }, [allTools]);
+  useEffect(() => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+    scene.onContextClick = (x, y) => setContextMenuAt({ x, y });
+    return () => { scene.onContextClick = null; };
+  });
+
   return (
-    <div className={`app-shell${objectsPanelOpen ? "" : " objects-collapsed"}`}>
+    <div className={`app-shell${objectsPanelOpen ? "" : " objects-collapsed"}${allTools ? "" : " rail-compact"}`}>
       <header className="topbar">
         <div className="topbar-left">
           <div className="brand">
@@ -4627,9 +4834,10 @@ export function App() {
       )}
 
       <ToolPreviewLayer />
-      <div className="tool-rail" role="toolbar" aria-label="Design tools">
+      <div className={`tool-rail${allTools ? "" : " compact"}`} role="toolbar" aria-label="Design tools">
         {/* Category 1: Selection & Transform */}
         <button
+          data-core
           className={toolMode === "select" ? "active" : ""}
           onClick={() => setToolMode("select")}
           title="Select and resize (V)"
@@ -4796,6 +5004,7 @@ export function App() {
           )}
         </div>
         <button
+          data-core
           className={toolMode === "measure" ? "active" : ""}
           aria-pressed={toolMode === "measure"}
           onClick={() => setToolMode((mode) => mode === "measure" ? "select" : "measure")}
@@ -4916,7 +5125,7 @@ export function App() {
         <span className="tool-rail-sep" role="separator" />
 
         {/* Category 4: View & Navigation */}
-        <div className="tool-rail-item-container" ref={wireframeMenuRef}>
+        <div className="tool-rail-item-container" data-core ref={wireframeMenuRef}>
           <button
             className={wireframe !== "off" || wireframeMenuOpen ? "active" : ""}
             onClick={() => setWireframeMenuOpen((v) => !v)}
@@ -5000,6 +5209,7 @@ export function App() {
           )}
         </div>
         <button
+          data-core
           className={selectionTransparent ? "active" : ""}
           onClick={toggleTransparency}
           title="Make the selection see-through (T)"
@@ -5010,6 +5220,7 @@ export function App() {
           <TransparencyIcon />
         </button>
         <button
+          data-core
           onClick={zoomToSelected}
           title={selectedIds.length ? "Zoom to selected object (Z)" : "Fit all objects in view (Z)"}
           aria-label="Zoom to selected"
@@ -5024,6 +5235,17 @@ export function App() {
           aria-pressed={explodeAmount > 0}
         >
           <ExplodeIcon />
+        </button>
+        <span className="tool-rail-spacer" data-core aria-hidden="true" />
+        <button
+          data-core
+          className={`tool-rail-all${allTools ? " active" : ""}`}
+          onClick={() => setAllTools((v) => !v)}
+          title={allTools ? "Show only the main tools" : "Show all tools"}
+          aria-label={allTools ? "Show fewer tools" : "Show all tools"}
+          aria-pressed={allTools}
+        >
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><rect x="4" y="4" width="6" height="6" rx="1" /><rect x="14" y="4" width="6" height="6" rx="1" /><rect x="4" y="14" width="6" height="6" rx="1" /><rect x="14" y="14" width="6" height="6" rx="1" /></svg>
         </button>
       </div>
 
@@ -5063,6 +5285,8 @@ export function App() {
       )}
 
       <main className="workspace">
+        {toolMode !== "place" && <AdaptiveToolPanel suggestions={suggestions} />}
+        {contextMenuAt && <ToolContextMenu at={contextMenuAt} suggestions={suggestions} onClose={() => setContextMenuAt(null)} />}
         <Viewport
           parts={parts}
           nodes={nodes}
@@ -5686,10 +5910,19 @@ export function App() {
                 step={0.5}
                 onValue={(value) => {
                   setFaceValue(value);
+                  previewTypedPush(value);
                 }}
                 onEnter={() => faceApplyButtonRef.current?.click()}
               />
             </label>}
+            {faceOp === "push" && pushPreviewStatus && (
+              <p className={`border-preview-status${pushPreviewStatus !== "building" && pushPreviewStatus !== "shown" ? " failed" : ""}`}>
+                {pushPreviewStatus === "building"
+                  ? <span className="status-pill busy hollow-building-status" title="Recalculating the preview">Building…</span>
+                  : pushPreviewStatus === "shown" ? "Preview only — Apply to keep it."
+                  : pushPreviewStatus}
+              </p>
+            )}
             {faceOp === "resize" && <>
               <p>Drag a side to resize one direction, or a corner to resize both. The opposite handle stays fixed.</p>
               {resizeFrame && resizeBounds && <>

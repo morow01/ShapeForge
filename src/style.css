@@ -1008,6 +1008,8 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
   appearance: textfield;
 }
 .push-pull-measure:focus { outline: none; }
+/* The drag has gone further than a curved face can move (see previewBlocked). */
+.push-pull-measure.blocked { background: #fde2e2; color: #b42318; box-shadow: 0 0 0 1px #f3a3a3; }
 .push-pull-measure::-webkit-inner-spin-button,
 .push-pull-measure::-webkit-outer-spin-button {
   margin: 0;
@@ -4796,3 +4798,98 @@ button.stepper-btn:disabled {
   background: #eef2f6;
 }
 .tool-preview-gallery .tool-preview { pointer-events: auto; }
+
+/* ---- Adaptive tools (selection-driven suggestions) ---------------------- */
+/* Compact toolbar: only the always-useful tools; "All tools" expands it.
+   It stays one column even on short windows, where the full set goes two. */
+.app-shell.rail-compact { --rail-w: 56px; }
+.tool-rail.compact { display: flex; flex-direction: column; align-items: center; }
+.tool-rail.compact > :not([data-core]) { display: none; }
+.tool-rail-spacer { flex: 1; min-height: 8px; }
+@media (max-height: 959px) {
+  .tool-rail:not(.compact) .tool-rail-spacer { grid-column: 1 / -1; min-height: 4px; }
+  .tool-rail:not(.compact) .tool-rail-all { grid-column: 1 / -1; justify-self: center; }
+}
+.adaptive-tools {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 5;
+  width: 208px;
+  max-height: calc(100% - 24px);
+  overflow-y: auto;
+  padding: 10px 8px 8px;
+  background: rgb(255 255 255 / 96%);
+  border: 1px solid #d3dce1;
+  border-radius: 10px;
+  box-shadow: 0 4px 18px rgb(31 50 62 / 12%);
+  backdrop-filter: blur(8px);
+}
+.adaptive-for { margin: 0 6px; font-size: 11px; color: #64748b; }
+.adaptive-heading { margin: 0 6px 8px; font-size: 13px; font-weight: 600; color: #0f172a; }
+.adaptive-section + .adaptive-section { margin-top: 6px; padding-top: 6px; border-top: 1px solid #e2e8f0; }
+.adaptive-section-title { margin: 2px 6px 4px; font-size: 11px; font-weight: 600; color: #64748b; }
+.adaptive-hint { margin: 6px 6px 2px; font-size: 11px; line-height: 1.4; color: #64748b; }
+.adaptive-row { display: flex; align-items: center; border-radius: 7px; }
+.adaptive-row:hover { background: #f1f5f9; }
+.adaptive-row.primary, .adaptive-row.active { background: #e6f6f6; }
+.adaptive-row.active { box-shadow: inset 0 0 0 1px #00a7a5; }
+.adaptive-tool {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 6px;
+  border: 0;
+  background: none;
+  color: #0f172a;
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.adaptive-row.primary .adaptive-tool, .adaptive-row.active .adaptive-tool { color: #087a79; font-weight: 600; }
+.adaptive-tool:disabled { color: #94a3b8; cursor: not-allowed; }
+.adaptive-icon { width: 20px; height: 20px; flex: none; display: grid; place-items: center; color: #475569; }
+.adaptive-icon svg { width: 20px; height: 20px; }
+.adaptive-row.primary .adaptive-icon, .adaptive-row.active .adaptive-icon { color: #087a79; }
+.adaptive-tool:disabled .adaptive-icon { color: #cbd5e1; }
+.adaptive-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.adaptive-tool kbd {
+  flex: none;
+  padding: 0 5px;
+  font: 600 10px/16px inherit;
+  color: #64748b;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+}
+.adaptive-choices { display: flex; gap: 3px; padding-right: 4px; }
+.adaptive-choices button {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  font-size: 11px;
+  font-weight: 700;
+  color: #087a79;
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.adaptive-choices button:hover { border-color: #00a7a5; background: #e6f6f6; }
+.adaptive-context-menu {
+  position: fixed;
+  z-index: 1100;
+  min-width: 210px;
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  padding: 6px;
+  background: #fff;
+  border: 1px solid #d3dce1;
+  border-radius: 10px;
+  box-shadow: 0 8px 28px rgb(31 50 62 / 20%);
+}
+.adaptive-context-menu .adaptive-for { margin: 2px 6px 6px; font-weight: 600; }

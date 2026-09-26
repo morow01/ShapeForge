@@ -18,6 +18,8 @@ const WARM_DELAY = 120;  // while one is open (or just closed), neighbours swap 
 const WARM_FOR = 600;
 const CARD_W = 264;
 
+const sideList = (el: HTMLElement) => el.closest<HTMLElement>(".tool-rail, .adaptive-tools, .adaptive-context-menu");
+
 type Open = { preview: Preview; el: HTMLElement; left: number; top: number };
 
 /** Mount once. Watches the whole document so buttons need no wiring. */
@@ -48,11 +50,13 @@ export function ToolPreviewLayer() {
     };
     const place = (el: HTMLElement, preview: Preview) => {
       const r = el.getBoundingClientRect();
-      const inRail = !!el.closest(".tool-rail");
+      // Vertical tool lists (toolbar, suggestions, right-click menu) get the
+      // card beside the whole list, so it never covers the list itself.
+      const side = sideList(el);
       const cardH = cardRef.current?.offsetHeight || 250;
       let left: number, top: number;
-      if (inRail) {
-        left = r.right + 10;
+      if (side) {
+        left = side.getBoundingClientRect().right + 10;
         top = r.top + r.height / 2 - cardH / 2;
       } else {
         left = r.left + r.width / 2 - CARD_W / 2;
@@ -106,7 +110,7 @@ export function ToolPreviewLayer() {
 
   // Re-centre once the card's real height is known.
   useEffect(() => {
-    if (!open || !cardRef.current || !open.el.closest(".tool-rail")) return;
+    if (!open || !cardRef.current || !sideList(open.el)) return;
     const r = open.el.getBoundingClientRect();
     const h = cardRef.current.offsetHeight;
     const top = Math.max(8, Math.min(r.top + r.height / 2 - h / 2, window.innerHeight - h - 8));

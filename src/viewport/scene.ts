@@ -166,6 +166,11 @@ interface PushPullDrag {
   active: boolean;
   handle: THREE.Object3D;
   handleBasePosition: THREE.Vector3;
+  /** The gripped face is curved: found again by position, never by plane. */
+  curved: boolean;
+  /** World mm already dragged when this drag picked up an open push/pull on
+   *  the same face (see continuePushPull); 0 for a fresh drag. */
+  baseDistance: number;
   worldNormal: THREE.Vector3;
   /** True when `handle` was spawned just for this one drag (a direct click
    *  on a hovered face, not a pooled arrow from updatePushPullOverlay) —
@@ -183,6 +188,8 @@ interface PushPullDrag {
    *  restoreOriginalGeom/commitOrAbandonPushPull). */
   originalGeom: ThreeGeometry[];
   originalPivot: THREE.Vector3;
+  /** The part's face list before the drag — see PushPullPending. */
+  originalFaces: FaceInfo[] | undefined;
   /** performance.now() of the last previewLocal() call sent, so a fast drag
    *  samples at most every PUSH_PULL_PREVIEW_MS instead of on every single
    *  pointermove — each sample is a real OCCT/manifold rebuild. */
@@ -192,6 +199,10 @@ interface PushPullDrag {
    *  the newest distance instead of replaying a backlog of stale positions. */
   previewInFlight: boolean;
   queuedPreviewDistance: number | null;
+  /** The last preview could not be built (a curved face pushed past what
+   *  it can take): the distance box shows red, and on release the reason is
+   *  fetched and shown rather than waiting for Apply. */
+  previewBlocked?: boolean;
   /** How far the drag has reached, in WORLD millimetres — what the arrow,
    *  the pill and the user all deal in. Divide by worldPerLocal for anything
    *  the kernel sees. */
@@ -211,7 +222,32 @@ interface PushPullPending {
   view: PartView;
   originalGeom: ThreeGeometry[];
   originalPivot: THREE.Vector3;
+  /** The part's face list before the drag; previews replace it. */
+  originalFaces: FaceInfo[] | undefined;
   worldPerLocal: number;
+}
+
+/** What a push/pull preview needs to draw its result on a part. */
+type PushPullPreviewTarget = Pick<PushPullDrag, "id" | "view" | "curved" | "currentDistance" | "localPoint" | "localNormal" | "worldPerLocal">;
+
+/**
+ * A push/pull shown from a TYPED distance — in the side panel's Distance
+ * field, or in the pill beside the arrow — so the part shows the result
+ * while the number is being typed, as it does during a drag. Nothing is
+ * written to the document until Apply/Enter.
+ */
+interface TypedPushPullPreview extends PushPullPreviewTarget {
+  /** The shape to put back when the preview is dropped. Null when the pill
+   *  is previewing: its own pushPullPending snapshot already covers that. */
+  snapshot: {
+    originalGeom: ThreeGeometry[];
+    originalPivot: THREE.Vector3;
+    originalFaces: FaceInfo[] | undefined;
+    groupIndex: number | null;
+  } | null;
+  queued: number | null;
+  inFlight: boolean;
+  waiting: ((ok: boolean) => void)[];
 }
 
 interface ResizeTarget {
@@ -1444,6 +1480,18 @@ export class Scene {
    *  closes (blur/Enter/Escape). Carries the pre-drag geometry snapshot too,
    *  so abandoning can revert a live preview exactly. */
   private pushPullPending: PushPullPending | null = null;
+  /** A push/pull previewed from a typed distance — see TypedPushPullPreview. */
+  private typedPreview: TypedPushPullPreview | null = null;
+  /** The push/pull distance showing in the panel and not yet applied —
+   *  typed there, typed in the pill, or dragged. Clicking another face
+   *  carries it over (see carriedTypedDistance), however many faces are
+   *  clicked in a row, so the number in the panel is always what the
+   *  selected face previews. Only Apply, Esc, Cancel, leaving the tool or
+   *  clicking empty space clear it. */
+  private unappliedDistance: number | null = null;
+  /** unappliedDistance as it stood when the current press began; the pill
+   *  that press opens starts from it. */
+  private carriedTypedDistance: number | null = null;
   /**
    * The face a TYPED edit should act on, held independently of the pill.
    *
@@ -1810,6 +1858,13 @@ export class Scene {
     | null = null;
   /** Live world-mm distance shown by both Push/Pull numeric controls. */
   onPushPullDistanceChange: ((distanceMm: number) => void) | null = null;
+  /** Asks the kernel whether a push/pull can be built; resolves to the
+   *  reason it cannot, or null when it can. Curved faces have real limits
+   *  (they cannot be pushed through their own centre), so they are checked
+   *  before anything is written to the document. */
+  onCheckPushPull: ((id: string, op: { point: Vec3; normal: Vec3; distance: number }) => Promise<string | null>) | null = null;
+  /** A checked push/pull was refused; the reason is for the user. */
+  onPushPullRefused: ((reason: string) => void) | null = null;
   onSelectEdges: ((id: string | null, points: Vec3[]) => void) | null = null;
   /** The face currently selected, and the kernel-local point that anchors it,
    *  so a whole-body edit driven by a face — Hollow — knows what it applies
@@ -1862,7 +1917,11 @@ export class Scene {
     this.pushPullLabelEl.addEventListener("input", () => {
       this.pushPullLabelEl.style.width = `${Math.max(4.2, this.pushPullLabelEl.value.length + 1.6)}ch`;
       const displayed = evaluateMathExpression(this.pushPullLabelEl.value);
-      if (displayed !== null && Number.isFinite(displayed)) this.onPushPullDistanceChange?.(toMillimetres(displayed, this.displayUnit));
+      if (displayed !== null && Number.isFinite(displayed)) {
+        const mm = toMillimetres(displayed, this.displayUnit);
+        this.reportPushPullDistance(mm);
+        this.previewPendingTyped(mm);
+      }
     });
     this.pushPullLabelEl.addEventListener("focus", () => {
       this.onDragChange?.(true);
@@ -1870,7 +1929,12 @@ export class Scene {
     });
     // Moving to the settings panel must never silently apply a preview.
     // The panel retains the distance and Apply can explicitly use it.
-    this.pushPullLabelEl.addEventListener("blur", () => this.commitOrAbandonPushPull(false));
+    this.pushPullLabelEl.addEventListener("blur", () => {
+      const open = !!this.pushPullPending;
+      this.commitOrAbandonPushPull(false, true);
+      // Still the same face and the same number: the panel previews it now.
+      if (open && this.unappliedDistance !== null) void this.previewTypedPushPull(this.unappliedDistance);
+    });
     this.pushPullLabelEl.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
         this.commitOrAbandonPushPull(true);
@@ -1981,6 +2045,8 @@ export class Scene {
     });
     // Right-click drives the camera (orbit), never the browser's menu.
     this.renderer.domElement.addEventListener("contextmenu", this.onContextMenu);
+    this.renderer.domElement.addEventListener("dblclick", this.onEdgeDoubleClick);
+    this.renderer.domElement.addEventListener("pointerdown", this.onRightDown, true);
     // Capture phase on an ANCESTOR of the canvas — this is what lets it run
     // before TransformControls' own pointerdown listener (registered on the
     // canvas itself, and with no button check of its own) regardless of
@@ -2698,6 +2764,7 @@ export class Scene {
       const existing = this.parts.get(part.id);
       if (existing) {
         if (this.selectedEdges.some((edge) => edge.partId === part.id)) this.clearEdgeSelection(true);
+        if (this.typedPreview?.id === part.id) this.dropTypedPushPullPreview();
         existing.geom = syncKernelGeometry(part.mesh, existing.geom);
         existing.pivot = this.centreGeometry(existing.geom);
         existing.mesh.geometry = existing.geom[0].faces;
@@ -2705,12 +2772,21 @@ export class Scene {
         existing.occluder.geometry = existing.geom[0].faces;
         this.applyDraftGeometry(existing);
         existing.isHole = part.isHole;
+        // Whether the selected face was curved, judged on the OLD face list.
+        const selectedWasCurved = this.selectedFace?.partId === part.id &&
+          existing.faces?.[this.selectedFace.groupIndex]?.planar === false;
         existing.faces = part.faces;
         // A rebuild may return the same topological faces in a different
         // array order. Keep Push/Pull attached to the face's expected moved
         // position instead of blindly reusing the old group index, which can
         // highlight and arm an unrelated neighbouring face after Apply.
-        if (
+        if (selectedWasCurved && this.selectedFace && this.armedFace?.id === part.id) {
+          // Curved: found again by position; the armed point already moved
+          // with the edit, so it stays as it is.
+          const index = this.faceGroupNear(existing, this.armedFace.localPoint);
+          if (index >= 0) this.selectedFace.groupIndex = index;
+          this.armedFace = { ...this.armedFace, view: existing };
+        } else if (
           this.selectedFace?.partId === part.id &&
           this.armedFace?.id === part.id &&
           part.faces?.length
@@ -3251,7 +3327,11 @@ export class Scene {
       this.clearCollisionContacts();
     }
     if (this.selectedFace && !this.isOwnerOrAncestorSelected(this.selectedFace.partId)) {
+      // Take the orange paint off too: dropping only the reference left the
+      // face looking selected after a click on empty space.
+      const held = this.parts.get(this.selectedFace.partId);
       this.selectedFace = null;
+      if (held) clearHighlights(held.mesh.geometry as THREE.BufferGeometry);
     }
     if (this.selectedEdges.length && !this.isOwnerOrAncestorSelected(this.selectedEdges[0].partId)) {
       this.clearEdgeSelection(true);
@@ -3426,7 +3506,8 @@ export class Scene {
           node.position[1] + rotatedPivot.y,
           node.position[2] + rotatedPivot.z,
         );
-        const previewing = this.pushPullDrag ?? this.pushPullPending;
+        const previewing = this.pushPullDrag ?? this.pushPullPending ??
+          (this.typedPreview?.snapshot ? { id: this.typedPreview.id, originalPivot: this.typedPreview.snapshot.originalPivot } : null);
         if (previewing?.id === node.id) {
           view.group.position.sub(this.pivotDrift(view, previewing.originalPivot, view.pivot));
         }
@@ -4395,6 +4476,68 @@ export class Scene {
     return new THREE.Vector3(p[0], p[1], p[2]).sub(view.pivot).applyMatrix4(view.group.matrixWorld);
   }
 
+  /** Inverse of kernelLocalToWorld. */
+  private worldToKernelLocal(view: PartView, p: Vec3): Vec3 {
+    view.group.updateWorldMatrix(true, false);
+    const inverse = view.group.matrixWorld.clone().invert();
+    return new THREE.Vector3(p[0], p[1], p[2]).applyMatrix4(inverse).add(view.pivot).toArray() as Vec3;
+  }
+
+  /** Inverse of kernelNormalToWorld. */
+  private worldNormalToKernel(view: PartView, n: Vec3): Vec3 {
+    const s = view.group.scale;
+    const local = new THREE.Vector3(n[0], n[1], n[2])
+      .applyQuaternion(view.group.getWorldQuaternion(new THREE.Quaternion()).invert());
+    return local.set(local.x * (s.x || 1), local.y * (s.y || 1), local.z * (s.z || 1)).normalize().toArray() as Vec3;
+  }
+
+  /**
+   * Where push/pull grips a face, in the kernel's local frame. A flat face
+   * has one point and one normal for all of it. A curved face (a hole wall,
+   * a cylinder side) does not: its FaceInfo point is just some display
+   * triangle's centre and its normal belongs to one corner, which pointed
+   * the arrow off in a random direction - and for a hole, put it on the
+   * axis in mid-air. So a curved face is gripped where it was clicked, with
+   * the normal there; that is what armedFace holds for it.
+   */
+  private pushPullAnchor(partId: string, face: FaceInfo): { point: Vec3; normal: Vec3 } | null {
+    if (face.planar) return { point: face.point, normal: face.normal };
+    const armed = this.armedFace;
+    return armed?.id === partId ? { point: armed.localPoint, normal: armed.localNormal } : null;
+  }
+
+  /** The anchor for a curved face at a raycast hit, in the kernel frame. */
+  private curvedAnchorAt(view: PartView, hit: { point: Vec3; normal: Vec3 }): { point: Vec3; normal: Vec3 } {
+    return { point: this.worldToKernelLocal(view, hit.point), normal: this.worldNormalToKernel(view, hit.normal) };
+  }
+
+  /** The display face group nearest a kernel-local point - how a curved
+   *  face is found again after a rebuild or preview renumbers the groups. */
+  private faceGroupNear(view: PartView, localPoint: Vec3): number {
+    const geometry = view.mesh.geometry as THREE.BufferGeometry;
+    const position = geometry.getAttribute("position");
+    const index = geometry.getIndex();
+    if (!position) return -1;
+    const target = new THREE.Vector3(localPoint[0], localPoint[1], localPoint[2]).sub(view.pivot);
+    const triangles = (index ? index.count : position.count) / 3;
+    // Distance to the nearest point ON each triangle, not to its centre: a
+    // hole wall is drawn as tall strips whose centres sit halfway down, so a
+    // grip near the rim matched the top face's small triangles instead.
+    const triangle = new THREE.Triangle();
+    const closest = new THREE.Vector3();
+    let best = -1;
+    let bestDistance = Infinity;
+    for (let t = 0; t < triangles; t++) {
+      const i = t * 3;
+      triangle.a.fromBufferAttribute(position, index ? index.getX(i) : i);
+      triangle.b.fromBufferAttribute(position, index ? index.getX(i + 1) : i + 1);
+      triangle.c.fromBufferAttribute(position, index ? index.getX(i + 2) : i + 2);
+      const distance = triangle.closestPointToPoint(target, closest).distanceToSquared(target);
+      if (distance < bestDistance) { bestDistance = distance; best = t; }
+    }
+    return best < 0 ? -1 : getFaceIndex(best, geometry);
+  }
+
   /** Rotation and scale, never translation. A plane's normal transforms by
    *  the inverse transpose (n / s, not n * s), so on a non-uniformly scaled
    *  part this is what keeps the arrow square to the face actually on
@@ -4505,11 +4648,12 @@ export class Scene {
     const faces = view?.faces;
     const faceIndex = this.selectedFace?.groupIndex ?? -1;
     const face = faces?.[faceIndex];
+    const anchor = id && face ? this.pushPullAnchor(id, face) : null;
     const visible =
-      this.toolMode === "face" && this.facePushPullEnabled && !!view && !!face?.planar && face.pushPullable !== false && this.isOwnerOrAncestorSelected(id ?? "") &&
+      this.toolMode === "face" && this.facePushPullEnabled && !!view && !!anchor && face?.pushPullable !== false && this.isOwnerOrAncestorSelected(id ?? "") &&
       !this.showResult && view.group.visible;
     this.pushPullHandles.visible = visible;
-    if (!visible || !view || !face || !id) {
+    if (!visible || !view || !face || !id || !anchor) {
       this.pushPullPoolKey = "";
       this.pushPullHandleHovered = false;
       if (!this.gizmo.dragging) this.renderer.domElement.style.cursor = "";
@@ -4526,8 +4670,8 @@ export class Scene {
 
     view.group.updateWorldMatrix(true, true);
     const handle = this.pushPullHandleMeshes[0];
-    const at = this.renderedFaceCenter(view, faceIndex, face.point);
-    const normal = this.kernelNormalToWorld(view, face.normal);
+    const at = face.planar ? this.renderedFaceCenter(view, faceIndex, face.point) : this.kernelLocalToWorld(view, anchor.point);
+    const normal = this.kernelNormalToWorld(view, anchor.normal);
     const scale = Math.max(MIN_HANDLE_WORLD, this.worldSnapTolerance(at) * PUSH_PULL_HANDLE_SCALE);
     handle.position.copy(at).addScaledVector(normal, scale * 0.2);
     handle.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), normal);
@@ -4626,19 +4770,24 @@ export class Scene {
     this.selectedIds = [partId];
     this.onSelectObject?.(partId, false);
     this.restoreSelectedFaceHighlight();
+    const anchor = face.planar ? { point: face.point, normal: face.normal } : this.curvedAnchorAt(found.view, found);
+    if (!face.planar) {
+      this.armedFace = { id: partId, localPoint: anchor.point, localNormal: anchor.normal, view: found.view, worldPerLocal: this.worldPerLocalAlong(found.view, anchor.normal) };
+    }
     this.updatePushPullOverlay();
-    const handle = this.facePushPullEnabled && face.planar && face.pushPullable !== false
+    const handle = this.facePushPullEnabled && face.pushPullable !== false
       ? this.pushPullHandleMeshes[0]
       : undefined;
     if (handle) {
       this.showPushPullInputForFace(
         partId,
-        face.point,
-        face.normal,
+        anchor.point,
+        anchor.normal,
         found.view,
         this.cloneGeom(found.view.geom),
         found.view.pivot.clone(),
-        this.worldPerLocalAlong(found.view, face.normal),
+        found.view.faces,
+        this.worldPerLocalAlong(found.view, anchor.normal),
         handle.position,
         0,
       );
@@ -6358,10 +6507,13 @@ export class Scene {
     while (handle && handle.userData.faceIndex === undefined) handle = handle.parent;
     if (!handle || handle.userData.partId !== id) return false;
     const face = faces[handle.userData.faceIndex as number];
-    if (!face) return false;
+    const anchor = face ? this.pushPullAnchor(id, face) : null;
+    if (!face || !anchor) return false;
 
-    const at = this.renderedFaceCenter(view, handle.userData.faceIndex as number, face.point);
-    const worldNormal = this.kernelNormalToWorld(view, face.normal);
+    const at = face.planar
+      ? this.renderedFaceCenter(view, handle.userData.faceIndex as number, face.point)
+      : this.kernelLocalToWorld(view, anchor.point);
+    const worldNormal = this.kernelNormalToWorld(view, anchor.normal);
     const project = (p: THREE.Vector3) => {
       const v = p.clone().project(this.camera);
       return { x: ((v.x + 1) / 2) * rect.width, y: ((1 - v.y) / 2) * rect.height };
@@ -6376,26 +6528,30 @@ export class Scene {
     // distance along it. Orbit slightly and try again.
     if (pixelsPerUnit < 1e-3) return false;
 
+    const carried = this.continuePushPull(id, anchor.normal, !face.planar);
     this.pushPullDrag = {
       id,
-      localPoint: face.point,
-      localNormal: face.normal,
+      localPoint: carried?.localPoint ?? anchor.point,
+      localNormal: carried?.localNormal ?? anchor.normal,
       screenDir: { x: dx / pixelsPerUnit, y: dy / pixelsPerUnit },
       pixelsPerUnit,
       downScreen: { x: e.clientX, y: e.clientY },
       active: false,
       handle,
-      handleBasePosition: handle.position.clone(),
+      handleBasePosition: handle.position.clone().addScaledVector(worldNormal, -(carried?.distance ?? 0)),
+      baseDistance: carried?.distance ?? 0,
+      curved: !face.planar,
       worldNormal,
       ephemeral: false,
       view,
-      originalGeom: this.cloneGeom(view.geom),
-      originalPivot: view.pivot.clone(),
+      originalGeom: carried?.originalGeom ?? this.cloneGeom(view.geom),
+      originalPivot: carried?.originalPivot ?? view.pivot.clone(),
+      originalFaces: carried ? carried.originalFaces : view.faces,
       lastPreviewAt: 0,
       previewInFlight: false,
       queuedPreviewDistance: null,
       currentDistance: 0,
-      worldPerLocal: this.worldPerLocalAlong(view, face.normal),
+      worldPerLocal: this.worldPerLocalAlong(view, anchor.normal),
     };
     this.pushPullGeneration++;
     this.controls.enabled = false;
@@ -6420,12 +6576,14 @@ export class Scene {
     const { view, groupIndex } = found;
     const partId = [...this.parts.entries()].find(([, candidate]) => candidate === view)?.[0];
     const face = view.faces?.[groupIndex];
-    if (!partId || !face?.planar || face.pushPullable === false) return false;
+    if (!partId || !face || face.pushPullable === false) return false;
+    // A curved face is gripped where it was pressed (see pushPullAnchor).
+    const anchor = face.planar ? { point: face.point, normal: face.normal } : this.curvedAnchorAt(view, found);
 
     const rect = this.renderer.domElement.getBoundingClientRect();
     view.group.updateWorldMatrix(true, true);
-    const at = this.renderedFaceCenter(view, groupIndex, face.point);
-    const worldNormal = this.kernelNormalToWorld(view, face.normal);
+    const at = face.planar ? this.renderedFaceCenter(view, groupIndex, face.point) : new THREE.Vector3(...found.point);
+    const worldNormal = this.kernelNormalToWorld(view, anchor.normal);
     const project = (point: THREE.Vector3) => {
       const projected = point.clone().project(this.camera);
       return {
@@ -6457,32 +6615,69 @@ export class Scene {
     this.selectedIds = [partId];
     this.onSelectObject?.(partId, false);
     this.restoreSelectedFaceHighlight();
+    const carried = this.continuePushPull(partId, anchor.normal, !face.planar);
     this.pushPullDrag = {
       id: partId,
-      localPoint: face.point,
-      localNormal: face.normal,
+      localPoint: carried?.localPoint ?? anchor.point,
+      localNormal: carried?.localNormal ?? anchor.normal,
       screenDir: { x: dx / pixelsPerUnit, y: dy / pixelsPerUnit },
       pixelsPerUnit,
       downScreen: { x: e.clientX, y: e.clientY },
       active: false,
       handle,
-      handleBasePosition: handle.position.clone(),
+      handleBasePosition: handle.position.clone().addScaledVector(worldNormal, -(carried?.distance ?? 0)),
+      baseDistance: carried?.distance ?? 0,
+      curved: !face.planar,
       worldNormal,
       ephemeral: true,
       view,
-      originalGeom: this.cloneGeom(view.geom),
-      originalPivot: view.pivot.clone(),
+      originalGeom: carried?.originalGeom ?? this.cloneGeom(view.geom),
+      originalPivot: carried?.originalPivot ?? view.pivot.clone(),
+      originalFaces: carried ? carried.originalFaces : view.faces,
       lastPreviewAt: 0,
       previewInFlight: false,
       queuedPreviewDistance: null,
       currentDistance: 0,
-      worldPerLocal: this.worldPerLocalAlong(view, face.normal),
+      worldPerLocal: this.worldPerLocalAlong(view, anchor.normal),
     };
     this.pushPullGeneration++;
     this.controls.enabled = false;
     this.gizmo.enabled = false;
     e.preventDefault();
     return true;
+  }
+
+  /**
+   * Grabbing the arrow again while a push/pull is still open (dragged, not yet
+   * applied) must carry on from that push/pull, not start a new one. The
+   * shape on screen is only a preview then: its face sits where the drag left
+   * it, which is not a face of the real, saved shape, so a fresh drag asked
+   * the kernel to push a face that does not exist — every preview came back
+   * empty and nothing moved. Instead, keep the original face and shape and
+   * start from the distance already dragged.
+   *
+   * Taking the open push/pull over also stops the distance box's blur (which
+   * abandons it) from reverting the shape underneath the new drag.
+   */
+  private continuePushPull(id: string, localNormal: Vec3, curved = false) {
+    const pending = this.pushPullPending;
+    if (!pending || pending.id !== id) return null;
+    const n = pending.localNormal;
+    // A curved face's normal differs from spot to spot, so gripping it again
+    // somewhere else is still the same face (settlePendingPushPull has
+    // already dropped the push/pull if it was a different one).
+    const sameDirection = n[0] * localNormal[0] + n[1] * localNormal[1] + n[2] * localNormal[2] > 0.999;
+    if (!curved && !sameDirection) return null;
+    const typed = toMillimetres(Number(this.pushPullLabelEl.value), this.displayUnit);
+    this.pushPullPending = null;
+    return {
+      localPoint: pending.localPoint,
+      localNormal: pending.localNormal,
+      originalGeom: pending.originalGeom,
+      originalPivot: pending.originalPivot,
+      originalFaces: pending.originalFaces,
+      distance: Number.isFinite(typed) ? typed : 0,
+    };
   }
 
   /** A deep copy of a part's current render geometry — used to snapshot the
@@ -6497,7 +6692,7 @@ export class Scene {
     const dx = e.clientX - drag.downScreen.x;
     const dy = e.clientY - drag.downScreen.y;
     const along = dx * drag.screenDir.x + dy * drag.screenDir.y;
-    return Math.round((along / drag.pixelsPerUnit) * 2) / 2;
+    return Math.round((drag.baseDistance + along / drag.pixelsPerUnit) * 2) / 2;
   }
 
   /**
@@ -6517,6 +6712,7 @@ export class Scene {
       drag.view,
       drag.originalGeom,
       drag.originalPivot,
+      drag.originalFaces,
       drag.worldPerLocal,
       drag.handleBasePosition,
       initialValueMm,
@@ -6530,6 +6726,7 @@ export class Scene {
     view: PartView,
     originalGeom: ThreeGeometry[],
     originalPivot: THREE.Vector3,
+    originalFaces: FaceInfo[] | undefined,
     worldPerLocal: number,
     labelWorldPosition: THREE.Vector3,
     initialValueMm = 0,
@@ -6549,6 +6746,7 @@ export class Scene {
       view,
       originalGeom,
       originalPivot,
+      originalFaces,
       worldPerLocal,
     };
     this.armedFace = { id, localPoint, localNormal, view, worldPerLocal };
@@ -6558,6 +6756,15 @@ export class Scene {
     this.pushPullLabelEl.style.width = `${Math.max(4.2, this.pushPullLabelEl.value.length + 1.6)}ch`;
     this.pushPullLabelEl.focus();
     this.pushPullLabelEl.select();
+    const carried = initialValueMm === 0 ? this.carriedTypedDistance : null;
+    this.carriedTypedDistance = null;
+    if (carried !== null) {
+      this.pushPullLabelEl.value = formatLength(carried, this.displayUnit, this.decimalPlaces);
+      this.pushPullLabelEl.style.width = `${Math.max(4.2, this.pushPullLabelEl.value.length + 1.6)}ch`;
+      this.pushPullLabelEl.select();
+      this.reportPushPullDistance(carried);
+      this.previewPendingTyped(carried);
+    }
   }
 
   /** Keeps the value pill beside, never on top of, the arrow. The offset is
@@ -6608,6 +6815,8 @@ export class Scene {
    * rebuild from then on reported "could not be found after rebuilding".
    */
   releaseFace() {
+    this.clearTypedPushPullPreview();
+    this.unappliedDistance = null;
     if (this.pushPullPending) this.commitOrAbandonPushPull(false);
     else this.pushPullLabelEl.style.display = "none";
     const held = this.selectedFace ? this.parts.get(this.selectedFace.partId) : undefined;
@@ -6634,15 +6843,41 @@ export class Scene {
   pushSelectedFace(worldDistance: number): boolean {
     const armed = this.armedFace;
     if (!armed || !Number.isFinite(worldDistance) || Math.abs(worldDistance) < 0.5) return false;
+    this.unappliedDistance = null;
+    // Back to the saved shape first: the edit is measured from it, and its
+    // pivot is what keeps the rest of the part in place (applyPushPull).
+    this.clearTypedPushPullPreview();
     // Close the pill first if it is still open, so it cannot resolve later
     // and restore its snapshot over the top of this edit.
     this.dismissFaceInput();
+    const selectedFace = this.selectedFace?.partId === armed.id ? armed.view.faces?.[this.selectedFace.groupIndex] : undefined;
+    if (selectedFace && !selectedFace.planar) {
+      void (async () => {
+        const reason = await this.onCheckPushPull?.(armed.id, {
+          point: armed.localPoint,
+          normal: armed.localNormal,
+          distance: this.toLocalDistance(worldDistance, armed.worldPerLocal),
+        }) ?? null;
+        if (reason) {
+          this.onPushPullRefused?.(reason);
+          return;
+        }
+        this.pushArmedFace(armed, worldDistance);
+      })();
+      return true;
+    }
+    this.pushArmedFace(armed, worldDistance);
+    return true;
+  }
+
+  private pushArmedFace(armed: NonNullable<Scene["armedFace"]>, worldDistance: number) {
     void this.applyPushPull({
       ...armed,
       // Only the pill's revert path reads these; applyPushPull does not touch
       // originalGeom, and takes the pivot as it stands right now.
       originalGeom: [],
       originalPivot: armed.view.pivot.clone(),
+      originalFaces: undefined,
     }, worldDistance);
     // The face is still there — it has simply moved. Keeping it armed, at
     // where it now is, means a second edit does not need the face clicking
@@ -6658,10 +6893,12 @@ export class Scene {
         armed.localPoint[2] + armed.localNormal[2] * travel,
       ],
     };
-    return true;
   }
 
-  private commitOrAbandonPushPull(apply: boolean) {
+  private commitOrAbandonPushPull(apply: boolean, keepDistance = false) {
+    // The pill's own preview stops here; its snapshot is pending's.
+    if (this.typedPreview && !this.typedPreview.snapshot) this.typedPreview = null;
+    this.pushPullLabelEl.classList.remove("blocked");
     const pending = this.pushPullPending;
     this.pushPullPending = null;
     this.pushPullGeneration++; // invalidates any still-in-flight preview — see applyFinalPushPullPreview
@@ -6671,25 +6908,85 @@ export class Scene {
 
     const distance = toMillimetres(Number(this.pushPullLabelEl.value), this.displayUnit);
     const valid = apply && Number.isFinite(distance) && Math.abs(distance) >= 0.5;
-    if (valid) {
-      this.disposeGeom(pending.originalGeom);
-      const travelled = this.toLocalDistance(distance, pending.worldPerLocal);
-      this.armedFace = {
-        id: pending.id,
-        localPoint: [
-          pending.localPoint[0] + pending.localNormal[0] * travelled,
-          pending.localPoint[1] + pending.localNormal[1] * travelled,
-          pending.localPoint[2] + pending.localNormal[2] * travelled,
-        ],
-        localNormal: pending.localNormal,
-        view: pending.view,
-        worldPerLocal: pending.worldPerLocal,
-      };
-      void this.applyPushPull(pending, distance);
+    if (valid) this.unappliedDistance = null;
+    if (valid && this.pendingIsCurved(pending)) {
+      void this.commitCheckedPushPull(pending, distance);
+    } else if (valid) {
+      this.commitPushPull(pending, distance);
     } else {
-      this.restoreGeom(pending.view, pending.originalGeom, pending.originalPivot);
-      this.restoreSelectedFaceHighlight();
+      this.revertPushPull(pending, keepDistance);
     }
+  }
+
+  /** A pending push/pull on a curved face: the saved face list has no flat
+   *  face at its grip point. */
+  private pendingIsCurved(pending: PushPullPending): boolean {
+    return !!pending.originalFaces && this.faceIndexAt(pending.originalFaces, pending.localPoint, pending.localNormal) < 0;
+  }
+
+  /** Writes the push/pull and keeps the face armed where it now is. */
+  private commitPushPull(pending: PushPullPending, distance: number) {
+    this.disposeGeom(pending.originalGeom);
+    const travelled = this.toLocalDistance(distance, pending.worldPerLocal);
+    this.armedFace = {
+      id: pending.id,
+      localPoint: [
+        pending.localPoint[0] + pending.localNormal[0] * travelled,
+        pending.localPoint[1] + pending.localNormal[1] * travelled,
+        pending.localPoint[2] + pending.localNormal[2] * travelled,
+      ],
+      localNormal: pending.localNormal,
+      view: pending.view,
+      worldPerLocal: pending.worldPerLocal,
+    };
+    void this.applyPushPull(pending, distance);
+  }
+
+  /** Curved faces are checked before the document changes: a refused one
+   *  used to be written, fail silently in the rebuild, then get pruned —
+   *  no message, but a stray Undo step and another face left selected. */
+  private async commitCheckedPushPull(pending: PushPullPending, distance: number) {
+    const reason = await this.onCheckPushPull?.(pending.id, {
+      point: pending.localPoint,
+      normal: pending.localNormal,
+      distance: this.toLocalDistance(distance, pending.worldPerLocal),
+    }) ?? null;
+    if (reason) {
+      this.revertPushPull(pending);
+      this.onPushPullRefused?.(reason);
+      return;
+    }
+    this.commitPushPull(pending, distance);
+  }
+
+  /** Puts the part back exactly as it was before the push/pull. */
+  private revertPushPull(pending: PushPullPending, keepDistance = false) {
+    this.restoreGeom(pending.view, pending.originalGeom, pending.originalPivot);
+    // Previews replace the part's face list (and re-point the selected face
+    // into it) so the arrow can follow the drag. Put both back as well, or
+    // the arrow and the next drag keep working from faces of a shape that
+    // was never saved: the arrow pointed the wrong way and the next pull
+    // could not find its face.
+    if (pending.originalFaces) {
+      pending.view.faces = pending.originalFaces;
+      if (this.selectedFace?.partId === pending.id) {
+        // A flat face by its plane; a curved one by where it is.
+        let index = this.faceIndexAt(pending.originalFaces, pending.localPoint, pending.localNormal);
+        if (index < 0) index = this.faceGroupNear(pending.view, pending.localPoint);
+        if (index >= 0) this.selectedFace.groupIndex = index;
+      }
+    }
+    this.restoreSelectedFaceHighlight();
+    // Nothing was applied, so nothing is left in the panel to apply later —
+    // unless the push/pull only moved on to another face, which takes the
+    // same number with it.
+    if (!keepDistance) this.reportPushPullDistance(0);
+  }
+
+  /** Tells the panel the distance, and remembers it for the next face. */
+  private reportPushPullDistance(worldDistance: number) {
+    this.unappliedDistance = Number.isFinite(worldDistance) && Math.abs(worldDistance) >= 0.5 ? worldDistance : null;
+    this.onPushPullDistanceChange?.(worldDistance);
   }
 
   /**
@@ -6722,6 +7019,49 @@ export class Scene {
       }
     }
     this.onPushPullFace?.(pending.id, op, shift);
+  }
+
+  /**
+   * A press anywhere but the open push/pull's own face (or its arrow) drops
+   * that unapplied push/pull BEFORE anything reads the part's shape. Left
+   * open, the next face's drag snapshotted the shape with the first pull
+   * still previewed in it, so cancelling the second pull put the first one
+   * back instead of the saved shape — the first pull looked remembered.
+   */
+  private settlePendingPushPull(e: PointerEvent) {
+    const pending = this.pushPullPending;
+    if (!pending || this.toolMode !== "face" || e.button !== 0) return;
+    // Its own arrow carries on with it (see continuePushPull).
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    if (this.pushPullHandles.visible && this.raycaster.intersectObjects(this.pushPullHandleMeshes, true).length) return;
+    // So does the face itself, where the drag has moved it to. The preview
+    // keeps the selected face pointed at that moved face (applyPreviewMesh),
+    // so a hit on exactly that face of that part is the same face.
+    const found = this.raycastFace(e);
+    const hitId = found ? [...this.parts.entries()].find(([, view]) => view === found.view)?.[0] : undefined;
+    if (found && hitId === pending.id && this.selectedFace?.partId === pending.id &&
+      found.groupIndex === this.selectedFace.groupIndex) return;
+    this.commitOrAbandonPushPull(false, !!found);
+  }
+
+  /** Index of the planar face that has this normal and whose plane holds
+   *  this point (nearest centre wins); -1 if none. */
+  private faceIndexAt(faces: FaceInfo[], point: Vec3, normal: Vec3): number {
+    let best = -1;
+    let bestDistance = Infinity;
+    faces.forEach((face, i) => {
+      if (!face.planar) return;
+      const facing = face.normal[0] * normal[0] + face.normal[1] * normal[1] + face.normal[2] * normal[2];
+      if (facing < 0.999) return;
+      const offset = [point[0] - face.point[0], point[1] - face.point[1], point[2] - face.point[2]];
+      if (Math.abs(offset[0] * normal[0] + offset[1] * normal[1] + offset[2] * normal[2]) > 1e-3) return;
+      const distance = Math.hypot(offset[0], offset[1], offset[2]);
+      if (distance < bestDistance) { bestDistance = distance; best = i; }
+    });
+    return best;
   }
 
   /** Puts a part's render geometry (and its matching pivot) back to a saved
@@ -6774,12 +7114,154 @@ export class Scene {
         // flight. Never let that stale result overwrite the current scene.
         if (this.pushPullDrag !== drag) break;
         if (preview) this.applyPreviewMesh(drag, preview);
+        if (drag.curved) {
+          drag.previewBlocked = !preview;
+          this.pushPullLabelEl.classList.toggle("blocked", !preview);
+        }
       }
       drag.previewInFlight = false;
     })();
   }
 
-  private applyPreviewMesh(drag: PushPullDrag, preview: PreviewBuild) {
+  /**
+   * Shows the selected face pushed/pulled by a distance typed in the side
+   * panel, without writing anything; null (or under the 0.5 mm floor) puts
+   * the saved shape back. Resolves to null when shown, or to the reason the
+   * kernel cannot build it (the saved shape is then shown instead).
+   */
+  async previewTypedPushPull(worldDistance: number | null): Promise<string | null> {
+    const armed = this.armedFace;
+    const valid = worldDistance !== null && Number.isFinite(worldDistance) && Math.abs(worldDistance) >= 0.5;
+    // null only ends the preview; a number (even 0) is what the panel holds.
+    if (worldDistance !== null) this.unappliedDistance = valid ? worldDistance : null;
+    if (!valid || !armed || !this.facePushPullEnabled || this.pushPullDrag || this.pushPullPending) {
+      // Only the panel's own preview: the pill's belongs to the pill.
+      if (this.typedPreview?.snapshot) this.clearTypedPushPullPreview();
+      return null;
+    }
+    if (this.typedPreview && (this.typedPreview.id !== armed.id || !this.typedPreview.snapshot)) this.clearTypedPushPullPreview();
+    let preview = this.typedPreview;
+    if (!preview) {
+      const groupIndex = this.selectedFace?.partId === armed.id ? this.selectedFace.groupIndex : null;
+      const face = groupIndex !== null ? armed.view.faces?.[groupIndex] : undefined;
+      preview = this.typedPreview = {
+        id: armed.id,
+        view: armed.view,
+        localPoint: armed.localPoint,
+        localNormal: armed.localNormal,
+        worldPerLocal: armed.worldPerLocal,
+        curved: !!face && !face.planar,
+        currentDistance: 0,
+        snapshot: {
+          originalGeom: this.cloneGeom(armed.view.geom),
+          originalPivot: armed.view.pivot.clone(),
+          originalFaces: armed.view.faces,
+          groupIndex,
+        },
+        queued: null,
+        inFlight: false,
+        waiting: [],
+      };
+    }
+    if (await this.runTypedPreview(preview, worldDistance!)) return null;
+    const reason = await this.onCheckPushPull?.(armed.id, {
+      point: armed.localPoint,
+      normal: armed.localNormal,
+      distance: this.toLocalDistance(worldDistance!, armed.worldPerLocal),
+    }).catch(() => null) ?? null;
+    return reason ?? "This face cannot be moved that far. Try a smaller distance.";
+  }
+
+  /** The pill's typed number, previewed on the part (see TypedPushPullPreview). */
+  private previewPendingTyped(worldDistance: number) {
+    const pending = this.pushPullPending;
+    if (!pending || this.pushPullDrag) return;
+    let preview = this.typedPreview;
+    if (!preview || preview.snapshot || preview.id !== pending.id) {
+      this.clearTypedPushPullPreview();
+      preview = this.typedPreview = {
+        id: pending.id,
+        view: pending.view,
+        localPoint: pending.localPoint,
+        localNormal: pending.localNormal,
+        worldPerLocal: pending.worldPerLocal,
+        curved: this.pendingIsCurved(pending),
+        currentDistance: 0,
+        snapshot: null,
+        queued: null,
+        inFlight: false,
+        waiting: [],
+      };
+    }
+    // Under 0.5 mm the kernel leaves the face alone, so that previews as
+    // the saved shape — which is right for a cleared or zero pill.
+    void this.runTypedPreview(preview, worldDistance);
+  }
+
+  /** One build at a time; typing faster than the kernel skips straight to
+   *  the newest number. Resolves true when the newest number was shown. */
+  private runTypedPreview(preview: TypedPushPullPreview, worldDistance: number): Promise<boolean> {
+    preview.queued = worldDistance;
+    const done = new Promise<boolean>((resolve) => preview.waiting.push(resolve));
+    if (preview.inFlight) return done;
+    preview.inFlight = true;
+    void (async () => {
+      let ok = true;
+      while (this.typedPreview === preview && preview.queued !== null) {
+        const distance = preview.queued;
+        preview.queued = null;
+        let build: PreviewBuild | null = null;
+        try {
+          build = await this.onPreviewPushPull?.(preview.id, {
+            point: preview.localPoint,
+            normal: preview.localNormal,
+            distance: this.toLocalDistance(distance, preview.worldPerLocal),
+          }) ?? null;
+        } catch {
+          build = null;
+        }
+        if (this.typedPreview !== preview) { ok = true; break; }
+        ok = !!build;
+        if (!preview.snapshot) this.pushPullLabelEl.classList.toggle("blocked", !build);
+        if (build) {
+          preview.currentDistance = distance;
+          this.applyPreviewMesh(preview, build);
+        } else if (preview.snapshot && preview.queued === null) {
+          // Show the real shape rather than a stale result for an older number.
+          this.clearTypedPushPullPreview();
+        }
+      }
+      preview.inFlight = false;
+      for (const resolve of preview.waiting.splice(0)) resolve(ok);
+    })();
+    return done;
+  }
+
+  /** Ends a panel-typed preview and puts the saved shape back. */
+  private clearTypedPushPullPreview() {
+    const preview = this.typedPreview;
+    if (!preview) return;
+    this.typedPreview = null;
+    const saved = preview.snapshot;
+    if (!saved) return; // the pill's pushPullPending snapshot reverts it
+    preview.view.faces = saved.originalFaces;
+    this.restoreGeom(preview.view, saved.originalGeom, saved.originalPivot);
+    if (saved.groupIndex !== null && this.selectedFace?.partId === preview.id) this.selectedFace.groupIndex = saved.groupIndex;
+    this.restoreSelectedFaceHighlight();
+  }
+
+  /** A rebuild is replacing the previewed part: drop the saved shape without
+   *  putting it back, since the rebuild is the newer truth. */
+  private dropTypedPushPullPreview() {
+    const saved = this.typedPreview?.snapshot;
+    const id = this.typedPreview?.id;
+    this.typedPreview = null;
+    if (!saved) return;
+    if (saved.groupIndex !== null && this.selectedFace && this.selectedFace.partId === id) this.selectedFace.groupIndex = saved.groupIndex;
+    this.disposeGeom(saved.originalGeom);
+  }
+
+  private applyPreviewMesh(drag: PushPullPreviewTarget, preview: PreviewBuild) {
     // syncKernelGeometry reuses/mutates drag.view.geom's existing
     // BufferGeometry objects in place whenever the array length already
     // matches (always true here — one mesh in, one geometry pair out), so
@@ -6804,7 +7286,16 @@ export class Scene {
     // no extra call needed here.
     if (preview.faces) {
       drag.view.faces = preview.faces;
-      if (this.selectedFace?.partId === drag.id) {
+      if (this.selectedFace?.partId === drag.id && drag.curved) {
+        // A curved face has no plane to match; find it at where it now is.
+        const travelled = this.toLocalDistance(drag.currentDistance, drag.worldPerLocal);
+        const index = this.faceGroupNear(drag.view, [
+          drag.localPoint[0] + drag.localNormal[0] * travelled,
+          drag.localPoint[1] + drag.localNormal[1] * travelled,
+          drag.localPoint[2] + drag.localNormal[2] * travelled,
+        ]);
+        if (index >= 0) this.selectedFace.groupIndex = index;
+      } else if (this.selectedFace?.partId === drag.id) {
         const travelled = this.toLocalDistance(drag.currentDistance, drag.worldPerLocal);
         const expected: Vec3 = [
           drag.localPoint[0] + drag.localNormal[0] * travelled,
@@ -8127,6 +8618,7 @@ export class Scene {
   setFacePushPullEnabled(enabled: boolean) {
     this.facePushPullEnabled = enabled;
     if (!enabled) {
+      this.clearTypedPushPullPreview();
       if (this.pushPullPending) this.commitOrAbandonPushPull(false);
       else this.pushPullLabelEl.style.display = "none";
       this.pushPullLabelEl.style.display = "none";
@@ -9758,6 +10250,13 @@ export class Scene {
     // Before beginResize: the face arrows sit outside the bounds cage, but
     // an arrow near a corner could otherwise fall inside beginResize's own
     // screen-space grab radius and be swallowed by it.
+    // A left press in the view ends a panel-typed preview, putting the saved
+    // shape back before anything below hit-tests or snapshots it.
+    if (e.button === 0) {
+      this.carriedTypedDistance = this.unappliedDistance;
+      this.clearTypedPushPullPreview();
+    }
+    this.settlePendingPushPull(e);
     if (this.beginPushPull(e) || this.beginPushPullFromFace(e)) {
       this.downAt = null;
       return;
@@ -9930,7 +10429,7 @@ export class Scene {
     return nearest;
   }
 
-  private edgeAt(e: PointerEvent): { id: string; view: PartView; groupIndex: number; point: Vec3 } | null {
+  private edgeAt(e: MouseEvent): { id: string; view: PartView; groupIndex: number; point: Vec3 } | null {
     const rect = this.renderer.domElement.getBoundingClientRect();
     this.pointer.set(
       ((e.clientX - rect.left) / rect.width) * 2 - 1,
@@ -9950,6 +10449,13 @@ export class Scene {
     const view = this.parts.get(id);
     if (!view) return null;
     const groupIndex = getEdgeIndex(hit.index ?? 0, view.wire.geometry);
+    const point = this.edgeMidpoint(view, groupIndex);
+    return point ? { id, view, groupIndex, point } : null;
+  }
+
+  /** A point in the middle of one of a part's edges, in the kernel's frame —
+   *  what an edge op stores to find that edge again. */
+  private edgeMidpoint(view: PartView, groupIndex: number): Vec3 | null {
     const group = view.wire.geometry.groups[groupIndex];
     const positions = view.wire.geometry.getAttribute("position");
     if (!group || !positions) return null;
@@ -9965,7 +10471,98 @@ export class Scene {
       displayPoint = new THREE.Vector3(positions.getX(middle), positions.getY(middle), positions.getZ(middle));
     }
     const local = displayPoint.add(view.pivot);
-    return { id, view, groupIndex, point: [local.x, local.y, local.z] };
+    return [local.x, local.y, local.z];
+  }
+
+  /**
+   * Double-click in edge mode selects the whole run of edges the clicked one
+   * belongs to: from each end it carries on into whichever connected edge
+   * continues most nearly straight on, and stops at a real corner. So the
+   * inside edge of a bent strip is one double-click rather than one click per
+   * straight piece, while a box's top edges (90 degree corners) stay separate.
+   */
+  private onEdgeDoubleClick = (e: MouseEvent) => {
+    if (this.toolMode !== "edge" || e.button !== 0) return;
+    // The two clicks of the double-click have already selected and then
+    // deselected this edge, and a preview may be showing: pick from the
+    // real, unedited shape. The app rebuilds the preview for the new set.
+    this.setEdgePreview(null, null);
+    const picked = this.edgeAt(e);
+    if (!picked) return;
+    if (this.selectedEdges.length && this.selectedEdges[0].partId !== picked.id) this.clearEdgeSelection(false);
+    for (const groupIndex of this.edgeChain(picked.view, picked.groupIndex)) {
+      if (this.selectedEdges.some((edge) => edge.partId === picked.id && edge.groupIndex === groupIndex)) continue;
+      const point = this.edgeMidpoint(picked.view, groupIndex);
+      const line = point ? this.edgeLine(picked.view, groupIndex, 0xff5b13) : null;
+      if (point && line) this.selectedEdges.push({ partId: picked.id, groupIndex, point, line });
+    }
+    this.clearEdgeHover();
+    this.onSelectObject?.(picked.id, false);
+    this.onSelectEdges?.(
+      this.selectedEdges[0]?.partId ?? null,
+      this.selectedEdges.map((edge) => edge.point),
+    );
+  };
+
+  /** The clicked edge plus every edge that continues it without a sharp turn
+   *  (see onEdgeDoubleClick), as wire group indices. */
+  private edgeChain(view: PartView, start: number): number[] {
+    const geometry = view.wire.geometry;
+    const positions = geometry.getAttribute("position");
+    const groups = geometry.groups;
+    if (!positions || !groups[start]) return [start];
+    const at = (i: number) => new THREE.Vector3().fromBufferAttribute(positions, i);
+    // Each edge's two ends, with the direction it leaves each end in.
+    const ends = groups.map((group) => {
+      if (group.count < 2) return null;
+      const first = at(group.start);
+      const last = at(group.start + group.count - 1);
+      return [
+        { point: first, out: at(group.start + 1).sub(first).normalize() },
+        { point: last, out: at(group.start + group.count - 2).sub(last).normalize() },
+      ];
+    });
+    const box = new THREE.Box3().setFromBufferAttribute(positions as THREE.BufferAttribute);
+    const tolerance = Math.max(1e-4, box.getSize(new THREE.Vector3()).length() * 1e-5);
+    // At most this much turn still counts as the same run; the next best
+    // option must turn clearly more, or the choice is ambiguous and it stops.
+    const MAX_TURN = Math.cos((50 * Math.PI) / 180);
+    const chain = new Set<number>([start]);
+    const walk = (edge: number, endIndex: 0 | 1) => {
+      let current = edge;
+      let end = endIndex;
+      for (;;) {
+        const here = ends[current]?.[end];
+        if (!here) return;
+        const heading = here.out.clone().negate();
+        let best = -1;
+        let bestEnd: 0 | 1 = 0;
+        let bestCos = -Infinity;
+        let secondCos = -Infinity;
+        ends.forEach((candidate, index) => {
+          if (!candidate || index === current) return;
+          candidate.forEach((side, sideIndex) => {
+            if (side.point.distanceTo(here.point) > tolerance) return;
+            const cos = heading.dot(side.out);
+            if (cos > bestCos) {
+              secondCos = bestCos;
+              bestCos = cos;
+              best = index;
+              bestEnd = (1 - sideIndex) as 0 | 1;
+            } else if (cos > secondCos) {
+              secondCos = cos;
+            }
+          });
+        });
+        if (best < 0 || bestCos < MAX_TURN || secondCos > bestCos - 0.15 || chain.has(best)) return;
+        chain.add(best);
+        current = best;
+        end = bestEnd;
+      }
+    };
+    walk(start, 0);
+    walk(start, 1);
+    return [...chain];
   }
 
   private edgeLine(view: PartView, groupIndex: number, color: number): LineSegments2 | null {
@@ -10135,7 +10732,7 @@ export class Scene {
       }
       const distance = this.pushPullDistance(e, drag);
       drag.currentDistance = distance;
-      this.onPushPullDistanceChange?.(distance);
+      this.reportPushPullDistance(distance);
       // Immediate feedback: the arrow slides along the face's normal on every
       // frame with no debounce or lag. The mesh rebuild itself is throttled
       // live — every step is a real OCCT boolean — so it updates once, on
@@ -10563,10 +11160,21 @@ export class Scene {
       } else {
         drag.handle.position.copy(drag.handleBasePosition);
       }
-      const distance = drag.active ? this.pushPullDistance(e, drag) : 0;
+      const distance = drag.active ? this.pushPullDistance(e, drag) : drag.baseDistance;
       drag.currentDistance = distance;
       // Keep the drag reviewable until Apply/Enter or Cancel resolves it.
       this.showPushPullInput(drag, distance);
+      this.pushPullLabelEl.classList.remove("blocked");
+      if (drag.curved && drag.active && Math.abs(distance) >= 0.5) {
+        // Say why now, not only after Apply, if the drag went further than
+        // this curved face can move. Checked on every release, not only when
+        // a preview failed: a quick drag can end before any preview ran.
+        void this.onCheckPushPull?.(drag.id, {
+          point: drag.localPoint,
+          normal: drag.localNormal,
+          distance: this.toLocalDistance(distance, drag.worldPerLocal),
+        })?.then((reason) => { if (reason) this.onPushPullRefused?.(reason); });
+      }
       return;
     }
 
@@ -10954,7 +11562,28 @@ export class Scene {
     };
   }
 
-  private onContextMenu = (e: MouseEvent) => e.preventDefault();
+  /** A right-click that did not turn into an orbit drag: the page shows the
+   *  tool menu for the selection at (clientX, clientY). */
+  onContextClick: ((clientX: number, clientY: number) => void) | null = null;
+  private rightDownAt: { x: number; y: number } | null = null;
+  private onRightDown = (e: PointerEvent) => {
+    if (e.button === 2) this.rightDownAt = { x: e.clientX, y: e.clientY };
+  };
+
+  private onContextMenu = (e: MouseEvent) => {
+    e.preventDefault();
+    const down = this.rightDownAt;
+    this.rightDownAt = null;
+    // Right-drag orbits the camera; only a click (barely moved) opens a menu.
+    if (!down || Math.hypot(e.clientX - down.x, e.clientY - down.y) > 4 || !this.onContextClick) return;
+    // Right-clicking an unselected object selects it first, so the menu is
+    // about the thing under the pointer.
+    const found = this.raycastFace(e as PointerEvent);
+    const hitId = found ? [...this.parts.entries()].find(([, view]) => view === found.view)?.[0] : undefined;
+    const rootId = hitId ? this.findRootOwner(hitId) : undefined;
+    if (rootId && !this.selectedIds.includes(rootId)) this.onSelectObject?.(rootId, false);
+    this.onContextClick(e.clientX, e.clientY);
+  };
 
   /**
    * TransformControls has no concept of "ignore this button" — it hit-tests
@@ -11209,6 +11838,10 @@ export class Scene {
   private lastFaceKey: string | null = null;
   private emitFaceSelection() {
     const selected = this.selectedFace;
+    // A typed push/pull preview moves the selected face on screen, but the
+    // selection is still the saved face until Apply — reporting the moved
+    // one would make the panel measure (and restart) from the preview.
+    if (this.typedPreview?.snapshot && this.typedPreview.id === selected?.partId) return;
     const view = selected ? this.parts.get(selected.partId) : undefined;
     // Preview faces have different indices and centres. Selection still
     // belongs to the unedited shape until Apply; publishing preview faces
@@ -11218,17 +11851,21 @@ export class Scene {
       : view?.faces;
     const face = selected && view ? faces?.[selected.groupIndex] : undefined;
     const id = face ? selected!.partId : null;
-    const point = face?.point ?? null;
+    // A curved face is reported at its grip (see pushPullAnchor), not at a
+    // display triangle's centre with one corner's normal.
+    const grip = id && face ? this.pushPullAnchor(id, face) : null;
+    const point = grip?.point ?? face?.point ?? null;
     // Deliberately NOT cleared just because selectedFace went null: applying
     // an edit clears that, and the bar is still pointed at the same face.
     const key = id && point ? `${id}|${point.join(",")}` : null;
     if (key === this.lastFaceKey) return;
     this.lastFaceKey = key;
+    const normal = grip?.normal ?? face?.normal ?? null;
     this.onSelectFace?.(
       id,
       point,
-      face?.normal ?? null,
-      id && view && face ? this.sizeAcross(view, face.normal) : 0,
+      normal,
+      id && view && normal ? this.sizeAcross(view, normal) : 0,
       face?.boundaryEdges ?? [],
     );
   }
@@ -11359,6 +11996,8 @@ export class Scene {
     this.renderer.domElement.removeEventListener("pointerup", this.onPointerUp);
     this.renderer.domElement.removeEventListener("pointercancel", this.onPointerCancel);
     this.renderer.domElement.removeEventListener("contextmenu", this.onContextMenu);
+    this.renderer.domElement.removeEventListener("dblclick", this.onEdgeDoubleClick);
+    this.renderer.domElement.removeEventListener("pointerdown", this.onRightDown, true);
     this.host.removeEventListener("pointerdown", this.onGlobalPointerDown, { capture: true });
     this.host.removeEventListener("pointerup", this.onGlobalPointerUp, { capture: true });
     window.removeEventListener("pointerup", this.onWindowPointerUp);

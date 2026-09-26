@@ -10,10 +10,14 @@ import {
   importSTLAsMesh,
   loft,
   makeFace,
+  measureArea,
+  measureDistanceBetween,
   measureVolume,
+  iterTopo,
   MeshShape,
   getManifold,
   getOC,
+  makeOffset,
   sketchFaceOffset,
 } from "replicad";
 import type { Face, Shape3D, Sketch, Wire } from "replicad";
@@ -145,6 +149,18 @@ function roundPolygon2D(
 }
 
 /** Samples one tangent circular fillet while walking prev -> corner -> next. */
+/** A solid of revolution about Z from an outline of (radius, z) points that
+ *  starts and ends on the axis. Straight segments revolve into true cones
+ *  and cylinders, so the result has smooth faces rather than facets. */
+function revolveAxialOutline(points: [number, number][]): Shape3D {
+  let pen = draw(points[0]);
+  for (let i = 1; i < points.length; i++) {
+    const [px, pz] = points[i - 1];
+    if (Math.hypot(points[i][0] - px, points[i][1] - pz) > 1e-7) pen = pen.lineTo(points[i]);
+  }
+  return pen.close().sketchOnPlane("XZ").revolve([0, 0, 1]) as Shape3D;
+}
+
 function roundedCornerPoints(
   prev: [number, number],
   corner: [number, number],
@@ -923,6 +939,13 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
             })
           : [tangent];
         const axialProfile = [...bottomProfile, ...capProfile.slice(1)];
+        if (sides >= 32) {
+          // Like Cylinder: with enough sides a cone is a true round cone, so
+          // a hole cut with it is one smooth face that Push/Pull can move,
+          // not a fan of thin flat strips.
+          s = revolveAxialOutline([[0, 0], ...axialProfile, pole]);
+          break;
+        }
         const polygonSketch = (radius: number, z: number) => {
           const points: [number, number][] = Array.from({ length: sides }, (_, i) => {
             const angle = 2 * Math.PI * i / sides + (sides === 4 ? Math.PI / 4 : 0);
@@ -938,6 +961,14 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
           ruled: true,
           endPoint: [0, 0, pole[1]],
         }) as Shape3D;
+      } else if (sides >= 32) {
+        // A true round cone (see the rounded-tip case above), with any corner
+        // rounding worked into its outline before it is revolved.
+        const bottom = roundedCornerPoints([0, 0], [rb, 0], [rt, p.height], bottomCorner, cornerSteps);
+        const top: [number, number][] = rt > 0
+          ? [...roundedCornerPoints([rb, 0], [rt, p.height], [0, p.height], topCorner, cornerSteps), [0, p.height]]
+          : [[0, p.height]];
+        s = revolveAxialOutline([[0, 0], ...bottom, ...top]);
       } else {
         // A regular polygon profile makes Sides part of the real solid. A
         // linear extrusion profile scales that polygon to the requested top
@@ -1832,6 +1863,37 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
   return normalise(s);
 }
 
+/**
+ * The exact extent of a solid, for CHECKING a mesh against it. OCCT's quick
+ * box (what getSolidBounds reads for a B-rep) can be loose around offset and
+ * spline surfaces — a cone cut widened 1 mm by push/pull measured 4 mm too
+ * big — so a correct mesh looked short of it and was rejected as "could not
+ * be rebuilt reliably". The precise box ignores tolerances and follows the
+ * real geometry. Not used for placement: getSolidBounds stays as it is there,
+ * so nothing already in a document shifts.
+ */
+export function getTightSolidBounds(s: AnySolid): [[number, number, number], [number, number, number]] {
+  if (isMesh(s)) return getSolidBounds(s);
+  try {
+    const oc = getOC();
+    const box = new oc.Bnd_Box();
+    try {
+      oc.BRepBndLib.AddOptimal((s as Shape3D).wrapped, box, false, false);
+      if (box.IsVoid()) return getSolidBounds(s);
+      const lo = box.CornerMin();
+      const hi = box.CornerMax();
+      const bounds: [[number, number, number], [number, number, number]] = [[lo.X(), lo.Y(), lo.Z()], [hi.X(), hi.Y(), hi.Z()]];
+      lo.delete();
+      hi.delete();
+      return bounds.flat().every(Number.isFinite) ? bounds : getSolidBounds(s);
+    } finally {
+      box.delete();
+    }
+  } catch {
+    return getSolidBounds(s);
+  }
+}
+
 export function getSolidBounds(s: AnySolid): [[number, number, number], [number, number, number]] {
   if (isMesh(s)) {
     try {
@@ -2340,6 +2402,201 @@ function finishEdgesInTwoPasses(
   return null;
 }
 
+/**
+ * A fillet or chamfer on one straight edge between two flat faces, built by
+ * hand for when OCCT's own refuses.
+ *
+ * OCCT has to cap a finish where its edge ends, and gives up where that end
+ * lands awkwardly: a bevel on the middle edge of a bent strip, where the cap
+ * must be cut against the next narrow sloped side, or a bevel right beside a
+ * round, where it must meet the round's curved end. Shapr3D (Parasolid) does
+ * both: the bevel simply runs on until it passes out through the neighbouring
+ * surface. That is what this builds: the material the finish removes along
+ * the line of the edge — beyond the bevel plane, or outside the round's
+ * cylinder — keeping only the piece that actually touches this edge.
+ *
+ * Where the edge carries on into another edge of the same face at a shallow
+ * bend (the strip's next straight piece), the finish is cut off square to
+ * the bend's mitre — the plane halving the angle between the two edges, as a
+ * picture frame's corner does. Left to run on, the bevel plane on a strip
+ * bending away from it sliced along the entire rest of the part. Where the
+ * edge ends at a real corner (a square end), it runs out through that end.
+ *
+ * Only convex edges (a corner sticking out) are done; null for anything else,
+ * or if the removed piece is far bigger than the finish could account for.
+ */
+function manualFinishPiece(solid: Shape3D, anchor: Vec3, kind: "fillet" | "chamfer", size: number): Shape3D | null {
+  try {
+    const target = new Vector(anchor);
+    let edge: import("replicad").Edge | null = null;
+    let nearest = Infinity;
+    for (const candidate of solid.edges) {
+      if (candidate.geomType !== "LINE") continue;
+      const a = candidate.startPoint;
+      const b = candidate.endPoint;
+      const ab = b.sub(a);
+      const t = Math.max(0, Math.min(1, target.sub(a).dot(ab) / Math.max(ab.dot(ab), 1e-12)));
+      const d = a.add(ab.multiply(t)).sub(target).Length;
+      if (d < nearest) { nearest = d; edge = candidate; }
+    }
+    if (!edge || nearest > EDGE_ANCHOR_FALLBACK_TOLERANCE) return null;
+    const sides = solid.faces.filter((face) => face.edges.some((e) => e.isSame(edge!)));
+    if (sides.length !== 2 || sides.some((face) => face.geomType !== "PLANE")) return null;
+
+    const start = edge.startPoint;
+    const end = edge.endPoint;
+    const length = end.sub(start).Length;
+    if (!(length > 1e-6)) return null;
+    const u = end.sub(start).normalized();
+    const mid = start.add(end).multiply(0.5);
+    const [nA, nB] = sides.map((face) => face.normalAt(face.center).normalized());
+    // Outward along both normals from a convex edge is empty space; from an
+    // inside corner it is material.
+    const outward = nA.add(nB).normalized();
+    const probeSize = Math.min(0.02, size / 10);
+    const probe = makeBaseBox(probeSize, probeSize, probeSize)
+      .translate(mid.add(outward.multiply(size / 4)).toTuple()) as Shape3D;
+    if (measureVolume(solid.intersect(probe) as Shape3D) > probeSize ** 3 * 0.1) return null;
+    // Directions along each face, square to the edge, away from it.
+    const along = (n: Vector, other: Vector) => {
+      const d = u.cross(n).normalized();
+      return d.dot(other) < 0 ? d : d.multiply(-1);
+    };
+    const dA = along(nA, nB);
+    const dB = along(nB, nA);
+    const cosAngle = Math.max(-1, Math.min(1, dA.dot(dB)));
+    const angle = Math.acos(cosAngle); // the corner's inside angle
+    if (!(angle > 0.05 && angle < Math.PI - 0.05)) return null;
+
+    const [lo, hi] = getTightSolidBounds(solid);
+    const reach = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) * 2 + size * 4 + 10;
+    /** Everything on the `normal` side of the plane through `at`: a huge
+     *  block with one face on that plane. */
+    const halfSpace = (at: Vector, normal: Vector): Shape3D => {
+      let block = makeBaseBox(reach, reach, reach) as Shape3D;
+      const z = new Vector([0, 0, 1]);
+      const turn = z.cross(normal);
+      const sin = turn.Length;
+      const cos = z.dot(normal);
+      if (sin > 1e-9) block = block.rotate(Math.atan2(sin, cos) * 180 / Math.PI, [0, 0, 0], turn.toTuple()) as Shape3D;
+      else if (cos < 0) block = block.rotate(180, [0, 0, 0], [1, 0, 0]) as Shape3D;
+      return block.translate(at.toTuple()) as Shape3D;
+    };
+    // The far side of the plane through the lines `reachA` and `reachB`
+    // along each face from the edge.
+    const beyond = (reachA: number, reachB: number): Shape3D => {
+      const pa = mid.add(dA.multiply(reachA));
+      const pb = mid.add(dB.multiply(reachB));
+      let m = u.cross(pb.sub(pa)).normalized();
+      if (m.dot(outward) < 0) m = m.multiply(-1);
+      return halfSpace(pa, m);
+    };
+    // Mitres at the ends that bend on into another edge of either face.
+    const SHALLOW_BEND = Math.cos((60 * Math.PI) / 180);
+    const mitres: Shape3D[] = [];
+    for (const [vertex, arriving] of [[start, u.multiply(-1)], [end, u]] as const) {
+      let next: Vector | null = null;
+      for (const face of sides) {
+        for (const other of face.edges) {
+          if (other.isSame(edge) || other.geomType !== "LINE") continue;
+          const a = other.startPoint;
+          const b = other.endPoint;
+          const leaving = a.sub(vertex).Length < 1e-6 ? b.sub(a) : b.sub(vertex).Length < 1e-6 ? a.sub(b) : null;
+          if (!leaving || leaving.Length < 1e-9) continue;
+          const direction = leaving.normalized();
+          if (direction.dot(arriving) >= SHALLOW_BEND && (!next || direction.dot(arriving) > next.dot(arriving))) next = direction;
+        }
+      }
+      if (!next) continue;
+      let normal = arriving.add(next).normalized();
+      if (mid.sub(vertex).dot(normal) < 0) normal = normal.multiply(-1);
+      mitres.push(halfSpace(vertex, normal));
+    }
+    const bounded = (tool: Shape3D) => mitres.reduce((kept, mitre) => kept.intersect(mitre) as Shape3D, tool);
+
+    let tool: Shape3D;
+    let crossArea: number;
+    if (kind === "chamfer") {
+      tool = bounded(beyond(size, size));
+      crossArea = 0.5 * size * size * Math.sin(angle);
+    } else {
+      const setback = size / Math.tan(angle / 2);
+      const bisector = dA.add(dB).normalized();
+      const centre = mid.add(bisector.multiply(size / Math.sin(angle / 2)));
+      const cylinder = makeCylinder(size, reach, centre.sub(u.multiply(reach / 2)).toTuple(), u.toTuple()) as Shape3D;
+      tool = bounded(beyond(setback, setback).cut(cylinder) as Shape3D);
+      crossArea = size * setback - (size * size * (Math.PI - angle)) / 2;
+    }
+    if (!(crossArea > 1e-9)) return null;
+
+    const removed = solid.intersect(tool) as Shape3D;
+    const marker = makeSphere(1e-3).translate(mid.toTuple()) as Shape3D;
+    let piece: Shape3D | null = null;
+    let closest = Infinity;
+    for (const raw of iterTopo(removed.wrapped, "solid")) {
+      const candidate = cast(raw) as Shape3D;
+      const distance = measureDistanceBetween(candidate, marker);
+      if (distance < closest) { closest = distance; piece = candidate; }
+    }
+    if (!piece || closest > 0.01) return null;
+    // It may run on a little past the edge's ends (that is the point), but
+    // not take a slice of the whole part.
+    const pieceVolume = measureVolume(piece);
+    if (!(pieceVolume > 1e-9) || pieceVolume > crossArea * length * 3 + crossArea * size * 20) return null;
+    return piece;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * manualFinishPiece for every edge, all worked out on the SAME unedited
+ * solid and cut away together. Two finished edges meeting at a bend then
+ * share one mitre exactly, like a picture frame. Done one after another they
+ * did not: the first edge's mitre left a small step at the bend, the second
+ * edge saw that step instead of the first edge's line, so it was not mitred
+ * and its bevel ran on into the first — a notch and flaps along the strip.
+ * Null if any edge is not one this can do.
+ */
+function manualEdgesFinish(solid: Shape3D, anchors: Vec3[], kind: "fillet" | "chamfer", size: number): Shape3D | null {
+  try {
+    let removed: Shape3D | null = null;
+    for (const anchor of anchors) {
+      const piece = manualFinishPiece(solid, anchor, kind, size);
+      if (!piece) return null;
+      removed = removed ? removed.fuse(piece) as Shape3D : piece;
+    }
+    if (!removed) return null;
+    const result = solid.cut(removed) as Shape3D;
+    if (!isOcctValid(result) || tessellatesEmpty(result) || !isWatertight(result)) return null;
+    return result;
+  } catch {
+    return null;
+  }
+}
+
+/** Each edge in turn, OCCT's own finish first and manualEdgeFinish when it
+ *  refuses; null if any edge cannot be done either way. */
+function finishEdgesOneByOne(solid: Shape3D, kind: "fillet" | "chamfer", size: number, anchors: Vec3[]): Shape3D | null {
+  // All the edges built together is right wherever it applies; one at a
+  // time is only for a mix it cannot do (a curved edge among them, say).
+  const together = manualEdgesFinish(solid, anchors, kind, size);
+  if (together) return together;
+  let current: Shape3D | null = solid;
+  for (const anchor of anchors) {
+    if (!current) return null;
+    const on: Shape3D = current;
+    let next: Shape3D | null = null;
+    try {
+      const selector = edgesAt([anchor]);
+      const candidate = (kind === "fillet" ? on.fillet(size, selector) : on.chamfer(size, selector)) as Shape3D;
+      if (isOcctValid(candidate) && !tessellatesEmpty(candidate) && isWatertight(candidate) && noNewSplit(on, candidate)) next = candidate;
+    } catch { /* built by hand below */ }
+    current = next ?? manualEdgesFinish(on, [anchor], kind, size);
+  }
+  return current;
+}
+
 function sharpBorderEdges(solid: Shape3D, face: Face): import("replicad").Edge[] {
   const border = face.edges;
   const faceNormal = face.normalAt(face.center);
@@ -2697,6 +2954,140 @@ function resizePlanarFace(solid: Shape3D, face: Face, op: ResizeFaceOp): Shape3D
 }
 
 /**
+ * A handle-drag face resize (ResizeFaceOp.stretch) done on the B-rep: the
+ * face's outline is scaled/moved in its own plane, and each wall beside it
+ * leans to follow, pivoting where the walls end — the same result the mesh
+ * version gives, but the part stays a smooth CAD solid.
+ *
+ * It used to go to the mesh kernel every time, turning the part into
+ * triangles for good. Everything done to it afterwards then worked on facets:
+ * rounding an edge came out as flat strips with spikes where pieces met, and
+ * edges could not be picked cleanly.
+ *
+ * Works where each straight side of the face slides parallel to itself, which
+ * is every side lying along the handles' two directions (a box's top, the
+ * usual case) or any face when both directions scale alike. Then each wall is
+ * one draft, and flat walls stay flat. Anything else returns null and the
+ * caller falls back to the mesh.
+ */
+/** stretchPlanarFace on the face the op points at, checked like every other
+ *  B-rep edit; null means use the mesh version instead. */
+function stretchedBRep(solid: Shape3D, op: ResizeFaceOp): Shape3D | null {
+  try {
+    const face = findFace(solid, op.point, op.normal);
+    if (!face) return null;
+    const candidate = stretchPlanarFace(solid, face, op);
+    if (!candidate || !isOcctValid(candidate) || tessellatesEmpty(candidate) || !isWatertight(candidate)) return null;
+    return candidate;
+  } catch {
+    return null;
+  }
+}
+
+function stretchPlanarFace(solid: Shape3D, face: Face, op: ResizeFaceOp): Shape3D | null {
+  const stretch = op.stretch;
+  if (!stretch) return null;
+  if (face.clone().innerWires().length) return null;
+  const boundary = face.edges;
+  if (boundary.some((edge) => edge.geomType !== "LINE")) return null;
+  const adjoining = solid.faces.filter((candidate) =>
+    !candidate.isSame(face) &&
+    candidate.edges.some((edge) => boundary.some((selectedEdge) => edge.isSame(selectedEdge))),
+  );
+  if (!adjoining.length || adjoining.some((wall) => wall.geomType !== "PLANE")) return null;
+
+  // The handles' frame — exactly planarPatch's in meshFace.ts, which is what
+  // the resize UI measured the stretch in.
+  const n = new Vector(op.normal).normalized();
+  const seedAxis = Math.abs(n.z) < 0.9 ? new Vector([0, 0, 1]) : new Vector([1, 0, 0]);
+  const x = seedAxis.cross(n).normalized();
+  const y = n.cross(x);
+  const anchor = new Vector(op.point);
+  const project = (q: Vector): [number, number] => { const d = q.sub(anchor); return [d.dot(x), d.dot(y)]; };
+  const transform = (uv: [number, number]): [number, number] =>
+    uv.map((v, i) => stretch.origin[i] + (v - stretch.origin[i]) * stretch.scale[i] + stretch.translation[i]) as [number, number];
+  const [sx, sy] = stretch.scale;
+  if (!(sx > 0 && sy > 0)) return null;
+
+  const center = face.center;
+  const faceProjection = center.x * n.x + center.y * n.y + center.z * n.z;
+  let oppositeProjection = Infinity;
+  for (const wall of adjoining) {
+    for (const edge of wall.edges) {
+      for (const t of [0, 1]) {
+        const q = edge.pointAt(t);
+        oppositeProjection = Math.min(oppositeProjection, q.x * n.x + q.y * n.y + q.z * n.z);
+      }
+    }
+  }
+  const height = faceProjection - oppositeProjection;
+  if (!(height >= 0.1)) return null;
+
+  const items: { face: Face; angle: number }[] = [];
+  for (const wall of adjoining) {
+    const shared = boundary.filter((edge) => wall.edges.some((e) => e.isSame(edge)));
+    let shift: number | null = null;
+    for (const edge of shared) {
+      const a = edge.startPoint;
+      const b = edge.endPoint;
+      const [ax, ay] = project(a);
+      const [bx, by] = project(b);
+      const dx = bx - ax;
+      const dy = by - ay;
+      const length = Math.hypot(dx, dy);
+      if (length < 1e-9) continue;
+      // The side must keep its direction, or the wall would have to twist.
+      if (Math.abs(dx * dy * (sx - sy)) / (length * length) > 1e-6) return null;
+      // Outward (away from the face's middle), square to the side, in plane.
+      let mx = dy / length;
+      let my = -dx / length;
+      const [cx, cy] = project(center);
+      if ((ax - cx) * mx + (ay - cy) * my < 0) { mx = -mx; my = -my; }
+      const [tx, ty] = transform([ax, ay]);
+      const moved = (tx - ax) * mx + (ty - ay) * my;
+      if (shift === null) shift = moved;
+      else if (Math.abs(moved - shift) > 1e-6) return null;
+    }
+    if (shift === null) return null;
+    const wn = wall.normalAt(wall.center);
+    const sDot = (wn.x * n.x + wn.y * n.y + wn.z * n.z) / Math.hypot(wn.x, wn.y, wn.z);
+    if (!(Math.abs(sDot) < 0.99)) return null;
+    const lean = -sDot / Math.sqrt(1 - sDot * sDot);
+    // Nothing to do for a wall that neither moves nor leans.
+    if (Math.abs(shift) < 1e-7 && Math.abs(lean) < 1e-7) continue;
+    const angle = -Math.atan(lean + shift / height);
+    if (!Number.isFinite(angle) || Math.abs(angle) >= (80 * Math.PI) / 180) return null;
+    // OCCT ignores an angle this close to upright (see NEAR_UPRIGHT_DRAFT); a
+    // wall that should end up there cannot be drafted to it.
+    if (Math.abs(angle) < NEAR_UPRIGHT_DRAFT) {
+      if (Math.abs(lean) < 1e-7) continue;
+      return null;
+    }
+    items.push({ face: wall, angle });
+  }
+  if (!items.length) return solid;
+  const pivotPoint: Vec3 = [
+    center.x - n.x * height,
+    center.y - n.y * height,
+    center.z - n.z * height,
+  ];
+  const result = draftFacesAbout(solid, items, n, pivotPoint);
+  // The face must end up where the stretch put it: same plane, area scaled
+  // by both factors (a draft that silently skipped a wall would not be).
+  const expected = measureArea(face) * sx * sy;
+  const moved = result.faces.find((candidate) => {
+    if (candidate.geomType !== "PLANE") return false;
+    const c = candidate.center;
+    const cn = candidate.normalAt(c);
+    return (cn.x * n.x + cn.y * n.y + cn.z * n.z) / Math.hypot(cn.x, cn.y, cn.z) > 0.9999 &&
+      Math.abs(c.x * n.x + c.y * n.y + c.z * n.z - faceProjection) < 1e-4 &&
+      Math.abs(measureArea(candidate) - expected) <= Math.max(1e-4, expected * 1e-4);
+  });
+  if (!moved) return null;
+  return result;
+}
+
+/**
  * Drafts each face by its own absolute angle (radians) about the plane through
  * `origin` perpendicular to `normal`. replicad's draft() takes one angle for
  * every face, which is exactly what a repeated resize cannot use.
@@ -2866,6 +3257,415 @@ function offsetExtrudeFace(solid: Shape3D, face: Face, op: OffsetExtrudeOp): Sha
   // Extruding backwards along the normal produces the prism on the inside of
   // the solid, which is the material to remove.
   return (op.height >= 0 ? solid.fuse(prism) : solid.cut(prism)) as Shape3D;
+}
+
+/** Why a curved face cannot be pushed/pulled, shown to the user as-is. */
+export class CurvedFaceError extends Error {}
+
+/**
+ * The curved face a push/pull's saved point lies on. Flat faces are found by
+ * findFace; a curved one (a hole wall, a cylinder side) has no single plane
+ * to compare, so the point is projected onto each candidate surface and the
+ * nearest one that faces the same way — and actually contains the point, not
+ * just its surface's extension — wins.
+ */
+function findCurvedFace(solid: Shape3D, point: Vec3, normal: Vec3, tolerance = 0.3): Face | null {
+  let best: Face | null = null;
+  let bestDistance = Infinity;
+  for (const face of solid.faces) {
+    if (face.geomType === "PLANE") continue;
+    const [min, max] = face.boundingBox.bounds;
+    const pad = tolerance + 0.5;
+    if (point.some((value, i) => value < min[i] - pad || value > max[i] + pad)) continue;
+    let onSurface: Vector;
+    let n: Vector;
+    try {
+      // uvCoordinates gives the surface's own parameters; pointOnSurface
+      // wants them scaled 0..1 across the face. Outside 0..1 means the point
+      // is on the surface's extension, not on this face.
+      const [u, v] = face.uvCoordinates(point);
+      const { uMin, uMax, vMin, vMax } = face.UVBounds;
+      const nu = uMax - uMin > 1e-12 ? (u - uMin) / (uMax - uMin) : 0.5;
+      const nv = vMax - vMin > 1e-12 ? (v - vMin) / (vMax - vMin) : 0.5;
+      if (nu < -0.01 || nu > 1.01 || nv < -0.01 || nv > 1.01) continue;
+      onSurface = face.pointOnSurface(nu, nv);
+      n = face.normalAt(onSurface);
+    } catch {
+      continue;
+    }
+    const distance = Math.hypot(onSurface.x - point[0], onSurface.y - point[1], onSurface.z - point[2]);
+    if (distance > tolerance) continue;
+    const facing = (n.x * normal[0] + n.y * normal[1] + n.z * normal[2]) / (Math.hypot(n.x, n.y, n.z) || 1);
+    if (facing < 0.8) continue;
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = face;
+    }
+  }
+  return best;
+}
+
+/** The face a push/pull targets, flat or curved. */
+function findPushPullFace(solid: Shape3D, point: Vec3, normal: Vec3): Face | null {
+  return findFace(solid, point, normal) ?? findCurvedFace(solid, point, normal);
+}
+
+/**
+ * Thickens one face into a solid slab `distance` thick along its own normal.
+ * OCCT's simple thickening builds the slab on the side AGAINST the normal
+ * (into the material) correctly, but a slab along the normal comes out
+ * inside-out (negative volume), and a boolean with it silently does nothing.
+ * So an outward slab is built from the already-offset surface, thickened
+ * back towards the face. Verified against exact volumes for holes and
+ * cylinders both ways (see memory: occt-node-harness).
+ */
+function thickenFace(face: Face, distance: number): Shape3D {
+  const source = distance > 0 ? makeOffset(face, distance) : face;
+  return thickenShape(source, distance > 0 ? -distance : distance);
+}
+
+function thickenShape(shape: { wrapped: any }, thickness: number): Shape3D {
+  const oc = getOC();
+  const builder = new oc.BRepOffsetAPI_MakeThickSolid();
+  try {
+    builder.MakeThickSolidBySimple(shape.wrapped, thickness);
+    builder.Build(new oc.Message_ProgressRange());
+    if (!builder.IsDone()) throw new Error("thickening failed");
+    return cast(builder.Shape()) as Shape3D;
+  } finally {
+    builder.delete();
+  }
+}
+
+/**
+ * The slab to add (distance > 0) or remove (distance < 0) for a curved face,
+ * checked to be on the right side. Which side OCCT's thickening lands on
+ * follows how the surface happens to be parametrised, not the face's own
+ * normal: for a cylinder hole thickenFace is right, but for a cone-shaped
+ * cut it built the slab in the empty cut, so "make it bigger" removed
+ * nothing. So each way of building it is tried, and one is kept only if
+ * the slab really covers the spot half-way out from the gripped point along
+ * the face's own normal (a tiny cube there must overlap it — booleans on
+ * the slab's face, which touches the solid exactly, are too flaky to judge
+ * by), and the result gains or loses material as asked.
+ */
+function curvedPushPull(solid: Shape3D, face: Face, distance: number, grip: Vec3): AnySolid | null {
+  const d = distance;
+  let unit: Vector;
+  try {
+    const n = face.normalAt(grip);
+    const length = Math.hypot(n.x, n.y, n.z);
+    if (!(length > 1e-12)) return null;
+    unit = new Vector([n.x / length, n.y / length, n.z / length]);
+  } catch {
+    return null;
+  }
+  const size = Math.min(Math.abs(d) / 3, 0.5);
+  const probe = makeBaseBox(size, size, size).translate([
+    grip[0] + unit.x * d / 2,
+    grip[1] + unit.y * d / 2,
+    grip[2] + unit.z * d / 2 - size / 2,
+  ]) as Shape3D;
+  const probeVolume = size ** 3;
+  const before = measureVolume(solid);
+  // A result BRepCheck flags but that is otherwise sound (closed, meshes, the
+  // volume moved by no more than the slab, nothing sticking out further than
+  // the distance) — kept in case no build passes the full check.
+  let flagged: Shape3D | null = null;
+  const builds: (() => Shape3D)[] = [
+    () => thickenFace(face, d),
+    () => thickenShape(face, -d),
+    () => thickenShape(face, d),
+    () => thickenShape(makeOffset(face, -d), d),
+    () => thickenShape(makeOffset(face, d), -d),
+  ];
+  for (const build of builds) {
+    try {
+      const slab = build();
+      if (!(measureVolume(slab) > 1e-6)) continue;
+      if (!(measureVolume(slab.intersect(probe) as Shape3D) > probeVolume * 0.5)) continue;
+      const changed = (after: number) => d > 0 ? after > before + 1e-6 : after < before - 1e-6 && after > 1e-6;
+      try {
+        const result = (d > 0 ? solid.fuse(slab) : solid.cut(slab)) as Shape3D;
+        // Volume alone is not enough: OCCT can return a solid whose volume
+        // moved the right way but whose topology is broken, which then fails
+        // to tessellate and the scene reports "could not be rebuilt reliably".
+        // The same checks Hollow uses catch that before it leaves the kernel.
+        const after = measureVolume(result);
+        if (!changed(after) || tessellatesEmpty(result) || !isWatertight(result)) continue;
+        if (isOcctValid(result)) return result;
+        // BRepCheck can reject a correct fuse over one flat face (seen on a
+        // quarter-round wall above a cone cut: exact volume, closed, and later
+        // edits on it came out valid again). Refusing it left that face
+        // impossible to pull, so it is accepted when everything else holds.
+        if (!flagged && Math.abs(after - before) <= measureVolume(slab) * 1.01 + 1e-6 && boundsWithin(result, solid, Math.abs(d))) flagged = result;
+      } catch { /* try the next way of building the slab */ }
+      // No mesh-kernel fallback here on purpose: it turned the part into
+      // triangles for good, and every later edit on it then worked on facets
+      // (reported as the model "degrading"). A curved push/pull either
+      // stays a smooth B-rep or is refused.
+    } catch {
+      continue;
+    }
+  }
+  return flagged;
+}
+
+/** True when `result`'s tight box lies within `original`'s grown by `margin`. */
+function boundsWithin(result: Shape3D, original: Shape3D, margin: number): boolean {
+  const [lo, hi] = getTightSolidBounds(result);
+  const [olo, ohi] = getTightSolidBounds(original);
+  const slack = margin + 0.01;
+  return [0, 1, 2].every((i) => lo[i] >= olo[i] - slack && hi[i] <= ohi[i] + slack);
+}
+
+/**
+ * True when the face blends smoothly into a neighbour along one of its edges
+ * (a rounded edge). Offsetting just that strip leaves a step or a groove
+ * where it meets the neighbour instead of changing the rounding, so it is
+ * refused rather than done badly.
+ */
+function blendsIntoNeighbour(solid: Shape3D, face: Face): boolean {
+  for (const edge of face.edges) {
+    const mid = edge.pointAt(0.5);
+    const p: Vec3 = [mid.x, mid.y, mid.z];
+    let own: Vector;
+    try { own = face.normalAt(p); } catch { continue; }
+    for (const other of solid.faces) {
+      if (other.isSame(face)) continue;
+      if (!other.edges.some((candidate) => candidate.isSame(edge))) continue;
+      let theirs: Vector;
+      try { theirs = other.normalAt(p); } catch { continue; }
+      const dot = (own.x * theirs.x + own.y * theirs.y + own.z * theirs.z) /
+        ((Math.hypot(own.x, own.y, own.z) * Math.hypot(theirs.x, theirs.y, theirs.z)) || 1);
+      if (dot > 0.999) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * How far a curved face can move along its own normal in one direction
+ * before it turns inside out. Moving a hole wall toward its centre line, or
+ * shrinking a cylinder, only works until the wall reaches that line; past
+ * it the offset surface folds through itself and comes out the other side
+ * (reported: a cone-shaped cut pushed 8.5 mm grew a mirrored cone outside
+ * the block). A pointed cone reaches its line at the tip, so it cannot move
+ * that way at all. This works for any curved face, not just ones whose axis
+ * OCCT will hand over: sample the face, move each sample along its normal,
+ * and see whether neighbouring samples swap places — the sign of a fold.
+ * Returns Infinity when no fold happens within a generous range.
+ */
+function curvedOffsetLimit(face: Face, sign: 1 | -1): number {
+  const steps = 16;
+  const grid: { p: Vector; n: [number, number, number] }[][] = [];
+  for (let i = 0; i <= steps; i++) {
+    const row: { p: Vector; n: [number, number, number] }[] = [];
+    for (let j = 0; j <= steps; j++) {
+      const p = face.pointOnSurface(i / steps, j / steps);
+      let n: Vector;
+      try { n = face.normalAt(p); } catch { n = new Vector([0, 0, 0]); }
+      const length = Math.hypot(n.x, n.y, n.z);
+      row.push({ p, n: length > 1e-12 ? [n.x / length, n.y / length, n.z / length] : [0, 0, 0] });
+    }
+    grid.push(row);
+  }
+  const folds = (d: number) => {
+    const pair = (a: { p: Vector; n: [number, number, number] }, b: { p: Vector; n: [number, number, number] }) => {
+      const dp = [b.p.x - a.p.x, b.p.y - a.p.y, b.p.z - a.p.z];
+      const span = dp[0] * dp[0] + dp[1] * dp[1] + dp[2] * dp[2];
+      if (span < 1e-10) return false; // both on a point (a cone's tip)
+      const dq = dp.map((value, k) => value + (b.n[k] - a.n[k]) * d * sign);
+      return dq[0] * dp[0] + dq[1] * dp[1] + dq[2] * dp[2] <= 0.02 * span;
+    };
+    for (let i = 0; i <= steps; i++) {
+      for (let j = 0; j <= steps; j++) {
+        if (i < steps && pair(grid[i][j], grid[i + 1][j])) return true;
+        if (j < steps && pair(grid[i][j], grid[i][j + 1])) return true;
+      }
+    }
+    return false;
+  };
+  const [min, max] = face.boundingBox.bounds;
+  let high = Math.max(1, Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]) * 4);
+  if (!folds(high)) return Infinity;
+  let low = 0;
+  for (let k = 0; k < 30; k++) {
+    const mid = (low + high) / 2;
+    if (folds(mid)) high = mid; else low = mid;
+  }
+  return low;
+}
+
+/**
+ * Push/pull for a curved face: a hole wall moves in (smaller hole) or out
+ * (bigger hole), a cylinder side grows or shrinks, by adding or removing a
+ * curved slab that follows the surface — the curved counterpart of the flat
+ * prism pushPullFace uses.
+ */
+type V3 = [number, number, number];
+const v3 = {
+  sub: (a: V3, b: V3): V3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]],
+  add: (a: V3, b: V3): V3 => [a[0] + b[0], a[1] + b[1], a[2] + b[2]],
+  scale: (a: V3, k: number): V3 => [a[0] * k, a[1] * k, a[2] * k],
+  dot: (a: V3, b: V3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2],
+  cross: (a: V3, b: V3): V3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]],
+  unit: (a: V3): V3 => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; },
+};
+
+/**
+ * The cone a CONE face lies on: its tip, its axis (pointing from the tip
+ * toward the wide end) and its half-angle. This OCCT build does not bind
+ * gp_Cone, so it is measured: the face's straight lines (generators) all
+ * run through the tip, and their directions all make the same angle with
+ * the axis — so the tip is where the generators meet, and the axis is
+ * square to the circle their unit directions trace. Checked against a
+ * fourth generator; null if the face is not really a cone.
+ */
+function measureCone(face: Face): { apex: V3; axis: V3; halfAngle: number } | null {
+  const at = (u: number, v: number): V3 => { const q = face.pointOnSurface(u, v); return [q.x, q.y, q.z]; };
+  const us = [0.1, 0.5, 0.9, 0.3];
+  const lines = us.map((u) => { const a = at(u, 0.15); const b = at(u, 0.85); return { p: a, d: v3.unit(v3.sub(b, a)) }; });
+  if (lines.some((line) => !Number.isFinite(line.d[0]))) return null;
+  // Least-squares meeting point of the first three generators.
+  const m = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+  const rhs: V3 = [0, 0, 0];
+  for (const { p, d } of lines.slice(0, 3)) {
+    for (let i = 0; i < 3; i++) {
+      for (let j = 0; j < 3; j++) {
+        const term = (i === j ? 1 : 0) - d[i] * d[j];
+        m[i][j] += term;
+        rhs[i] += term * p[j];
+      }
+    }
+  }
+  const det = (x: number[][]) =>
+    x[0][0] * (x[1][1] * x[2][2] - x[1][2] * x[2][1]) - x[0][1] * (x[1][0] * x[2][2] - x[1][2] * x[2][0]) + x[0][2] * (x[1][0] * x[2][1] - x[1][1] * x[2][0]);
+  const D = det(m);
+  if (Math.abs(D) < 1e-9) return null;
+  const apex = [0, 1, 2].map((k) => det(m.map((row, r) => row.map((value, c) => (c === k ? rhs[r] : value))))) .map((value) => value / D) as V3;
+  // Generator directions pointing away from the tip.
+  const g = lines.map(({ p, d }) => (v3.dot(v3.sub(p, apex), d) < 0 ? v3.scale(d, -1) : d));
+  let axis = v3.unit(v3.cross(v3.sub(g[1], g[0]), v3.sub(g[2], g[0])));
+  if (v3.dot(axis, g[0]) < 0) axis = v3.scale(axis, -1);
+  const cosA = v3.dot(axis, g[0]);
+  if (!(cosA > 0.01 && cosA < 0.9999)) return null;
+  if (g.some((dir) => Math.abs(v3.dot(axis, dir) - cosA) > 1e-3)) return null;
+  return { apex, axis, halfAngle: Math.acos(cosA) };
+}
+
+/** A solid cone with its tip at `apex`, opening along `axis` for
+ *  `length` mm at `halfAngle`. */
+function coneSolid(apex: V3, axis: V3, halfAngle: number, length: number): Shape3D {
+  let cone = revolveAxialOutline([[0, 0], [length * Math.tan(halfAngle), length], [0, length]]);
+  const z: V3 = [0, 0, 1];
+  const turn = v3.cross(z, axis);
+  const sin = Math.hypot(turn[0], turn[1], turn[2]);
+  const cos = v3.dot(z, axis);
+  if (sin > 1e-9) cone = cone.rotate(Math.atan2(sin, cos) * 180 / Math.PI, [0, 0, 0], turn) as Shape3D;
+  else if (cos < 0) cone = cone.rotate(180, [0, 0, 0], [1, 0, 0]) as Shape3D;
+  return cone.translate(apex) as Shape3D;
+}
+
+/**
+ * Push/pull on a cone face by shifting the cone itself: the surface a cone's
+ * wall moves to is the same cone with its tip slid along the axis by
+ * distance / sin(half-angle). That stays exact where offsetting the face
+ * cannot — past the tip it would fold — so a cone-shaped cut can be pulled
+ * shut, the way Shapr3D does it, and a solid cone shrunk to nothing. Only
+ * the band between the old and new cone changes: added where the part has
+ * a cut (kept within the part's own bounds, so nothing grows outside it),
+ * removed where it is solid.
+ */
+function shiftConeFace(solid: Shape3D, face: Face, distance: number, grip: Vec3): Shape3D | null {
+  const cone = measureCone(face);
+  if (!cone) return null;
+  let n: V3;
+  try { const q = face.normalAt(grip); n = v3.unit([q.x, q.y, q.z]); } catch { return null; }
+  // Toward the axis or away from it, and is the material inside the cone
+  // (a solid cone) or outside it (a cone-shaped cut)?
+  const fromApex = v3.sub(grip, cone.apex);
+  const onAxis = v3.add(cone.apex, v3.scale(cone.axis, v3.dot(fromApex, cone.axis)));
+  const normalTowardAxis = v3.dot(n, v3.sub(onAxis, grip)) > 0;
+  const towardAxis = distance > 0 === normalTowardAxis;
+  const cut = normalTowardAxis; // the face's normal points into the empty cone
+  const shift = Math.abs(distance) / Math.sin(cone.halfAngle);
+  const [lo, hi] = getTightSolidBounds(solid);
+  const reach = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) +
+    Math.max(...[lo, hi].flatMap((corner) => [0, 1, 2].map(() => Math.hypot(...v3.sub(corner as V3, cone.apex))))) + shift + 1;
+  // The smaller cone's tip sits further along the axis.
+  const bigApex = towardAxis ? cone.apex : v3.sub(cone.apex, v3.scale(cone.axis, shift));
+  const smallApex = towardAxis ? v3.add(cone.apex, v3.scale(cone.axis, shift)) : cone.apex;
+  // Only along this face's own stretch of the axis: above or below it the
+  // band would also swallow other faces of the cut (a straight-walled rim
+  // over the cone was filled in along with it). A face that reaches the tip
+  // may move past it, so the stretch continues beyond the tip.
+  let tMin = Infinity;
+  let tMax = -Infinity;
+  for (let i = 0; i <= 8; i++) {
+    for (let j = 0; j <= 8; j++) {
+      const q = face.pointOnSurface(i / 8, j / 8);
+      const t = v3.dot(v3.sub([q.x, q.y, q.z], cone.apex), cone.axis);
+      tMin = Math.min(tMin, t);
+      tMax = Math.max(tMax, t);
+    }
+  }
+  if (tMin < 1e-3 * Math.max(1, tMax)) tMin -= shift + 1;
+  try {
+    const stretch = makeCylinder(reach, tMax - tMin, v3.add(cone.apex, v3.scale(cone.axis, tMin)), cone.axis) as Shape3D;
+    const band = (coneSolid(bigApex, cone.axis, cone.halfAngle, reach)
+      .cut(coneSolid(smallApex, cone.axis, cone.halfAngle, reach + shift)) as Shape3D)
+      .intersect(stretch) as Shape3D;
+    let result: Shape3D;
+    if (cut === towardAxis) {
+      // A cut shrinking, or a solid cone growing: add the band, but only
+      // inside the part's own box.
+      // Exactly the part's box: padding it left hair-thin slivers against
+      // the part's own faces and the result was no longer watertight.
+      const size = v3.sub(hi as V3, lo as V3);
+      const box = makeBaseBox(size[0], size[1], size[2]).translate([(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]]) as Shape3D;
+      result = solid.fuse(band.intersect(box) as Shape3D) as Shape3D;
+    } else {
+      result = solid.cut(band) as Shape3D;
+    }
+    const before = measureVolume(solid);
+    const after = measureVolume(result);
+    const grew = after > before + 1e-6;
+    if ((cut === towardAxis) !== grew || !(after > 1e-6)) return null;
+    if (!isOcctValid(result) || tessellatesEmpty(result) || !isWatertight(result)) return null;
+    return result;
+  } catch {
+    return null;
+  }
+}
+
+function pushPullCurvedFace(solid: Shape3D, face: Face, distance: number, grip: Vec3): AnySolid {
+  if (Math.abs(distance) < 1e-6) return solid;
+  if (face.geomType === "SPHERE") {
+    throw new CurvedFaceError("A sphere cannot be pushed or pulled. Use the size handles to make it bigger or smaller.");
+  }
+  if (blendsIntoNeighbour(solid, face)) {
+    throw new CurvedFaceError("This face flows smoothly into a rounded edge, so moving it on its own would leave a step. Change the rounding with Round an edge, or the size in Properties.");
+  }
+  const limit = curvedOffsetLimit(face, distance > 0 ? 1 : -1);
+  if (face.geomType === "CONE" && Math.abs(distance) >= limit - 0.01) {
+    const shifted = shiftConeFace(solid, face, distance, grip);
+    if (shifted) return shifted;
+  }
+  if (Math.abs(distance) >= limit - 0.01) {
+    throw new CurvedFaceError(limit < 0.1
+      ? "This curved face comes to a point, so it can only be moved the other way."
+      : `That would push this curved face through its own centre. It can move about ${Math.floor(limit * 10) / 10} mm this way at most.`);
+  }
+  const result = curvedPushPull(solid, face, distance, grip) ??
+    (face.geomType === "CONE" ? shiftConeFace(solid, face, distance, grip) : null);
+  if (!result) throw new CurvedFaceError("This curved face cannot be moved that far. Try a smaller distance.");
+  return result;
+}
+
+/** Push/pull on whichever kind of face was found; `grip` is the op point. */
+function pushPullAnyFace(solid: Shape3D, face: Face, distance: number, grip: Vec3): AnySolid {
+  return face.geomType === "PLANE" ? pushPullFace(solid, face, distance) : pushPullCurvedFace(solid, face, distance, grip);
 }
 
 function pushPullFace(solid: Shape3D, face: Face, distance: number): Shape3D {
@@ -3733,9 +4533,15 @@ export async function makePushPullPreviewBase(spec: EditSpec): Promise<Shape3D |
 }
 
 /** Applies only the changing final operation to a cached preview base. */
-export function applyPushPullPreview(base: Shape3D, op: PushPullOp): Shape3D | null {
-  const face = findFace(base, op.point, op.normal);
-  return face ? pushPullFace(base, face, op.distance) : null;
+export function applyPushPullPreview(base: Shape3D, op: PushPullOp): AnySolid | null {
+  const face = findPushPullFace(base, op.point, op.normal);
+  if (!face) return null;
+  try {
+    return pushPullAnyFace(base, face, op.distance, op.point);
+  } catch (error) {
+    if (error instanceof CurvedFaceError) return null;
+    throw error;
+  }
 }
 
 /** True if a sphere sits anywhere below this node — the seam bug's only
@@ -3918,7 +4724,8 @@ async function replayEdit(
         );
         if (!candidate || invalid) {
           // All at once was refused; several edges may still go in two passes.
-          const stepped = finishEdgesInTwoPasses(solid, op.kind, op.distance, edgeAnchors);
+          const stepped = finishEdgesInTwoPasses(solid, op.kind, op.distance, edgeAnchors) ??
+            finishEdgesOneByOne(solid, op.kind, op.distance, edgeAnchors);
           if (stepped) {
             candidate = stepped;
           } else if (firstFailure) {
@@ -3933,6 +4740,12 @@ async function replayEdit(
           solid = candidate;
         }
       } catch (error) {
+        const anchors = op.points?.length ? op.points : [op.point];
+        const byHand = !op.face && !isMesh(solid) ? finishEdgesOneByOne(solid as Shape3D, op.kind, op.distance, anchors) : null;
+        if (byHand) {
+          solid = byHand;
+          continue;
+        }
         const detail = error instanceof Error ? error.message : String(error);
         onError?.(
           spec.id,
@@ -4005,6 +4818,10 @@ async function replayEdit(
       continue;
     }
     if (op.kind === "resizeFace") {
+      if (!isMesh(solid) && op.stretch) {
+        const stretched = stretchedBRep(solid, op);
+        if (stretched) { solid = stretched; continue; }
+      }
       if (isMesh(solid) || op.stretch) {
         let reason = "That face cannot be resized by this amount; the previous shape was kept.";
         const candidate = resizeMeshFace(isMesh(solid) ? solid : solid.meshShape(FALLBACK_MESH_QUALITY), op, (message) => { reason = message; });
@@ -4074,7 +4891,7 @@ async function replayEdit(
       else solid = edited;
       continue;
     }
-    const face = findFace(solid, faceOp.point, faceOp.normal);
+    const face = findPushPullFace(solid, faceOp.point, faceOp.normal);
     if (!face) {
       onError?.(
         spec.id,
@@ -4082,7 +4899,12 @@ async function replayEdit(
       );
       continue;
     }
-    solid = pushPullFace(solid, face, faceOp.distance);
+    try {
+      solid = pushPullAnyFace(solid, face, faceOp.distance, faceOp.point);
+    } catch (error) {
+      if (!(error instanceof CurvedFaceError)) throw error;
+      onError?.(spec.id, `${error.message} The previous shape was kept.`);
+    }
   }
   return solid;
 }
@@ -4172,6 +4994,7 @@ export async function survivingOps(
       // go in two passes. Without this here, Apply would reject the very
       // finish the live preview had just shown working.
       if (!candidate) candidate = finishEdgesInTwoPasses(bRepSolid, op.kind, op.distance, edgeAnchors);
+      if (!candidate) candidate = finishEdgesOneByOne(bRepSolid, op.kind, op.distance, edgeAnchors);
       if (candidate) {
         solid = candidate;
         kept.push(op);
@@ -4225,6 +5048,10 @@ export async function survivingOps(
       continue;
     }
     if (op.kind === "resizeFace") {
+      if (!isMesh(solid) && op.stretch) {
+        const stretched = stretchedBRep(solid, op);
+        if (stretched) { solid = stretched; kept.push(op); continue; }
+      }
       if (isMesh(solid) || op.stretch) {
         const candidate = resizeMeshFace(isMesh(solid) ? solid : solid.meshShape(FALLBACK_MESH_QUALITY), op);
         if (candidate) { solid = candidate; kept.push(op); }
@@ -4257,9 +5084,16 @@ export async function survivingOps(
       }
       continue;
     }
-    const face = findFace(solid as Shape3D, faceOp.point, faceOp.normal);
+    const face = findPushPullFace(solid as Shape3D, faceOp.point, faceOp.normal);
     if (!face) continue;
-    solid = pushPullFace(solid as Shape3D, face, faceOp.distance);
+    try {
+      solid = pushPullAnyFace(solid as Shape3D, face, faceOp.distance, faceOp.point);
+    } catch (error) {
+      // A curved face this kernel refuses (a sphere, a rounded edge) never
+      // becomes possible later, so the op is as dead as a missing face.
+      if (error instanceof CurvedFaceError) continue;
+      throw error;
+    }
     kept.push(op);
   }
   return kept;

@@ -19,6 +19,7 @@ import {
   hasImport,
   isMesh,
   getSolidBounds,
+  getTightSolidBounds,
   makeLocal,
   makeWorld,
   makePushPullPreviewBase,
@@ -802,7 +803,7 @@ function withSphereSurfaceLines(mesh: KernelMesh, params: Record<string, number>
  */
 function meshMatchesSolidBounds(mesh: KernelMesh, solid: AnySolid): boolean {
   try {
-    const [expectedMin, expectedMax] = getSolidBounds(solid);
+    const [expectedMin, expectedMax] = getTightSolidBounds(solid);
     const vertices = mesh.faces.vertices;
     if (!vertices.length) return false;
     const gotMin = [Infinity, Infinity, Infinity];
@@ -2178,6 +2179,31 @@ const api = {
    * this is what lets the app drop it for good. null for anything that
    * isn't an edit node — nothing to prune.
    */
+  /**
+   * Why the LAST op of this edit could not be applied, or null if it can.
+   * Built through the same path as a real rebuild, so a push/pull is
+   * checked exactly as it would be applied — the live-drag preview takes a
+   * shortcut that can come back empty without saying why. Errors that were
+   * already there without the new op (an older broken edit) do not count.
+   */
+  async pushPullIssue(spec: NodeSpec): Promise<string | null> {
+    await init();
+    if (spec.type !== "edit" || !spec.ops.length) return null;
+    const errorsOf = async (candidate: NodeSpec) => {
+      const found: string[] = [];
+      try {
+        await makeLocal(candidate, (_id, message) => { found.push(message); });
+      } catch (error) {
+        found.push(error instanceof Error ? error.message : String(error));
+      }
+      return found;
+    };
+    const withOp = await errorsOf(spec);
+    if (!withOp.length) return null;
+    const before = await errorsOf({ ...spec, ops: spec.ops.slice(0, -1) });
+    return withOp.find((message) => !before.includes(message)) ?? null;
+  },
+
   async pruneDeadOps(spec: NodeSpec): Promise<EditOp[] | null> {
     await init();
     if (spec.type !== "edit") return null;

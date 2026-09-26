@@ -491,6 +491,8 @@ export const kernel = {
   // Not coalesced: an explicit, one-off user action (the "Remove broken
   // edit" button), not a rebuild fired on every change.
   pruneDeadOps: (spec: NodeSpec) => withWatchdog("scene", (raw) => raw.pruneDeadOps(spec)),
+  // Not coalesced either: checks one push/pull before it is written.
+  pushPullIssue: (spec: NodeSpec) => withWatchdog("scene", (raw) => raw.pushPullIssue(spec)),
   simplifyMesh: (blobId: string, ratio: number) =>
     withWatchdog("scene", (raw) => raw.simplifyMesh(blobId, ratio)),
   splitByPlane: (spec: NodeSpec, planePoint: Vec3, planeNormal: Vec3) =>
