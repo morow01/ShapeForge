@@ -5,7 +5,7 @@ import { EXPORT_MESHES_WATCHDOG_MS, EXPORT_WATCHDOG_MS, kernel, KernelTimeoutErr
 import { Viewport } from "./viewport/Viewport";
 import { PathPatternPanel } from "./ui/PathPatternPanel";
 import { ToolPreviewLayer } from "./ui/ToolPreview";
-import { AdaptiveToolPanel, ToolContextMenu, type ToolItem, type ToolSuggestions } from "./ui/AdaptiveTools";
+import { AdaptiveToolRail, ToolContextMenu, type ToolItem, type ToolSuggestions } from "./ui/AdaptiveTools";
 import type { PathPlacement } from "./geometry/pathPattern";
 import { readViewportQuality, VIEWPORT_QUALITY_KEY, type ViewportQuality } from "./viewport/quality";
 import type { FaceBounds, FaceResizeFrame } from "./viewport/FaceResizeHandles";
@@ -461,6 +461,15 @@ type FileOperation = {
   /** Opening/importing is only finished after the rebuilt scene has appeared. */
   sawSceneBusy: boolean;
 };
+
+/** Tools the slim rail always has its own button for, so the suggestions
+ *  inside the rail leave them out rather than show them twice. */
+const RAIL_CORE_ARIA: ReadonlySet<string> = new Set([
+  "Select tool",
+  "Measuring tape tool",
+  "Toggle transparency",
+  "Zoom to selected",
+]);
 
 export function App() {
   const nodes = useDoc((s) => s.nodes);
@@ -4338,7 +4347,7 @@ export function App() {
   const tools = {
     addShape: { id: "addShape", label: "Add a shape", aria: "Add a shape", icon: <PrimitiveShapeIcon kind="box" />, enabled: true,
       run: showShapeLibrary },
-    importFile: { id: "importFile", label: "Import STL, 3MF or SVG", aria: "Import a file", icon: <ImportIcon />, enabled: true,
+    importFile: { id: "importFile", label: "Import a file", tooltip: "Import STL, 3MF or SVG", aria: "Import a file", icon: <ImportIcon />, enabled: true,
       run: () => importInputRef.current?.click() },
     sketch: { id: "sketch", label: "Sketch", aria: "Sketch tool", icon: <SketchToolIcon />, enabled: true,
       active: toolMode === "place" && pendingPrimitive === "sketch",
@@ -4351,7 +4360,7 @@ export function App() {
       active: toolMode === "move", run: () => setToolMode("move") },
     rotate: { id: "rotate", label: "Rotate", aria: "Rotate tool", icon: <RotateToolIcon />, keys: "R", enabled: anySelected, reason: needOne,
       active: toolMode === "rotate", run: () => setToolMode("rotate") },
-    mirror: { id: "mirror", label: "Mirror", aria: "Mirror tool", icon: <MirrorToolIcon />, enabled: anySelected, reason: needOne,
+    mirror: { id: "mirror", label: "Mirror", tooltip: "Mirror across X", aria: "Mirror tool", icon: <MirrorToolIcon />, enabled: anySelected, reason: needOne,
       run: () => mirrorSelection([true, false, false]),
       choices: (["X", "Y", "Z"] as const).map((axis, i) => ({
         label: axis, title: `Mirror across ${axis}`, run: () => mirrorSelection([i === 0, i === 1, i === 2]),
@@ -4467,6 +4476,10 @@ export function App() {
   // the full set. Remembered per browser.
   const [allTools, setAllTools] = useState(() => { try { return localStorage.getItem("shapeforge.allTools") === "1"; } catch { return false; } });
   useEffect(() => { try { localStorage.setItem("shapeforge.allTools", allTools ? "1" : "0"); } catch { /* per-viewer nicety only */ } }, [allTools]);
+  // The slim rail can widen to name its tools and explain the suggestions.
+  const [railExpanded, setRailExpanded] = useState(() => { try { return localStorage.getItem("shapeforge.railExpanded") === "1"; } catch { return false; } });
+  useEffect(() => { try { localStorage.setItem("shapeforge.railExpanded", railExpanded ? "1" : "0"); } catch { /* per-viewer nicety only */ } }, [railExpanded]);
+  const showRailLabels = railExpanded && !allTools;
   useEffect(() => {
     const scene = sceneRef.current;
     if (!scene) return;
@@ -4475,7 +4488,7 @@ export function App() {
   });
 
   return (
-    <div className={`app-shell${objectsPanelOpen ? "" : " objects-collapsed"}${allTools ? "" : " rail-compact"}`}>
+    <div className={`app-shell${objectsPanelOpen ? "" : " objects-collapsed"}${allTools ? "" : " rail-compact"}${showRailLabels ? " rail-expanded" : ""}`}>
       <header className="topbar">
         <div className="topbar-left">
           <div className="brand">
@@ -4853,15 +4866,35 @@ export function App() {
       )}
 
       <ToolPreviewLayer />
-      <div className={`tool-rail${allTools ? "" : " compact"}`} role="toolbar" aria-label="Design tools">
+      <div className={`tool-rail${allTools ? "" : " compact"}${showRailLabels ? " expanded" : ""}`} role="toolbar" aria-label="Design tools">
+        {!allTools && (
+          <button
+            data-core
+            className="tool-rail-expand"
+            onClick={() => setRailExpanded((v) => !v)}
+            title={railExpanded ? "Hide tool names" : "Show tool names and tips"}
+            aria-label={railExpanded ? "Hide tool names" : "Show tool names and tips"}
+            aria-expanded={railExpanded}
+          >
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d={railExpanded ? "M10 4L6 8l4 4" : "M6 4l4 4-4 4"} /></svg>
+          </button>
+        )}
         {/* Category 1: Selection & Transform */}
         <button
           data-core
+          data-label="Select"
           className={toolMode === "select" ? "active" : ""}
           onClick={() => setToolMode("select")}
           title="Select and resize (V)"
           aria-label="Select tool"
         ><SelectIcon /></button>
+        {/* The tools that suit the selection, in the slim rail only; the full
+            toolbar already has every one of them. */}
+        {!allTools && toolMode !== "place" && (
+          <div data-core className="tool-rail-suggest">
+            <AdaptiveToolRail suggestions={suggestions} expanded={showRailLabels} skipAria={RAIL_CORE_ARIA} />
+          </div>
+        )}
         <button
           className={toolMode === "move" ? "active" : ""}
           onClick={() => setToolMode("move")}
@@ -5024,6 +5057,7 @@ export function App() {
         </div>
         <button
           data-core
+          data-label="Measure"
           className={toolMode === "measure" ? "active" : ""}
           aria-pressed={toolMode === "measure"}
           onClick={() => setToolMode((mode) => mode === "measure" ? "select" : "measure")}
@@ -5146,6 +5180,7 @@ export function App() {
         {/* Category 4: View & Navigation */}
         <div className="tool-rail-item-container" data-core ref={wireframeMenuRef}>
           <button
+            data-label="View mode"
             className={wireframe !== "off" || wireframeMenuOpen ? "active" : ""}
             onClick={() => setWireframeMenuOpen((v) => !v)}
             title={
@@ -5229,6 +5264,7 @@ export function App() {
         </div>
         <button
           data-core
+          data-label="See-through"
           className={selectionTransparent ? "active" : ""}
           onClick={toggleTransparency}
           title="Make the selection see-through (T)"
@@ -5240,6 +5276,7 @@ export function App() {
         </button>
         <button
           data-core
+          data-label={selectedIds.length ? "Zoom to selection" : "Zoom to fit"}
           onClick={zoomToSelected}
           title={selectedIds.length ? "Zoom to selected object (Z)" : "Fit all objects in view (Z)"}
           aria-label="Zoom to selected"
@@ -5258,6 +5295,7 @@ export function App() {
         <span className="tool-rail-spacer" data-core aria-hidden="true" />
         <button
           data-core
+          data-label="All tools"
           className={`tool-rail-all${allTools ? " active" : ""}`}
           onClick={() => setAllTools((v) => !v)}
           title={allTools ? "Show only the main tools" : "Show all tools"}
@@ -5304,7 +5342,6 @@ export function App() {
       )}
 
       <main className="workspace">
-        {toolMode !== "place" && <AdaptiveToolPanel suggestions={suggestions} />}
         {contextMenuAt && <ToolContextMenu at={contextMenuAt} suggestions={suggestions} onClose={() => setContextMenuAt(null)} />}
         <Viewport
           parts={parts}
@@ -5326,6 +5363,7 @@ export function App() {
           plateVisible={plateVisible}
           viewCubeVisible={viewCubeVisible}
           onHideViewCube={() => setViewCubeVisible(false)}
+          onToggleCameraMode={() => setCameraMode((m) => (m === "perspective" ? "orthographic" : "perspective"))}
           plateSize={plateSize}
           displayUnit={displayUnit}
           decimalPlaces={decimalPlaces}

@@ -3,16 +3,18 @@ import { createPortal } from "react-dom";
 
 /*
  * Selection-driven tool suggestions (Shapr3D-style): the tools that make sense
- * for what is selected are listed in a small floating panel, with the most
- * likely one highlighted and the rest in named groups below it (all shown,
- * nothing folded away), and the same list
- * on a right-click. The full toolbar stays one click away ("All tools"), so
- * suggestions are a shortcut, never the only way to reach a tool.
+ * for what is selected are listed in the left tool rail, with the most
+ * likely one highlighted and the rest in groups below it (all shown, nothing
+ * folded away), and the same list on a right-click. The full toolbar stays
+ * one click away ("All tools"), so suggestions are a shortcut, never the
+ * only way to reach a tool.
  */
 
 export interface ToolItem {
   id: string;
   label: string;
+  /** Hover text when the short label leaves something out; defaults to the label. */
+  tooltip?: string;
   /** Must match the toolbar button's aria-label so hover previews work. */
   aria: string;
   icon: ReactNode;
@@ -46,7 +48,9 @@ function ToolRow({ item, primary, onDone }: { item: ToolItem; primary?: boolean;
         type="button"
         className="adaptive-tool"
         aria-label={item.aria}
-        title={!item.enabled ? item.reason : item.keys && item.keys.length > 3 ? `${item.label} (${item.keys})` : undefined}
+        // The label can be cut short in the narrow panel (and is hidden when
+        // it is collapsed to icons), so the tooltip always names the tool.
+        title={!item.enabled ? item.reason : item.keys ? `${item.tooltip ?? item.label} (${item.keys})` : item.tooltip ?? item.label}
         disabled={!item.enabled}
         onClick={() => { item.run(); onDone?.(); }}
       >
@@ -68,25 +72,49 @@ function ToolRow({ item, primary, onDone }: { item: ToolItem; primary?: boolean;
   );
 }
 
-/** The floating suggestions panel over the top-left of the 3D view. */
-export function AdaptiveToolPanel({ suggestions }: { suggestions: ToolSuggestions }) {
+/**
+ * The suggestions as a section of the left tool rail. Collapsed (the
+ * default) the rail stays a slim strip of icons, grouped by dividers, and
+ * each icon's tooltip names it. Expanded, the rail widens to show each
+ * tool's name and shortcut, what the suggestions are for, the group names,
+ * and the hint on what to do next.
+ *
+ * `skipAria` leaves out tools the rail already has a permanent button for
+ * (Measure, See-through, Zoom), so nothing appears twice.
+ */
+export function AdaptiveToolRail({ suggestions, expanded, skipAria }: {
+  suggestions: ToolSuggestions;
+  expanded: boolean;
+  skipAria?: ReadonlySet<string>;
+}) {
+  const sections = suggestions.sections
+    .map((section) => ({ ...section, items: section.items.filter((item) => !skipAria?.has(item.aria)) }))
+    .filter((section) => section.items.length);
   // The suggested tool is highlighted only while no tool is actually in use.
-  const anyActive = suggestions.sections.some((section) => section.items.some((item) => item.active));
-  const firstEnabled = anyActive ? undefined : suggestions.sections[0]?.items.find((item) => item.enabled);
+  const anyActive = sections.some((section) => section.items.some((item) => item.active));
+  const firstEnabled = anyActive ? undefined : sections[0]?.items.find((item) => item.enabled);
   // The hint says what to do next with the tool in use, so it sits under that
   // tool's own group; with none in use, under the main tools.
-  const hintAt = Math.max(0, suggestions.sections.findIndex((section) => section.items.some((item) => item.active)));
+  const hintAt = Math.max(0, sections.findIndex((section) => section.items.some((item) => item.active)));
   return (
-    <div className="adaptive-tools" role="toolbar" aria-label={`Suggested tools for ${suggestions.heading}`}>
-      <p className="adaptive-for">Suggested for</p>
-      <p className="adaptive-heading">{suggestions.heading}</p>
-      {suggestions.sections.map((section, index) => (
+    <div
+      className={`adaptive-rail${expanded ? " expanded" : ""}`}
+      role="group"
+      aria-label={`Suggested tools for ${suggestions.heading}`}
+    >
+      {expanded && (
+        <div className="adaptive-head-text">
+          <p className="adaptive-for">Suggested for</p>
+          <p className="adaptive-heading">{suggestions.heading}</p>
+        </div>
+      )}
+      {sections.map((section, index) => (
         <div key={section.title ?? index} className="adaptive-section">
-          {section.title && <p className="adaptive-section-title">{section.title}</p>}
+          {section.title && expanded && <p className="adaptive-section-title">{section.title}</p>}
           {section.items.map((item) => (
             <ToolRow key={item.id} item={item} primary={item === firstEnabled && !item.active} />
           ))}
-          {index === hintAt && suggestions.hint && <p className="adaptive-hint">{suggestions.hint}</p>}
+          {index === hintAt && suggestions.hint && expanded && <p className="adaptive-hint">{suggestions.hint}</p>}
         </div>
       ))}
     </div>

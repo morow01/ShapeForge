@@ -4810,23 +4810,65 @@ button.stepper-btn:disabled {
   .tool-rail:not(.compact) .tool-rail-spacer { grid-column: 1 / -1; min-height: 4px; }
   .tool-rail:not(.compact) .tool-rail-all { grid-column: 1 / -1; justify-self: center; }
 }
-.adaptive-tools {
-  position: absolute;
-  top: 12px;
-  left: 12px;
-  z-index: 5;
-  width: 208px;
-  max-height: calc(100% - 24px);
-  overflow-y: auto;
-  padding: 10px 8px 8px;
-  background: rgb(255 255 255 / 96%);
-  border: 1px solid #d3dce1;
-  border-radius: 10px;
-  box-shadow: 0 4px 18px rgb(31 50 62 / 12%);
-  backdrop-filter: blur(8px);
+/* Suggested tools, inside the left rail. Slim by default: icons only, each
+   group divided off, tooltips naming each tool. The expand button at the top
+   widens the whole rail to name every tool and show the tips. */
+.app-shell.rail-expanded { --rail-w: 188px; }
+.tool-rail .tool-rail-expand { height: 24px; min-height: 24px; color: #64748b; }
+.tool-rail .tool-rail-expand svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.tool-rail .tool-rail-expand:hover { color: #0f172a; }
+.tool-rail-suggest {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  margin: 3px 0;
+  padding: 5px 0;
+  border-top: 1px solid #d8e0e5;
+  border-bottom: 1px solid #d8e0e5;
 }
+.adaptive-rail { display: flex; flex-direction: column; align-items: center; width: 100%; }
+.adaptive-rail .adaptive-section { display: flex; flex-direction: column; align-items: center; width: 100%; }
+.adaptive-rail .adaptive-section + .adaptive-section { margin-top: 4px; padding-top: 4px; }
+.adaptive-rail:not(.expanded) .adaptive-section + .adaptive-section { border-top-color: transparent; background: linear-gradient(#d8e0e5, #d8e0e5) center top / 28px 1px no-repeat; }
+.tool-rail .adaptive-tool {
+  display: flex;
+  justify-content: center;
+  width: 43px;
+  height: 34px;
+  min-height: 34px;
+  padding: 0;
+  border: 0;
+}
+.adaptive-rail:not(.expanded) .adaptive-label,
+.adaptive-rail:not(.expanded) .adaptive-tool kbd,
+.adaptive-rail:not(.expanded) .adaptive-choices { display: none; }
+.tool-rail .adaptive-choices button { display: grid; place-items: center; width: 22px; height: 22px; min-height: 22px; padding: 0; border: 1px solid #cbd5e1; background: #fff; }
+.tool-rail .adaptive-choices button:hover { border-color: #00a7a5; background: #e6f6f6; }
+/* Expanded: every tool is a named row, the permanent ones included. */
+.tool-rail.expanded { align-items: stretch; padding-left: 8px; padding-right: 8px; }
+.tool-rail.expanded .tool-rail-expand { align-self: flex-end; width: 28px; }
+.adaptive-rail.expanded,
+.adaptive-rail.expanded .adaptive-section { align-items: stretch; }
+.adaptive-rail.expanded .adaptive-row { width: 100%; }
+.tool-rail.expanded .adaptive-tool { justify-content: flex-start; width: auto; height: 30px; min-height: 30px; padding: 0 6px; }
+.tool-rail.expanded .tool-rail-item-container { width: 100%; }
+.tool-rail.expanded button[data-label] {
+  display: flex;
+  justify-content: flex-start;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 32px;
+  min-height: 32px;
+  padding: 0 6px;
+}
+.tool-rail.expanded button[data-label]::after { content: attr(data-label); font-size: 12px; font-weight: 400; color: #0f172a; white-space: nowrap; }
+.tool-rail.expanded button[data-label].active::after { color: #087a79; font-weight: 600; }
+.tool-rail.expanded button[data-label]:disabled::after { color: #94a3b8; }
+.tool-rail.expanded .tool-rail-spacer { min-height: 8px; }
 .adaptive-for { margin: 0 6px; font-size: 11px; color: #64748b; }
-.adaptive-heading { margin: 0 6px 8px; font-size: 13px; font-weight: 600; color: #0f172a; }
+.adaptive-heading { margin: 0 6px 6px; font-size: 13px; font-weight: 600; color: #0f172a; }
 .adaptive-section + .adaptive-section { margin-top: 6px; padding-top: 6px; border-top: 1px solid #e2e8f0; }
 .adaptive-section-title { margin: 2px 6px 4px; font-size: 11px; font-weight: 600; color: #64748b; }
 /* "Add a shape" points at the library: a brief glow says where it went. */
@@ -4845,21 +4887,21 @@ button.stepper-btn:disabled {
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 8px;
-  height: 32px;
-  padding: 0 6px;
+  gap: 7px;
+  height: 29px;
+  padding: 0 5px;
   border: 0;
   background: none;
   color: #0f172a;
   font: inherit;
-  font-size: 12.5px;
+  font-size: 12px;
   text-align: left;
   cursor: pointer;
 }
 .adaptive-row.primary .adaptive-tool, .adaptive-row.active .adaptive-tool { color: #087a79; font-weight: 600; }
 .adaptive-tool:disabled { color: #94a3b8; cursor: not-allowed; }
-.adaptive-icon { width: 20px; height: 20px; flex: none; display: grid; place-items: center; color: #475569; }
-.adaptive-icon svg { width: 20px; height: 20px; }
+.adaptive-icon { width: 18px; height: 18px; flex: none; display: grid; place-items: center; color: #475569; }
+.adaptive-icon svg { width: 18px; height: 18px; }
 .adaptive-row.primary .adaptive-icon, .adaptive-row.active .adaptive-icon { color: #087a79; }
 .adaptive-tool:disabled .adaptive-icon { color: #cbd5e1; }
 .adaptive-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

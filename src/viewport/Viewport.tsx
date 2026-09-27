@@ -4,7 +4,7 @@ import type { CameraMode, ToolMode, WireframeMode, AlignSubMode, DuplicateResult
 import type { PreviewBuild, ScenePart } from "../kernel/types";
 import type { PrimitiveKind, SceneNode, Vec3 } from "../document/types";
 import type { DisplayUnit } from "../measurement";
-import { EyeOffIcon, HomeIcon, ZoomToFitIcon } from "../ui/icons";
+import { EyeOffIcon, HomeIcon, OrthographicIcon, PerspectiveIcon, ZoomToFitIcon } from "../ui/icons";
 
 interface Props {
   parts: ScenePart[];
@@ -36,6 +36,8 @@ interface Props {
   viewCubeVisible?: boolean;
   /** The hide button on the view cube's hover toolbar. */
   onHideViewCube?: () => void;
+  /** The perspective / orthographic switch on the same toolbar. */
+  onToggleCameraMode?: () => void;
   plateSize?: { width: number; depth: number };
   displayUnit: DisplayUnit;
   decimalPlaces: number;
@@ -281,6 +283,21 @@ export function Viewport(props: Props) {
             >
               <ZoomToFitIcon className="navcube-icon" />
             </button>
+            {props.onToggleCameraMode && (
+              <button
+                type="button"
+                className="navcube-tool"
+                onClick={() => props.onToggleCameraMode?.()}
+                title={cameraMode === "perspective"
+                  ? "Perspective view (click for orthographic)"
+                  : "Orthographic view (click for perspective)"}
+                aria-label={cameraMode === "perspective" ? "Perspective view" : "Orthographic view"}
+              >
+                {cameraMode === "perspective"
+                  ? <PerspectiveIcon className="navcube-icon" />
+                  : <OrthographicIcon className="navcube-icon" />}
+              </button>
+            )}
             <button
               type="button"
               className="navcube-tool"
