@@ -47,9 +47,7 @@ import {
   MirrorToolIcon,
   NewDesignIcon,
   ObjectsIcon,
-  OrthographicIcon,
   PencilIcon,
-  PerspectiveIcon,
   PrimitiveShapeIcon,
   ProjectsIcon,
   RedoIcon,
@@ -4680,26 +4678,6 @@ export function App() {
               aria-label="Toggle Objects panel"
             >
               <ObjectsIcon className="topbar-icon" />
-            </button>
-            <button
-              className="topbar-icon-btn"
-              onClick={() => setCameraMode((m) => (m === "perspective" ? "orthographic" : "perspective"))}
-              title={
-                cameraMode === "perspective"
-                  ? "Perspective View (Click to switch to Orthographic)"
-                  : "Orthographic View (Click to switch to Perspective)"
-              }
-              aria-label={
-                cameraMode === "perspective"
-                  ? "Perspective View"
-                  : "Orthographic View"
-              }
-            >
-              {cameraMode === "perspective" ? (
-                <PerspectiveIcon className="topbar-icon" />
-              ) : (
-                <OrthographicIcon className="topbar-icon" />
-              )}
             </button>
             <button
               className={`topbar-icon-btn ${plateVisible ? "on" : ""}`}
