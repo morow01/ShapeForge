@@ -84,6 +84,11 @@ const diam = (key: string, label: string, max = 1000): ParamField => ({
   displayScale: 2,
 });
 
+/** Every non-empty combination of the Organizer Bin's finger cut-out flags. */
+const ANY_FINGER_CUTOUT = Array.from({ length: 31 }, (_, i) => i + 1);
+/** Every non-empty combination of the Organizer Bin's label tab sides. */
+const ANY_LABEL_TAB = Array.from({ length: 15 }, (_, i) => i + 1);
+
 const angle = (key: string, label: string, showIf?: ParamField["showIf"]): ParamField => ({
   key,
   label,
@@ -997,6 +1002,23 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
       wallThickness: 2,
       floorThickness: 2,
       internalFillet: 1.5,
+      dividers: 0,
+      dividersX: 1,
+      dividersY: 0,
+      dividerThickness: 1.6,
+      dividerHeight: 100,
+      wallPattern: 0,
+      patternSize: 6,
+      patternSpacing: 2,
+      patternBorder: 3,
+      patternOn: 3,
+      fingerCutout: 0,
+      fingerShape: 0,
+      labelTab: 0,
+      labelTabWidth: 12,
+      labelTabThickness: 1.6,
+      fingerWidth: 20,
+      fingerDepth: 12,
     },
     fields: [
       dim("width", "Width"),
@@ -1006,6 +1028,98 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
       { key: "wallThickness", label: "Wall Thickness", min: 0.4, max: 50, step: 0.2, noSlider: true, suffix: "mm" },
       { key: "floorThickness", label: "Bottom Thickness", min: 0.4, max: 50, step: 0.2, noSlider: true, suffix: "mm" },
       { key: "internalFillet", label: "Inside Bottom Curve", min: 0, max: 20, step: 0.5, noSlider: true, suffix: "mm" },
+      {
+        key: "dividers",
+        label: "Dividers",
+        min: 0,
+        max: 1,
+        step: 1,
+        options: [
+          { value: 0, label: "None" },
+          { value: 1, label: "Add dividers" },
+        ],
+      },
+      { key: "dividersX", label: "Dividers across width", min: 0, max: 30, step: 1, showIf: { key: "dividers", oneOf: [1] } },
+      { key: "dividersY", label: "Dividers across depth", min: 0, max: 30, step: 1, showIf: { key: "dividers", oneOf: [1] } },
+      { key: "dividerThickness", label: "Divider Thickness", min: 0.4, max: 20, step: 0.2, noSlider: true, suffix: "mm", showIf: { key: "dividers", oneOf: [1] } },
+      { key: "dividerHeight", label: "Divider Height", min: 10, max: 100, step: 5, suffix: "%", showIf: { key: "dividers", oneOf: [1] } },
+      {
+        // Bit flags, shown as on/off cards: any mix of walls and dividers.
+        key: "fingerCutout",
+        label: "Finger Cut-out",
+        min: 0,
+        max: 31,
+        step: 1,
+        options: [
+          { value: 1, label: "Front" },
+          { value: 2, label: "Back" },
+          { value: 4, label: "Left" },
+          { value: 8, label: "Right" },
+          { value: 16, label: "Dividers" },
+        ],
+      },
+      {
+        key: "fingerShape",
+        label: "Cut-out Shape",
+        min: 0,
+        max: 3,
+        step: 1,
+        options: [
+          { value: 0, label: "Round" },
+          { value: 1, label: "Trapezoid" },
+          { value: 2, label: "Wave" },
+          { value: 3, label: "Square" },
+        ],
+        showIf: { key: "fingerCutout", oneOf: ANY_FINGER_CUTOUT },
+      },
+      { key: "fingerWidth", label: "Cut-out Width", min: 4, max: 400, step: 0.5, noSlider: true, suffix: "mm", showIf: { key: "fingerCutout", oneOf: ANY_FINGER_CUTOUT } },
+      { key: "fingerDepth", label: "Cut-out Depth", min: 1, max: 400, step: 0.5, noSlider: true, suffix: "mm", showIf: { key: "fingerCutout", oneOf: ANY_FINGER_CUTOUT } },
+      {
+        // Bit flags, shown as on/off cards: a tab on that side of every compartment.
+        key: "labelTab",
+        label: "Label Tab",
+        min: 0,
+        max: 15,
+        step: 1,
+        options: [
+          { value: 1, label: "Front" },
+          { value: 2, label: "Back" },
+          { value: 4, label: "Left" },
+          { value: 8, label: "Right" },
+        ],
+      },
+      { key: "labelTabWidth", label: "Tab Width", min: 2, max: 100, step: 0.5, noSlider: true, suffix: "mm", showIf: { key: "labelTab", oneOf: ANY_LABEL_TAB } },
+      { key: "labelTabThickness", label: "Tab Thickness", min: 0.6, max: 10, step: 0.2, noSlider: true, suffix: "mm", showIf: { key: "labelTab", oneOf: ANY_LABEL_TAB } },
+      {
+        key: "wallPattern",
+        label: "Wall Pattern",
+        min: 0,
+        max: 4,
+        step: 1,
+        options: [
+          { value: 0, label: "Solid" },
+          { value: 1, label: "Hexagons (honeycomb)" },
+          { value: 2, label: "Round holes" },
+          { value: 3, label: "Diamonds" },
+          { value: 4, label: "Vertical slots" },
+        ],
+      },
+      { key: "patternSize", label: "Hole Size", min: 1.5, max: 100, step: 0.5, noSlider: true, suffix: "mm", showIf: { key: "wallPattern", oneOf: [1, 2, 3, 4] } },
+      { key: "patternSpacing", label: "Bar Width", min: 0.6, max: 50, step: 0.2, noSlider: true, suffix: "mm", showIf: { key: "wallPattern", oneOf: [1, 2, 3, 4] } },
+      { key: "patternBorder", label: "Solid Border", min: 0.5, max: 50, step: 0.5, noSlider: true, suffix: "mm", showIf: { key: "wallPattern", oneOf: [1, 2, 3, 4] } },
+      {
+        // Bit flags (1 = outer walls, 2 = dividers), shown as two toggles.
+        key: "patternOn",
+        label: "Pattern On",
+        min: 1,
+        max: 3,
+        step: 1,
+        options: [
+          { value: 1, label: "Outer walls" },
+          { value: 2, label: "Dividers" },
+        ],
+        showIf: { key: "wallPattern", oneOf: [1, 2, 3, 4] },
+      },
     ],
   },
   ellipsoid: {

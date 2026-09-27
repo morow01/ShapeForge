@@ -1375,6 +1375,9 @@ function ObjectParams({
         if ((node.kind === "cylinder" || node.kind === "cone") && f.key === "sides" && node.params.sides == null) {
           base = 48;
         }
+        // Bins saved before dividers and wall patterns existed lack those
+        // params; show what the kernel builds them with, not 0.
+        if (node.kind === "tray" && node.params[f.key] == null) base = def.defaults[f.key] ?? 0;
         if (node.kind === "triangle" && f.key === "cornerSteps" && node.params.cornerSteps == null) base = 32;
         if (node.kind === "pyramid" && f.key === "cornerSteps" && node.params.cornerSteps == null) base = 24;
         if (node.kind === "wedge" && f.key === "cornerSteps" && node.params.cornerSteps == null) base = 24;
@@ -1519,7 +1522,7 @@ function ObjectParams({
                 decimalPlaces={decimalPlaces}
                 screwHoleIcon={node.kind === "screwHole" && SCREW_HOLE_COMPACT_KEYS.has(f.key)}
                 springIcon={node.kind === "spring" && SPRING_COMPACT_KEYS.has(f.key)}
-                isLength={!shown.options && shown.suffix !== "°" && !["sides", "points", "cornerSteps", "surfaceSteps", "teeth", "ballCount", "turns"].includes(shown.key)}
+                isLength={!shown.options && shown.suffix !== "°" && shown.suffix !== "%" && !["sides", "points", "cornerSteps", "surfaceSteps", "teeth", "ballCount", "turns", "dividersX", "dividersY"].includes(shown.key)}
               />
             ),
           };
@@ -1572,7 +1575,7 @@ function ObjectParams({
               decimalPlaces={decimalPlaces}
               screwHoleIcon={node.kind === "screwHole" && SCREW_HOLE_COMPACT_KEYS.has(f.key)}
               springIcon={node.kind === "spring" && SPRING_COMPACT_KEYS.has(f.key)}
-              isLength={!f.options && f.suffix !== "°" && !["sides", "points", "cornerSteps", "surfaceSteps", "teeth", "ballCount", "turns"].includes(f.key)}
+              isLength={!f.options && f.suffix !== "°" && f.suffix !== "%" && !["sides", "points", "cornerSteps", "surfaceSteps", "teeth", "ballCount", "turns", "dividersX", "dividersY"].includes(f.key)}
             />
           ),
         };
@@ -1799,6 +1802,119 @@ function SpringDimensionIcon({ kind }: { kind: string }) {
   );
 }
 
+const WALL_PATTERN_SHORT = ["Solid", "Hexagons", "Round", "Diamonds", "Slots"];
+
+const trayIconProps = {
+  viewBox: "0 0 24 24",
+  fill: "none",
+  stroke: "currentColor",
+  strokeWidth: 1.2,
+  strokeLinecap: "round" as const,
+  strokeLinejoin: "round" as const,
+  "aria-hidden": true,
+  focusable: false,
+};
+
+/** A patch of bin wall seen face-on, showing one Organizer Bin wall pattern.
+ *  The holes are cut out of the tinted wall with an even-odd fill. */
+function WallPatternIcon({ pattern }: { pattern: number }) {
+  const wall = "M4.5 4h15a1.5 1.5 0 0 1 1.5 1.5v13a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5v-13A1.5 1.5 0 0 1 4.5 4Z";
+  const hex = (cx: number, cy: number, r: number) =>
+    "M" + Array.from({ length: 6 }, (_, k) => {
+      const a = -Math.PI / 2 + (k * Math.PI) / 3;
+      return `${(cx + r * Math.cos(a)).toFixed(2)} ${(cy + r * Math.sin(a)).toFixed(2)}`;
+    }).join("L") + "Z";
+  const circle = (cx: number, cy: number, r: number) =>
+    `M${cx - r} ${cy}a${r} ${r} 0 1 0 ${2 * r} 0a${r} ${r} 0 1 0 ${-2 * r} 0Z`;
+  const diamond = (cx: number, cy: number, r: number) =>
+    `M${cx} ${cy - r}L${cx + r} ${cy}L${cx} ${cy + r}L${cx - r} ${cy}Z`;
+  const slot = (cx: number) => "M" + `${cx - 1.2} 8.2v7.6a1.2 1.2 0 0 0 2.4 0v-7.6a1.2 1.2 0 0 0-2.4 0Z`;
+  const honeycomb: [number, number][] = [[8.6, 9.3], [15.4, 9.3], [12, 15]];
+  const holes =
+    pattern === 1 ? honeycomb.map(([x, y]) => hex(x, y, 2.9)) :
+    pattern === 2 ? honeycomb.map(([x, y]) => circle(x, y, 2.4)) :
+    pattern === 3 ? [diamond(8, 9, 3), diamond(16, 9, 3), diamond(12, 15, 3)] :
+    pattern === 4 ? [7.5, 12, 16.5].map(slot) :
+    [];
+  return (
+    <svg {...trayIconProps}>
+      <path d={[wall, ...holes].join("")} fill="currentColor" fillOpacity="0.15" fillRule="evenodd" />
+    </svg>
+  );
+}
+
+/** Bin seen from above: outer ring of walls plus a divider cross. */
+const BIN_RING = "M6 3h12a3 3 0 0 1 3 3v12a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3Z"
+  + "M7 5.5h10A1.5 1.5 0 0 1 18.5 7v10a1.5 1.5 0 0 1-1.5 1.5H7A1.5 1.5 0 0 1 5.5 17V7A1.5 1.5 0 0 1 7 5.5Z";
+
+/** A bin wall seen face-on with each finger cut-out shape taken out of its top. */
+function FingerShapeIcon({ shape }: { shape: number }) {
+  const notch = [
+    "M3 5H8V7A4 4 0 0 0 16 7V5H21", // round U
+    "M3 5H6Q7 5 7.6 5.8L10 9.6Q10.6 10.5 11.6 10.5H12.4Q13.4 10.5 14 9.6L16.4 5.8Q17 5 18 5H21", // trapezoid
+    "M3 5C8 5 8 11 12 11C16 11 16 5 21 5", // wave
+    "M3 5H8V8.5Q8 11 10.5 11H13.5Q16 11 16 8.5V5H21", // square
+  ][shape] ?? "M3 5H21";
+  return (
+    <svg {...trayIconProps}>
+      <path d={`${notch}V19.5H3Z`} fill="currentColor" fillOpacity="0.15" />
+    </svg>
+  );
+}
+
+/** Bin seen from above with a label tab along one side (front at the bottom). */
+function LabelTabIcon({ side }: { side: number }) {
+  // Drawn along the front, then turned to the side it stands for.
+  const turn = side === 2 ? 180 : side === 4 ? 90 : side === 8 ? -90 : 0;
+  return (
+    <svg {...trayIconProps}>
+      <path d={BIN_RING} fill="currentColor" fillOpacity="0.06" fillRule="evenodd" opacity="0.5" />
+      <g transform={`rotate(${turn} 12 12)`}>
+        <rect x="5.5" y="13.5" width="13" height="5" rx="0.6" fill="currentColor" fillOpacity="0.35" />
+        <path d="M8 16h5" strokeWidth="1" opacity="0.8" />
+      </g>
+    </svg>
+  );
+}
+
+/** Where the wall pattern goes: the outer walls, or the dividers. */
+function PatternTargetIcon({ target }: { target: number }) {
+  const walls = target === 1;
+  return (
+    <svg {...trayIconProps}>
+      <path d={BIN_RING} fill="currentColor" fillOpacity={walls ? 0.3 : 0.06} fillRule="evenodd" opacity={walls ? 1 : 0.5} />
+      <path d="M12 5.5v13M5.5 12h13" strokeWidth={walls ? 1 : 2.2} opacity={walls ? 0.4 : 1} />
+    </svg>
+  );
+}
+
+/**
+ * Bin seen from above with a finger scoop on one wall (front at the bottom,
+ * as the default camera looks at it), or on the dividers.
+ */
+function FingerCutoutIcon({ side }: { side: number }) {
+  if (side === 16) {
+    return (
+      <svg {...trayIconProps}>
+        <path d={BIN_RING} fill="currentColor" fillOpacity="0.06" fillRule="evenodd" opacity="0.5" />
+        <path d="M12 5.5v4M12 14.5v4M5.5 12h4M14.5 12h4" strokeWidth="2.2" />
+        <path d="M9.5 12a2.5 2.5 0 0 1 5 0" strokeWidth="1.4" />
+      </svg>
+    );
+  }
+  // Drawn on the front wall, then turned to the wall it stands for.
+  const turn = side === 2 ? 180 : side === 4 ? 90 : side === 8 ? -90 : 0;
+  return (
+    <svg {...trayIconProps}>
+      <path d={BIN_RING} fill="currentColor" fillOpacity="0.06" fillRule="evenodd" opacity="0.5" />
+      <g transform={`rotate(${turn} 12 12)`}>
+        <path d="M6 19.75H9.4M14.6 19.75H18" strokeWidth="2.6" />
+        <path d="M9.4 19.75a2.6 2.6 0 0 1 5.2 0" strokeWidth="1.4" fill="currentColor" fillOpacity="0.2" />
+      </g>
+    </svg>
+  );
+}
+
 const fmt = (n: number) => (Math.round(n * 100) / 100).toString();
 
 function Field({
@@ -1841,6 +1957,94 @@ function Field({
     "outerFillet", "innerFillet", "cornerRadius", "internalFillet",
     "outerTopFillet", "outerBottomFillet", "innerTopFillet", "innerBottomFillet",
   ].includes(field.key);
+  if (field.key === "dividers" && field.options?.length === 2) {
+    const on = value === 1;
+    return (
+      <div className="field field-switch-row">
+        <span className="field-label">{field.label}</span>
+        <button
+          type="button"
+          className={`settings-toggle ${on ? "on" : ""}`}
+          role="switch"
+          aria-checked={on}
+          aria-label={field.label}
+          onClick={() => onChange(on ? 0 : 1)}
+        >
+          <span className="settings-toggle-knob" />
+        </button>
+      </div>
+    );
+  }
+  if ((field.key === "wallPattern" || field.key === "fingerShape") && field.options) {
+    const isPattern = field.key === "wallPattern";
+    return (
+      <div className="field">
+        <span className="field-label">{field.label}</span>
+        <div className={`joint-type-grid tray-choice-grid ${isPattern ? "" : "four"}`} role="group" aria-label={field.label}>
+          {field.options.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              className={`joint-type-card ${value === option.value ? "active" : ""}`}
+              title={option.label}
+              aria-pressed={value === option.value}
+              onClick={() => onChange(option.value)}
+            >
+              {isPattern ? <WallPatternIcon pattern={option.value} /> : <FingerShapeIcon shape={option.value} />}
+              <span>{isPattern ? WALL_PATTERN_SHORT[option.value] : option.label}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+  }
+  if ((field.key === "patternOn" || field.key === "fingerCutout" || field.key === "labelTab") && field.options) {
+    // Independent on/off cards over bit flags. The wall pattern has to go
+    // somewhere, so its last card stays on; finger cut-outs can all be off.
+    const keepOne = field.key === "patternOn";
+    const bits = Math.round(value) || (keepOne ? 3 : 0);
+    return (
+      <div className="field">
+        <span className="field-label">{field.label}</span>
+        <div
+          className={`joint-type-grid tray-choice-grid ${field.options.length === 2 ? "two" : field.options.length === 4 ? "four" : ""}`}
+          role="group"
+          aria-label={field.label}
+        >
+          {field.options.map((option) => {
+            const on = (bits & option.value) !== 0;
+            const locked = keepOne && on && bits === option.value;
+            return (
+              <button
+                key={option.value}
+                type="button"
+                className={`joint-type-card ${on ? "active" : ""}`}
+                title={locked ? `${option.label} (at least one must stay on)` : option.label}
+                aria-pressed={on}
+                onClick={() => {
+                  const next = bits ^ option.value;
+                  if (next || !keepOne) onChange(next);
+                }}
+              >
+                {field.key === "patternOn"
+                  ? <PatternTargetIcon target={option.value} />
+                  : field.key === "labelTab"
+                    ? <LabelTabIcon side={option.value} />
+                    : <FingerCutoutIcon side={option.value} />}
+                <span>{option.label}</span>
+              </button>
+            );
+          })}
+        </div>
+        {field.key === "fingerCutout" && (
+          <p className="field-hint">A finger scoop in the middle of each one you pick. Click again to remove.</p>
+        )}
+        {field.key === "labelTab" && (
+          <p className="field-hint">A shelf for a label on that side of every compartment, flush with the top.</p>
+        )}
+      </div>
+    );
+  }
   if (field.key === "wireShape" && field.options?.length === 2) {
     return (
       <div className="field">

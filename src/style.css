@@ -4914,3 +4914,12 @@ button.stepper-btn:disabled {
   cursor: pointer;
 }
 .explode-close-btn:hover { background: rgba(255, 255, 255, 0.16); color: #fff; }
+/* Organizer Bin pickers (wall pattern, pattern target, finger cut-outs):
+   the joinery panel's cards, three to a row in the narrow properties panel. */
+.tray-choice-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 0; }
+.tray-choice-grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.tray-choice-grid.four { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; }
+.tray-choice-grid .joint-type-card { min-width: 0; padding: 8px 4px; }
+.tray-choice-grid .joint-type-card > span { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+/* An on/off setting: label on the left, switch on the right. */
+.field.field-switch-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }

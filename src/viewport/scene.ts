@@ -85,6 +85,29 @@ const HOVER_GROW = 1.18;
  *  and the handle would stop shrinking while the model kept growing around
  *  it — reported as handles "zooming in too" when the camera zoomed in. */
 const MIN_HANDLE_WORLD = 0.02;
+/** Most align-by-points nodes shown on one object; past this they get too
+ *  crowded to pick between and are thinned out (see thinPoints). */
+const MAX_ALIGN_POINTS = 160;
+
+/**
+ * Keeps at most `limit` of `points`, spread evenly: points are bucketed into
+ * a grid, one kept per cell, and the cells grow until few enough remain.
+ * Earlier points win their cell, so callers put the most useful ones first.
+ */
+function thinPoints(points: THREE.Vector3[], limit: number): THREE.Vector3[] {
+  if (points.length <= limit) return points;
+  const box = new THREE.Box3().setFromPoints(points);
+  let cell = Math.max(box.getSize(new THREE.Vector3()).length(), 1e-6) / 200;
+  for (;;) {
+    const kept = new Map<string, THREE.Vector3>();
+    for (const p of points) {
+      const key = `${Math.floor(p.x / cell)}|${Math.floor(p.y / cell)}|${Math.floor(p.z / cell)}`;
+      if (!kept.has(key)) kept.set(key, p);
+    }
+    if (kept.size <= limit) return [...kept.values()];
+    cell *= 1.3;
+  }
+}
 /** Minimum gap between live push/pull preview rebuilds during a drag — each
  *  one is a real OCCT/manifold call, not free, so this bounds how often a
  *  fast mouse-move can ask for a new one. Short enough to read as live. */
@@ -2577,8 +2600,11 @@ export class Scene {
         }
       }
       const graphVertices = [...vertices.values()];
+      // Junctions (three or more edges meeting, like a box corner) first, so
+      // they are the ones kept when crowded points are thinned out below.
       const primaryPoints = [...vertices.entries()]
         .filter(([key, entry]) => topologyEndpoints.has(key) || entry.count >= 3 || entry.neighbours.size !== 2)
+        .sort(([, a], [, b]) => b.neighbours.size - a.neighbours.size)
         .map(([, entry]) => entry.point);
       const featurePoints = graphVertices
         .filter((entry) => {
@@ -2594,11 +2620,16 @@ export class Scene {
           return a.angleTo(b) < Math.PI - THREE.MathUtils.degToRad(6);
         })
         .map((entry) => entry.point);
-      if (featurePoints.length >= 4 && featurePoints.length <= 96) return featurePoints;
+      if (featurePoints.length >= 4 && featurePoints.length <= MAX_ALIGN_POINTS) return featurePoints;
       // Detailed booleans can contain hundreds of curve samples. In that case
       // keep their true edge endpoints/junctions rather than throwing every
       // feature away and reverting to an eight-corner bounding box.
-      if (primaryPoints.length >= 4 && primaryPoints.length <= 96) return primaryPoints;
+      if (primaryPoints.length >= 4 && primaryPoints.length <= MAX_ALIGN_POINTS) return primaryPoints;
+      // Still too many (an Organizer Bin with a few dividers and finger
+      // cut-outs passed the old limit and lost every node but the box
+      // corners): thin them out evenly instead of dropping them all.
+      const source = primaryPoints.length >= 4 ? primaryPoints : featurePoints;
+      if (source.length >= 4) return thinPoints(source, MAX_ALIGN_POINTS);
     }
     obj.updateWorldMatrix(true, true);
     const box = new THREE.Box3().setFromObject(obj);

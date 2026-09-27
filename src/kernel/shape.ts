@@ -27,6 +27,7 @@ import { svgMeshSolid, svgRevolveSolid } from "./svgSolid";
 import { makeThreadedRodSolid, makeThreadedNutSolid } from "./threads";
 import { makeSpringSolid } from "./spring";
 import { makeHingeSolid } from "./hinge";
+import { buildTray } from "./tray";
 import { meshOpeningPrism, meshShellOpening, offsetExtrudeMesh, resizeMeshFace } from "./meshFace";
 import type { SvgCommand } from "../svg/parse";
 import type { EditOp, OffsetExtrudeOp, PushPullOp, ResizeFaceOp, ShellOp, Vec3 } from "../document/types";
@@ -1575,8 +1576,10 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
         }
       }
 
-      // 3. Cut inner pocket from outer solid
-      s = outer.cut(inner.translate([0, 0, floor]));
+      // 3. Cut inner pocket from outer solid, adding any dividers and wall pattern
+      s = buildTray(outer, inner.translate([0, 0, floor]) as Shape3D, {
+        w, d, h, wall, floor, cornerR, inCornerR, insideFillet,
+      }, p);
       break;
     }
     case "ellipsoid": {
