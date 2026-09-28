@@ -4965,3 +4965,21 @@ button.stepper-btn:disabled {
 .tray-choice-grid .joint-type-card > span { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 /* An on/off setting: label on the left, switch on the right. */
 .field.field-switch-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+
+/* TEMPORARY feedback pad (src/ui/FeedbackNotes.tsx) */
+.feedback-fab { position: fixed; right: 14px; bottom: 44px; z-index: 900; width: 38px; height: 38px; border-radius: 50%; border: 1px solid #c9d1d6; background: #fff; color: #1f8a8a; box-shadow: 0 2px 8px rgba(0,0,0,.2); cursor: pointer; display: grid; place-items: center; }
+.feedback-count { position: absolute; top: -4px; right: -4px; background: #d2544c; color: #fff; border-radius: 9px; font-size: 10px; padding: 1px 5px; }
+.feedback-panel { position: fixed; right: 14px; bottom: 90px; z-index: 900; width: 320px; max-height: 60vh; display: flex; flex-direction: column; gap: 6px; padding: 10px; background: #fff; color: #222; border: 1px solid #c9d1d6; border-radius: 8px; box-shadow: 0 6px 24px rgba(0,0,0,.25); font-size: 12px; }
+.feedback-head { display: flex; align-items: center; gap: 8px; }
+.feedback-head button { margin-left: auto; border: 0; background: none; font-size: 18px; cursor: pointer; }
+.feedback-where { color: #98a3ab; font-size: 10px; }
+.feedback-panel textarea { width: 100%; resize: vertical; font: inherit; padding: 6px; box-sizing: border-box; }
+.feedback-actions { display: flex; align-items: center; justify-content: space-between; }
+.feedback-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.feedback-list li { display: flex; gap: 6px; align-items: flex-start; border-top: 1px solid #eef1f3; padding-top: 6px; }
+.feedback-list li > div { flex: 1; }
+.feedback-list li.done .feedback-text { text-decoration: line-through; color: #98a3ab; }
+.feedback-list li button { border: 0; background: none; cursor: pointer; color: #6b7780; display: grid; place-items: center; padding: 2px; }
+.feedback-list li button:hover { color: #1f8a8a; }
+.feedback-text { white-space: pre-wrap; }
+.feedback-meta, .feedback-empty { color: #98a3ab; font-size: 10px; }

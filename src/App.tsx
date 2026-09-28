@@ -113,6 +113,7 @@ import type { EditSpec, ExportQuality, NodeSpec, PreviewBuild, ScenePart } from 
 import type { CameraMode, CollisionHighlightStyle, DuplicateResult, Scene, ToolMode, WireframeMode } from "./viewport/scene";
 import { cellColour, DEFAULT_CELL_DISPLAY, type CellDisplay } from "./viewport/cellColours";
 import { APP_NAME, APP_VERSION } from "./version";
+import { FeedbackNotes } from "./ui/FeedbackNotes";
 
 /** Shown when Hollow is pressed with nothing selected; cleared as soon as a
  *  face is. Named so the clearing effect can recognise its own message and
@@ -8235,6 +8236,7 @@ export function App() {
       {textModalOpen && textFonts && (
         <TextModal fonts={textFonts ?? []} onClose={() => setTextModalOpen(false)} onCreate={(config) => void createText(config)} onPickFile={() => textFontInputRef.current?.click()} />
       )}
+      <FeedbackNotes />
     </div>
   );
 }
