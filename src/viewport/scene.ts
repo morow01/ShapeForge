@@ -10696,7 +10696,9 @@ export class Scene {
     if (this.faceResizeHandles) return;
     // If the left mouse button is no longer pressed, any active drag gesture must finish immediately.
     // This guards against missed pointerup events on Windows (e.g. while holding Alt or dragging off-canvas).
-    if ((e.buttons & 1) === 0) {
+    // Mouse only: a stylus/finger always ends with pointerup or pointercancel, and a
+    // stylus does not always report the "primary button" bit while it is touching.
+    if (e.pointerType === "mouse" && (e.buttons & 1) === 0) {
       if (this.grab || this.resizeDrag || this.pushPullDrag || this.marquee || this.alignPointDrag || this.navDrag || this.downAt) {
         this.onPointerUp(e);
         return;
@@ -10712,7 +10714,7 @@ export class Scene {
         this.updateShapeDragFootprint(e);
         return;
       }
-      if (this.shapeDragCandidate && (e.buttons & 1) === 1 && this.downAt) {
+      if (this.shapeDragCandidate && (e.pointerType !== "mouse" || (e.buttons & 1) === 1) && this.downAt) {
         if (Math.hypot(e.clientX - this.downAt.x, e.clientY - this.downAt.y) > CLICK_SLOP_PX) {
           this.beginShapeDrag(e);
           return;
