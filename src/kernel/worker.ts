@@ -1,6 +1,7 @@
 // The CAD kernel runs here, off the main thread. OCCT operations are
 // synchronous and can block for hundreds of ms; keeping them in a worker is
 // what stops the UI freezing mid-drag.
+import "../utils/uuidPolyfill";
 import * as Comlink from "comlink";
 import opencascade from "replicad-opencascadejs";
 import wasmUrl from "replicad-opencascadejs/wasm?url";
