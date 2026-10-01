@@ -4983,3 +4983,7 @@ button.stepper-btn:disabled {
 .feedback-list li button:hover { color: #1f8a8a; }
 .feedback-text { white-space: pre-wrap; }
 .feedback-meta, .feedback-empty { color: #98a3ab; font-size: 10px; }
+.feedback-edit-actions { display: flex; gap: 6px; margin-top: 4px; }
+.feedback-list li .feedback-edit-actions button { display: block; border: 1px solid #c9d1d6; border-radius: 5px; padding: 3px 10px; font-size: 11px; }
+.feedback-list li .feedback-edit-actions button.save { background: #1f8a8a; border-color: #1f8a8a; color: #fff; }
+.feedback-list li .feedback-edit-actions button:disabled { opacity: .5; cursor: default; }

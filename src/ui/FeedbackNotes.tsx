@@ -26,7 +26,6 @@ export function FeedbackNotes() {
   const [open, setOpen] = useState(false);
   const [notes, setNotes] = useState<Note[]>([]);
   const [draft, setDraft] = useState("");
-  const [showDone, setShowDone] = useState(false);
   const [toDisk, setToDisk] = useState(false);
   const [editId, setEditId] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
@@ -64,7 +63,6 @@ export function FeedbackNotes() {
   };
 
   const openCount = notes.filter((n) => !n.done).length;
-  const shown = notes.filter((n) => showDone || !n.done);
 
   return (
     <>
@@ -87,23 +85,27 @@ export function FeedbackNotes() {
           />
           <div className="feedback-actions">
             <button onClick={add} disabled={!draft.trim()}>Add note</button>
-            <label><input type="checkbox" checked={showDone} onChange={(e) => setShowDone(e.target.checked)} /> show done</label>
           </div>
           <ul className="feedback-list">
-            {shown.length === 0 && <li className="feedback-empty">No notes yet.</li>}
-            {shown.map((n) => (
+            {notes.length === 0 && <li className="feedback-empty">No notes yet.</li>}
+            {notes.map((n) => (
               <li key={n.id} className={n.done ? "done" : ""}>
                 <input type="checkbox" checked={n.done} title="Mark done" onChange={() => save(notes.map((m) => (m.id === n.id ? { ...m, done: !m.done } : m)))} />
                 <div>
                   {editId === n.id ? (
-                    <textarea
-                      autoFocus
-                      value={editText}
-                      rows={3}
-                      onChange={(e) => setEditText(e.target.value)}
-                      onBlur={commitEdit}
-                      onKeyDown={(e) => { e.stopPropagation(); if (e.key === "Escape") setEditId(null); else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) commitEdit(); }}
-                    />
+                    <>
+                      <textarea
+                        autoFocus
+                        value={editText}
+                        rows={3}
+                        onChange={(e) => setEditText(e.target.value)}
+                        onKeyDown={(e) => { e.stopPropagation(); if (e.key === "Escape") setEditId(null); else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) commitEdit(); }}
+                      />
+                      <div className="feedback-edit-actions">
+                        <button className="save" onClick={commitEdit} disabled={!editText.trim()}>Save</button>
+                        <button onClick={() => setEditId(null)}>Cancel</button>
+                      </div>
+                    </>
                   ) : (
                     <div className="feedback-text" onDoubleClick={() => { setEditId(n.id); setEditText(n.text); }}>{n.text}</div>
                   )}
