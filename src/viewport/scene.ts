@@ -4956,6 +4956,7 @@ export class Scene {
   private placeAt(e: PointerEvent) {
     if (this.surfacePlacement) {this.surfaceObjectPointer(e,true);return;}
     const placement = this.placementAt(e);
+    this.dbg(`placeAt -> ${placement ? "hit" : "NO HIT"} cb=${!!this.onPlaceSurface}`);
     if (placement) {
       if (this.placementPreview) this.placementPreview.visible = false;
       this.setPlacementTarget(null);
@@ -10269,7 +10270,7 @@ export class Scene {
   }
 
   private onPointerDown = (e: PointerEvent) => {
-    this.dbg(`onDown button=${e.button} mode=${this.toolMode}`);
+    this.dbg(`onDown #${e.pointerId} button=${e.button} mode=${this.toolMode}`);
     if (this.toolMode === "measure" && e.button === 0) { this.tape.click(e); return; }
     // Only the left button ever selects/drags — right/middle are reserved
     // for orbit/pan and must never be misread as a click on release.
@@ -11360,7 +11361,7 @@ export class Scene {
     }
     this.shapeDragCandidate = null;
 
-    this.dbg(`onUp down=${!!down} gizmoDrag=${this.gizmo.dragging} dist=${down ? Math.round(Math.hypot(e.clientX - down.x, e.clientY - down.y)) : "-"} mode=${this.toolMode}`);
+    this.dbg(`onUp[${e.type}/${e.pointerType}#${e.pointerId}] down=${!!down} gizmoDrag=${this.gizmo.dragging} dist=${down ? Math.round(Math.hypot(e.clientX - down.x, e.clientY - down.y)) : "-"} mode=${this.toolMode}`);
     if (!down || this.gizmo.dragging) return;
     if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > CLICK_SLOP_PX) return;
     if (this.toolMode === "place") {
