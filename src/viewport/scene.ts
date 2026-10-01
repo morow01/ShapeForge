@@ -4960,11 +4960,17 @@ export class Scene {
     if (placement) {
       if (this.placementPreview) this.placementPreview.visible = false;
       this.setPlacementTarget(null);
-      this.onPlaceSurface?.(
-        placement.point.toArray() as Vec3,
-        placement.normal.toArray() as Vec3,
-        placement.targetId,
-      );
+      this.dbg(`point=${placement.point.toArray().map((v) => v.toFixed(1))} normal=${placement.normal.toArray().map((v) => v.toFixed(2))}`);
+      try {
+        this.onPlaceSurface?.(
+          placement.point.toArray() as Vec3,
+          placement.normal.toArray() as Vec3,
+          placement.targetId,
+        );
+      } catch (err) {
+        this.dbg(`PLACE ERROR: ${err instanceof Error ? err.message : String(err)}`);
+        throw err;
+      }
     }
   }
 
@@ -10258,6 +10264,8 @@ export class Scene {
     el.style.cssText = "position:fixed;left:150px;top:70px;z-index:9999;pointer-events:none;background:rgba(0,0,0,.75);color:#9f9;font:11px monospace;padding:6px;white-space:pre;max-width:60vw";
     document.body.appendChild(el);
     this.debugEl = el;
+    window.addEventListener("error", (ev) => this.dbg(`JS ERROR: ${ev.message}`));
+    window.addEventListener("unhandledrejection", (ev) => this.dbg(`PROMISE ERROR: ${String((ev.reason as Error)?.message ?? ev.reason)}`));
     let moves = 0;
     for (const type of ["pointerdown", "pointerup", "pointercancel", "contextmenu", "click"]) {
       this.renderer.domElement.addEventListener(type, (ev) => {
