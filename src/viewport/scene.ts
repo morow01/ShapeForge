@@ -10246,7 +10246,7 @@ export class Scene {
    *  a touch screen / stylus really reports (see installPointerDebug). */
   private debugEl: HTMLDivElement | null = null;
   private debugLines: string[] = [];
-  private dbg(msg: string) {
+  dbg(msg: string) {
     if (!this.debugEl) return;
     this.debugLines.push(msg);
     if (this.debugLines.length > 14) this.debugLines.shift();

@@ -839,6 +839,7 @@ export function App() {
   }, []);
 
   const placePrimitive = useCallback((point: Vec3, normal: Vec3, targetId?: string, sizeOverride?: Record<string, number>) => {
+    sceneRef.current?.dbg(`placePrimitive pending=${pendingPrimitive} nodes=${useDoc.getState().nodes.length}`);
     if (!pendingPrimitive) return;
     const n = new THREE.Vector3(...normal).normalize();
     // Every kernel primitive is normalised with its base on local Z=0.
@@ -896,6 +897,7 @@ export function App() {
         select(newId);
       }
     }
+    sceneRef.current?.dbg(`placed: nodes=${useDoc.getState().nodes.length}`);
     setPendingPrimitive(null);
     setToolMode("select");
   }, [addPrimitive, pendingPrimitive, selectMany, combine, rename, select, sketchGuides]);
