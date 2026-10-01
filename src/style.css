@@ -4987,3 +4987,28 @@ button.stepper-btn:disabled {
 .feedback-list li .feedback-edit-actions button { display: block; border: 1px solid #c9d1d6; border-radius: 5px; padding: 3px 10px; font-size: 11px; }
 .feedback-list li .feedback-edit-actions button.save { background: #1f8a8a; border-color: #1f8a8a; color: #fff; }
 .feedback-list li .feedback-edit-actions button:disabled { opacity: .5; cursor: default; }
+
+/* Tablet widths: the top bar was ~1344px wide at a 1280px screen, pushing the settings
+   gear off the right edge. A page wider than its screen makes a tablet browser zoom the
+   whole app out to fit it — the brief "shrink" on click — so the bar is trimmed in steps
+   to always fit, and anything that still overflows is clipped, never widening the page. */
+.topbar { overflow-x: clip; }
+@media (max-width: 1400px) {
+  .brand-version, .status-pill { display: none; }
+  .project-title-container { margin-left: 8px; }
+}
+@media (max-width: 1240px) {
+  .topbar-export-btn span, .topbar-blueprint-btn span { display: none; }
+  .topbar-export-btn { padding: 0; width: 34px; min-width: 34px; }
+  .project-title-btn { max-width: 150px; }
+}
+@media (max-width: 1100px) {
+  .brand-name { display: none; }
+  .brand { min-width: auto; gap: 6px; }
+  .project-title-btn { max-width: 100px; }
+  .topbar-left { gap: 4px; }
+  .topbar-group { gap: 2px; }
+  .topbar-divider { margin: 0 2px; }
+  .topbar-icon-btn { width: 30px; min-width: 30px; }
+  .file-menu-btn { padding: 4px 8px; }
+}
