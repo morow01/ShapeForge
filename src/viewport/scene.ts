@@ -11598,7 +11598,9 @@ export class Scene {
   onContextClick: ((clientX: number, clientY: number) => void) | null = null;
   private rightDownAt: { x: number; y: number } | null = null;
   private onRightDown = (e: PointerEvent) => {
-    if (e.button === 2) this.rightDownAt = { x: e.clientX, y: e.clientY };
+    // A touch has no right button: its long-press raises "contextmenu", so
+    // remember where the finger went down to stand in for a right-click.
+    if (e.button === 2 || e.pointerType === "touch") this.rightDownAt = { x: e.clientX, y: e.clientY };
   };
 
   private onContextMenu = (e: MouseEvent) => {
