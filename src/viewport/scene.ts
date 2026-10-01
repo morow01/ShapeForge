@@ -10278,9 +10278,9 @@ export class Scene {
     // A press is owned by the one pointer that started it. A second touch (a palm
     // resting beside a stylus, a second finger) must not replace it — and its own
     // up/cancel must not end it (see onPointerUp). A stylus may take over from a touch.
-    if (this.activePointerId !== null && e.pointerId !== this.activePointerId && e.pointerType !== "pen"
+    if (this.activePointerId !== null && `${e.pointerType}:${e.pointerId}` !== this.activePointerId && e.pointerType !== "pen"
       && performance.now() - this.activePointerAt < 8000) return;
-    this.activePointerId = e.pointerId;
+    this.activePointerId = `${e.pointerType}:${e.pointerId}`;
     this.activePointerAt = performance.now();
     this.capturePointer(e);
     this.downAt = { x: e.clientX, y: e.clientY };
@@ -11221,14 +11221,14 @@ export class Scene {
     this.updateResizeOverlay();
   };
 
-  /** The pointer that owns the current press, or null between presses. */
-  private activePointerId: number | null = null;
+  /** The pointer that owns the current press ("pen:0"), or null between presses. Some tablets give the pen, a finger and a phantom mouse the same numeric id, so the type is part of the key. */
+  private activePointerId: string | null = null;
   /** When it went down: a lost pointerup must not lock out new presses for long. */
   private activePointerAt = 0;
 
   private onPointerUp = (e: PointerEvent) => {
     if (this.toolMode === "measure") return;
-    if (this.activePointerId !== null && e.pointerId !== this.activePointerId) return;
+    if (this.activePointerId !== null && `${e.pointerType}:${e.pointerId}` !== this.activePointerId) return;
     this.activePointerId = null;
     this.releasePointer(e);
     const down = this.downAt;
