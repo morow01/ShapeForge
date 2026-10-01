@@ -10252,7 +10252,7 @@ export class Scene {
     this.debugEl.textContent = this.debugLines.join("\n");
   }
   private installPointerDebug() {
-    if (!new URLSearchParams(location.search).has("debugPointers")) return;
+    if (!/debugpointers/i.test(location.search)) return;
     const el = document.createElement("div");
     el.style.cssText = "position:fixed;left:150px;top:70px;z-index:9999;pointer-events:none;background:rgba(0,0,0,.75);color:#9f9;font:11px monospace;padding:6px;white-space:pre;max-width:60vw";
     document.body.appendChild(el);
