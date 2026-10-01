@@ -2055,6 +2055,7 @@ export class Scene {
     this.scene.add(this.plateGroup);
     this.rebuildPlate();
 
+    this.installPointerDebug();
     this.renderer.domElement.addEventListener("pointerdown", this.onPointerDown);
     this.renderer.domElement.addEventListener("pointermove", this.onPointerMove);
     // Registered right after onPointerMove so it fires after it.
@@ -10240,7 +10241,35 @@ export class Scene {
 
   // ---- picking ------------------------------------------------------------
 
+  /** TEMPORARY: open the app with ?debugPointers to get an on-screen log of what
+   *  a touch screen / stylus really reports (see installPointerDebug). */
+  private debugEl: HTMLDivElement | null = null;
+  private debugLines: string[] = [];
+  private dbg(msg: string) {
+    if (!this.debugEl) return;
+    this.debugLines.push(msg);
+    if (this.debugLines.length > 14) this.debugLines.shift();
+    this.debugEl.textContent = this.debugLines.join("\n");
+  }
+  private installPointerDebug() {
+    if (!new URLSearchParams(location.search).has("debugPointers")) return;
+    const el = document.createElement("div");
+    el.style.cssText = "position:fixed;left:150px;top:70px;z-index:9999;pointer-events:none;background:rgba(0,0,0,.75);color:#9f9;font:11px monospace;padding:6px;white-space:pre;max-width:60vw";
+    document.body.appendChild(el);
+    this.debugEl = el;
+    let moves = 0;
+    for (const type of ["pointerdown", "pointerup", "pointercancel", "contextmenu", "click"]) {
+      this.renderer.domElement.addEventListener(type, (ev) => {
+        const p = ev as PointerEvent;
+        this.dbg(`${type} ${p.pointerType ?? ""} b${p.button} bs${p.buttons} (${Math.round(p.clientX)},${Math.round(p.clientY)}) mode=${this.toolMode} moves=${moves}`);
+        if (type === "pointerdown") moves = 0;
+      }, true);
+    }
+    this.renderer.domElement.addEventListener("pointermove", (ev) => { if (ev.buttons) moves++; }, true);
+  }
+
   private onPointerDown = (e: PointerEvent) => {
+    this.dbg(`onDown button=${e.button} mode=${this.toolMode}`);
     if (this.toolMode === "measure" && e.button === 0) { this.tape.click(e); return; }
     // Only the left button ever selects/drags — right/middle are reserved
     // for orbit/pan and must never be misread as a click on release.
@@ -11317,6 +11346,7 @@ export class Scene {
     }
     this.shapeDragCandidate = null;
 
+    this.dbg(`onUp down=${!!down} gizmoDrag=${this.gizmo.dragging} dist=${down ? Math.round(Math.hypot(e.clientX - down.x, e.clientY - down.y)) : "-"} mode=${this.toolMode}`);
     if (!down || this.gizmo.dragging) return;
     if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > CLICK_SLOP_PX) return;
     if (this.toolMode === "place") {
