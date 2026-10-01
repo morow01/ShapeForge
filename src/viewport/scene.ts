@@ -4883,8 +4883,7 @@ export class Scene {
     this.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
     this.raycaster.setFromCamera(this.pointer, this.camera);
-    const overHandle = this.toolMode === "face" && this.pushPullHandles.visible &&
-      this.raycaster.intersectObjects(this.pushPullHandleMeshes, true).length > 0;
+    const overHandle = this.toolMode === "face" && this.pushPullHandleAt(e) !== null;
     if (overHandle !== this.pushPullHandleHovered) {
       this.pushPullHandleHovered = overHandle;
       this.renderer.domElement.style.cursor = overHandle ? "pointer" : "";
@@ -6511,6 +6510,44 @@ export class Scene {
   }
 
   /**
+   * The face arrow under the pointer, if any. An exact hit wins; otherwise the
+   * arrow whose on-screen box (grown by a grab margin) holds the pointer, so a
+   * fingertip or stylus does not have to land on the arrow's few pixels, and
+   * a press near it is never read as a click on the face behind it.
+   */
+  private pushPullHandleAt(e: PointerEvent): THREE.Object3D | null {
+    if (!this.pushPullHandles.visible) return null;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    const hit = this.raycaster.intersectObjects(this.pushPullHandleMeshes, true)[0];
+    if (hit) return hit.object;
+    const margin = e.pointerType === "mouse" ? 8 : 30;
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    let best: THREE.Object3D | null = null;
+    let bestDist = Infinity;
+    for (const handle of this.pushPullHandleMeshes) {
+      handle.updateWorldMatrix(true, true);
+      const box = new THREE.Box3().setFromObject(handle);
+      if (box.isEmpty()) continue;
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (let i = 0; i < 8; i++) {
+        const v = new THREE.Vector3(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z).project(this.camera);
+        const x = ((v.x + 1) / 2) * rect.width;
+        const y = ((1 - v.y) / 2) * rect.height;
+        minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+        minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+      }
+      if (px < minX - margin || px > maxX + margin || py < minY - margin || py > maxY + margin) continue;
+      const dist = Math.hypot(px - (minX + maxX) / 2, py - (minY + maxY) / 2);
+      if (dist < bestDist) { bestDist = dist; best = handle; }
+    }
+    return best;
+  }
+
+  /**
    * Starts a push/pull if the pointer went down on one of the face arrows.
    * The whole gesture resolves to a signed distance along the face normal,
    * so the projected screen direction of that normal is computed once here
@@ -6529,12 +6566,12 @@ export class Scene {
     this.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
     this.raycaster.setFromCamera(this.pointer, this.camera);
-    const hit = this.raycaster.intersectObjects(this.pushPullHandleMeshes, true)[0];
-    if (!hit) return false;
+    const hitObject = this.pushPullHandleAt(e);
+    if (!hitObject) return false;
 
     // intersectObjects(recursive) can report a child cone/shaft, so walk up
     // to whichever ancestor actually carries the face index.
-    let handle: THREE.Object3D | null = hit.object;
+    let handle: THREE.Object3D | null = hitObject;
     while (handle && handle.userData.faceIndex === undefined) handle = handle.parent;
     if (!handle || handle.userData.partId !== id) return false;
     const face = faces[handle.userData.faceIndex as number];
@@ -7067,7 +7104,7 @@ export class Scene {
     this.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
     this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
     this.raycaster.setFromCamera(this.pointer, this.camera);
-    if (this.pushPullHandles.visible && this.raycaster.intersectObjects(this.pushPullHandleMeshes, true).length) return;
+    if (this.pushPullHandleAt(e)) return;
     // So does the face itself, where the drag has moved it to. The preview
     // keeps the selected face pointed at that moved face (applyPreviewMesh),
     // so a hit on exactly that face of that part is the same face.
