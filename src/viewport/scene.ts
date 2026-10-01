@@ -10274,6 +10274,13 @@ export class Scene {
     // Only the left button ever selects/drags — right/middle are reserved
     // for orbit/pan and must never be misread as a click on release.
     if (e.button !== 0) return;
+    // A press is owned by the one pointer that started it. A second touch (a palm
+    // resting beside a stylus, a second finger) must not replace it — and its own
+    // up/cancel must not end it (see onPointerUp). A stylus may take over from a touch.
+    if (this.activePointerId !== null && e.pointerId !== this.activePointerId && e.pointerType !== "pen"
+      && performance.now() - this.activePointerAt < 8000) return;
+    this.activePointerId = e.pointerId;
+    this.activePointerAt = performance.now();
     this.capturePointer(e);
     this.downAt = { x: e.clientX, y: e.clientY };
     // Shape Builder owns every left click while it is running: the regions
@@ -11213,8 +11220,15 @@ export class Scene {
     this.updateResizeOverlay();
   };
 
+  /** The pointer that owns the current press, or null between presses. */
+  private activePointerId: number | null = null;
+  /** When it went down: a lost pointerup must not lock out new presses for long. */
+  private activePointerAt = 0;
+
   private onPointerUp = (e: PointerEvent) => {
     if (this.toolMode === "measure") return;
+    if (this.activePointerId !== null && e.pointerId !== this.activePointerId) return;
+    this.activePointerId = null;
     this.releasePointer(e);
     const down = this.downAt;
     this.downAt = null;
