@@ -2265,7 +2265,7 @@ button.stepper-btn:disabled {
 }
 
 @media (max-width: 680px) {
-  .brand-name { display: none; }
+  .brand-name, .brand-version { display: none; }
   .topbar-group[aria-label="View"] button:nth-child(n+4) { display: none; }
   .topbar-group[aria-label="Arrange"] button:nth-child(n+3) { display: none; }
 }
@@ -4994,21 +4994,23 @@ button.stepper-btn:disabled {
    to always fit, and anything that still overflows is clipped, never widening the page. */
 .topbar { overflow-x: clip; }
 @media (max-width: 1400px) {
-  .brand-version, .status-pill { display: none; }
+  .status-pill { display: none; }
   .project-title-container { margin-left: 8px; }
 }
-@media (max-width: 1240px) {
+@media (max-width: 1300px) {
   .topbar-export-btn span, .topbar-blueprint-btn span { display: none; }
   .topbar-export-btn { padding: 0; width: 34px; min-width: 34px; }
-  .project-title-btn { max-width: 150px; }
+  .project-title-btn { max-width: 110px; }
 }
-@media (max-width: 1100px) {
-  .brand-name { display: none; }
-  .brand { min-width: auto; gap: 6px; }
-  .project-title-btn { max-width: 100px; }
+@media (max-width: 1200px) {
+  .project-title-btn { max-width: 80px; }
   .topbar-left { gap: 4px; }
   .topbar-group { gap: 2px; }
   .topbar-divider { margin: 0 2px; }
-  .topbar-icon-btn { width: 30px; min-width: 30px; }
   .file-menu-btn { padding: 4px 8px; }
+}
+@media (max-width: 1100px) {
+  .brand-name, .brand-version { display: none; }
+  .brand { min-width: auto; gap: 6px; }
+  .topbar-icon-btn { width: 30px; min-width: 30px; }
 }
