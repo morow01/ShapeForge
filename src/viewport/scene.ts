@@ -10252,13 +10252,21 @@ export class Scene {
    * so the scene spun while the stylus was resizing something. A touch that
    * starts while the stylus is on or hovering just above the screen is dropped
    * before anything (orbit, picking, gizmo) sees it. Fingers work as before
-   * whenever the stylus is not in use.
+   * whenever the stylus is not in use. Moving and zooming the scene is for fingers
+   * (and mouse) only; the stylus is for working on the objects.
    */
   private installPalmRejection() {
     const key = (e: PointerEvent) => `${e.pointerType}:${e.pointerId}`;
     const guard = (ev: Event) => {
       const e = ev as PointerEvent;
-      if (e.pointerType === "pen") { this.lastPenAt = performance.now(); return; }
+      if (e.pointerType === "pen") {
+        this.lastPenAt = performance.now();
+        // The stylus never moves the camera. Its tip is already ignored by the orbit
+        // controls (left button is unmapped); its side button reports as a right/middle
+        // click, which would orbit/pan, so that press is dropped before they see it.
+        if (e.type === "pointerdown" && e.button !== 0) e.stopPropagation();
+        return;
+      }
       if (e.pointerType !== "touch") return;
       if (e.type === "pointerdown") {
         if (performance.now() - this.lastPenAt > 800) { this.palmKeys.delete(key(e)); return; }
