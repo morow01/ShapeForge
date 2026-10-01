@@ -2055,7 +2055,7 @@ export class Scene {
     this.scene.add(this.plateGroup);
     this.rebuildPlate();
 
-    this.installPointerDebug();
+    this.installPalmRejection();
     this.renderer.domElement.addEventListener("pointerdown", this.onPointerDown);
     this.renderer.domElement.addEventListener("pointermove", this.onPointerMove);
     // Registered right after onPointerMove so it fires after it.
@@ -4956,21 +4956,14 @@ export class Scene {
   private placeAt(e: PointerEvent) {
     if (this.surfacePlacement) {this.surfaceObjectPointer(e,true);return;}
     const placement = this.placementAt(e);
-    this.dbg(`placeAt -> ${placement ? "hit" : "NO HIT"} cb=${!!this.onPlaceSurface}`);
     if (placement) {
       if (this.placementPreview) this.placementPreview.visible = false;
       this.setPlacementTarget(null);
-      this.dbg(`point=${placement.point.toArray().map((v) => v.toFixed(1))} normal=${placement.normal.toArray().map((v) => v.toFixed(2))}`);
-      try {
-        this.onPlaceSurface?.(
-          placement.point.toArray() as Vec3,
-          placement.normal.toArray() as Vec3,
-          placement.targetId,
-        );
-      } catch (err) {
-        this.dbg(`PLACE ERROR: ${err instanceof Error ? err.message : String(err)}`);
-        throw err;
-      }
+      this.onPlaceSurface?.(
+        placement.point.toArray() as Vec3,
+        placement.normal.toArray() as Vec3,
+        placement.targetId,
+      );
     }
   }
 
@@ -10248,37 +10241,40 @@ export class Scene {
 
   // ---- picking ------------------------------------------------------------
 
-  /** TEMPORARY: open the app with ?debugPointers to get an on-screen log of what
-   *  a touch screen / stylus really reports (see installPointerDebug). */
-  private debugEl: HTMLDivElement | null = null;
-  private debugLines: string[] = [];
-  dbg(msg: string) {
-    if (!this.debugEl) return;
-    this.debugLines.push(msg);
-    if (this.debugLines.length > 14) this.debugLines.shift();
-    this.debugEl.textContent = this.debugLines.join("\n");
-  }
-  private installPointerDebug() {
-    if (!/debugpointers/i.test(location.search)) return;
-    const el = document.createElement("div");
-    el.style.cssText = "position:fixed;left:150px;top:70px;z-index:9999;pointer-events:none;background:rgba(0,0,0,.75);color:#9f9;font:11px monospace;padding:6px;white-space:pre;max-width:60vw";
-    document.body.appendChild(el);
-    this.debugEl = el;
-    window.addEventListener("error", (ev) => this.dbg(`JS ERROR: ${ev.message}`));
-    window.addEventListener("unhandledrejection", (ev) => this.dbg(`PROMISE ERROR: ${String((ev.reason as Error)?.message ?? ev.reason)}`));
-    let moves = 0;
-    for (const type of ["pointerdown", "pointerup", "pointercancel", "contextmenu", "click"]) {
-      this.renderer.domElement.addEventListener(type, (ev) => {
-        const p = ev as PointerEvent;
-        this.dbg(`${type} ${p.pointerType ?? ""} b${p.button} bs${p.buttons} (${Math.round(p.clientX)},${Math.round(p.clientY)}) mode=${this.toolMode} moves=${moves}`);
-        if (type === "pointerdown") moves = 0;
-      }, true);
+  /** When a stylus last reported anything, hovering included. */
+  private lastPenAt = 0;
+  /** Touches ignored as a resting palm, so their move/up are ignored too. */
+  private palmKeys = new Set<string>();
+
+  /**
+   * Palm rejection. A tablet reports a palm or knuckle resting on the screen as
+   * an ordinary touch, and OrbitControls turns a one-finger touch into an orbit —
+   * so the scene spun while the stylus was resizing something. A touch that
+   * starts while the stylus is on or hovering just above the screen is dropped
+   * before anything (orbit, picking, gizmo) sees it. Fingers work as before
+   * whenever the stylus is not in use.
+   */
+  private installPalmRejection() {
+    const key = (e: PointerEvent) => `${e.pointerType}:${e.pointerId}`;
+    const guard = (ev: Event) => {
+      const e = ev as PointerEvent;
+      if (e.pointerType === "pen") { this.lastPenAt = performance.now(); return; }
+      if (e.pointerType !== "touch") return;
+      if (e.type === "pointerdown") {
+        if (performance.now() - this.lastPenAt > 800) { this.palmKeys.delete(key(e)); return; }
+        this.palmKeys.add(key(e));
+      }
+      if (this.palmKeys.has(key(e))) {
+        e.stopPropagation();
+        if (e.type === "pointerup" || e.type === "pointercancel") this.palmKeys.delete(key(e));
+      }
+    };
+    for (const type of ["pointerdown", "pointermove", "pointerup", "pointercancel"]) {
+      this.host.addEventListener(type, guard, true);
     }
-    this.renderer.domElement.addEventListener("pointermove", (ev) => { if (ev.buttons) moves++; }, true);
   }
 
   private onPointerDown = (e: PointerEvent) => {
-    this.dbg(`onDown #${e.pointerId} button=${e.button} mode=${this.toolMode}`);
     if (this.toolMode === "measure" && e.button === 0) { this.tape.click(e); return; }
     // Only the left button ever selects/drags — right/middle are reserved
     // for orbit/pan and must never be misread as a click on release.
@@ -11369,7 +11365,6 @@ export class Scene {
     }
     this.shapeDragCandidate = null;
 
-    this.dbg(`onUp[${e.type}/${e.pointerType}#${e.pointerId}] down=${!!down} gizmoDrag=${this.gizmo.dragging} dist=${down ? Math.round(Math.hypot(e.clientX - down.x, e.clientY - down.y)) : "-"} mode=${this.toolMode}`);
     if (!down || this.gizmo.dragging) return;
     if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > CLICK_SLOP_PX) return;
     if (this.toolMode === "place") {
