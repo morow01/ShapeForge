@@ -30,6 +30,8 @@ import {
   setProjectFolder,
   setProjectLocation,
   moveToBin,
+  collectFolderTree,
+  binFolderTree,
 } from "./persist";
 import {
   TRI_BY_ANGLES,
@@ -733,7 +735,7 @@ interface DocState {
   openProject: (id: string) => boolean;
   renameProject: (name: string) => void;
   duplicateProject: (id: string) => string | null;
-  deleteProject: (id: string) => boolean;
+  deleteProject: (id: string, via?: { folderId: string; at: number }) => boolean;
   /** Renames any design, not just the open one. */
   renameProjectById: (id: string, name: string) => void;
   refreshFolders: () => void;
@@ -962,11 +964,11 @@ export const useDoc = create<DocState>()(
         return newId;
       },
 
-      deleteProject: (id) => {
+      deleteProject: (id, via) => {
         flushSave();
         const s = get();
         const deletedMeta = s.projects.find((p) => p.id === id);
-        moveToBin(id);
+        moveToBin(id, via);
         deleteProjectStorage(id);
         if (deletedMeta) driveHooks.onProjectDeleted?.(deletedMeta);
         const remaining = listProjects();
@@ -1016,11 +1018,15 @@ export const useDoc = create<DocState>()(
         flushSave();
         const before = get();
         const folder = before.folders.find((f) => f.id === id);
-        const designIds = before.projects.filter((p) => p.folderId === id).map((p) => p.id);
-        const subfolderIds = before.folders.filter((f) => f.parentId === id).map((f) => f.id);
-        deleteFolderEntry(id);
+        if (!folder) return;
+        // The folder and everything inside it go to the Bin together, and come back together.
+        const at = Date.now();
+        const tree = collectFolderTree(id);
+        const designIds = before.projects.filter((p) => p.folderId && tree.includes(p.folderId)).map((p) => p.id);
+        for (const designId of designIds) get().deleteProject(designId, { folderId: id, at });
+        if (!binFolderTree(id, at)) deleteFolderEntry(id);
         set({ folders: listFolders(), projects: listProjects() });
-        if (folder) driveHooks.onFolderDeleted?.({ folder, designIds, subfolderIds });
+        driveHooks.onFolderDeleted?.({ folder, designIds: [], subfolderIds: [] });
       },
 
       moveProjectToFolder: (projectId, folderId) => {

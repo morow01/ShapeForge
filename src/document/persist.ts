@@ -563,7 +563,107 @@ const BIN_THUMB_PREFIX = "cad.bin.thumb.";
 export const BIN_DAYS = 30;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-export type BinEntry = { meta: ProjectMeta; deletedAt: number };
+/** viaFolder is set when the design went into the Bin as part of a deleted folder. */
+export type BinEntry = { meta: ProjectMeta; deletedAt: number; viaFolder?: string };
+/** A deleted folder with everything below it: `folders` is the folder itself and its subfolders. */
+export type BinFolderEntry = { id: string; folders: FolderMeta[]; deletedAt: number };
+
+const BIN_FOLDERS_KEY = "cad.bin.folders";
+
+function readBinFolders(): BinFolderEntry[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(BIN_FOLDERS_KEY) ?? "[]") as BinFolderEntry[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeBinFolders(list: BinFolderEntry[]): void {
+  localStorage.setItem(BIN_FOLDERS_KEY, JSON.stringify(list));
+}
+
+/** A folder's id followed by every folder below it. */
+export function collectFolderTree(rootId: string): string[] {
+  const all = listFolders();
+  const out = [rootId];
+  for (let i = 0; i < out.length; i++) for (const f of all) if (f.parentId === out[i] && !out.includes(f.id)) out.push(f.id);
+  return out;
+}
+
+/** Deleted folders, newest first. */
+export function listBinFolders(): BinFolderEntry[] {
+  const list = readBinFolders();
+  const now = Date.now();
+  const live = list.filter((e) => now - e.deletedAt < BIN_DAYS * DAY_MS);
+  if (live.length !== list.length) {
+    try {
+      writeBinFolders(live);
+    } catch {
+      /* tidied up next time */
+    }
+  }
+  return live.sort((a, b) => b.deletedAt - a.deletedAt);
+}
+
+/** What the Bin holds at the top level: loose designs and whole folders. */
+export function binCount(): number {
+  return listBin().filter((e) => !e.viaFolder).length + listBinFolders().length;
+}
+
+/** Number of designs inside a binned folder. */
+export function binFolderDesignCount(rootId: string): number {
+  return readBin().filter((e) => e.viaFolder === rootId).length;
+}
+
+/** Takes a folder and its subfolders out of the list and keeps a record for Restore. */
+export function binFolderTree(rootId: string, at: number): boolean {
+  try {
+    const ids = collectFolderTree(rootId);
+    const all = listFolders();
+    const doomed = ids.map((id) => all.find((f) => f.id === id)).filter((f): f is FolderMeta => !!f);
+    if (!doomed.length) return false;
+    writeBinFolders([...readBinFolders().filter((e) => e.id !== rootId), { id: rootId, folders: doomed, deletedAt: at }]);
+    writeFolders(all.filter((f) => !ids.includes(f.id)));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Brings a deleted folder back with its subfolders and designs. Returns the designs restored. */
+export function restoreBinFolder(rootId: string): string[] | null {
+  try {
+    const entry = readBinFolders().find((e) => e.id === rootId);
+    if (!entry) return null;
+    const current = listFolders();
+    const restored = entry.folders
+      .filter((f) => !current.some((c) => c.id === f.id))
+      .map((f) => {
+        const { driveId: _drop, ...rest } = f;
+        void _drop;
+        const parentGone = f.id === rootId && f.parentId && !current.some((c) => c.id === f.parentId);
+        return parentGone ? { ...rest, parentId: null } : rest;
+      });
+    writeFolders([...current, ...restored]);
+    const designIds = readBin().filter((e) => e.viaFolder === rootId).map((e) => e.meta.id);
+    const back = designIds.filter((id) => restoreFromBin(id));
+    writeBinFolders(readBinFolders().filter((e) => e.id !== rootId));
+    return back;
+  } catch {
+    return null;
+  }
+}
+
+/** Removes a deleted folder, and the designs that went with it, for good. */
+export function deleteBinFolder(rootId: string): void {
+  try {
+    deleteFromBin(readBin().filter((e) => e.viaFolder === rootId).map((e) => e.meta.id));
+    writeBinFolders(readBinFolders().filter((e) => e.id !== rootId));
+  } catch {
+    /* nothing more to do */
+  }
+}
 
 function readBin(): BinEntry[] {
   try {
@@ -600,12 +700,12 @@ export function listBin(): BinEntry[] {
 }
 
 /** Days left before a binned design is cleared. */
-export function binDaysLeft(entry: BinEntry): number {
+export function binDaysLeft(entry: { deletedAt: number }): number {
   return Math.max(0, Math.ceil(BIN_DAYS - (Date.now() - entry.deletedAt) / DAY_MS));
 }
 
 /** Copies a design into the Bin just before it is deleted. Empty designs are not worth keeping. */
-export function moveToBin(id: string): boolean {
+export function moveToBin(id: string, via?: { folderId: string; at: number }): boolean {
   try {
     const rawIndex = localStorage.getItem(INDEX_KEY);
     const meta = rawIndex ? (JSON.parse(rawIndex) as ProjectMeta[]).find((p) => p.id === id) : undefined;
@@ -614,7 +714,10 @@ export function moveToBin(id: string): boolean {
     localStorage.setItem(BIN_DATA_PREFIX + id, data);
     const thumb = localStorage.getItem(THUMB_PREFIX + id);
     if (thumb) localStorage.setItem(BIN_THUMB_PREFIX + id, thumb);
-    writeBin([...readBin().filter((e) => e.meta.id !== id), { meta: { ...meta }, deletedAt: Date.now() }]);
+    writeBin([
+      ...readBin().filter((e) => e.meta.id !== id),
+      { meta: { ...meta }, deletedAt: via?.at ?? Date.now(), ...(via ? { viaFolder: via.folderId } : {}) },
+    ]);
     return true;
   } catch {
     dropBinData(id);

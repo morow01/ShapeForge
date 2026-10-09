@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useDoc } from "../document/store";
-import { exportProjectFile, hasProjectContents, listBin, loadProject, loadThumbnail, locationOf } from "../document/persist";
+import { binCount as countBin, collectFolderTree, exportProjectFile, hasProjectContents, loadProject, loadThumbnail, locationOf } from "../document/persist";
 import { BinView } from "./BinView";
 import type { FolderMeta, ProjectMeta } from "../document/types";
 import { APP_NAME } from "../version";
@@ -222,7 +222,7 @@ export function HomePage({
   const kept = projects.filter((p) => locationOf(p) === "browser");
   const onDrive = projects.filter((p) => locationOf(p) === "drive");
   // A design known only from Drive's listing shows 0 shapes because it has not been fetched yet, not because it is empty.
-  const binCount = listBin().length;
+  const binCount = countBin();
   const empties = projects.filter((p) => p.objectCount === 0 && !p.remote && p.id !== currentProjectId);
 
   let designs: ProjectMeta[];
@@ -240,7 +240,7 @@ export function HomePage({
   } else if (view.kind === "bin") {
     designs = [];
   } else {
-    designs = projects.filter((p) => (p.folderId ?? null) === viewFolderId);
+    designs = viewFolderId === null ? projects : projects.filter((p) => p.folderId === viewFolderId);
     subfolders = folders.filter((f) => f.parentId === viewFolderId).sort((a, b) => a.name.localeCompare(b.name));
   }
 
@@ -391,13 +391,14 @@ export function HomePage({
   };
 
   const handleDeleteFolder = async (f: FolderMeta) => {
-    const inside = countIn(f.id) + folders.filter((x) => x.parentId === f.id).length;
-    const note = inside
-      ? `Its ${inside} ${inside === 1 ? "item moves" : "items move"} up one level; nothing inside is deleted.`
+    const tree = collectFolderTree(f.id);
+    const designCount = projects.filter((p) => p.folderId && tree.includes(p.folderId)).length;
+    const note = designCount
+      ? `The ${designCount} ${designCount === 1 ? "design" : "designs"} inside go with it.`
       : "It is empty.";
     const ok = await ask({
       title: "Delete folder?",
-      message: `"${f.name}" will be deleted. ${note}`,
+      message: `"${f.name}" moves to the Bin and is kept for 30 days. ${note}`,
       confirmLabel: "Delete folder",
       destructive: true,
     });
@@ -701,7 +702,7 @@ export function HomePage({
                             : `${p.objectCount} ${p.objectCount === 1 ? "shape" : "shapes"} · ${timeAgo(p.updatedAt)}`}
                         {p.id === currentProjectId ? " · open" : ""}
                       </span>
-                      {(searching || view.kind !== "folder") && folderName && <span className="home-meta">In {folderName}</span>}
+                      {(searching || view.kind !== "folder" || viewFolderId === null) && folderName && <span className="home-meta">In {folderName}</span>}
                       <span className={`home-tag ${where}`}>{where === "draft" ? "Not saved yet" : where === "drive" ? "Google Drive" : "This browser"}</span>
                       <div className="home-actions">
                         <button className="home-act" onClick={() => startRenameDesign(p)} title="Rename" aria-label={`Rename ${p.name}`}>
