@@ -17,12 +17,14 @@ type GoogleApi = {
         error_callback?: (error: { type?: string; message?: string }) => void;
       }) => TokenClient;
       revoke: (token: string, done?: () => void) => void;
+      hasGrantedAllScopes: (response: TokenResponse, ...scopes: string[]) => boolean;
     };
   };
 };
 
 const GIS_SRC = "https://accounts.google.com/gsi/client";
 const CONNECTED_KEY = "cad.driveConnected";
+const DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file";
 
 let loading: Promise<void> | null = null;
 let client: TokenClient | null = null;
@@ -76,6 +78,13 @@ function ensureClient(): TokenClient {
         // A minute early, so a request never starts with a token that is about to expire.
         expiresAt: Date.now() + (Number(response.expires_in) || 3600) * 1000 - 60_000,
       };
+      rememberToken();
+      // Google lets people untick individual permissions, so check Drive was really granted.
+      if (!google()!.accounts.oauth2.hasGrantedAllScopes(response, DRIVE_FILE_SCOPE)) {
+        token = null;
+        settle(new Error("The Drive permission wasn't ticked. Sign out, connect again, and tick the Google Drive box before clicking Continue."));
+        return;
+      }
       settle(null);
     },
     error_callback: (error) => {
@@ -117,6 +126,37 @@ async function fetchEmail(accessToken: string): Promise<string | null> {
   }
 }
 
+/* The token only lasts about an hour, so keeping it for this browser tab (not on disk) lets a
+   refresh carry on signed in. Closing the tab forgets it. */
+const TOKEN_KEY = "cad.driveToken";
+
+function rememberToken(email?: string | null) {
+  try {
+    if (!token) return;
+    const previous = JSON.parse(sessionStorage.getItem(TOKEN_KEY) ?? "null") as { email?: string | null } | null;
+    sessionStorage.setItem(TOKEN_KEY, JSON.stringify({ ...token, email: email === undefined ? previous?.email ?? null : email }));
+  } catch {
+    /* a refresh will then need a click to reconnect */
+  }
+}
+
+/** After a refresh: picks the still-valid token back up, so no sign-in window is needed. */
+export function restoreSession(): void {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(TOKEN_KEY) ?? "null") as
+      | { value?: string; expiresAt?: number; email?: string | null }
+      | null;
+    if (saved?.value && saved.expiresAt && Date.now() < saved.expiresAt) {
+      token = { value: saved.value, expiresAt: saved.expiresAt };
+      useDrive.getState().setStatus("signedIn", saved.email ?? null);
+    } else {
+      sessionStorage.removeItem(TOKEN_KEY);
+    }
+  } catch {
+    /* nothing to restore */
+  }
+}
+
 export function wasConnected(): boolean {
   try {
     return localStorage.getItem(CONNECTED_KEY) === "1";
@@ -137,7 +177,9 @@ export async function signIn(): Promise<void> {
     } catch {
       /* not remembered, so the next visit asks again */
     }
-    drive.setStatus("signedIn", await fetchEmail(accessToken));
+    const email = await fetchEmail(accessToken);
+    rememberToken(email);
+    drive.setStatus("signedIn", email);
   } catch (error) {
     drive.setStatus("signedOut");
     drive.setError(error instanceof Error ? error.message : "Sign-in failed.");
@@ -149,6 +191,7 @@ export function signOut(): void {
   if (token) google()?.accounts.oauth2.revoke(token.value, () => {});
   token = null;
   try {
+    sessionStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(CONNECTED_KEY);
   } catch {
     /* nothing to clear */

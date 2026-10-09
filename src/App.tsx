@@ -15,6 +15,7 @@ import { HomePage } from "./ui/HomePage";
 import { SaveDialog } from "./ui/SaveDialog";
 import { installDriveHooks, syncNow } from "./drive/sync";
 import { useDrive } from "./drive/state";
+import { restoreSession, signIn, wasConnected } from "./drive/auth";
 import {
   AlignNodeIcon,
   AlignToolIcon,
@@ -490,6 +491,17 @@ export function App() {
   const driveStatus = useDrive((s) => s.status);
   useEffect(() => {
     installDriveHooks();
+    restoreSession();
+    // The sign-in lives in memory, so after a refresh the first click anywhere quietly signs
+    // back in (Google only allows its window to open from a click). Failures stay silent: the
+    // Home page still offers Reconnect.
+    if (!wasConnected()) return;
+    const reconnect = () => {
+      window.removeEventListener("pointerdown", reconnect, true);
+      if (useDrive.getState().status === "signedOut") void signIn().catch(() => {});
+    };
+    window.addEventListener("pointerdown", reconnect, true);
+    return () => window.removeEventListener("pointerdown", reconnect, true);
   }, []);
   // Looking at Home while connected brings it up to date with Drive.
   useEffect(() => {
@@ -8375,3 +8387,4 @@ function timeAgo(then: number, now: number): string {
   const mins = Math.round(secs / 60);
   return mins < 60 ? `${mins}m ago` : `${Math.round(mins / 60)}h ago`;
 }
+
