@@ -10,6 +10,7 @@ import {
   loadThumbnail,
   parseProjectFile,
   saveProject,
+  setProjectLocation,
   updateProjectMeta,
   writeFolderList,
 } from "../document/persist";
@@ -384,6 +385,21 @@ export async function pullIndex(openProjectId?: string): Promise<void> {
 
 // ---- moves, renames and deletes ----
 
+/** While signed in everything lives on Drive: a design kept only in this browser is adopted
+ *  as soon as it has something in it. Empty drafts stay local so no empty files are made. */
+function adoptIntoDrive(id: string): boolean {
+  if (useDrive.getState().status !== "signedIn") return false;
+  const meta = listProjects().find((p) => p.id === id);
+  if (!meta || meta.remote || meta.location === "drive" || meta.objectCount === 0) return false;
+  if (!setProjectLocation(id, "drive")) return false;
+  useDoc.getState().refreshProjectsList();
+  return true;
+}
+
+function adoptAllIntoDrive(): void {
+  for (const p of listProjects()) if (adoptIntoDrive(p.id)) markDirty(p.id);
+}
+
 /** Sends a design again a moment after it changed; if Drive cannot be reached it stays marked. */
 const timers = new Map<string, number>();
 export function queuePush(id: string): void {
@@ -446,6 +462,7 @@ export async function runSync<T>(job: () => Promise<T>): Promise<T | undefined> 
 /** Reads Drive's current state, sends anything waiting, and refreshes what the Home page shows. */
 export async function syncNow(): Promise<void> {
   await runSync(async () => {
+    adoptAllIntoDrive();
     await flushPending();
     // Folders made before Drive was connected (or still empty) get their Drive twin too.
     for (const f of listFolders()) if (!f.driveId) await driveFolderFor(f.id);
@@ -479,6 +496,7 @@ async function moveFolderOnDrive(folderId: string): Promise<void> {
 
 export function installDriveHooks(): void {
   driveHooks.onProjectChanged = (id) => {
+    adoptIntoDrive(id);
     const meta = listProjects().find((p) => p.id === id);
     if (meta?.location === "drive") queuePush(id);
   };
@@ -509,7 +527,11 @@ export function installDriveHooks(): void {
   // the open design's id too, so only a change within the same design counts.
   useDoc.subscribe((state, previous) => {
     if (state.nodes === previous.nodes || state.currentProjectId !== previous.currentProjectId) return;
-    const meta = state.projects.find((p) => p.id === state.currentProjectId);
-    if (meta?.location === "drive") queuePush(state.currentProjectId);
+    // The editor's own save lands a moment after the edit, so give it time before adopting.
+    const id = state.currentProjectId;
+    window.setTimeout(() => {
+      adoptIntoDrive(id);
+      if (listProjects().find((p) => p.id === id)?.location === "drive") queuePush(id);
+    }, 600);
   });
 }

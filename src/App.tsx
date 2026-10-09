@@ -3645,15 +3645,21 @@ export function App() {
     return () => window.clearTimeout(t);
   }, [homeOpen, sceneBusy, nodes.length, currentProjectId]);
 
+  /** Signed in to Drive, everything lives there and nothing is asked; otherwise ask where. */
+  const chooseHome = useCallback(() => {
+    if (useDrive.getState().status === "signedIn") useDoc.getState().saveCurrentTo("drive");
+    else setSaveDialogOpen(true);
+  }, []);
+
   /** Save: a design with no home yet asks where to keep it; any other just saves
    *  where it already is. */
   const saveNow = useCallback(() => {
     const state = useDoc.getState();
     const meta = state.projects.find((p) => p.id === state.currentProjectId);
     const where = locationOf(meta ?? {});
-    if (where === "draft") setSaveDialogOpen(true);
+    if (where === "draft") chooseHome();
     else state.saveCurrentTo(where);
-  }, []);
+  }, [chooseHome]);
 
   /** New design from Home. An untouched draft is reused rather than leaving a trail of empty ones. */
   const newFromHome = useCallback((folderId: string | null) => {
@@ -4625,7 +4631,7 @@ export function App() {
           {currentLocation === "draft" ? (
             <button
               className="location-chip draft"
-              onClick={() => setSaveDialogOpen(true)}
+              onClick={chooseHome}
               title="This design has no home yet. It is kept in this browser until you save it."
             >
               Not saved yet · Save
