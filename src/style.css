@@ -5817,3 +5817,7 @@ span.status-btn { cursor: default; }
 .status-btn.bad { color: #8a4a00; background: #fdf0e6; border-color: #f1cba4; padding: 0 10px; }
 @keyframes status-pulse { 50% { opacity: 0.3; } }
 .file-menu-about { padding: 6px 12px 8px; font-size: 11.5px; color: #98a4ad; }
+
+.home-side-links { margin: 6px 0 0; padding: 0 10px 4px; font-size: 11.5px; color: #98a4ad; }
+.home-side-links a { color: #7d8b96; text-decoration: none; }
+.home-side-links a:hover { color: #00807e; text-decoration: underline; }

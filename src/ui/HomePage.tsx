@@ -941,6 +941,11 @@ export function HomePage({
               Designs kept in this browser live only on this computer. Download a backup file to keep a copy elsewhere.
             </p>
           )}
+          <p className="home-side-links">
+            <a href={`${import.meta.env.BASE_URL}privacy.html`} target="_blank" rel="noreferrer">Privacy</a>
+            <span aria-hidden="true"> · </span>
+            <a href={`${import.meta.env.BASE_URL}terms.html`} target="_blank" rel="noreferrer">Terms</a>
+          </p>
         </nav>
 
         <main className="home-main">
