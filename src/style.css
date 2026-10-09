@@ -5507,3 +5507,6 @@ button.stepper-btn:disabled {
 .drive-steps code { background: #eef2f5; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
 .drive-steps a { color: #00807e; }
 .drive-problem { margin: 0; color: #b42318; font-size: 13px; }
+
+.drive-steps ul { margin: 4px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 3px; }
+.drive-note { margin: 0; padding: 8px 10px; border-radius: 8px; background: #f3f7f9; font-size: 12.5px; line-height: 1.55; color: #4a5a66; }

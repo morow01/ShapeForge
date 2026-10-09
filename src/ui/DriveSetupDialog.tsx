@@ -58,30 +58,66 @@ export function DriveSetupDialog({ open, onClose }: DriveSetupDialogProps) {
       <div className="save-dialog drive-setup" role="dialog" aria-label="Set up Google Drive" onClick={(e) => e.stopPropagation()}>
         <h2>Set up Google Drive</h2>
         <p className="confirm-message">
-          ShapeForge saves into your own Google Drive, in a folder it creates. Google asks every app to
-          register once. It takes about five minutes and is free.
+          ShapeForge saves into your own Google Drive, in a folder it creates, and can only see the files it
+          made itself. Google asks every app to register once. It is free and takes about ten minutes. Use the
+          Google account you want your designs stored in.
         </p>
         <ol className="drive-steps">
           <li>
-            Open the{" "}
-            <a href="https://console.cloud.google.com/projectcreate" target="_blank" rel="noreferrer">Google Cloud console</a>{" "}
-            and create a project named ShapeForge.
+            <b>Make a project.</b> Open{" "}
+            <a href="https://console.cloud.google.com/projectcreate" target="_blank" rel="noreferrer">Create project</a>,
+            type <code>ShapeForge</code> as the name, and click <b>Create</b>. Then check the project name at the top
+            left of the page says ShapeForge (click it to switch if not).
           </li>
           <li>
-            Turn on the{" "}
-            <a href="https://console.cloud.google.com/apis/library/drive.googleapis.com" target="_blank" rel="noreferrer">Google Drive API</a>{" "}
-            for that project.
+            <b>Turn on Drive.</b> Open the{" "}
+            <a href="https://console.cloud.google.com/apis/library/drive.googleapis.com" target="_blank" rel="noreferrer">Google Drive API page</a>{" "}
+            and click the blue <b>Enable</b> button.
           </li>
           <li>
-            Under <b>OAuth consent screen</b>, choose <b>External</b>, name it ShapeForge, add your email, and add
-            yourself as a <b>test user</b>. In Scopes add <code>.../auth/drive.file</code>.
+            <b>Set up the sign-in screen.</b> Open{" "}
+            <a href="https://console.cloud.google.com/auth/overview" target="_blank" rel="noreferrer">Google Auth Platform</a>{" "}
+            and click <b>Get started</b>. Then:
+            <ul>
+              <li><b>App information:</b> App name <code>ShapeForge</code>, User support email: choose your email. Next.</li>
+              <li><b>Audience:</b> choose <b>External</b>. Next.</li>
+              <li><b>Contact information:</b> type your email. Next.</li>
+              <li><b>Finish:</b> tick the agreement box, click <b>Continue</b>, then <b>Create</b>.</li>
+            </ul>
           </li>
           <li>
-            Under <b>Credentials</b>, create an <b>OAuth client ID</b> of type <b>Web application</b>. Under
-            Authorised JavaScript origins add <code>{origin}</code> (and <code>https://morow01.github.io</code> for the website).
+            <b>Allow yourself to sign in.</b> In the left menu click <b>Audience</b>. Under <b>Test users</b> click{" "}
+            <b>+ Add users</b>, type your Gmail address, and click <b>Save</b>. (While the app is in Testing, only
+            listed people can sign in.)
           </li>
-          <li>Copy the Client ID it shows and paste it below.</li>
+          <li>
+            <b>Allow the Drive permission.</b> In the left menu click <b>Data Access</b>, then{" "}
+            <b>Add or remove scopes</b>. In the filter box type <code>drive.file</code>, tick the row ending{" "}
+            <code>/auth/drive.file</code>, click <b>Update</b> at the bottom, then <b>Save</b>.
+          </li>
+          <li>
+            <b>Make the sign-in ID.</b> In the left menu click <b>Clients</b>, then <b>+ Create client</b>.
+            <ul>
+              <li>Application type: <b>Web application</b>. Name: <code>ShapeForge web</code>.</li>
+              <li>
+                Under <b>Authorised JavaScript origins</b> click <b>+ Add URI</b> and enter{" "}
+                <code>{origin}</code>. Click <b>+ Add URI</b> again and enter <code>https://morow01.github.io</code>{" "}
+                if you also use the website. Origins have no path and no trailing slash.
+              </li>
+              <li>Leave Authorised redirect URIs empty. Click <b>Create</b>.</li>
+            </ul>
+          </li>
+          <li>
+            <b>Copy the Client ID</b> from the box that appears (it ends in <code>.apps.googleusercontent.com</code>;
+            you can find it again later under Clients). Paste it below and click Save.
+          </li>
         </ol>
+        <p className="drive-note">
+          <b>First sign-in:</b> Google will say the app isn't verified. That is expected for your own app. Click{" "}
+          <b>Advanced</b>, then <b>Go to ShapeForge (unsafe)</b>, then allow access.<br />
+          <b>If you see "origin_mismatch"</b>, the address in step 6 doesn't match the page you are on.{" "}
+          <b>If you see "access denied"</b>, add that Gmail address in step 4.
+        </p>
         <label className="save-label" htmlFor="drive-client-id">Client ID</label>
         <input
           id="drive-client-id"
