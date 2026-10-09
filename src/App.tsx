@@ -14,7 +14,7 @@ import { Tree } from "./ui/Tree";
 import { HomePage } from "./ui/HomePage";
 import { SaveDialog } from "./ui/SaveDialog";
 import { VersionHistoryDialog } from "./ui/VersionHistoryDialog";
-import { installDriveHooks, syncNow } from "./drive/sync";
+import { installDriveHooks, startAutoSync, syncNow } from "./drive/sync";
 import { useDrive } from "./drive/state";
 import { armQuietReconnect, restoreSession } from "./drive/auth";
 import {
@@ -497,6 +497,7 @@ export function App() {
     // back in (Google only allows its window to open from a click). Failures stay silent: the
     // Home page still offers Reconnect.
     if (useDrive.getState().status === "signedOut") armQuietReconnect();
+    return startAutoSync();
   }, []);
   // Coming back online (or reconnecting) sends whatever changed while signed out.
   useEffect(() => {

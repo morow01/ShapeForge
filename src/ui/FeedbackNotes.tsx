@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { APP_VERSION } from "../version";
-import { runSync, syncNotesWithDrive } from "../drive/sync";
+import { AUTO_SYNC_EVENT, runSync, syncNotesWithDrive } from "../drive/sync";
 import { useDrive } from "../drive/state";
 
 // TEMPORARY dev aid: a scratch pad for feedback while the app is being built.
@@ -57,9 +57,19 @@ export function FeedbackNotes() {
   }, []);
 
   // While connected to Google Drive the notes are kept level with the copy there, so every computer sees them.
+  const [autoTick, setAutoTick] = useState(0);
   useEffect(() => {
     if (open) lastSig.current = "";
   }, [open]);
+  // The minute-by-minute check asks the notes to look at Drive again too.
+  useEffect(() => {
+    const again = () => {
+      lastSig.current = "";
+      setAutoTick((n) => n + 1);
+    };
+    window.addEventListener(AUTO_SYNC_EVENT, again);
+    return () => window.removeEventListener(AUTO_SYNC_EVENT, again);
+  }, []);
   useEffect(() => {
     if (driveStatus !== "signedIn" || !ready) return;
     const signature = JSON.stringify(notes) + JSON.stringify(deletedRef.current);
@@ -76,7 +86,7 @@ export function FeedbackNotes() {
     return () => window.clearTimeout(syncTimer.current);
     // save only writes locally, so it is left out on purpose
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [notes, driveStatus, ready, open]);
+  }, [notes, driveStatus, ready, open, autoTick]);
 
   const save = (next: Note[], removed: string[] = []) => {
     notesRef.current = next;
