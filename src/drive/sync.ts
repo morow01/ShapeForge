@@ -18,7 +18,7 @@ import {
 } from "../document/persist";
 import { getBlob, putBlob } from "../document/blobStore";
 import type { FolderMeta, ProjectData, ProjectMeta } from "../document/types";
-import { DriveApi, DriveAuthError, DriveError, FOLDER_MIME } from "./api";
+import { DriveApi, DriveAuthError, DriveError, DriveScopeError, FOLDER_MIME } from "./api";
 import type { DriveFile } from "./api";
 import { getAccessToken, hasToken, signedOutByGoogle } from "./auth";
 import { APP_FOLDER_NAME, ASSETS_FOLDER_NAME } from "./config";
@@ -937,7 +937,8 @@ export async function runSync<T>(job: () => Promise<T>): Promise<T | undefined> 
     return result;
   } catch (error) {
     if (error instanceof DriveAuthError) {
-      signedOutByGoogle();
+      if (error instanceof DriveScopeError) signedOutByGoogle(error.message, true);
+      else signedOutByGoogle();
       useDrive.getState().setStatus("signedOut");
     }
     useDrive.getState().setError(

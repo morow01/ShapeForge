@@ -40,6 +40,14 @@ export class DriveAuthError extends DriveError {
   }
 }
 
+/** The sign-in did not include permission for Drive: the person has to connect again and allow it. */
+export class DriveScopeError extends DriveAuthError {
+  constructor() {
+    super("Google signed you in but did not give ShapeForge permission to use your Drive. Sign out, connect again, and tick the Google Drive box before clicking Continue.");
+    this.name = "DriveScopeError";
+  }
+}
+
 export type DriveFetch = (url: string, init?: RequestInit) => Promise<Response>;
 
 const API = "https://www.googleapis.com/drive/v3/files";
@@ -79,7 +87,11 @@ export class DriveApi {
     const token = await this.getToken();
     const res = await this.doFetch(url, { ...init, headers: { ...(init.headers ?? {}), Authorization: `Bearer ${token}` } });
     if (res.status === 401) throw new DriveAuthError();
-    if (!res.ok) throw new DriveError(res.status, `Google Drive said ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    if (!res.ok) {
+      const body = await res.text();
+      if (res.status === 403 && /insufficient/i.test(body) && /scope|permission/i.test(body)) throw new DriveScopeError();
+      throw new DriveError(res.status, `Google Drive said ${res.status}: ${body.slice(0, 200)}`);
+    }
     return res;
   }
 

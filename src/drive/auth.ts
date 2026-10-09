@@ -233,6 +233,17 @@ export async function signIn(): Promise<void> {
     } catch {
       /* not remembered, so the next visit asks again */
     }
+    // Google lets people untick the Drive permission; a token without it can sign in but never save anything.
+    const scopes = await grantedScopes(accessToken);
+    if (scopes && !scopes.includes(DRIVE_FILE_SCOPE)) {
+      try {
+        google()?.accounts.oauth2.revoke(accessToken, () => {});
+      } catch {
+        /* the grant simply stays */
+      }
+      signedOutByGoogle("Google signed you in but did not give ShapeForge permission to use your Drive. Connect again and tick the Google Drive box.", true);
+      throw new Error("The Google Drive permission was not ticked. Click Connect again and tick the Google Drive box before clicking Continue.");
+    }
     const email = await fetchEmail(accessToken);
     rememberToken(email);
     drive.setStatus("signedIn", email);
@@ -298,14 +309,28 @@ export function armQuietReconnect(): void {
 }
 
 /** Used when Drive itself says the sign-in was refused. */
-export function signedOutByGoogle(): void {
+export function signedOutByGoogle(reason?: string, askAgain = false): void {
   token = null;
   try {
     localStorage.removeItem(TOKEN_KEY);
+    // Without the "connected" mark the next Connect shows Google's full permission screen again.
+    if (askAgain) localStorage.removeItem(CONNECTED_KEY);
   } catch {
     /* nothing to clear */
   }
-  noteSignedOut("Google Drive refused the saved sign-in (it was revoked, or the account's access was changed).");
+  noteSignedOut(reason ?? "Google Drive refused the saved sign-in (it was revoked, or the account's access was changed).");
+}
+
+/** What Google says this token may do, or null when it cannot be asked (offline, blocked). */
+async function grantedScopes(accessToken: string): Promise<string[] | null> {
+  try {
+    const res = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${encodeURIComponent(accessToken)}`);
+    if (!res.ok) return null;
+    const data = (await res.json()) as { scope?: string };
+    return (data.scope ?? "").split(/\s+/).filter(Boolean);
+  } catch {
+    return null;
+  }
 }
 
 export function hasToken(): boolean {
