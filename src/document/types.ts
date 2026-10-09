@@ -1838,12 +1838,20 @@ export const MAX_BUILD_SOURCES = 4;
 
 export const isGroup = (n: SceneNode): n is GroupNode => n.type === "group";
 
+/** Where a design is kept. "draft" is a new design the person has not chosen a
+ *  home for yet (it still autosaves in this browser so nothing is lost);
+ *  "browser" is a design deliberately kept in this browser; "drive" is reserved
+ *  for Google Drive. A saved index entry with no location is a design from before
+ *  this existed, which was always kept in the browser. */
+export type ProjectLocation = "draft" | "browser" | "drive";
+
 export interface ProjectMeta {
   id: string;
   name: string;
   createdAt: number;
   updatedAt: number;
   objectCount: number;
+  location?: ProjectLocation;
 }
 
 export interface ProjectData {

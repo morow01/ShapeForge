@@ -9,6 +9,7 @@ import type {
   PrimitiveKind,
   ProjectData,
   ProjectFile,
+  ProjectLocation,
   ProjectMeta,
   SceneNode,
   Vec3,
@@ -19,6 +20,7 @@ const ACTIVE_PROJECT_KEY = "cad.active_project_id";
 const PROJECT_PREFIX = "cad.project.";
 const LEGACY_KEY = "cad.document";
 const CAMERA_KEY = "cad.camera";
+const THUMB_PREFIX = "cad.thumb.";
 const VERSION = 1;
 
 interface StoredLegacy {
@@ -288,6 +290,9 @@ export function listProjects(): ProjectMeta[] {
   };
 
   saveProject(initialProject);
+  // A first-ever launch has not chosen a home for its design yet; one carried over
+  // from the old single-document storage was already being kept.
+  setProjectLocation(initialProject.id, initialNodes.length ? "browser" : "draft");
   setActiveProjectId(initialProject.id);
 
   return [
@@ -297,8 +302,48 @@ export function listProjects(): ProjectMeta[] {
       createdAt: initialProject.createdAt,
       updatedAt: initialProject.updatedAt,
       objectCount: initialProject.nodes.length,
+      location: initialNodes.length ? "browser" : "draft",
     },
   ];
+}
+
+/** Where a design is kept; a design saved before locations existed is in the browser. */
+export function locationOf(meta: Pick<ProjectMeta, "location">): ProjectLocation {
+  return meta.location ?? "browser";
+}
+
+/** Records where a design lives without touching its contents. */
+export function setProjectLocation(id: string, location: ProjectLocation): boolean {
+  try {
+    const raw = localStorage.getItem(INDEX_KEY);
+    if (!raw) return false;
+    const list = JSON.parse(raw) as ProjectMeta[];
+    const entry = list.find((p) => p.id === id);
+    if (!entry) return false;
+    entry.location = location;
+    localStorage.setItem(INDEX_KEY, JSON.stringify(list));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Small preview picture shown on the Home page card. Kept apart from the design so
+ *  a design's own save stays small; a missing or unwritable one just shows a placeholder. */
+export function saveThumbnail(id: string, dataUrl: string): void {
+  try {
+    localStorage.setItem(THUMB_PREFIX + id, dataUrl);
+  } catch {
+    /* a thumbnail is never worth failing for */
+  }
+}
+
+export function loadThumbnail(id: string): string | null {
+  try {
+    return localStorage.getItem(THUMB_PREFIX + id);
+  } catch {
+    return null;
+  }
 }
 
 export function getActiveProjectId(): string {
@@ -343,15 +388,17 @@ export function saveProject(project: ProjectData): boolean {
       list = [];
     }
 
+    const existingIdx = list.findIndex((p) => p.id === project.id);
     const meta: ProjectMeta = {
       id: project.id,
       name: project.name,
       createdAt: project.createdAt,
       updatedAt: project.updatedAt,
       objectCount: project.nodes.length,
+      // An autosave must never move a design to a different home.
+      ...(existingIdx >= 0 && list[existingIdx].location ? { location: list[existingIdx].location } : {}),
     };
 
-    const existingIdx = list.findIndex((p) => p.id === project.id);
     if (existingIdx >= 0) {
       list[existingIdx] = meta;
     } else {
@@ -369,6 +416,7 @@ export function saveProject(project: ProjectData): boolean {
 export function deleteProjectStorage(id: string): boolean {
   try {
     localStorage.removeItem(PROJECT_PREFIX + id);
+    localStorage.removeItem(THUMB_PREFIX + id);
     const raw = localStorage.getItem(INDEX_KEY);
     if (raw) {
       const list = (JSON.parse(raw) as ProjectMeta[]).filter((p) => p.id !== id);

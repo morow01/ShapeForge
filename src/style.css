@@ -5014,3 +5014,205 @@ button.stepper-btn:disabled {
   .brand { min-width: auto; gap: 6px; }
   .topbar-icon-btn { width: 30px; min-width: 30px; }
 }
+
+/* ---- Home page (start screen) and Save dialog ---- */
+.home-page {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  background: #f4f7f9;
+  display: flex;
+  flex-direction: column;
+  color: #1f2a33;
+}
+.home-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 18px;
+  background: #fff;
+  border-bottom: 1px solid #e2e8f0;
+}
+.home-brand { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.home-search {
+  width: 280px;
+  max-width: 34vw;
+  height: 34px;
+  padding: 0 12px;
+  border: 1px solid #d5dde3;
+  border-radius: 8px;
+  font-size: 14px;
+  background: #f8fafb;
+  margin-left: 14px;
+}
+.home-search:focus { outline: none; border-color: #00a7a5; background: #fff; }
+.home-spacer { flex: 1; }
+.home-body { flex: 1; display: grid; grid-template-columns: 220px minmax(0, 1fr); min-height: 0; }
+.home-side {
+  padding: 16px 12px;
+  background: #fff;
+  border-right: 1px solid #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+}
+.home-side-label { font-size: 11px; color: #8795a0; padding: 14px 10px 4px; text-transform: none; }
+.home-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #4a5a66;
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+.home-nav:hover { background: #eef3f6; }
+.home-nav.on { background: #e6f7f7; color: #00807e; font-weight: 600; }
+.home-nav.disabled { color: #a3afb8; cursor: default; }
+.home-nav.disabled:hover { background: transparent; }
+.home-count { font-size: 12px; color: #8795a0; }
+.home-soon {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #eef2f5;
+  color: #6c7a85;
+  margin-left: 4px;
+}
+.home-side-note { font-size: 12px; line-height: 1.5; color: #8795a0; padding: 14px 10px 0; margin: 0; }
+.home-main { padding: 20px 26px; overflow-y: auto; }
+.home-title { font-size: 20px; font-weight: 600; margin: 0 0 16px; }
+.home-empty { color: #6c7a85; padding: 40px 0; }
+.home-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; }
+.home-card {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.home-card:hover { border-color: #b8c6cf; }
+.home-card.current { border-color: #00a7a5; }
+.home-thumb {
+  position: relative;
+  height: 132px;
+  border: 0;
+  padding: 0;
+  background: #eef2f5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #aab6bf;
+  cursor: pointer;
+}
+.home-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.home-tag {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #fff;
+  color: #4a5a66;
+  border: 1px solid #dde4e9;
+}
+.home-tag.draft { background: #fff6e0; color: #8a5a00; border-color: #f1dca4; }
+.home-cap { padding: 10px 12px 8px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.home-name {
+  border: 0;
+  background: none;
+  padding: 0;
+  text-align: left;
+  font-size: 14px;
+  font-weight: 600;
+  color: #1f2a33;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.home-meta { font-size: 12px; color: #8795a0; }
+.home-actions { display: flex; gap: 4px; margin-top: 6px; opacity: 0; transition: opacity 0.12s; }
+.home-card:hover .home-actions, .home-card:focus-within .home-actions { opacity: 1; }
+.home-act {
+  width: 28px;
+  height: 28px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #52616c;
+  cursor: pointer;
+}
+.home-act:hover { background: #f0f4f7; }
+.home-act.danger:hover { background: #fdecec; color: #b42318; border-color: #f4c6c2; }
+.home-act-icon { width: 16px; height: 16px; }
+.save-dialog {
+  background: #fff;
+  width: 92%;
+  max-width: 440px;
+  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.15);
+  padding: 20px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.save-dialog h2 { margin: 0 0 2px; font-size: 18px; }
+.save-label { font-size: 12px; color: #6c7a85; margin-top: 4px; }
+.save-name { height: 36px; padding: 0 10px; border: 1px solid #d5dde3; border-radius: 8px; font-size: 14px; }
+.save-name:focus { outline: none; border-color: #00a7a5; }
+.save-choice {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid #dde4e9;
+  border-radius: 10px;
+  cursor: pointer;
+}
+.save-choice.on { border-color: #00a7a5; background: #f0fafa; }
+.save-choice.disabled { color: #a3afb8; cursor: default; background: #fafbfc; }
+.save-choice-text { display: flex; flex-direction: column; gap: 2px; font-size: 12.5px; color: #52616c; }
+.save-choice-text b { font-size: 14px; color: #1f2a33; font-weight: 600; }
+.save-choice.disabled .save-choice-text b { color: #8795a0; }
+.save-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+.topbar-home-btn { gap: 6px; }
+.location-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid #dde4e9;
+  background: #fff;
+  color: #4a5a66;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.location-chip:hover { background: #f0f4f7; }
+.location-chip.draft { background: #fff6e0; color: #8a5a00; border-color: #f1dca4; }
+@media (max-width: 760px) {
+  .home-body { grid-template-columns: 1fr; }
+  .home-side { flex-direction: row; flex-wrap: wrap; border-right: 0; border-bottom: 1px solid #e2e8f0; padding: 8px; }
+  .home-side-label, .home-side-note { display: none; }
+  .home-search { max-width: 30vw; }
+}
+.home-top .modal-btn { white-space: nowrap; flex-shrink: 0; }
+@media (max-width: 1180px) {
+  .topbar-home-btn span { display: none; }
+}

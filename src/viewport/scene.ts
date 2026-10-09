@@ -1374,6 +1374,35 @@ export class Scene {
    *  feel. Not read anywhere performance-sensitive. */
   private recentFrameTimes: number[] = [];
 
+  /** A small JPEG of the current view for the Home page card. The canvas does not
+   *  keep its pixels between frames, so a frame is drawn and read in the same call.
+   *  The view cube is left out of the picture. */
+  captureThumbnail(width = 240, height = 180): string | null {
+    const cubeWasVisible = this.navCubeVisible;
+    try {
+      this.navCubeVisible = false;
+      this.renderFrame();
+      const source = this.renderer.domElement;
+      if (!source.width || !source.height) return null;
+      const out = document.createElement("canvas");
+      out.width = width;
+      out.height = height;
+      const ctx = out.getContext("2d");
+      if (!ctx) return null;
+      ctx.fillStyle = "#eef2f5";
+      ctx.fillRect(0, 0, width, height);
+      const scale = Math.min(width / source.width, height / source.height);
+      const w = source.width * scale;
+      const h = source.height * scale;
+      ctx.drawImage(source, (width - w) / 2, (height - h) / 2, w, h);
+      return out.toDataURL("image/jpeg", 0.75);
+    } catch {
+      return null;
+    } finally {
+      this.navCubeVisible = cubeWasVisible;
+    }
+  }
+
   getFps(): number {
     const now = performance.now();
     this.recentFrameTimes = this.recentFrameTimes.filter((t) => now - t <= 1000);

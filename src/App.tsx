@@ -11,7 +11,8 @@ import { readViewportQuality, VIEWPORT_QUALITY_KEY, type ViewportQuality } from 
 import type { FaceBounds, FaceResizeFrame } from "./viewport/FaceResizeHandles";
 import { Inspector } from "./ui/Inspector";
 import { Tree } from "./ui/Tree";
-import { ProjectsModal } from "./ui/ProjectsModal";
+import { HomePage } from "./ui/HomePage";
+import { SaveDialog } from "./ui/SaveDialog";
 import {
   AlignNodeIcon,
   AlignToolIcon,
@@ -49,6 +50,7 @@ import {
   ObjectsIcon,
   PencilIcon,
   PrimitiveShapeIcon,
+  HomeIcon,
   ProjectsIcon,
   RedoIcon,
   RotateToolIcon,
@@ -106,7 +108,7 @@ import { MAX_BUILD_SOURCES, PRIMITIVES, PRIMITIVE_CATEGORIES, SKETCH_CURVE_SEGME
 import { findAssemblyOwner, findNode, parentOf, resolveNodeTransparent, resolveNodeColor, updateNode, walk } from "./document/tree";
 import { bakeScale } from "./document/bake";
 import { putBlob } from "./document/blobStore";
-import { loadCameraState } from "./document/persist";
+import { loadCameraState, locationOf, saveThumbnail } from "./document/persist";
 import type { EditOp, GroupNode, ImportNode, PrimitiveKind, SceneNode, ShellOp, HollowRim, ResizeFaceOp, SketchData, Vec3 } from "./document/types";
 import { RETRYABLE_MESH_ERROR } from "./kernel/types";
 import type { EditSpec, ExportQuality, NodeSpec, PreviewBuild, ScenePart } from "./kernel/types";
@@ -477,7 +479,12 @@ export function App() {
   const storageBlocked = useDoc((s) => s.storageBlocked);
   const projectName = useDoc((s) => s.projectName);
   const sceneRef = useRef<Scene | null>(null);
-  const [projectsModalOpen, setProjectsModalOpen] = useState(false);
+  // The app opens on the Home page; the editor is already loaded behind it.
+  const [homeOpen, setHomeOpen] = useState(true);
+  const [saveDialogOpen, setSaveDialogOpen] = useState(false);
+  const currentProjectId = useDoc((s) => s.currentProjectId);
+  const projectList = useDoc((s) => s.projects);
+  const currentLocation = locationOf(projectList.find((p) => p.id === currentProjectId) ?? {});
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [surfaceSource, setSurfaceSource] = useState<string | null>(null);
   const [surfaceTarget, setSurfaceTarget] = useState<string | null>(null);
@@ -551,6 +558,7 @@ export function App() {
     renameProject,
     newProject,
     exportCurrentProject,
+    saveCurrentTo,
   } = useDoc.getState();
 
   // Ticks the "Saved 2m ago" label without re-rendering on every frame.
@@ -3590,6 +3598,38 @@ export function App() {
     setNewDesignPromptOpen(false);
   }, [newProject]);
 
+  /** Back to the Home page, leaving a small picture of the design for its card. */
+  const openHome = useCallback(() => {
+    const state = useDoc.getState();
+    if (state.nodes.length) {
+      const shot = sceneRef.current?.captureThumbnail();
+      if (shot) saveThumbnail(state.currentProjectId, shot);
+    }
+    setHomeOpen(true);
+  }, []);
+
+  /** Save: a design with no home yet asks where to keep it; any other just saves
+   *  where it already is. */
+  const saveNow = useCallback(() => {
+    const state = useDoc.getState();
+    const meta = state.projects.find((p) => p.id === state.currentProjectId);
+    const where = locationOf(meta ?? {});
+    if (where === "draft") setSaveDialogOpen(true);
+    else state.saveCurrentTo(where);
+  }, []);
+
+  /** New design from Home. An untouched draft is reused rather than leaving a trail of empty ones. */
+  const newFromHome = useCallback(() => {
+    const state = useDoc.getState();
+    const meta = state.projects.find((p) => p.id === state.currentProjectId);
+    if (!state.nodes.length && locationOf(meta ?? {}) === "draft") {
+      setIsEditingTitle(true);
+    } else {
+      createNewDesign();
+    }
+    setHomeOpen(false);
+  }, [createNewDesign]);
+
   /** Asks first when there is something on screen to lose track of. An empty
    *  scene has nothing to confirm, so it just goes. */
   const startNewDesign = useCallback(() => {
@@ -4187,10 +4227,10 @@ export function App() {
         selectMany(useDoc.getState().nodes.map((node) => node.id));
       } else if (mod && e.key.toLowerCase() === "o") {
         e.preventDefault();
-        setProjectsModalOpen(true);
+        openHome();
       } else if (mod && e.key.toLowerCase() === "s") {
         e.preventDefault();
-        exportCurrentProject();
+        saveNow();
       } else if (mod && e.key.toLowerCase() === "p") {
         e.preventDefault();
         setBlueprintOpen(true);
@@ -4271,7 +4311,7 @@ export function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [removeSelected, selectMany, undo, redo, group, ungroup, toggleTransparency, dropSelected, ungroupSelected, groupSelected, commitBuild, exportCurrentProject, newProject, cycleWireframe, zoomToSelected, toggleHoleSelected]);
+  }, [removeSelected, selectMany, undo, redo, group, ungroup, toggleTransparency, dropSelected, ungroupSelected, groupSelected, commitBuild, openHome, saveNow, newProject, cycleWireframe, zoomToSelected, toggleHoleSelected]);
 
   // The big card is for work the user is WAITING on: opening a file,
   // exporting, the first build of a document. A rebuild triggered by an edit
@@ -4490,6 +4530,15 @@ export function App() {
     <div className={`app-shell${objectsPanelOpen ? "" : " objects-collapsed"}${allTools ? "" : " rail-compact"}${showRailLabels ? " rail-expanded" : ""}`}>
       <header className="topbar">
         <div className="topbar-left">
+          <button
+            className="topbar-btn topbar-home-btn"
+            onClick={openHome}
+            title="All designs (Ctrl+O)"
+            aria-label="All designs"
+          >
+            <HomeIcon className="topbar-icon" />
+            <span>Designs</span>
+          </button>
           <div className="brand">
             <span className="brand-mark">S</span>
             <span className="brand-name">{APP_NAME}</span>
@@ -4531,6 +4580,20 @@ export function App() {
             )}
           </div>
 
+          {currentLocation === "draft" ? (
+            <button
+              className="location-chip draft"
+              onClick={() => setSaveDialogOpen(true)}
+              title="This design has no home yet. It is kept in this browser until you save it."
+            >
+              Not saved yet · Save
+            </button>
+          ) : (
+            <span className="location-chip" title="Kept in this browser. Download a backup file from the File menu.">
+              This browser
+            </span>
+          )}
+
           <div className="file-menu-container" ref={fileMenuRef}>
             <button
               className={`topbar-btn file-menu-btn ${fileMenuOpen ? "on" : ""}`}
@@ -4558,7 +4621,7 @@ export function App() {
                 </button>
                 <button
                   role="menuitem"
-                  onClick={() => { setFileMenuOpen(false); setProjectsModalOpen(true); }}
+                  onClick={() => { setFileMenuOpen(false); openHome(); }}
                 >
                   <ProjectsIcon className="topbar-icon" />
                   <span className="item-label">Open…</span>
@@ -4574,11 +4637,18 @@ export function App() {
                 <hr />
                 <button
                   role="menuitem"
-                  onClick={() => { setFileMenuOpen(false); exportCurrentProject(); }}
+                  onClick={() => { setFileMenuOpen(false); saveNow(); }}
                 >
                   <SaveFileIcon className="topbar-icon" />
                   <span className="item-label">Save</span>
                   <span className="item-key">Ctrl+S</span>
+                </button>
+                <button
+                  role="menuitem"
+                  onClick={() => { setFileMenuOpen(false); exportCurrentProject(); }}
+                >
+                  <ExportIcon className="topbar-icon" />
+                  <span className="item-label">Download backup file</span>
                 </button>
                 <button
                   role="menuitem"
@@ -8099,9 +8169,10 @@ export function App() {
 
       </aside>
 
-      <ProjectsModal
-        isOpen={projectsModalOpen}
-        onClose={() => setProjectsModalOpen(false)}
+      <HomePage
+        open={homeOpen}
+        onClose={() => setHomeOpen(false)}
+        onNewDesign={newFromHome}
         onProjectLoadStart={(name) => {
           setError(null);
           setFileOperation({
@@ -8115,6 +8186,19 @@ export function App() {
           setFileOperation((current) => current ? { ...current, waitingForScene: true } : null);
         }}
         onProjectLoadFailed={() => setFileOperation(null)}
+      />
+
+      <SaveDialog
+        open={saveDialogOpen}
+        name={projectName}
+        onClose={() => setSaveDialogOpen(false)}
+        onSave={(name, location) => {
+          if (name !== projectName) renameProject(name);
+          saveCurrentTo(location);
+          const shot = useDoc.getState().nodes.length ? sceneRef.current?.captureThumbnail() : null;
+          if (shot) saveThumbnail(useDoc.getState().currentProjectId, shot);
+          setSaveDialogOpen(false);
+        }}
       />
 
       <SettingsModal

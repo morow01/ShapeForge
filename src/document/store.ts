@@ -23,6 +23,7 @@ import {
   restoreProjectFileBlobs,
   saveProject,
   setActiveProjectId,
+  setProjectLocation,
 } from "./persist";
 import {
   TRI_BY_ANGLES,
@@ -44,11 +45,19 @@ import type {
   ObjectNode,
   PrimitiveKind,
   ProjectData,
+  ProjectLocation,
   ProjectMeta,
   PushPullOp,
   SceneNode,
   Vec3,
 } from "./types";
+
+/** A new design that was never touched and never given a home is just clutter once
+ *  the person moves on, so it is dropped rather than left on the Home page. */
+function dropEmptyDraft(id: string) {
+  const meta = listProjects().find((p) => p.id === id);
+  if (meta && meta.location === "draft" && meta.objectCount === 0) deleteProjectStorage(id);
+}
 
 // Restored synchronously at module load, so the first render already has the
 // saved document — no hydration flash, and no bogus entry in the undo history.
@@ -706,6 +715,9 @@ interface DocState {
   renameProject: (name: string) => void;
   duplicateProject: (id: string) => string | null;
   deleteProject: (id: string) => boolean;
+  /** Chooses where the open design is kept. A new design starts as a draft, which
+   *  autosaves in this browser but has not been given a home. */
+  saveCurrentTo: (location: ProjectLocation) => void;
   exportCurrentProject: () => Promise<void>;
   importProjectFile: (file: File) => Promise<boolean>;
   importProjectData: (data: ProjectData) => string;
@@ -832,6 +844,7 @@ export const useDoc = create<DocState>()(
 
       newProject: (name) => {
         flushSave();
+        dropEmptyDraft(get().currentProjectId);
         const newId = `p-${Date.now()}`;
         const newProjName = name?.trim() || "Untitled Project";
         const newProj: ProjectData = {
@@ -843,6 +856,7 @@ export const useDoc = create<DocState>()(
           nodes: [],
         };
         saveProject(newProj);
+        setProjectLocation(newId, "draft");
         setActiveProjectId(newId);
         const updatedProjects = listProjects();
 
@@ -862,6 +876,7 @@ export const useDoc = create<DocState>()(
         flushSave();
         const proj = loadProject(id);
         if (!proj) return false;
+        if (id !== get().currentProjectId) dropEmptyDraft(get().currentProjectId);
         setActiveProjectId(proj.id);
         const updatedProjects = listProjects();
 
@@ -909,6 +924,8 @@ export const useDoc = create<DocState>()(
           updatedAt: Date.now(),
         };
         saveProject(newProj);
+        const sourceLocation = get().projects.find((p) => p.id === id)?.location;
+        if (sourceLocation) setProjectLocation(newId, sourceLocation);
         set({ projects: listProjects() });
         return newId;
       },
@@ -928,6 +945,13 @@ export const useDoc = create<DocState>()(
           set({ projects: remaining });
         }
         return true;
+      },
+
+      saveCurrentTo: (location) => {
+        flushSave();
+        const s = get();
+        setProjectLocation(s.currentProjectId, location);
+        set({ projects: listProjects(), savedAt: Date.now(), storageBlocked: false });
       },
 
       exportCurrentProject: async () => {
@@ -962,6 +986,8 @@ export const useDoc = create<DocState>()(
       importProjectData: (proj) => {
         flushSave();
         saveProject(proj);
+        // A file the person chose to open is a design they meant to keep.
+        setProjectLocation(proj.id, "browser");
         setActiveProjectId(proj.id);
         const updatedProjects = listProjects();
 
