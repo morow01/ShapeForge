@@ -471,9 +471,13 @@ export function deleteFolderEntry(id: string): void {
 
 /** Small preview picture shown on the Home page card. Kept apart from the design so
  *  a design's own save stays small; a missing or unwritable one just shows a placeholder. */
+/** Set by the Drive code, so a new preview picture can be sent along with the design. */
+export const thumbnailHooks: { onSaved?: (id: string) => void } = {};
+
 export function saveThumbnail(id: string, dataUrl: string): void {
   try {
     localStorage.setItem(THUMB_PREFIX + id, dataUrl);
+    thumbnailHooks.onSaved?.(id);
   } catch {
     /* a thumbnail is never worth failing for */
   }

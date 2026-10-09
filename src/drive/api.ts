@@ -9,7 +9,7 @@
 export const FOLDER_MIME = "application/vnd.google-apps.folder";
 export const APP_TAG = { key: "shapeforge", value: "1" } as const;
 
-export type DriveKind = "root" | "assets" | "folder" | "design" | "blob" | "version" | "versions" | "notes";
+export type DriveKind = "root" | "assets" | "folder" | "design" | "blob" | "version" | "versions" | "notes" | "thumb" | "thumbs";
 
 /** Saved versions carry their own tag, so the regular listing of designs never has to page through them. */
 export const VERSION_TAG = { key: "shapeforgeVersion", value: "1" } as const;
@@ -84,7 +84,8 @@ export class DriveApi {
   }
 
   private tag(kind: DriveKind, extra: Record<string, string> = {}): Record<string, string> {
-    const tag = kind === "version" || kind === "versions" ? VERSION_TAG : APP_TAG;
+    // Versions and thumbnails are many small files: they carry their own tag so the main listing stays short.
+    const tag = kind === "version" || kind === "versions" || kind === "thumb" || kind === "thumbs" ? VERSION_TAG : APP_TAG;
     return { [tag.key]: tag.value, kind, ...extra };
   }
 
@@ -122,10 +123,30 @@ export class DriveApi {
     return ((await res.json()) as { files?: DriveFile[] }).files?.[0];
   }
 
-  /** The folder the saved versions are kept in, if it exists. */
-  async findVersionsFolder(): Promise<DriveFile | undefined> {
+  /** Every file of a kind that carries the versions tag (the saved thumbnails), across all pages. */
+  async listAuxByKind(kind: "thumb"): Promise<DriveFile[]> {
+    const out: DriveFile[] = [];
+    let pageToken: string | undefined;
+    do {
+      const params = new URLSearchParams({
+        q: `appProperties has { key='${VERSION_TAG.key}' and value='${VERSION_TAG.value}' } and appProperties has { key='kind' and value='${kind}' } and trashed = false`,
+        fields: `nextPageToken,files(${FIELDS})`,
+        pageSize: "1000",
+        spaces: "drive",
+      });
+      if (pageToken) params.set("pageToken", pageToken);
+      const res = await this.request(`${API}?${params}`);
+      const data = (await res.json()) as { files?: DriveFile[]; nextPageToken?: string };
+      out.push(...(data.files ?? []));
+      pageToken = data.nextPageToken;
+    } while (pageToken);
+    return out;
+  }
+
+  /** A hidden helper folder (saved versions, thumbnails), if it exists. */
+  async findVersionsFolder(kind: "versions" | "thumbs" = "versions"): Promise<DriveFile | undefined> {
     const params = new URLSearchParams({
-      q: `appProperties has { key='${VERSION_TAG.key}' and value='${VERSION_TAG.value}' } and appProperties has { key='kind' and value='versions' } and trashed = false`,
+      q: `appProperties has { key='${VERSION_TAG.key}' and value='${VERSION_TAG.value}' } and appProperties has { key='kind' and value='${kind}' } and trashed = false`,
       fields: `files(${FIELDS})`,
       pageSize: "10",
       spaces: "drive",
@@ -154,7 +175,7 @@ export class DriveApi {
     return out;
   }
 
-  async createFolder(name: string, parentId: string | undefined, kind: "root" | "assets" | "folder" | "versions", properties: Record<string, string> = {}): Promise<DriveFile> {
+  async createFolder(name: string, parentId: string | undefined, kind: "root" | "assets" | "folder" | "versions" | "thumbs", properties: Record<string, string> = {}): Promise<DriveFile> {
     const res = await this.request(`${API}?fields=${FIELDS}`, {
       method: "POST",
       headers: { "Content-Type": "application/json; charset=UTF-8" },

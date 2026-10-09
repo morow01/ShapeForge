@@ -10,7 +10,9 @@ import {
   loadThumbnail,
   parseProjectFile,
   saveProject,
+  saveThumbnail,
   setProjectLocation,
+  thumbnailHooks,
   updateProjectMeta,
   writeFolderList,
 } from "../document/persist";
@@ -34,6 +36,9 @@ const BLOBS_KEY = "cad.drive.blobs";
 const DIRTY_KEY = "cad.drive.dirty";
 const TRASH_KEY = "cad.drive.trash";
 const VERSIONS_KEY = "cad.drive.versionsId";
+const THUMBS_KEY = "cad.drive.thumbsId";
+const THUMB_FILES_KEY = "cad.drive.thumbFiles";
+const THUMB_SIGS_KEY = "cad.drive.thumbSigs";
 const LAST_VERSION_KEY = "cad.drive.lastVersion";
 const LAST_PRUNE_KEY = "cad.drive.lastPrune";
 // A snapshot is taken at most this often while a design is being edited.
@@ -94,6 +99,8 @@ export function resetDriveCaches(): void {
   writeString(ROOT_KEY, null);
   writeString(ASSETS_KEY, null);
   writeString(VERSIONS_KEY, null);
+  writeString(THUMBS_KEY, null);
+  writeJson(THUMB_FILES_KEY, {});
   writeJson(BLOBS_KEY, {});
 }
 
@@ -440,6 +447,119 @@ export async function pullIndex(openProjectId?: string): Promise<void> {
 
 // ---- moves, renames and deletes ----
 
+// ---- thumbnails ----
+/* A design's preview picture is made on the computer that drew it, so each one is also kept as its own small
+   file in a hidden Drive folder. A computer that has never opened a design fetches just the pictures it lacks. */
+
+/** A cheap fingerprint of a picture, to tell whether it changed since it was last sent. */
+function thumbSig(dataUrl: string): string {
+  let h = 5381;
+  for (let i = 0; i < dataUrl.length; i += 7) h = ((h << 5) + h + dataUrl.charCodeAt(i)) | 0;
+  return `${dataUrl.length}:${(h >>> 0).toString(36)}`;
+}
+
+async function ensureThumbsFolder(): Promise<string> {
+  const cached = readString(THUMBS_KEY);
+  if (cached) return cached;
+  const { rootId } = await ensureRoot();
+  const found = await driveApi().findVersionsFolder("thumbs");
+  const id = found?.id ?? (await driveApi().createFolder("_thumbnails", rootId, "thumbs")).id;
+  writeString(THUMBS_KEY, id);
+  return id;
+}
+
+async function refreshThumbMap(): Promise<Record<string, string>> {
+  const map: Record<string, string> = {};
+  for (const f of await driveApi().listAuxByKind("thumb")) {
+    const localId = f.appProperties?.localId;
+    if (localId) map[localId] = f.id;
+  }
+  writeJson(THUMB_FILES_KEY, map);
+  return map;
+}
+
+/** Sends a design's preview picture to Drive, unless Drive already has this exact picture. */
+export async function pushThumbnail(id: string, attempt = 0): Promise<void> {
+  const thumb = loadThumbnail(id);
+  if (!thumb) return;
+  const sig = thumbSig(thumb);
+  const sigs = readJson<Record<string, string>>(THUMB_SIGS_KEY, {});
+  if (sigs[id] === sig) return;
+  const parentId = await ensureThumbsFolder();
+  let files = readJson<Record<string, string>>(THUMB_FILES_KEY, {});
+  if (!files[id]) files = await refreshThumbMap();
+  try {
+    const file = await driveApi().upload({
+      fileId: files[id],
+      name: `${id}.thumbnail`,
+      parentId,
+      mimeType: "text/plain",
+      body: thumb,
+      kind: "thumb",
+      properties: { localId: id, sig },
+    });
+    files[id] = file.id;
+    writeJson(THUMB_FILES_KEY, files);
+    sigs[id] = sig;
+    writeJson(THUMB_SIGS_KEY, sigs);
+  } catch (error) {
+    // The remembered file is gone from Drive: forget it and send a fresh one.
+    if (error instanceof DriveError && error.status === 404 && attempt === 0) {
+      delete files[id];
+      writeJson(THUMB_FILES_KEY, files);
+      return pushThumbnail(id, 1);
+    }
+    throw error;
+  }
+}
+
+/** Fetches the pictures this computer lacks, and sends the ones Drive lacks. */
+async function syncThumbnails(): Promise<void> {
+  const remote = await driveApi().listAuxByKind("thumb");
+  const files: Record<string, string> = {};
+  for (const f of remote) if (f.appProperties?.localId) files[f.appProperties.localId] = f.id;
+  writeJson(THUMB_FILES_KEY, files);
+
+  const sigs = readJson<Record<string, string>>(THUMB_SIGS_KEY, {});
+  const projects = listProjects();
+  let fetched = 0;
+  for (const f of remote) {
+    const id = f.appProperties?.localId;
+    if (!id || !projects.some((p) => p.id === id)) continue;
+    const remoteSig = f.appProperties?.sig ?? "";
+    const local = loadThumbnail(id);
+    // Missing here, or changed on another computer while this one's has not changed since it was last sent.
+    const needed = !local || (!!remoteSig && remoteSig !== sigs[id] && thumbSig(local) === sigs[id]);
+    if (!needed) continue;
+    if (fetched++ >= 40) break;
+    const text = await driveApi().downloadText(f.id);
+    if (!text.startsWith("data:image")) continue;
+    sigs[id] = thumbSig(text);
+    writeJson(THUMB_SIGS_KEY, sigs);
+    saveThumbnail(id, text);
+  }
+
+  // Pictures made here that Drive has never had (designs saved before this existed).
+  let sent = 0;
+  for (const p of projects) {
+    if (p.location !== "drive" || p.remote || files[p.id] || !loadThumbnail(p.id)) continue;
+    if (sent++ >= 25) break;
+    await pushThumbnail(p.id);
+  }
+}
+
+const thumbTimers = new Map<string, number>();
+function queueThumbnailPush(id: string): void {
+  window.clearTimeout(thumbTimers.get(id));
+  thumbTimers.set(
+    id,
+    window.setTimeout(() => {
+      thumbTimers.delete(id);
+      void runSync(() => pushThumbnail(id));
+    }, PUSH_DELAY_MS),
+  );
+}
+
 // ---- feedback notes ----
 
 export type SyncedNote = { id: string; text: string; version: string; at: number; done: boolean; updatedAt?: number };
@@ -722,6 +842,12 @@ export async function syncNow(): Promise<void> {
     // Folders made before Drive was connected (or still empty) get their Drive twin too.
     for (const f of listFolders()) if (!f.driveId) await driveFolderFor(f.id);
     await pullIndex(useDoc.getState().currentProjectId);
+    try {
+      await syncThumbnails();
+    } catch (error) {
+      if (error instanceof DriveAuthError) throw error;
+      /* preview pictures are a bonus: the designs themselves are already level */
+    }
     useDoc.getState().refreshProjectsList();
     useDoc.getState().refreshFolders();
   });
@@ -750,6 +876,10 @@ async function moveFolderOnDrive(folderId: string): Promise<void> {
 }
 
 export function installDriveHooks(): void {
+  thumbnailHooks.onSaved = (id) => {
+    const meta = listProjects().find((p) => p.id === id);
+    if (meta?.location === "drive" && useDrive.getState().status === "signedIn") queueThumbnailPush(id);
+  };
   driveHooks.onProjectChanged = (id) => {
     adoptIntoDrive(id);
     const meta = listProjects().find((p) => p.id === id);
@@ -759,7 +889,15 @@ export function installDriveHooks(): void {
     clearDirty(meta.id);
     if (!meta.driveId) return;
     const driveId = meta.driveId;
-    writeJson(TRASH_KEY, [...readJson<string[]>(TRASH_KEY, []), driveId]);
+    // Its preview picture file goes with it.
+    const thumbs = readJson<Record<string, string>>(THUMB_FILES_KEY, {});
+    const sigs = readJson<Record<string, string>>(THUMB_SIGS_KEY, {});
+    const thumbFile = thumbs[meta.id];
+    delete thumbs[meta.id];
+    delete sigs[meta.id];
+    writeJson(THUMB_FILES_KEY, thumbs);
+    writeJson(THUMB_SIGS_KEY, sigs);
+    writeJson(TRASH_KEY, [...readJson<string[]>(TRASH_KEY, []), driveId, ...(thumbFile ? [thumbFile] : [])]);
     void runSync(flushPending);
   };
   driveHooks.onFolderRenamed = (folderId) => {
