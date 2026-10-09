@@ -459,6 +459,7 @@ export function HomePage({
             {...dropProps(null)}
           >
             <span>All designs</span>
+            <span className="home-count">{projects.length}</span>
           </button>
           <button className={navClass(!searching && view.kind === "recent")} onClick={() => { setSearch(""); setView({ kind: "recent" }); }}>
             <span>Recent</span>
