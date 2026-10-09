@@ -165,6 +165,12 @@ async function driveFolderFor(localFolderId: string | null): Promise<string> {
   const running = makingFolder.get(folder.id);
   if (running) return running;
   const job = (async () => {
+    // A page closed mid-way can leave a folder on Drive that was never recorded here: use it, never add a second.
+    const existing = (await driveApi().findFolders(folder.id))[0];
+    if (existing) {
+      setFolderDriveId(folder.id, existing.id);
+      return existing.id;
+    }
     const parent = await driveFolderFor(folder.parentId);
     const made = await driveApi().createFolder(folder.name, parent, "folder", { localId: folder.id });
     setFolderDriveId(folder.id, made.id);
@@ -341,7 +347,35 @@ export async function pullIndex(openProjectId?: string): Promise<string | null> 
   writeJson(BLOBS_KEY, blobMap);
 
   // Folders, parents before children.
-  const driveFolders = files.filter((f) => f.mimeType === FOLDER_MIME && f.appProperties?.kind === "folder");
+  const allDriveFolders = files.filter((f) => f.mimeType === FOLDER_MIME && f.appProperties?.kind === "folder");
+  // Two Drive folders for one local folder: keep the linked (else newest) one, move anything inside across, trash the rest.
+  const linkedDriveIds = new Map(listFolders().map((f) => [f.id, f.driveId]));
+  const keepFolder = new Map<string, DriveFile>();
+  const extraFolders: DriveFile[] = [];
+  for (const df of allDriveFolders) {
+    const localId = df.appProperties?.localId;
+    if (!localId) continue;
+    const current = keepFolder.get(localId);
+    if (!current) {
+      keepFolder.set(localId, df);
+      continue;
+    }
+    const linked = linkedDriveIds.get(localId);
+    const keep =
+      current.id === linked ? current : df.id === linked ? df : (df.modifiedTime ?? "") > (current.modifiedTime ?? "") ? df : current;
+    keepFolder.set(localId, keep);
+    extraFolders.push(keep === current ? df : current);
+  }
+  for (const extra of extraFolders) {
+    const keep = keepFolder.get(extra.appProperties!.localId!)!;
+    for (const child of files.filter((f) => (f.parents ?? []).includes(extra.id))) {
+      await driveApi().updateMetadata(child.id, { addParent: keep.id, removeParent: extra.id });
+      child.parents = (child.parents ?? []).map((p) => (p === extra.id ? keep.id : p));
+    }
+    await trashOnDrive(extra.id);
+  }
+  const extraIds = new Set(extraFolders.map((f) => f.id));
+  const driveFolders = allDriveFolders.filter((f) => !extraIds.has(f.id));
   const byDriveId = new Map(driveFolders.map((f) => [f.id, f]));
   const depthOf = (f: DriveFile): number => {
     let depth = 0;
@@ -388,8 +422,32 @@ export async function pullIndex(openProjectId?: string): Promise<string | null> 
     }
   }
   const onDrive = new Set(driveFolders.map((f) => f.id));
-  for (const f of folders) if (f.driveId && !onDrive.has(f.driveId)) delete f.driveId;
-  writeFolderList(folders);
+  // A folder that was linked to Drive and is no longer there was deleted on another computer: it goes here too,
+  // and what was inside it moves up to the nearest folder that remains.
+  const goneIds = new Set(folders.filter((f) => f.driveId && !onDrive.has(f.driveId)).map((f) => f.id));
+  let keptFolders = folders;
+  if (goneIds.size) {
+    const parentOf = new Map(folders.map((f) => [f.id, f.parentId]));
+    const climb = (start: string | null): string | null => {
+      const seen = new Set<string>();
+      let cursor = start;
+      while (cursor && goneIds.has(cursor) && !seen.has(cursor)) {
+        seen.add(cursor);
+        cursor = parentOf.get(cursor) ?? null;
+      }
+      return cursor;
+    };
+    keptFolders = folders.filter((f) => !goneIds.has(f.id)).map((f) => ({ ...f, parentId: climb(f.parentId) }));
+    for (const m of listProjects()) {
+      if (!m.folderId || !goneIds.has(m.folderId)) continue;
+      const target = climb(m.folderId);
+      updateProjectMeta(m.id, (x) => {
+        if (target) x.folderId = target;
+        else delete x.folderId;
+      });
+    }
+  }
+  writeFolderList(keptFolders);
 
   // Designs.
   const allDesignFiles = files.filter((f) => f.appProperties?.kind === "design");
