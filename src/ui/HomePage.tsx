@@ -4,7 +4,7 @@ import { binCount as countBin, collectFolderTree, exportProjectFile, hasProjectC
 import { BinView } from "./BinView";
 import { VersionHistoryDialog } from "./VersionHistoryDialog";
 import type { FolderMeta, ProjectMeta } from "../document/types";
-import { APP_NAME } from "../version";
+import { APP_NAME, APP_VERSION } from "../version";
 import { useConfirm } from "./ConfirmDialog";
 import { DriveSetupDialog } from "./DriveSetupDialog";
 import { connectDrive } from "../drive/actions";
@@ -476,6 +476,7 @@ export function HomePage({
         <div className="home-brand">
           <span className="brand-mark">S</span>
           <span className="brand-name">{APP_NAME}</span>
+          <span className="brand-version">v{APP_VERSION}</span>
         </div>
         <input
           type="search"
