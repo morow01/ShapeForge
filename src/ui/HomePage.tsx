@@ -14,7 +14,7 @@ import { connectDrive } from "../drive/actions";
 import { signOut, wasConnected } from "../drive/auth";
 import { fetchProject, runSync, syncNow } from "../drive/sync";
 import { useDrive } from "../drive/state";
-import { DuplicateIcon, ExportIcon, FolderOpenIcon, PlusIcon, TrashIcon } from "./icons";
+import { FolderOpenIcon, PlusIcon, TrashIcon } from "./icons";
 
 function timeAgo(timestamp: number): string {
   const seconds = Math.floor((Date.now() - timestamp) / 1000);
@@ -545,7 +545,7 @@ export function HomePage({
 
   const beginPress = (e: React.PointerEvent, p: ProjectMeta, thumb: string | null) => {
     if (e.button !== 0 || e.pointerType === "touch") return;
-    if ((e.target as Element).closest(".home-actions, .home-check, .home-star, .home-tagchip")) return;
+    if ((e.target as Element).closest(".home-actions, .home-check, .home-star, .home-more, .home-tagchip")) return;
     // Dragging one of several selected designs takes all of them.
     const group = selected.has(p.id) && selectedDesigns.length > 1 ? selectedDesigns.map((d) => d.id) : [p.id];
     const label = group.length > 1 ? `${group.length} designs` : p.name;
@@ -862,6 +862,20 @@ export function HomePage({
                       {selected.has(p.id) ? "✓" : ""}
                     </button>
                     <button
+                      className="home-more"
+                      aria-label={`More actions for ${p.name}`}
+                      aria-haspopup="menu"
+                      title="More"
+                      onClick={(e) => {
+                        const r = e.currentTarget.getBoundingClientRect();
+                        setMenu({ x: Math.max(8, r.right - 180), y: r.bottom + 4, target: { kind: "design", project: p } });
+                      }}
+                    >
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                        <circle cx="5.5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="18.5" cy="12" r="1.7" />
+                      </svg>
+                    </button>
+                    <button
                       className={`home-star${p.starred ? " on" : ""}`}
                       aria-pressed={!!p.starred}
                       aria-label={p.starred ? `Remove the star from ${p.name}` : `Star ${p.name}`}
@@ -909,28 +923,6 @@ export function HomePage({
                       {where !== "drive" && (
                         <span className={`home-tag ${where}`}>{where === "draft" ? "Not saved yet" : "This browser"}</span>
                       )}
-                      <div className="home-actions">
-                        <button className="home-act" onClick={() => startRenameDesign(p)} title="Rename" aria-label={`Rename ${p.name}`}>
-                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                            <path d="M4 20h4L19 9l-4-4L4 16z" />
-                          </svg>
-                        </button>
-                        <button className="home-act" onClick={() => duplicateProject(p.id)} title="Duplicate" aria-label={`Duplicate ${p.name}`}>
-                          <DuplicateIcon className="home-act-icon" />
-                        </button>
-                        <button className="home-act" onClick={() => startMove([p])} title="Move to folder" aria-label={`Move ${p.name} to a folder`}>
-                          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                            <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-                            <path d="M9 13h6m-2.5-2.5L15 13l-2.5 2.5" />
-                          </svg>
-                        </button>
-                        <button className="home-act" onClick={() => handleDownload(p)} title="Download backup file" aria-label={`Download ${p.name}`}>
-                          <ExportIcon className="home-act-icon" />
-                        </button>
-                        <button className="home-act delete" onClick={() => handleDelete(p)} title="Delete" aria-label={`Delete ${p.name}`}>
-                          <TrashIcon className="home-act-icon" />
-                        </button>
-                      </div>
                     </div>
                   </div>
                 );

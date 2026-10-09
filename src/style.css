@@ -5619,3 +5619,10 @@ button.stepper-btn:disabled {
 .tag-chip.all .tag-chip-icon { color: currentColor; }
 .home-nav-icon.tag { color: #2f7f7d; }
 .home-nav:hover .home-nav-icon.tag, .home-nav.on .home-nav-icon.tag { color: #2f7f7d; }
+
+/* The card's actions live in one menu button, so cards end where their content does. */
+.home-more { position: absolute; top: 8px; right: 40px; z-index: 2; width: 26px; height: 26px; min-height: 0; padding: 0; border: 0; border-radius: 8px; background: rgba(255,255,255,0.85); color: #6b7a86; cursor: pointer; display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity 0.12s; }
+.home-card:hover .home-more, .home-card:focus-within .home-more { opacity: 1; }
+.home-more:hover { background: #fff; color: #00807e; }
+.home-more svg { display: block; }
+.home-page.is-dragging .home-more { visibility: hidden; }
