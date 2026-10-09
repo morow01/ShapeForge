@@ -5769,3 +5769,8 @@ button.stepper-btn:disabled {
 }
 
 .home-row-tags .home-tagchip { white-space: nowrap; flex-shrink: 0; }
+
+/* Folder cards have no action buttons now (they live in the right-click menu), so the name gets the whole width. */
+.home-folder .home-folder-open { width: 100%; }
+.home-folder .home-folder-text { min-width: 0; }
+.home-folder .home-folder-text b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

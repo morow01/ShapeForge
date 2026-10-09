@@ -16,7 +16,7 @@ import { connectDrive } from "../drive/actions";
 import { lastSignOut, signOut, wasConnected } from "../drive/auth";
 import { fetchProject, runSync, syncNow } from "../drive/sync";
 import { useDrive } from "../drive/state";
-import { FolderOpenIcon, PlusIcon, TrashIcon } from "./icons";
+import { FolderOpenIcon, PlusIcon } from "./icons";
 
 function timeAgo(timestamp: number): string {
   const seconds = Math.floor((Date.now() - timestamp) / 1000);
@@ -967,16 +967,6 @@ export function HomePage({
                       <span>{countIn(f.id)} {countIn(f.id) === 1 ? "design" : "designs"}</span>
                     </span>
                   </button>
-                  <div className="home-folder-actions">
-                    <button className="home-act" onClick={() => startRename(f)} title="Rename folder" aria-label={`Rename ${f.name}`}>
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                        <path d="M4 20h4L19 9l-4-4L4 16z" />
-                      </svg>
-                    </button>
-                    <button className="home-act delete" onClick={() => handleDeleteFolder(f)} title="Delete folder" aria-label={`Delete ${f.name}`}>
-                      <TrashIcon className="home-act-icon" />
-                    </button>
-                  </div>
                 </div>
               ))}
             </div>
