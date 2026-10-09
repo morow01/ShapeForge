@@ -1049,6 +1049,38 @@ async function moveFolderOnDrive(folderId: string): Promise<void> {
   }
 }
 
+/** Notes and anything else that keeps itself level with Drive listens for this and checks again. */
+export const AUTO_SYNC_EVENT = "shapeforge:autosync";
+
+const AUTO_SYNC_EVERY_MS = 60_000;
+// Switching tabs back and forth must not turn into a flood of requests.
+const AUTO_SYNC_MIN_GAP_MS = 20_000;
+
+/**
+ * Keeps this computer up to date without being asked: when the tab comes back into view, when the window
+ * is focused, and once a minute while ShapeForge is open, visible and connected. Returns a function that stops it.
+ */
+export function startAutoSync(): () => void {
+  let last = 0;
+  const check = () => {
+    if (document.visibilityState !== "visible") return;
+    const drive = useDrive.getState();
+    if (drive.status !== "signedIn" || drive.busy) return;
+    if (Date.now() - last < AUTO_SYNC_MIN_GAP_MS) return;
+    last = Date.now();
+    void syncNow();
+    window.dispatchEvent(new Event(AUTO_SYNC_EVENT));
+  };
+  window.addEventListener("focus", check);
+  document.addEventListener("visibilitychange", check);
+  const timer = window.setInterval(check, AUTO_SYNC_EVERY_MS);
+  return () => {
+    window.removeEventListener("focus", check);
+    document.removeEventListener("visibilitychange", check);
+    window.clearInterval(timer);
+  };
+}
+
 export function installDriveHooks(): void {
   thumbnailHooks.onSaved = (id) => {
     const meta = listProjects().find((p) => p.id === id);
