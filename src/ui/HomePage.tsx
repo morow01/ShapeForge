@@ -421,7 +421,7 @@ export function HomePage({
   const atRoot = !searching && view.kind === "folder" && viewFolderId === null;
 
   return (
-    <div className={`home-page${drag ? " is-dragging" : ""}`} role="dialog" aria-label="My designs" data-previews={thumbVersion}>
+    <div className={`home-page${drag ? " is-dragging" : ""}`} role="dialog" aria-label="All designs" data-previews={thumbVersion}>
       <header className="home-top">
         <div className="home-brand">
           <span className="brand-mark">S</span>
@@ -458,8 +458,7 @@ export function HomePage({
             onClick={() => { setSearch(""); setView({ kind: "folder", id: null }); }}
             {...dropProps(null)}
           >
-            <span>My designs</span>
-            <span className="home-count">{projects.filter((p) => !p.folderId).length}</span>
+            <span>All designs</span>
           </button>
           <button className={navClass(!searching && view.kind === "recent")} onClick={() => { setSearch(""); setView({ kind: "recent" }); }}>
             <span>Recent</span>
@@ -508,7 +507,7 @@ export function HomePage({
           ) : (
             <div className="home-crumbs" aria-label="Folder path">
               <button className="home-crumb" onClick={() => setView({ kind: "folder", id: null })} {...dropProps(null)}>
-                My designs
+                All designs
               </button>
               {trail.map((f) => (
                 <span key={f.id} className="home-crumb-wrap">
@@ -675,7 +674,7 @@ export function HomePage({
           </div>
           <div className="home-drag-hint" role="status">
             {folders.length
-              ? `Drop ${drag.ids.length > 1 ? drag.name : `"${drag.name}"`} on a folder to move ${drag.ids.length > 1 ? "them" : "it"}. Drop on My designs to take ${drag.ids.length > 1 ? "them" : "it"} out of a folder.`
+              ? `Drop ${drag.ids.length > 1 ? drag.name : `"${drag.name}"`} on a folder to move ${drag.ids.length > 1 ? "them" : "it"}. Drop on All designs to take ${drag.ids.length > 1 ? "them" : "it"} out of a folder.`
               : "Make a folder with New folder, then drag designs into it."}
           </div>
         </>
@@ -729,7 +728,7 @@ export function HomePage({
             <div className="move-list">
               <label className={`move-row${moveTarget === null ? " on" : ""}`}>
                 <input type="radio" name="move-to" checked={moveTarget === null} onChange={() => setMoveTarget(null)} />
-                <span>My designs (top level)</span>
+                <span>All designs (no folder)</span>
               </label>
               {folderTree(folders).map(({ folder, depth }) => (
                 <label key={folder.id} className={`move-row${moveTarget === folder.id ? " on" : ""}`} style={{ paddingLeft: 10 + depth * 16 }}>
