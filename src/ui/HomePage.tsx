@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useDoc } from "../document/store";
 import { exportProjectFile, loadProject, loadThumbnail, locationOf } from "../document/persist";
 import type { FolderMeta, ProjectMeta } from "../document/types";
@@ -64,7 +64,23 @@ function folderTree(folders: FolderMeta[]): { folder: FolderMeta; depth: number 
   return out;
 }
 
-type NameDialogState = { mode: "new" | "rename"; folderId?: string; parentId: string | null } | null;
+type NameDialogState = {
+  mode: "new" | "rename" | "renameDesign";
+  folderId?: string;
+  projectId?: string;
+  parentId: string | null;
+} | null;
+
+type MenuState = {
+  x: number;
+  y: number;
+  target: { kind: "design"; project: ProjectMeta } | { kind: "folder"; folder: FolderMeta };
+} | null;
+
+/** A design being dragged to a folder: follows the pointer until it is let go. */
+type DragState = { ids: string[]; name: string; thumb: string | null; x: number; y: number } | null;
+
+const DRAG_START_DISTANCE = 6;
 
 /**
  * The start page: folders and designs, with where each design is kept. It sits over
@@ -91,15 +107,88 @@ export function HomePage({
   const renameFolder = useDoc((s) => s.renameFolder);
   const deleteFolder = useDoc((s) => s.deleteFolder);
   const moveProjectToFolder = useDoc((s) => s.moveProjectToFolder);
+  const renameProjectById = useDoc((s) => s.renameProjectById);
 
   const [search, setSearch] = useState("");
   const [view, setView] = useState<View>({ kind: "folder", id: null });
   const [nameDialog, setNameDialog] = useState<NameDialogState>(null);
   const [nameDraft, setNameDraft] = useState("");
-  const [moving, setMoving] = useState<ProjectMeta | null>(null);
+  const [moving, setMoving] = useState<ProjectMeta[] | null>(null);
   const [moveTarget, setMoveTarget] = useState<string | null>(null);
   const [dropTarget, setDropTarget] = useState<string | null | "none">("none");
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [menu, setMenu] = useState<MenuState>(null);
+  const [drag, setDrag] = useState<DragState>(null);
+  const dragRef = useRef<DragState>(null);
+  dragRef.current = drag;
+  const pressRef = useRef<{ ids: string[]; name: string; thumb: string | null; x: number; y: number } | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  // The click that ends a drag must not also open the design under the pointer.
+  const suppressClickRef = useRef(false);
+
+  // Dragging is done with pointer events rather than the browser's own drag and drop:
+  // that shows only a faint ghost, shows a "not allowed" cursor over anything that is
+  // not a target, and does nothing at all with a pen or finger.
+  useEffect(() => {
+    if (!open) return;
+    const dropAt = (x: number, y: number): string | null | "none" => {
+      const el = document.elementFromPoint(x, y)?.closest("[data-drop]") as HTMLElement | null;
+      if (!el) return "none";
+      const value = el.dataset.drop;
+      return value === "root" ? null : value ?? "none";
+    };
+    const onMove = (e: PointerEvent) => {
+      const press = pressRef.current;
+      if (!press) return;
+      if (!dragRef.current && Math.hypot(e.clientX - press.x, e.clientY - press.y) < DRAG_START_DISTANCE) return;
+      setMenu(null);
+      setDrag({ ids: press.ids, name: press.name, thumb: press.thumb, x: e.clientX, y: e.clientY });
+      setDropTarget(dropAt(e.clientX, e.clientY));
+    };
+    const onUp = (e: PointerEvent) => {
+      const press = pressRef.current;
+      pressRef.current = null;
+      if (!press || !dragRef.current) return;
+      const target = dropAt(e.clientX, e.clientY);
+      suppressClickRef.current = true;
+      window.setTimeout(() => { suppressClickRef.current = false; }, 80);
+      setDrag(null);
+      setDropTarget("none");
+      if (e.type === "pointerup" && target !== "none") {
+        for (const id of press.ids) useDoc.getState().moveProjectToFolder(id, target);
+      }
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+  }, [open]);
+
+  // The right-click menu closes on any click elsewhere, Escape, scrolling or resizing.
+  useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    const onDown = (e: PointerEvent) => {
+      if (!(e.target as Element | null)?.closest(".home-menu")) close();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    window.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("resize", close);
+    window.addEventListener("scroll", close, true);
+    return () => {
+      window.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("resize", close);
+      window.removeEventListener("scroll", close, true);
+    };
+  }, [menu]);
 
   if (!open) return null;
 
@@ -127,6 +216,17 @@ export function HomePage({
     subfolders = folders.filter((f) => f.parentId === viewFolderId).sort((a, b) => a.name.localeCompare(b.name));
   }
 
+  // Only designs that are on screen count as selected, so a bulk action can never touch
+  // something in a folder you have since left.
+  const selectedDesigns = designs.filter((p) => selected.has(p.id));
+  const toggleSelected = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
   const countIn = (folderId: string) => projects.filter((p) => p.folderId === folderId).length;
   const trail = folderPath(folders, viewFolderId);
 
@@ -141,6 +241,7 @@ export function HomePage({
           : null;
 
   const handleOpen = (p: ProjectMeta) => {
+    if (suppressClickRef.current) return;
     if (p.id === currentProjectId) {
       onClose();
       return;
@@ -192,6 +293,11 @@ export function HomePage({
     setNameDialog({ mode: "new", parentId: viewFolderId });
   };
 
+  const startRenameDesign = (p: ProjectMeta) => {
+    setNameDraft(p.name);
+    setNameDialog({ mode: "renameDesign", projectId: p.id, parentId: null });
+  };
+
   const startRename = (f: FolderMeta) => {
     setNameDraft(f.name);
     setNameDialog({ mode: "rename", folderId: f.id, parentId: f.parentId });
@@ -204,6 +310,8 @@ export function HomePage({
       const id = createFolder(name, nameDialog.parentId);
       setSearch("");
       setView({ kind: "folder", id });
+    } else if (nameDialog.mode === "renameDesign" && nameDialog.projectId) {
+      renameProjectById(nameDialog.projectId, name);
     } else if (nameDialog.folderId) {
       renameFolder(nameDialog.folderId, name);
     }
@@ -218,32 +326,44 @@ export function HomePage({
     if (viewFolderId === f.id) setView({ kind: "folder", id: f.parentId });
   };
 
-  const startMove = (p: ProjectMeta) => {
-    setMoving(p);
-    setMoveTarget(p.folderId ?? null);
+  const startMove = (group: ProjectMeta[]) => {
+    setMoving(group);
+    const first = group[0]?.folderId ?? null;
+    setMoveTarget(group.every((p) => (p.folderId ?? null) === first) ? first : null);
   };
 
   const submitMove = () => {
-    if (moving) moveProjectToFolder(moving.id, moveTarget);
+    if (moving) for (const p of moving) moveProjectToFolder(p.id, moveTarget);
     setMoving(null);
+    setSelected(new Set());
   };
 
-  const dragProps = (folderId: string | null) => ({
-    onDragOver: (e: React.DragEvent) => {
-      if (!e.dataTransfer.types.includes("text/x-shapeforge-design")) return;
-      e.preventDefault();
-      setDropTarget(folderId);
-    },
-    onDragLeave: () => setDropTarget("none"),
-    onDrop: (e: React.DragEvent) => {
-      const id = e.dataTransfer.getData("text/x-shapeforge-design");
-      setDropTarget("none");
-      if (id) {
-        e.preventDefault();
-        moveProjectToFolder(id, folderId);
-      }
-    },
-  });
+  const handleDeleteMany = (group: ProjectMeta[]) => {
+    if (group.length === 1) {
+      handleDelete(group[0]);
+      return;
+    }
+    if (!confirm(`Delete ${group.length} designs? This cannot be undone.`)) return;
+    for (const p of group) deleteProject(p.id);
+    setSelected(new Set());
+  };
+
+  /** Marks an element as somewhere a design can be dropped (null = the top level). */
+  const dropProps = (folderId: string | null) => ({ "data-drop": folderId ?? "root" });
+
+  const beginPress = (e: React.PointerEvent, p: ProjectMeta, thumb: string | null) => {
+    if (e.button !== 0 || e.pointerType === "touch") return;
+    if ((e.target as Element).closest(".home-actions, .home-check")) return;
+    // Dragging one of several selected designs takes all of them.
+    const group = selected.has(p.id) && selectedDesigns.length > 1 ? selectedDesigns.map((d) => d.id) : [p.id];
+    const label = group.length > 1 ? `${group.length} designs` : p.name;
+    pressRef.current = { ids: group, name: label, thumb, x: e.clientX, y: e.clientY };
+  };
+
+  const openMenu = (e: React.MouseEvent, target: NonNullable<MenuState>["target"]) => {
+    e.preventDefault();
+    setMenu({ x: e.clientX, y: e.clientY, target });
+  };
 
   const emptyText = searching
     ? "No designs match your search."
@@ -257,7 +377,7 @@ export function HomePage({
   const atRoot = !searching && view.kind === "folder" && viewFolderId === null;
 
   return (
-    <div className="home-page" role="dialog" aria-label="My designs" data-previews={thumbVersion}>
+    <div className={`home-page${drag ? " is-dragging" : ""}`} role="dialog" aria-label="My designs" data-previews={thumbVersion}>
       <header className="home-top">
         <div className="home-brand">
           <span className="brand-mark">S</span>
@@ -292,7 +412,7 @@ export function HomePage({
           <button
             className={navClass(atRoot, dropTarget === null)}
             onClick={() => { setSearch(""); setView({ kind: "folder", id: null }); }}
-            {...dragProps(null)}
+            {...dropProps(null)}
           >
             <span>My designs</span>
             <span className="home-count">{projects.filter((p) => !p.folderId).length}</span>
@@ -308,7 +428,7 @@ export function HomePage({
               className={navClass(!searching && view.kind === "folder" && viewFolderId === folder.id, dropTarget === folder.id)}
               style={{ paddingLeft: 10 + depth * 14 }}
               onClick={() => { setSearch(""); setView({ kind: "folder", id: folder.id }); }}
-              {...dragProps(folder.id)}
+              {...dropProps(folder.id)}
             >
               <span className="home-nav-name">{folder.name}</span>
               <span className="home-count">{countIn(folder.id)}</span>
@@ -343,13 +463,13 @@ export function HomePage({
             <h1 className="home-title">{title}</h1>
           ) : (
             <div className="home-crumbs" aria-label="Folder path">
-              <button className="home-crumb" onClick={() => setView({ kind: "folder", id: null })} {...dragProps(null)}>
+              <button className="home-crumb" onClick={() => setView({ kind: "folder", id: null })} {...dropProps(null)}>
                 My designs
               </button>
               {trail.map((f) => (
                 <span key={f.id} className="home-crumb-wrap">
                   <span className="home-crumb-sep" aria-hidden="true">›</span>
-                  <button className="home-crumb" onClick={() => setView({ kind: "folder", id: f.id })} {...dragProps(f.id)}>
+                  <button className="home-crumb" onClick={() => setView({ kind: "folder", id: f.id })} {...dropProps(f.id)}>
                     {f.name}
                   </button>
                 </span>
@@ -360,7 +480,12 @@ export function HomePage({
           {subfolders.length > 0 && (
             <div className="home-folders">
               {subfolders.map((f) => (
-                <div key={f.id} className={`home-folder${dropTarget === f.id ? " drop" : ""}`} {...dragProps(f.id)}>
+                <div
+                  key={f.id}
+                  className={`home-folder${dropTarget === f.id ? " drop" : ""}`}
+                  {...dropProps(f.id)}
+                  onContextMenu={(e) => openMenu(e, { kind: "folder", folder: f })}
+                >
                   <button className="home-folder-open" onClick={() => setView({ kind: "folder", id: f.id })} title={`Open ${f.name}`}>
                     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" aria-hidden="true">
                       <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
@@ -387,6 +512,18 @@ export function HomePage({
 
           {designs.length === 0 && subfolders.length === 0 && <div className="home-empty">{emptyText}</div>}
 
+          {selectedDesigns.length > 0 && (
+            <div className="home-selbar" role="toolbar" aria-label="Selected designs">
+              <b>{selectedDesigns.length} selected</b>
+              <button className="modal-btn" onClick={() => startMove(selectedDesigns)}>Move to folder…</button>
+              <button className="modal-btn home-danger" onClick={() => handleDeleteMany(selectedDesigns)}>Delete</button>
+              {selectedDesigns.length < designs.length && (
+                <button className="modal-btn" onClick={() => setSelected(new Set(designs.map((d) => d.id)))}>Select all {designs.length}</button>
+              )}
+              <button className="modal-btn" onClick={() => setSelected(new Set())}>Clear</button>
+            </div>
+          )}
+
           {designs.length > 0 && (
             <div className="home-grid">
               {designs.map((p) => {
@@ -396,15 +533,24 @@ export function HomePage({
                 return (
                   <div
                     key={p.id}
-                    className={`home-card${p.id === currentProjectId ? " current" : ""}`}
-                    draggable
-                    onDragStart={(e) => {
-                      e.dataTransfer.setData("text/x-shapeforge-design", p.id);
-                      e.dataTransfer.effectAllowed = "move";
-                    }}
-                    onDragEnd={() => setDropTarget("none")}
+                    className={`home-card${p.id === currentProjectId ? " current" : ""}${drag?.ids.includes(p.id) ? " lifted" : ""}${selected.has(p.id) ? " selected" : ""}`}
+                    onPointerDown={(e) => beginPress(e, p, thumb)}
+                    onContextMenu={(e) => openMenu(e, { kind: "design", project: p })}
                   >
-                    <button className="home-thumb" onClick={() => handleOpen(p)} title={`Open ${p.name}`}>
+                    <button
+                      className={`home-check${selected.has(p.id) ? " on" : ""}`}
+                      role="checkbox"
+                      aria-checked={selected.has(p.id)}
+                      aria-label={`Select ${p.name}`}
+                      onClick={() => toggleSelected(p.id)}
+                    >
+                      {selected.has(p.id) ? "✓" : ""}
+                    </button>
+                    <button
+                      className="home-thumb"
+                      onClick={(e) => (e.ctrlKey || e.metaKey ? toggleSelected(p.id) : handleOpen(p))}
+                      title={`Open ${p.name}`}
+                    >
                       {thumb ? (
                         <img src={thumb} alt="" draggable={false} />
                       ) : (
@@ -423,10 +569,15 @@ export function HomePage({
                       {(searching || view.kind !== "folder") && folderName && <span className="home-meta">In {folderName}</span>}
                       <span className={`home-tag ${where}`}>{where === "draft" ? "Not saved yet" : "This browser"}</span>
                       <div className="home-actions">
+                        <button className="home-act" onClick={() => startRenameDesign(p)} title="Rename" aria-label={`Rename ${p.name}`}>
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                            <path d="M4 20h4L19 9l-4-4L4 16z" />
+                          </svg>
+                        </button>
                         <button className="home-act" onClick={() => duplicateProject(p.id)} title="Duplicate" aria-label={`Duplicate ${p.name}`}>
                           <DuplicateIcon className="home-act-icon" />
                         </button>
-                        <button className="home-act" onClick={() => startMove(p)} title="Move to folder" aria-label={`Move ${p.name} to a folder`}>
+                        <button className="home-act" onClick={() => startMove([p])} title="Move to folder" aria-label={`Move ${p.name} to a folder`}>
                           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                             <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
                             <path d="M9 13h6m-2.5-2.5L15 13l-2.5 2.5" />
@@ -450,12 +601,12 @@ export function HomePage({
 
       {nameDialog && (
         <div className="modal-backdrop" onClick={() => setNameDialog(null)}>
-          <div className="save-dialog" role="dialog" aria-label={nameDialog.mode === "new" ? "New folder" : "Rename folder"} onClick={(e) => e.stopPropagation()}>
-            <h2>{nameDialog.mode === "new" ? "New folder" : "Rename folder"}</h2>
+          <div className="save-dialog" role="dialog" aria-label={nameDialog.mode === "new" ? "New folder" : "Rename"} onClick={(e) => e.stopPropagation()}>
+            <h2>{nameDialog.mode === "new" ? "New folder" : nameDialog.mode === "renameDesign" ? "Rename design" : "Rename folder"}</h2>
             <input
               className="save-name"
               value={nameDraft}
-              placeholder="Folder name"
+              placeholder={nameDialog.mode === "renameDesign" ? "Design name" : "Folder name"}
               onChange={(e) => setNameDraft(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter") submitName();
@@ -471,10 +622,64 @@ export function HomePage({
         </div>
       )}
 
+      {drag && (
+        <>
+          <div className="home-ghost" style={{ left: drag.x + 14, top: drag.y + 14 }} aria-hidden="true">
+            {drag.thumb ? <img src={drag.thumb} alt="" /> : <div className="home-ghost-ph" />}
+            {drag.ids.length > 1 && <span className="home-ghost-count">{drag.ids.length}</span>}
+            <b>{drag.name}</b>
+          </div>
+          <div className="home-drag-hint" role="status">
+            {folders.length
+              ? `Drop ${drag.ids.length > 1 ? drag.name : `"${drag.name}"`} on a folder to move ${drag.ids.length > 1 ? "them" : "it"}. Drop on My designs to take ${drag.ids.length > 1 ? "them" : "it"} out of a folder.`
+              : "Make a folder with New folder, then drag designs into it."}
+          </div>
+        </>
+      )}
+
+      {menu && (
+        <div
+          className="home-menu"
+          role="menu"
+          style={{ left: Math.max(8, Math.min(menu.x, window.innerWidth - 210)), top: Math.max(8, Math.min(menu.y, window.innerHeight - 280)) }}
+        >
+          {menu.target.kind === "design" ? (
+            (() => {
+              const p = menu.target.project;
+              const group = selected.has(p.id) && selectedDesigns.length > 1 ? selectedDesigns : [p];
+              const many = group.length > 1;
+              return (
+                <>
+                  {!many && <button role="menuitem" onClick={() => { setMenu(null); handleOpen(p); }}>Open</button>}
+                  {!many && <button role="menuitem" onClick={() => { setMenu(null); startRenameDesign(p); }}>Rename…</button>}
+                  <button role="menuitem" onClick={() => { setMenu(null); startMove(group); }}>{many ? `Move ${group.length} designs…` : "Move to folder…"}</button>
+                  {!many && <button role="menuitem" onClick={() => { setMenu(null); duplicateProject(p.id); }}>Duplicate</button>}
+                  {!many && <button role="menuitem" onClick={() => { setMenu(null); handleDownload(p); }}>Download backup file</button>}
+                  <hr />
+                  <button role="menuitem" className="danger-item" onClick={() => { setMenu(null); handleDeleteMany(group); }}>{many ? `Delete ${group.length} designs` : "Delete"}</button>
+                </>
+              );
+            })()
+          ) : (
+            (() => {
+              const f = menu.target.folder;
+              return (
+                <>
+                  <button role="menuitem" onClick={() => { setMenu(null); setSearch(""); setView({ kind: "folder", id: f.id }); }}>Open</button>
+                  <button role="menuitem" onClick={() => { setMenu(null); startRename(f); }}>Rename…</button>
+                  <hr />
+                  <button role="menuitem" className="danger-item" onClick={() => { setMenu(null); handleDeleteFolder(f); }}>Delete folder</button>
+                </>
+              );
+            })()
+          )}
+        </div>
+      )}
+
       {moving && (
         <div className="modal-backdrop" onClick={() => setMoving(null)}>
           <div className="save-dialog" role="dialog" aria-label="Move to folder" onClick={(e) => e.stopPropagation()}>
-            <h2>Move "{moving.name}"</h2>
+            <h2>{moving.length > 1 ? `Move ${moving.length} designs` : `Move "${moving[0]?.name}"`}</h2>
             <div className="move-list">
               <label className={`move-row${moveTarget === null ? " on" : ""}`}>
                 <input type="radio" name="move-to" checked={moveTarget === null} onChange={() => setMoveTarget(null)} />

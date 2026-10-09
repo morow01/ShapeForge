@@ -723,6 +723,8 @@ interface DocState {
   renameProject: (name: string) => void;
   duplicateProject: (id: string) => string | null;
   deleteProject: (id: string) => boolean;
+  /** Renames any design, not just the open one. */
+  renameProjectById: (id: string, name: string) => void;
   createFolder: (name: string, parentId: string | null) => string;
   renameFolder: (id: string, name: string) => void;
   /** Deletes the folder only; its designs and folders move up one level. */
@@ -960,6 +962,21 @@ export const useDoc = create<DocState>()(
           set({ projects: remaining });
         }
         return true;
+      },
+
+      renameProjectById: (id, name) => {
+        const trimmed = name.trim();
+        if (!trimmed) return;
+        if (id === get().currentProjectId) {
+          get().renameProject(trimmed);
+          return;
+        }
+        flushSave();
+        const proj = loadProject(id);
+        if (!proj) return;
+        proj.name = trimmed;
+        saveProject(proj);
+        set({ projects: listProjects() });
       },
 
       createFolder: (name, parentId) => {
