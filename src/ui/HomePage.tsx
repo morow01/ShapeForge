@@ -4,7 +4,7 @@ import { binCount as countBin, collectFolderTree, exportProjectFile, hasProjectC
 import { BinView } from "./BinView";
 import { VersionHistoryDialog } from "./VersionHistoryDialog";
 import { EditDialog } from "./EditDialog";
-import { BinIcon, ClockIcon, CloudIcon, DraftIcon, FolderIcon, GridIcon, MonitorIcon, StarIcon, TagIcon } from "./NavIcons";
+import { BinIcon, ClockIcon, CloudIcon, CopyIcon, DownloadIcon, DraftIcon, EyeIcon, FolderIcon, GridIcon, HistoryIcon, MonitorIcon, MoveFolderIcon, OpenIcon, PencilIcon, StarIcon, TagIcon } from "./NavIcons";
 import { addToTagRegistry, cleanTag, loadTagRegistry, removeFromTagRegistry, sameTag, uniqueTags } from "../document/tags";
 import { TagManager } from "./TagManager";
 import type { FolderMeta, ProjectMeta } from "../document/types";
@@ -1140,16 +1140,16 @@ export function HomePage({
               const many = group.length > 1;
               return (
                 <>
-                  {!many && <button role="menuitem" onClick={() => { setMenu(null); handleOpen(p); }}>Open</button>}
-                  <button role="menuitem" onClick={() => { setMenu(null); setTagging(group); }}>{many ? `Edit ${group.length} designs…` : "Edit…"}</button>
-                  <button role="menuitem" onClick={() => { setMenu(null); startMove(group); }}>{many ? `Move ${group.length} designs…` : "Move to folder…"}</button>
+                  {!many && <button role="menuitem" onClick={() => { setMenu(null); handleOpen(p); }}><OpenIcon className="menu-icon" />Open</button>}
+                  <button role="menuitem" onClick={() => { setMenu(null); setTagging(group); }}><PencilIcon className="menu-icon" />{many ? `Edit ${group.length} designs…` : "Edit…"}</button>
+                  <button role="menuitem" onClick={() => { setMenu(null); startMove(group); }}><MoveFolderIcon className="menu-icon" />{many ? `Move ${group.length} designs…` : "Move to folder…"}</button>
                   {!many && driveStatus === "signedIn" && locationOf(p) === "drive" && (
-                    <button role="menuitem" onClick={() => { setMenu(null); setHistoryFor(p.id); }}>Version history…</button>
+                    <button role="menuitem" onClick={() => { setMenu(null); setHistoryFor(p.id); }}><HistoryIcon className="menu-icon" />Version history…</button>
                   )}
-                  {!many && <button role="menuitem" onClick={() => { setMenu(null); duplicateProject(p.id); }}>Duplicate</button>}
-                  {!many && <button role="menuitem" onClick={() => { setMenu(null); handleDownload(p); }}>Download backup file</button>}
+                  {!many && <button role="menuitem" onClick={() => { setMenu(null); duplicateProject(p.id); }}><CopyIcon className="menu-icon" />Duplicate</button>}
+                  {!many && <button role="menuitem" onClick={() => { setMenu(null); handleDownload(p); }}><DownloadIcon className="menu-icon" />Download backup file</button>}
                   <hr />
-                  <button role="menuitem" className="danger-item" onClick={() => { setMenu(null); handleDeleteMany(group); }}>{many ? `Delete ${group.length} designs` : "Delete"}</button>
+                  <button role="menuitem" className="danger-item" onClick={() => { setMenu(null); handleDeleteMany(group); }}><BinIcon className="menu-icon" />{many ? `Delete ${group.length} designs` : "Delete"}</button>
                 </>
               );
             })()
@@ -1158,9 +1158,9 @@ export function HomePage({
               const tag = menu.target.tag;
               return (
                 <>
-                  <button role="menuitem" onClick={() => { setMenu(null); toggleTagFilter(tag); }}>Show or hide designs with this tag</button>
+                  <button role="menuitem" onClick={() => { setMenu(null); toggleTagFilter(tag); }}><EyeIcon className="menu-icon" />Show or hide designs with this tag</button>
                   <hr />
-                  <button role="menuitem" className="danger-item" onClick={() => { setMenu(null); void handleDeleteTag(tag); }}>Delete tag…</button>
+                  <button role="menuitem" className="danger-item" onClick={() => { setMenu(null); void handleDeleteTag(tag); }}><BinIcon className="menu-icon" />Delete tag…</button>
                 </>
               );
             })()
@@ -1169,10 +1169,10 @@ export function HomePage({
               const f = menu.target.folder;
               return (
                 <>
-                  <button role="menuitem" onClick={() => { setMenu(null); setSearch(""); setView({ kind: "folder", id: f.id }); }}>Open</button>
-                  <button role="menuitem" onClick={() => { setMenu(null); startRename(f); }}>Rename…</button>
+                  <button role="menuitem" onClick={() => { setMenu(null); setSearch(""); setView({ kind: "folder", id: f.id }); }}><OpenIcon className="menu-icon" />Open</button>
+                  <button role="menuitem" onClick={() => { setMenu(null); startRename(f); }}><PencilIcon className="menu-icon" />Rename…</button>
                   <hr />
-                  <button role="menuitem" className="danger-item" onClick={() => { setMenu(null); handleDeleteFolder(f); }}>Delete folder</button>
+                  <button role="menuitem" className="danger-item" onClick={() => { setMenu(null); handleDeleteFolder(f); }}><BinIcon className="menu-icon" />Delete folder</button>
                 </>
               );
             })()

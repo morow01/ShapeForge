@@ -5703,3 +5703,10 @@ button.stepper-btn:disabled {
 .home-page.is-dragging .home-card[data-drop-design] { outline: 2px dashed #00a7a5; outline-offset: -3px; }
 .home-page.is-dragging .home-card.tag-drop { outline: 2px solid #00a7a5; background: #eefaf9; }
 .home-toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); z-index: 1200; background: #1f2a33; color: #fff; font-size: 13px; padding: 9px 16px; border-radius: 999px; box-shadow: 0 6px 20px rgba(15,23,42,0.3); max-width: 80vw; text-align: center; }
+
+/* Icons in the right-click menus. */
+.home-menu { width: 224px; }
+.home-menu button { display: flex; align-items: center; gap: 11px; text-align: left; }
+.home-menu .menu-icon { flex-shrink: 0; color: #7d8b96; }
+.home-menu button:hover .menu-icon { color: #00807e; }
+.home-menu .danger-item .menu-icon, .home-menu .danger-item:hover .menu-icon { color: #b42318; }
