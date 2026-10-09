@@ -113,6 +113,7 @@ export function HomePage({
   const renameFolder = useDoc((s) => s.renameFolder);
   const deleteFolder = useDoc((s) => s.deleteFolder);
   const moveProjectToFolder = useDoc((s) => s.moveProjectToFolder);
+  const moveProjectsToLocation = useDoc((s) => s.moveProjectsToLocation);
   const renameProjectById = useDoc((s) => s.renameProjectById);
 
   const [search, setSearch] = useState("");
@@ -550,6 +551,15 @@ export function HomePage({
                   <button className="home-link" onClick={() => void syncNow()} disabled={driveBusy}>Sync now</button>
                   <button className="home-link" onClick={() => signOut()}>Sign out</button>
                 </div>
+                {drafts.length + kept.length > 0 && (
+                  <button
+                    className="home-link"
+                    title="Uploads every design kept in this browser, with its folders, to your Google Drive"
+                    onClick={() => moveProjectsToLocation([...kept, ...drafts].filter((p) => p.objectCount > 0).map((p) => p.id), "drive")}
+                  >
+                    Move all {kept.length + drafts.length} to Drive
+                  </button>
+                )}
               </div>
             </>
           ) : !driveConfigured ? (
@@ -633,6 +643,11 @@ export function HomePage({
             <div className="home-selbar" role="toolbar" aria-label="Selected designs">
               <b>{selectedDesigns.length} selected</b>
               <button className="modal-btn" onClick={() => startMove(selectedDesigns)}>Move to folder…</button>
+              {driveStatus === "signedIn" && selectedDesigns.some((p) => locationOf(p) !== "drive") && (
+                <button className="modal-btn" onClick={() => { moveProjectsToLocation(selectedDesigns.map((d) => d.id), "drive"); setSelected(new Set()); }}>
+                  Keep in Google Drive
+                </button>
+              )}
               <button className="modal-btn home-danger" onClick={() => handleDeleteMany(selectedDesigns)}>Delete</button>
               {selectedDesigns.length < designs.length && (
                 <button className="modal-btn" onClick={() => setSelected(new Set(designs.map((d) => d.id)))}>Select all {designs.length}</button>

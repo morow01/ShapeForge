@@ -744,6 +744,7 @@ interface DocState {
   /** Chooses where the open design is kept. A new design starts as a draft, which
    *  autosaves in this browser but has not been given a home. */
   saveCurrentTo: (location: ProjectLocation) => void;
+  moveProjectsToLocation: (ids: string[], location: ProjectLocation) => void;
   exportCurrentProject: () => Promise<void>;
   importProjectFile: (file: File) => Promise<boolean>;
   importProjectData: (data: ProjectData) => string;
@@ -1025,6 +1026,15 @@ export const useDoc = create<DocState>()(
         setProjectFolder(projectId, folderId);
         set({ projects: listProjects() });
         driveHooks.onProjectChanged?.(projectId);
+      },
+
+      moveProjectsToLocation: (ids, location) => {
+        flushSave();
+        for (const id of ids) {
+          if (!setProjectLocation(id, location)) continue;
+          driveHooks.onProjectChanged?.(id);
+        }
+        set({ projects: listProjects() });
       },
 
       saveCurrentTo: (location) => {

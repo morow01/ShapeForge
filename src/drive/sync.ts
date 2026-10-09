@@ -447,6 +447,8 @@ export async function runSync<T>(job: () => Promise<T>): Promise<T | undefined> 
 export async function syncNow(): Promise<void> {
   await runSync(async () => {
     await flushPending();
+    // Folders made before Drive was connected (or still empty) get their Drive twin too.
+    for (const f of listFolders()) if (!f.driveId) await driveFolderFor(f.id);
     await pullIndex(useDoc.getState().currentProjectId);
     useDoc.getState().refreshProjectsList();
     useDoc.getState().refreshFolders();
