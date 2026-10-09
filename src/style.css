@@ -5216,3 +5216,19 @@ button.stepper-btn:disabled {
 @media (max-width: 1180px) {
   .topbar-home-btn span { display: none; }
 }
+.home-top .modal-btn, .save-buttons .modal-btn { width: auto; flex: 0 0 auto; }
+.home-clean {
+  margin: 12px 4px 0;
+  padding: 7px 10px;
+  border: 1px dashed #c8d3da;
+  border-radius: 8px;
+  background: transparent;
+  color: #6c7a85;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  text-align: left;
+  min-height: 0;
+  width: auto;
+}
+.home-clean:hover { background: #fdf3f2; color: #b42318; border-color: #f0c1bd; }

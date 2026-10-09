@@ -108,7 +108,7 @@ import { MAX_BUILD_SOURCES, PRIMITIVES, PRIMITIVE_CATEGORIES, SKETCH_CURVE_SEGME
 import { findAssemblyOwner, findNode, parentOf, resolveNodeTransparent, resolveNodeColor, updateNode, walk } from "./document/tree";
 import { bakeScale } from "./document/bake";
 import { putBlob } from "./document/blobStore";
-import { loadCameraState, locationOf, saveThumbnail } from "./document/persist";
+import { loadCameraState, loadThumbnail, locationOf, saveThumbnail } from "./document/persist";
 import type { EditOp, GroupNode, ImportNode, PrimitiveKind, SceneNode, ShellOp, HollowRim, ResizeFaceOp, SketchData, Vec3 } from "./document/types";
 import { RETRYABLE_MESH_ERROR } from "./kernel/types";
 import type { EditSpec, ExportQuality, NodeSpec, PreviewBuild, ScenePart } from "./kernel/types";
@@ -482,6 +482,7 @@ export function App() {
   // The app opens on the Home page; the editor is already loaded behind it.
   const [homeOpen, setHomeOpen] = useState(true);
   const [saveDialogOpen, setSaveDialogOpen] = useState(false);
+  const [thumbVersion, setThumbVersion] = useState(0);
   const currentProjectId = useDoc((s) => s.currentProjectId);
   const projectList = useDoc((s) => s.projects);
   const currentLocation = locationOf(projectList.find((p) => p.id === currentProjectId) ?? {});
@@ -3607,6 +3608,20 @@ export function App() {
     }
     setHomeOpen(true);
   }, []);
+
+  // The design that is open when the app starts never gets "left", so its card would
+  // have no picture. Once it has finished building behind the Home page, take one.
+  useEffect(() => {
+    if (!homeOpen || sceneBusy || !nodes.length || loadThumbnail(currentProjectId)) return;
+    const t = window.setTimeout(() => {
+      const shot = sceneRef.current?.captureThumbnail();
+      if (shot) {
+        saveThumbnail(currentProjectId, shot);
+        setThumbVersion((n) => n + 1);
+      }
+    }, 600);
+    return () => window.clearTimeout(t);
+  }, [homeOpen, sceneBusy, nodes.length, currentProjectId]);
 
   /** Save: a design with no home yet asks where to keep it; any other just saves
    *  where it already is. */
@@ -8173,6 +8188,7 @@ export function App() {
         open={homeOpen}
         onClose={() => setHomeOpen(false)}
         onNewDesign={newFromHome}
+        thumbVersion={thumbVersion}
         onProjectLoadStart={(name) => {
           setError(null);
           setFileOperation({

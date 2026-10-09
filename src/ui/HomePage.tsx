@@ -24,6 +24,8 @@ type HomePageProps = {
   /** Close Home and go to the editor, which is showing whichever design is open. */
   onClose: () => void;
   onNewDesign: () => void;
+  /** Changes when a new preview picture has been saved, so the cards redraw. */
+  thumbVersion?: number;
   onProjectLoadStart?: (name: string) => void;
   onProjectLoadApplied?: () => void;
   onProjectLoadFailed?: () => void;
@@ -38,6 +40,7 @@ export function HomePage({
   open,
   onClose,
   onNewDesign,
+  thumbVersion = 0,
   onProjectLoadStart,
   onProjectLoadApplied,
   onProjectLoadFailed,
@@ -55,6 +58,7 @@ export function HomePage({
 
   if (!open) return null;
 
+  const empties = projects.filter((p) => p.objectCount === 0 && p.id !== currentProjectId);
   const drafts = projects.filter((p) => locationOf(p) === "draft");
   const kept = projects.filter((p) => locationOf(p) === "browser");
   const needle = search.toLowerCase().trim();
@@ -85,6 +89,12 @@ export function HomePage({
     if (confirm(`Delete "${p.name}"? This cannot be undone.`)) deleteProject(p.id);
   };
 
+  const handleClean = () => {
+    if (confirm(`Delete ${empties.length} empty ${empties.length === 1 ? "design" : "designs"} with no shapes in them?`)) {
+      for (const p of empties) deleteProject(p.id);
+    }
+  };
+
   const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = "";
@@ -110,7 +120,7 @@ export function HomePage({
       : "No designs yet. Create one to get started.";
 
   return (
-    <div className="home-page" role="dialog" aria-label="My designs">
+    <div className="home-page" role="dialog" aria-label="My designs" data-previews={thumbVersion}>
       <header className="home-top">
         <div className="home-brand">
           <span className="brand-mark">S</span>
@@ -155,6 +165,11 @@ export function HomePage({
             <span>Google Drive</span>
             <span className="home-soon">Soon</span>
           </button>
+          {empties.length > 0 && (
+            <button className="home-clean" onClick={handleClean} title="Removes designs that have no shapes in them">
+              Clear {empties.length} empty {empties.length === 1 ? "design" : "designs"}
+            </button>
+          )}
           <p className="home-side-note">
             Designs in this browser live only on this computer. Download a backup file to keep a copy elsewhere.
           </p>
