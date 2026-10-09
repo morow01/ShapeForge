@@ -14,6 +14,7 @@ import { useConfirm } from "./ConfirmDialog";
 import { DriveSetupDialog } from "./DriveSetupDialog";
 import { connectDrive } from "../drive/actions";
 import { lastSignOut, signOut, wasConnected } from "../drive/auth";
+import { hasBuiltInClientId, hasClientIdOverride } from "../drive/config";
 import { fetchProject, runSync, syncNow } from "../drive/sync";
 import { useDrive } from "../drive/state";
 import { FolderOpenIcon, PlusIcon } from "./icons";
@@ -918,7 +919,10 @@ export function HomePage({
                   </span>
                 ) : null;
               })()}
-              <button className="home-link" onClick={() => setSetupOpen(true)}>Change client ID</button>
+              {/* Only for a build without its own sign-in ID (development), or to undo a pasted one. */}
+              {(!hasBuiltInClientId() || hasClientIdOverride()) && (
+                <button className="home-link" onClick={() => setSetupOpen(true)}>Change client ID</button>
+              )}
             </div>
           )}
 
