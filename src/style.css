@@ -5626,3 +5626,15 @@ button.stepper-btn:disabled {
 .home-more:hover { background: #fff; color: #00807e; }
 .home-more svg { display: block; }
 .home-page.is-dragging .home-more { visibility: hidden; }
+
+/* Quick actions float over the bottom of the thumbnail on hover, so cards need no spare room for them. */
+.home-more { display: none; }
+.home-thumbwrap { position: relative; display: block; }
+.home-thumbwrap .home-thumb { width: 100%; }
+.home-hoverbar { position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%); display: flex; align-items: center; gap: 2px; padding: 3px; border-radius: 10px; background: rgba(255,255,255,0.94); box-shadow: 0 1px 6px rgba(15,23,42,0.18); opacity: 0; pointer-events: none; transition: opacity 0.12s; z-index: 2; }
+.home-card:hover .home-hoverbar, .home-card:focus-within .home-hoverbar { opacity: 1; pointer-events: auto; }
+.home-hb { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; min-height: 0; padding: 0; border: 0; border-radius: 7px; background: transparent; color: #52616c; cursor: pointer; }
+.home-hb:hover { background: #e6f7f7; color: #00807e; }
+.home-hb.delete:hover { background: #fdf0ef; color: #b42318; }
+.home-hb svg { display: block; }
+.home-page.is-dragging .home-hoverbar { visibility: hidden; }

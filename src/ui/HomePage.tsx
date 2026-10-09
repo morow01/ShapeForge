@@ -545,7 +545,7 @@ export function HomePage({
 
   const beginPress = (e: React.PointerEvent, p: ProjectMeta, thumb: string | null) => {
     if (e.button !== 0 || e.pointerType === "touch") return;
-    if ((e.target as Element).closest(".home-actions, .home-check, .home-star, .home-more, .home-tagchip")) return;
+    if ((e.target as Element).closest(".home-actions, .home-check, .home-star, .home-hoverbar, .home-tagchip")) return;
     // Dragging one of several selected designs takes all of them.
     const group = selected.has(p.id) && selectedDesigns.length > 1 ? selectedDesigns.map((d) => d.id) : [p.id];
     const label = group.length > 1 ? `${group.length} designs` : p.name;
@@ -862,20 +862,6 @@ export function HomePage({
                       {selected.has(p.id) ? "✓" : ""}
                     </button>
                     <button
-                      className="home-more"
-                      aria-label={`More actions for ${p.name}`}
-                      aria-haspopup="menu"
-                      title="More"
-                      onClick={(e) => {
-                        const r = e.currentTarget.getBoundingClientRect();
-                        setMenu({ x: Math.max(8, r.right - 180), y: r.bottom + 4, target: { kind: "design", project: p } });
-                      }}
-                    >
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                        <circle cx="5.5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="18.5" cy="12" r="1.7" />
-                      </svg>
-                    </button>
-                    <button
                       className={`home-star${p.starred ? " on" : ""}`}
                       aria-pressed={!!p.starred}
                       aria-label={p.starred ? `Remove the star from ${p.name}` : `Star ${p.name}`}
@@ -884,20 +870,48 @@ export function HomePage({
                     >
                       <StarIcon size={17} />
                     </button>
-                    <button
-                      className="home-thumb"
-                      onClick={(e) => (e.ctrlKey || e.metaKey ? toggleSelected(p.id) : handleOpen(p))}
-                      title={`Open ${p.name}`}
-                    >
-                      {thumb ? (
-                        <img src={thumb} alt="" draggable={false} />
-                      ) : (
-                        <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" aria-hidden="true">
-                          <path d="M12 3 4 7.5v9L12 21l8-4.5v-9z" />
-                          <path d="M4 7.5 12 12l8-4.5M12 12v9" />
-                        </svg>
-                      )}
-                    </button>
+                    <div className="home-thumbwrap">
+                      <button
+                        className="home-thumb"
+                        onClick={(e) => (e.ctrlKey || e.metaKey ? toggleSelected(p.id) : handleOpen(p))}
+                        title={`Open ${p.name}`}
+                      >
+                        {thumb ? (
+                          <img src={thumb} alt="" draggable={false} />
+                        ) : (
+                          <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" aria-hidden="true">
+                            <path d="M12 3 4 7.5v9L12 21l8-4.5v-9z" />
+                            <path d="M4 7.5 12 12l8-4.5M12 12v9" />
+                          </svg>
+                        )}
+                      </button>
+                      <div className="home-hoverbar" role="toolbar" aria-label={`Actions for ${p.name}`}>
+                        <button className="home-hb" onClick={() => startRenameDesign(p)} title="Rename" aria-label={`Rename ${p.name}`}>
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z" /></svg>
+                        </button>
+                        <button className="home-hb" onClick={() => setTagging([p])} title="Tags" aria-label={`Tags for ${p.name}`}>
+                          <TagIcon size={15} />
+                        </button>
+                        <button className="home-hb" onClick={() => startMove([p])} title="Move to folder" aria-label={`Move ${p.name} to a folder`}>
+                          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /><path d="M9 13h6m-2.5-2.5L15 13l-2.5 2.5" /></svg>
+                        </button>
+                        <button className="home-hb delete" onClick={() => handleDelete(p)} title="Delete" aria-label={`Delete ${p.name}`}>
+                          <TrashIcon className="home-act-icon" />
+                        </button>
+                        <button
+                          className="home-hb"
+                          aria-haspopup="menu"
+                          title="More"
+                          aria-label={`More actions for ${p.name}`}
+                          onClick={(e) => {
+                            const r = e.currentTarget.getBoundingClientRect();
+                            setMenu({ x: Math.max(8, r.right - 180), y: r.bottom + 4, target: { kind: "design", project: p } });
+                          }}
+                        >
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5.5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="18.5" cy="12" r="1.7" /></svg>
+                        </button>
+                      </div>
+                    </div>
                     <div className="home-cap">
                       <button className="home-name" onClick={() => handleOpen(p)} title={p.name}>{p.name}</button>
                       <span className="home-meta">
