@@ -91,7 +91,7 @@ type MenuState = {
 } | null;
 
 /** A design being dragged to a folder: follows the pointer until it is let go. */
-type DragState = { ids: string[]; name: string; thumb: string | null; x: number; y: number } | null;
+type DragState = { ids: string[]; name: string; thumb: string | null; x: number; y: number; /** Set when a tag, not designs, is being dragged. */ tag?: string } | null;
 
 const DRAG_START_DISTANCE = 6;
 
@@ -176,7 +176,15 @@ export function HomePage({
   const [drag, setDrag] = useState<DragState>(null);
   const dragRef = useRef<DragState>(null);
   dragRef.current = drag;
-  const pressRef = useRef<{ ids: string[]; name: string; thumb: string | null; x: number; y: number } | null>(null);
+  const pressRef = useRef<{ ids: string[]; name: string; thumb: string | null; x: number; y: number; tag?: string } | null>(null);
+  const selectedIdsRef = useRef<string[]>([]);
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimer = useRef<number | undefined>(undefined);
+  const showToast = (text: string) => {
+    setToast(text);
+    window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => setToast(null), 2600);
+  };
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [historyFor, setHistoryFor] = useState<string | null>(null);
   const [tagging, setTagging] = useState<ProjectMeta[] | null>(null);
@@ -251,7 +259,11 @@ export function HomePage({
   // not a target, and does nothing at all with a pen or finger.
   useEffect(() => {
     if (!open) return;
-    const dropAt = (x: number, y: number): string | null | "none" => {
+    const dropAt = (x: number, y: number, tagDrag: boolean): string | null | "none" => {
+      if (tagDrag) {
+        const card = document.elementFromPoint(x, y)?.closest("[data-drop-design]") as HTMLElement | null;
+        return card?.dataset.dropDesign ? `design:${card.dataset.dropDesign}` : "none";
+      }
       const el = document.elementFromPoint(x, y)?.closest("[data-drop]") as HTMLElement | null;
       if (!el) return "none";
       const value = el.dataset.drop;
@@ -262,18 +274,34 @@ export function HomePage({
       if (!press) return;
       if (!dragRef.current && Math.hypot(e.clientX - press.x, e.clientY - press.y) < DRAG_START_DISTANCE) return;
       setMenu(null);
-      setDrag({ ids: press.ids, name: press.name, thumb: press.thumb, x: e.clientX, y: e.clientY });
-      setDropTarget(dropAt(e.clientX, e.clientY));
+      setDrag({ ids: press.ids, name: press.name, thumb: press.thumb, x: e.clientX, y: e.clientY, tag: press.tag });
+      setDropTarget(dropAt(e.clientX, e.clientY, !!press.tag));
     };
     const onUp = (e: PointerEvent) => {
       const press = pressRef.current;
       pressRef.current = null;
       if (!press || !dragRef.current) return;
-      const target = dropAt(e.clientX, e.clientY);
+      const target = dropAt(e.clientX, e.clientY, !!press.tag);
       suppressClickRef.current = true;
       window.setTimeout(() => { suppressClickRef.current = false; }, 80);
       setDrag(null);
       setDropTarget("none");
+      if (press.tag) {
+        // A tag dropped on a design gives it that tag; on one of several picked designs, gives it to all of them.
+        if (e.type === "pointerup" && typeof target === "string" && target.startsWith("design:")) {
+          const id = target.slice("design:".length);
+          const picked = selectedIdsRef.current;
+          const ids = picked.length > 1 && picked.includes(id) ? picked : [id];
+          const ok = useDoc.getState().editTags(ids, [press.tag], []);
+          const names = useDoc.getState().projects.filter((p) => ids.includes(p.id)).map((p) => p.name);
+          showToast(
+            ok
+              ? `Added "${press.tag}" to ${ids.length > 1 ? `${ids.length} designs` : `"${names[0] ?? "the design"}"`}`
+              : `Couldn't add "${press.tag}": tags are kept short so they fit in Google Drive, and that design has too many.`,
+          );
+        }
+        return;
+      }
       if (e.type === "pointerup" && target !== "none") {
         for (const id of press.ids) useDoc.getState().moveProjectToFolder(id, target);
         // They have moved, so they are no longer "picked".
@@ -363,6 +391,7 @@ export function HomePage({
   // Only designs that are on screen count as selected, so a bulk action can never touch
   // something in a folder you have since left.
   const selectedDesigns = designs.filter((p) => selected.has(p.id));
+  selectedIdsRef.current = selectedDesigns.map((p) => p.id);
   const toggleSelected = (id: string) =>
     setSelected((prev) => {
       const next = new Set(prev);
@@ -554,8 +583,15 @@ export function HomePage({
    *  dragging, a place every dragged design is already in is left unmarked: dropping there
    *  would change nothing, so it should not look like a target. */
   const dropProps = (folderId: string | null): { "data-drop"?: string } => {
+    if (drag?.tag) return {};
     if (drag && drag.ids.every((id) => (projects.find((p) => p.id === id)?.folderId ?? null) === folderId)) return {};
     return { "data-drop": folderId ?? "root" };
+  };
+
+  /** Pressing a tag in the sidebar and moving makes it draggable onto designs. A plain click still ticks it. */
+  const beginTagPress = (e: React.PointerEvent, tag: string) => {
+    if (e.button !== 0 || e.pointerType === "touch") return;
+    pressRef.current = { ids: [], name: tag, thumb: null, tag, x: e.clientX, y: e.clientY };
   };
 
   const beginPress = (e: React.PointerEvent, p: ProjectMeta, thumb: string | null) => {
@@ -759,7 +795,8 @@ export function HomePage({
                 role="checkbox"
                 aria-checked={checked}
                 className={`${navClass(checked)}${count === 0 ? " unused" : ""}`}
-                onClick={() => toggleTagFilter(tag)}
+                onPointerDown={(e) => beginTagPress(e, tag)}
+                onClick={() => { if (!suppressClickRef.current) toggleTagFilter(tag); }}
                 onContextMenu={(e) => openMenu(e, { kind: "tag", tag })}
                 title={checked ? "Click to untick" : count === 0 ? "No designs use this tag yet" : "Click to show designs with this tag"}
               >
@@ -955,7 +992,8 @@ export function HomePage({
                 return (
                   <div
                     key={p.id}
-                    className={`home-card${p.id === currentProjectId ? " current" : ""}${drag?.ids.includes(p.id) ? " lifted" : ""}${selected.has(p.id) ? " selected" : ""}`}
+                    className={`home-card${p.id === currentProjectId ? " current" : ""}${drag?.ids.includes(p.id) ? " lifted" : ""}${selected.has(p.id) ? " selected" : ""}${dropTarget === `design:${p.id}` ? " tag-drop" : ""}`}
+                    {...(drag?.tag && !(p.tags ?? []).some((t) => sameTag(t, drag.tag!)) ? { "data-drop-design": p.id } : {})}
                     onPointerDown={(e) => beginPress(e, p, thumb)}
                     onContextMenu={(e) => openMenu(e, { kind: "design", project: p })}
                   >
@@ -1065,18 +1103,29 @@ export function HomePage({
 
       {drag && (
         <>
-          <div className="home-ghost" style={{ left: drag.x + 14, top: drag.y + 14 }} aria-hidden="true">
-            {drag.thumb ? <img src={drag.thumb} alt="" /> : <div className="home-ghost-ph" />}
-            {drag.ids.length > 1 && <span className="home-ghost-count">{drag.ids.length}</span>}
-            <b>{drag.name}</b>
-          </div>
+          {drag.tag ? (
+            <div className="home-ghost tag-ghost" style={{ left: drag.x + 14, top: drag.y + 14 }} aria-hidden="true">
+              <TagIcon size={12} />
+              <b>{drag.tag}</b>
+            </div>
+          ) : (
+            <div className="home-ghost" style={{ left: drag.x + 14, top: drag.y + 14 }} aria-hidden="true">
+              {drag.thumb ? <img src={drag.thumb} alt="" /> : <div className="home-ghost-ph" />}
+              {drag.ids.length > 1 && <span className="home-ghost-count">{drag.ids.length}</span>}
+              <b>{drag.name}</b>
+            </div>
+          )}
           <div className="home-drag-hint" role="status">
-            {folders.length
+            {drag.tag
+              ? `Drop on a design to add the tag "${drag.tag}". Picked designs all get it.`
+              : folders.length
               ? `Drop ${drag.ids.length > 1 ? drag.name : `"${drag.name}"`} on a folder to move ${drag.ids.length > 1 ? "them" : "it"}. Drop on All designs to take ${drag.ids.length > 1 ? "them" : "it"} out of a folder.`
               : "Make a folder with New folder, then drag designs into it."}
           </div>
         </>
       )}
+
+      {toast && <div className="home-toast" role="status">{toast}</div>}
 
       {menu && (
         <div

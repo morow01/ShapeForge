@@ -5697,3 +5697,9 @@ button.stepper-btn:disabled {
   .tags-body, .home-chevron { transition: none; }
   .tags-body.closed .tags-body-inner { transition: none; }
 }
+
+/* Dragging a tag from the sidebar onto a design. */
+.tag-ghost { display: flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 999px; background: #d7f1f0; border: 1px solid #00a7a5; color: #006b69; box-shadow: 0 4px 14px rgba(15,23,42,0.2); }
+.home-page.is-dragging .home-card[data-drop-design] { outline: 2px dashed #00a7a5; outline-offset: -3px; }
+.home-page.is-dragging .home-card.tag-drop { outline: 2px solid #00a7a5; background: #eefaf9; }
+.home-toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); z-index: 1200; background: #1f2a33; color: #fff; font-size: 13px; padding: 9px 16px; border-radius: 999px; box-shadow: 0 6px 20px rgba(15,23,42,0.3); max-width: 80vw; text-align: center; }
