@@ -30,9 +30,11 @@ import {
   setProjectFolder,
   setProjectLocation,
   moveToBin,
+  updateProjectMeta,
   collectFolderTree,
   binFolderTree,
 } from "./persist";
+import { sameTag, tagsFitDrive, uniqueTags } from "./tags";
 import {
   TRI_BY_ANGLES,
   applyTriangleAngle,
@@ -748,6 +750,10 @@ interface DocState {
    *  autosaves in this browser but has not been given a home. */
   saveCurrentTo: (location: ProjectLocation) => void;
   moveProjectsToLocation: (ids: string[], location: ProjectLocation) => void;
+  /** Stars every design given, or removes the star when they all have one already. */
+  toggleStar: (ids: string[]) => void;
+  /** Adds and removes tags on several designs at once. False if a design could not hold them all. */
+  editTags: (ids: string[], add: string[], remove: string[]) => boolean;
   exportCurrentProject: () => Promise<void>;
   importProjectFile: (file: File) => Promise<boolean>;
   importProjectData: (data: ProjectData) => string;
@@ -959,6 +965,7 @@ export const useDoc = create<DocState>()(
         const sourceMeta = get().projects.find((p) => p.id === id);
         if (sourceMeta?.location) setProjectLocation(newId, sourceMeta.location);
         if (sourceMeta?.folderId) setProjectFolder(newId, sourceMeta.folderId);
+        if (sourceMeta?.tags?.length) updateProjectMeta(newId, (m) => { m.tags = [...sourceMeta.tags!]; });
         set({ projects: listProjects() });
         driveHooks.onProjectChanged?.(newId);
         return newId;
@@ -1034,6 +1041,38 @@ export const useDoc = create<DocState>()(
         setProjectFolder(projectId, folderId);
         set({ projects: listProjects() });
         driveHooks.onProjectChanged?.(projectId);
+      },
+
+      toggleStar: (ids) => {
+        const metas = listProjects().filter((p) => ids.includes(p.id));
+        const star = !metas.every((p) => p.starred);
+        for (const p of metas) {
+          updateProjectMeta(p.id, (m) => {
+            if (star) m.starred = true;
+            else delete m.starred;
+          });
+          driveHooks.onProjectChanged?.(p.id);
+        }
+        set({ projects: listProjects() });
+      },
+
+      editTags: (ids, add, remove) => {
+        let allFit = true;
+        for (const p of listProjects().filter((x) => ids.includes(x.id))) {
+          const kept = (p.tags ?? []).filter((t) => !remove.some((r) => sameTag(r, t)));
+          const next = uniqueTags([...kept, ...add]);
+          if (!tagsFitDrive(next)) {
+            allFit = false;
+            continue;
+          }
+          updateProjectMeta(p.id, (m) => {
+            if (next.length) m.tags = next;
+            else delete m.tags;
+          });
+          driveHooks.onProjectChanged?.(p.id);
+        }
+        set({ projects: listProjects() });
+        return allFit;
       },
 
       moveProjectsToLocation: (ids, location) => {

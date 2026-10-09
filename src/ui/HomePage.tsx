@@ -3,6 +3,8 @@ import { useDoc } from "../document/store";
 import { binCount as countBin, collectFolderTree, exportProjectFile, hasProjectContents, loadProject, loadThumbnail, locationOf } from "../document/persist";
 import { BinView } from "./BinView";
 import { VersionHistoryDialog } from "./VersionHistoryDialog";
+import { TagsDialog } from "./TagsDialog";
+import { sameTag, uniqueTags } from "../document/tags";
 import type { FolderMeta, ProjectMeta } from "../document/types";
 import { APP_NAME, APP_VERSION } from "../version";
 import { useConfirm } from "./ConfirmDialog";
@@ -26,7 +28,7 @@ function timeAgo(timestamp: number): string {
 }
 
 /** What the main area is showing: a folder (null = the top level) or a flat list. */
-type View = { kind: "folder"; id: string | null } | { kind: "recent" } | { kind: "draft" } | { kind: "browser" } | { kind: "drive" } | { kind: "bin" };
+type View = { kind: "folder"; id: string | null } | { kind: "recent" } | { kind: "draft" } | { kind: "browser" } | { kind: "drive" } | { kind: "bin" } | { kind: "starred" } | { kind: "tag"; tag: string };
 
 type HomePageProps = {
   open: boolean;
@@ -131,6 +133,8 @@ export function HomePage({
   const pressRef = useRef<{ ids: string[]; name: string; thumb: string | null; x: number; y: number } | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [historyFor, setHistoryFor] = useState<string | null>(null);
+  const [tagging, setTagging] = useState<ProjectMeta[] | null>(null);
+  const toggleStar = useDoc((s) => s.toggleStar);
   const { ask, dialog: confirmDialog } = useConfirm();
   const driveConfigured = useDrive((s) => s.configured);
   const driveStatus = useDrive((s) => s.status);
@@ -225,12 +229,15 @@ export function HomePage({
   const onDrive = projects.filter((p) => locationOf(p) === "drive");
   // A design known only from Drive's listing shows 0 shapes because it has not been fetched yet, not because it is empty.
   const binCount = countBin();
+  const starredList = projects.filter((p) => p.starred);
+  const allTags = uniqueTags(projects.flatMap((p) => p.tags ?? [])).sort((a, b) => a.localeCompare(b));
+  const tagCount = (tag: string) => projects.filter((p) => (p.tags ?? []).some((t) => sameTag(t, tag))).length;
   const empties = projects.filter((p) => p.objectCount === 0 && !p.remote && p.id !== currentProjectId);
 
   let designs: ProjectMeta[];
   let subfolders: FolderMeta[] = [];
   if (searching) {
-    designs = projects.filter((p) => p.name.toLowerCase().includes(needle));
+    designs = projects.filter((p) => p.name.toLowerCase().includes(needle) || (p.tags ?? []).some((t) => t.toLowerCase().includes(needle)));
   } else if (view.kind === "recent") {
     designs = projects.slice(0, 24);
   } else if (view.kind === "draft") {
@@ -241,6 +248,10 @@ export function HomePage({
     designs = onDrive;
   } else if (view.kind === "bin") {
     designs = [];
+  } else if (view.kind === "starred") {
+    designs = starredList;
+  } else if (view.kind === "tag") {
+    designs = projects.filter((p) => (p.tags ?? []).some((t) => sameTag(t, view.tag)));
   } else {
     designs = viewFolderId === null ? projects : projects.filter((p) => p.folderId === viewFolderId);
     subfolders = folders.filter((f) => f.parentId === viewFolderId).sort((a, b) => a.name.localeCompare(b.name));
@@ -272,7 +283,11 @@ export function HomePage({
             ? "Google Drive"
             : view.kind === "bin"
               ? "Bin"
-              : null;
+              : view.kind === "starred"
+                ? "Starred"
+                : view.kind === "tag"
+                  ? `Tag: ${view.tag}`
+                  : null;
 
   const handleOpen = async (p: ProjectMeta) => {
     if (suppressClickRef.current) return;
@@ -447,7 +462,7 @@ export function HomePage({
 
   const beginPress = (e: React.PointerEvent, p: ProjectMeta, thumb: string | null) => {
     if (e.button !== 0 || e.pointerType === "touch") return;
-    if ((e.target as Element).closest(".home-actions, .home-check")) return;
+    if ((e.target as Element).closest(".home-actions, .home-check, .home-star, .home-tagchip")) return;
     // Dragging one of several selected designs takes all of them.
     const group = selected.has(p.id) && selectedDesigns.length > 1 ? selectedDesigns.map((d) => d.id) : [p.id];
     const label = group.length > 1 ? `${group.length} designs` : p.name;
@@ -463,6 +478,10 @@ export function HomePage({
     ? "No designs match your search."
     : view.kind === "draft"
       ? "Nothing waiting to be saved."
+      : view.kind === "starred"
+        ? "Star a design to find it here quickly."
+        : view.kind === "tag"
+          ? "No designs have this tag any more."
       : view.kind === "folder" && viewFolderId
         ? "This folder is empty. Create a design here, or drag one in."
         : "No designs yet. Create one to get started.";
@@ -516,6 +535,11 @@ export function HomePage({
             <span>Recent</span>
           </button>
 
+          <button className={navClass(!searching && view.kind === "starred")} onClick={() => { setSearch(""); setView({ kind: "starred" }); }}>
+            <span>★ Starred</span>
+            <span className="home-count">{starredList.length}</span>
+          </button>
+
           <div className="home-side-head">
             <span>Folders</span>
             <button className="home-side-add" onClick={() => startNewFolder(null)} title="New folder" aria-label="New folder">
@@ -537,6 +561,22 @@ export function HomePage({
               <span className="home-count">{countIn(folder.id)}</span>
             </button>
           ))}
+
+          {allTags.length > 0 && (
+            <>
+              <div className="home-side-label">Tags</div>
+              {allTags.map((tag) => (
+                <button
+                  key={tag}
+                  className={navClass(!searching && view.kind === "tag" && sameTag(view.tag, tag))}
+                  onClick={() => { setSearch(""); setView({ kind: "tag", tag }); }}
+                >
+                  <span className="home-nav-name">{tag}</span>
+                  <span className="home-count">{tagCount(tag)}</span>
+                </button>
+              ))}
+            </>
+          )}
 
           <div className="home-side-label">Where they are</div>
           <button className={navClass(!searching && view.kind === "draft")} onClick={() => { setSearch(""); setView({ kind: "draft" }); }}>
@@ -651,6 +691,10 @@ export function HomePage({
             <div className="home-selbar" role="toolbar" aria-label="Selected designs">
               <b>{selectedDesigns.length} selected</b>
               <button className="modal-btn" onClick={() => startMove(selectedDesigns)}>Move to folder…</button>
+              <button className="modal-btn" onClick={() => toggleStar(selectedDesigns.map((d) => d.id))}>
+                {selectedDesigns.every((d) => d.starred) ? "Remove star" : "Star"}
+              </button>
+              <button className="modal-btn" onClick={() => setTagging(selectedDesigns)}>Tags…</button>
               <button className="modal-btn home-danger" onClick={() => handleDeleteMany(selectedDesigns)}>Delete</button>
               {selectedDesigns.length < designs.length && (
                 <button className="modal-btn" onClick={() => setSelected(new Set(designs.map((d) => d.id)))}>Select all {designs.length}</button>
@@ -682,6 +726,15 @@ export function HomePage({
                       {selected.has(p.id) ? "✓" : ""}
                     </button>
                     <button
+                      className={`home-star${p.starred ? " on" : ""}`}
+                      aria-pressed={!!p.starred}
+                      aria-label={p.starred ? `Remove the star from ${p.name}` : `Star ${p.name}`}
+                      title={p.starred ? "Remove star" : "Star"}
+                      onClick={() => toggleStar([p.id])}
+                    >
+                      {p.starred ? "★" : "☆"}
+                    </button>
+                    <button
                       className="home-thumb"
                       onClick={(e) => (e.ctrlKey || e.metaKey ? toggleSelected(p.id) : handleOpen(p))}
                       title={`Open ${p.name}`}
@@ -706,6 +759,16 @@ export function HomePage({
                         {p.id === currentProjectId ? " · open" : ""}
                       </span>
                       {(searching || view.kind !== "folder" || viewFolderId === null) && folderName && <span className="home-meta">In {folderName}</span>}
+                      {(p.tags ?? []).length > 0 && (
+                        <span className="home-tagrow">
+                          {(p.tags ?? []).slice(0, 3).map((t) => (
+                            <button key={t} className="home-tagchip" onClick={() => { setSearch(""); setView({ kind: "tag", tag: t }); }} title={`Show everything tagged ${t}`}>
+                              {t}
+                            </button>
+                          ))}
+                          {(p.tags ?? []).length > 3 && <span className="home-tagmore">+{(p.tags ?? []).length - 3}</span>}
+                        </span>
+                      )}
                       <span className={`home-tag ${where}`}>{where === "draft" ? "Not saved yet" : where === "drive" ? "Google Drive" : "This browser"}</span>
                       <div className="home-actions">
                         <button className="home-act" onClick={() => startRenameDesign(p)} title="Rename" aria-label={`Rename ${p.name}`}>
@@ -797,6 +860,10 @@ export function HomePage({
                   {!many && <button role="menuitem" onClick={() => { setMenu(null); handleOpen(p); }}>Open</button>}
                   {!many && <button role="menuitem" onClick={() => { setMenu(null); startRenameDesign(p); }}>Rename…</button>}
                   <button role="menuitem" onClick={() => { setMenu(null); startMove(group); }}>{many ? `Move ${group.length} designs…` : "Move to folder…"}</button>
+                  <button role="menuitem" onClick={() => { setMenu(null); toggleStar(group.map((d) => d.id)); }}>
+                    {group.every((d) => d.starred) ? "Remove star" : many ? "Star all" : "Star"}
+                  </button>
+                  <button role="menuitem" onClick={() => { setMenu(null); setTagging(group); }}>Tags…</button>
                   {!many && driveStatus === "signedIn" && locationOf(p) === "drive" && (
                     <button role="menuitem" onClick={() => { setMenu(null); setHistoryFor(p.id); }}>Version history…</button>
                   )}
@@ -823,6 +890,7 @@ export function HomePage({
         </div>
       )}
 
+      <TagsDialog designs={tagging} known={allTags} onClose={() => setTagging(null)} />
       <VersionHistoryDialog open={historyFor !== null} projectId={historyFor ?? ""} onClose={() => setHistoryFor(null)} />
       {confirmDialog}
       <DriveSetupDialog open={setupOpen} onClose={() => setSetupOpen(false)} />

@@ -1871,6 +1871,9 @@ export interface ProjectMeta {
   /** True for a design known only from Drive's listing: its contents are not on this
    *  computer yet and are fetched the first time it is opened. */
   remote?: boolean;
+  /** Short labels the person added, for finding designs across folders. */
+  tags?: string[];
+  starred?: boolean;
 }
 
 export interface ProjectData {

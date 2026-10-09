@@ -21,6 +21,7 @@ import type { DriveFile } from "./api";
 import { getAccessToken, hasToken } from "./auth";
 import { APP_FOLDER_NAME, ASSETS_FOLDER_NAME } from "./config";
 import { useDrive } from "./state";
+import { decodeTags, encodeTags } from "../document/tags";
 
 /* Keeps the designs and folders in this browser matched to the ShapeForge folder in Google Drive.
    Drive is the shared copy: every design is one small .shapeforge file, imported STL and 3MF files
@@ -224,7 +225,7 @@ export async function pushProject(id: string, attempt = 0): Promise<void> {
       mimeType: "application/json",
       body: designJson(project),
       kind: "design",
-      properties: { localId: project.id },
+      properties: { localId: project.id, tags: encodeTags(meta?.tags), starred: meta?.starred ? "1" : "0" },
       thumbnail: loadThumbnail(id),
     });
 
@@ -395,6 +396,8 @@ export async function pullIndex(openProjectId?: string): Promise<void> {
         objectCount: 0,
         location: "drive",
         ...(folderId ? { folderId } : {}),
+        ...(decodeTags(d.appProperties?.tags).length ? { tags: decodeTags(d.appProperties?.tags) } : {}),
+        ...(d.appProperties?.starred === "1" ? { starred: true } : {}),
         driveId: d.id,
         driveModified: d.modifiedTime,
         remote: true,
@@ -407,6 +410,16 @@ export async function pullIndex(openProjectId?: string): Promise<void> {
         m.name = name;
         if (folderId) m.folderId = folderId;
         else delete m.folderId;
+        // Tags and the star are only present on files saved by this version or later.
+        if (d.appProperties?.tags !== undefined) {
+          const tags = decodeTags(d.appProperties.tags);
+          if (tags.length) m.tags = tags;
+          else delete m.tags;
+        }
+        if (d.appProperties?.starred !== undefined) {
+          if (d.appProperties.starred === "1") m.starred = true;
+          else delete m.starred;
+        }
         // Changed on Drive since we last sent or fetched it: fetch again the next time it is opened,
         // unless it is open right now (replacing it under the editor would lose unsaved work).
         if (m.driveModified && m.driveModified !== d.modifiedTime && m.id !== openProjectId) {

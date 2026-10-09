@@ -5534,3 +5534,21 @@ button.stepper-btn:disabled {
 .version-actions .modal-btn { width: auto; padding: 4px 10px; font-size: 12px; }
 .version-delete { color: #b42318; }
 .version-empty { margin: 0; padding: 16px; font-size: 13px; color: #6b7a86; }
+
+.home-star { position: absolute; top: 8px; right: 8px; z-index: 2; width: 26px; height: 26px; min-height: 0; padding: 0; border: 0; border-radius: 8px; background: rgba(255,255,255,0.85); color: #8a97a1; font-size: 17px; line-height: 1; cursor: pointer; display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity 0.12s; }
+.home-card:hover .home-star, .home-card:focus-within .home-star, .home-star.on { opacity: 1; }
+.home-star.on { color: #e8a317; }
+.home-star:hover { background: #fff; color: #e8a317; }
+.home-page.is-dragging .home-star { visibility: hidden; }
+.home-tagrow { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.home-tagchip { border: 1px solid #d3dde4; background: #f3f7f9; color: #3d4c57; font-size: 11px; line-height: 1.2; padding: 1px 7px; min-height: 0; width: auto; border-radius: 999px; cursor: pointer; }
+.home-tagchip:hover { background: #e3eef2; color: #00807e; border-color: #aecfd2; }
+.home-tagmore { font-size: 11px; color: #6b7a86; align-self: center; }
+.home-cap .home-tagrow + .home-tag { margin-top: 6px; }
+.tags-dialog { max-width: 460px; }
+.tag-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 12px; }
+.tag-hint { font-size: 13px; color: #6b7a86; }
+.tag-chip { border: 1px solid #d3dde4; background: #fff; color: #3d4c57; font-size: 13px; padding: 4px 11px; min-height: 0; width: auto; border-radius: 999px; cursor: pointer; }
+.tag-chip:hover { border-color: #00a7a5; }
+.tag-chip.all { background: #d7f1f0; border-color: #00a7a5; color: #006b69; }
+.tag-chip.some { background: #f3f7f9; border-style: dashed; color: #52616c; }
