@@ -532,6 +532,12 @@ export async function restoreVersion(designId: string, versionFileId: string): P
   parsed.id = designId;
   parsed.name = meta.name;
   saveProject(parsed);
+  // Now holds real contents here, so it must not be fetched from Drive again; send it as the newest.
+  updateProjectMeta(designId, (m) => {
+    delete m.remote;
+    m.location = "drive";
+  });
+  queuePush(designId);
   return true;
 }
 

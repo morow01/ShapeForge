@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
 import { useDoc } from "../document/store";
-import { deleteVersion, listDesignVersions, restoreVersion, runSync, saveVersion, versionAsCopy } from "../drive/sync";
+import { deleteVersion, fetchProject, listDesignVersions, restoreVersion, runSync, saveVersion, versionAsCopy } from "../drive/sync";
 import type { DesignVersion } from "../drive/sync";
 import { useDrive } from "../drive/state";
 import { useConfirm } from "./ConfirmDialog";
 
 type VersionHistoryDialogProps = {
   open: boolean;
+  /** The design whose history is shown. */
+  projectId: string;
   onClose: () => void;
 };
 
@@ -19,9 +21,11 @@ function whenText(at: number): string {
  * plus any the person saves by name. Restoring never loses work, because what it replaces
  * is saved as a version first.
  */
-export function VersionHistoryDialog({ open, onClose }: VersionHistoryDialogProps) {
-  const projectId = useDoc((s) => s.currentProjectId);
-  const projectName = useDoc((s) => s.projectName);
+export function VersionHistoryDialog({ open, projectId, onClose }: VersionHistoryDialogProps) {
+  const currentId = useDoc((s) => s.currentProjectId);
+  const meta = useDoc((s) => s.projects.find((p) => p.id === projectId));
+  const projectName = meta?.name ?? "this design";
+  const isOpenDesign = projectId === currentId;
   const signedIn = useDrive((s) => s.status) === "signedIn";
   const driveError = useDrive((s) => s.lastError);
   const [versions, setVersions] = useState<DesignVersion[] | null>(null);
@@ -57,8 +61,12 @@ export function VersionHistoryDialog({ open, onClose }: VersionHistoryDialogProp
   const save = async () => {
     setBusy(true);
     // Whatever is on screen is written first, so the version is the latest state.
-    useDoc.getState().saveCurrentTo("drive");
-    await runSync(() => saveVersion(projectId, label));
+    if (isOpenDesign) useDoc.getState().saveCurrentTo("drive");
+    await runSync(async () => {
+      // A design that is only on Drive so far has to be brought here before it can be copied.
+      if (meta?.remote) await fetchProject(projectId);
+      return saveVersion(projectId, label);
+    });
     setLabel("");
     await load();
   };
@@ -71,11 +79,15 @@ export function VersionHistoryDialog({ open, onClose }: VersionHistoryDialogProp
     });
     if (!ok) return;
     setBusy(true);
-    useDoc.getState().saveCurrentTo("drive");
-    const done = await runSync(() => restoreVersion(projectId, v.id));
+    if (isOpenDesign) useDoc.getState().saveCurrentTo("drive");
+    const done = await runSync(async () => {
+      if (meta?.remote) await fetchProject(projectId);
+      return restoreVersion(projectId, v.id);
+    });
     if (done) {
-      // Reloads the design from what was just written.
-      useDoc.getState().openProject(projectId);
+      // The open design reloads from what was just written; any other just refreshes its card.
+      if (isOpenDesign) useDoc.getState().openProject(projectId);
+      else useDoc.getState().refreshProjectsList();
       onClose();
     } else {
       await load();
@@ -86,7 +98,6 @@ export function VersionHistoryDialog({ open, onClose }: VersionHistoryDialogProp
     setBusy(true);
     const data = await runSync(() => versionAsCopy(projectId, v.id));
     if (data) {
-      const meta = useDoc.getState().projects.find((p) => p.id === projectId);
       const id = useDoc.getState().importProjectData(data);
       useDoc.getState().saveCurrentTo("drive");
       if (meta?.folderId) useDoc.getState().moveProjectToFolder(id, meta.folderId);

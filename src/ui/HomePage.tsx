@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useDoc } from "../document/store";
 import { binCount as countBin, collectFolderTree, exportProjectFile, hasProjectContents, loadProject, loadThumbnail, locationOf } from "../document/persist";
 import { BinView } from "./BinView";
+import { VersionHistoryDialog } from "./VersionHistoryDialog";
 import type { FolderMeta, ProjectMeta } from "../document/types";
 import { APP_NAME } from "../version";
 import { useConfirm } from "./ConfirmDialog";
@@ -129,6 +130,7 @@ export function HomePage({
   dragRef.current = drag;
   const pressRef = useRef<{ ids: string[]; name: string; thumb: string | null; x: number; y: number } | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [historyFor, setHistoryFor] = useState<string | null>(null);
   const { ask, dialog: confirmDialog } = useConfirm();
   const driveConfigured = useDrive((s) => s.configured);
   const driveStatus = useDrive((s) => s.status);
@@ -794,6 +796,9 @@ export function HomePage({
                   {!many && <button role="menuitem" onClick={() => { setMenu(null); handleOpen(p); }}>Open</button>}
                   {!many && <button role="menuitem" onClick={() => { setMenu(null); startRenameDesign(p); }}>Rename…</button>}
                   <button role="menuitem" onClick={() => { setMenu(null); startMove(group); }}>{many ? `Move ${group.length} designs…` : "Move to folder…"}</button>
+                  {!many && driveStatus === "signedIn" && locationOf(p) === "drive" && (
+                    <button role="menuitem" onClick={() => { setMenu(null); setHistoryFor(p.id); }}>Version history…</button>
+                  )}
                   {!many && <button role="menuitem" onClick={() => { setMenu(null); duplicateProject(p.id); }}>Duplicate</button>}
                   {!many && <button role="menuitem" onClick={() => { setMenu(null); handleDownload(p); }}>Download backup file</button>}
                   <hr />
@@ -817,6 +822,7 @@ export function HomePage({
         </div>
       )}
 
+      <VersionHistoryDialog open={historyFor !== null} projectId={historyFor ?? ""} onClose={() => setHistoryFor(null)} />
       {confirmDialog}
       <DriveSetupDialog open={setupOpen} onClose={() => setSetupOpen(false)} />
 

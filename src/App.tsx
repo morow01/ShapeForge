@@ -8256,7 +8256,7 @@ export function App() {
         onProjectLoadFailed={() => setFileOperation(null)}
       />
 
-      <VersionHistoryDialog open={historyOpen} onClose={() => setHistoryOpen(false)} />
+      <VersionHistoryDialog open={historyOpen} projectId={currentProjectId} onClose={() => setHistoryOpen(false)} />
       <SaveDialog
         open={saveDialogOpen}
         name={projectName}
