@@ -1,9 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { useDoc } from "../document/store";
-import { exportProjectFile, loadProject, loadThumbnail, locationOf } from "../document/persist";
+import { exportProjectFile, hasProjectContents, loadProject, loadThumbnail, locationOf } from "../document/persist";
 import type { FolderMeta, ProjectMeta } from "../document/types";
 import { APP_NAME } from "../version";
 import { useConfirm } from "./ConfirmDialog";
+import { DriveSetupDialog } from "./DriveSetupDialog";
+import { connectDrive } from "../drive/actions";
+import { signOut, wasConnected } from "../drive/auth";
+import { fetchProject, runSync, syncNow } from "../drive/sync";
+import { useDrive } from "../drive/state";
 import { DuplicateIcon, ExportIcon, FolderOpenIcon, PlusIcon, TrashIcon } from "./icons";
 
 function timeAgo(timestamp: number): string {
@@ -19,7 +24,7 @@ function timeAgo(timestamp: number): string {
 }
 
 /** What the main area is showing: a folder (null = the top level) or a flat list. */
-type View = { kind: "folder"; id: string | null } | { kind: "recent" } | { kind: "draft" } | { kind: "browser" };
+type View = { kind: "folder"; id: string | null } | { kind: "recent" } | { kind: "draft" } | { kind: "browser" } | { kind: "drive" };
 
 type HomePageProps = {
   open: boolean;
@@ -125,6 +130,13 @@ export function HomePage({
   const pressRef = useRef<{ ids: string[]; name: string; thumb: string | null; x: number; y: number } | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const { ask, dialog: confirmDialog } = useConfirm();
+  const driveConfigured = useDrive((s) => s.configured);
+  const driveStatus = useDrive((s) => s.status);
+  const driveEmail = useDrive((s) => s.email);
+  const driveBusy = useDrive((s) => s.busy);
+  const driveError = useDrive((s) => s.lastError);
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [openingId, setOpeningId] = useState<string | null>(null);
   // The click that ends a drag must not also open the design under the pointer.
   const suppressClickRef = useRef(false);
 
@@ -208,7 +220,9 @@ export function HomePage({
 
   const drafts = projects.filter((p) => locationOf(p) === "draft");
   const kept = projects.filter((p) => locationOf(p) === "browser");
-  const empties = projects.filter((p) => p.objectCount === 0 && p.id !== currentProjectId);
+  const onDrive = projects.filter((p) => locationOf(p) === "drive");
+  // A design known only from Drive's listing shows 0 shapes because it has not been fetched yet, not because it is empty.
+  const empties = projects.filter((p) => p.objectCount === 0 && !p.remote && p.id !== currentProjectId);
 
   let designs: ProjectMeta[];
   let subfolders: FolderMeta[] = [];
@@ -220,6 +234,8 @@ export function HomePage({
     designs = drafts;
   } else if (view.kind === "browser") {
     designs = kept;
+  } else if (view.kind === "drive") {
+    designs = onDrive;
   } else {
     designs = projects.filter((p) => (p.folderId ?? null) === viewFolderId);
     subfolders = folders.filter((f) => f.parentId === viewFolderId).sort((a, b) => a.name.localeCompare(b.name));
@@ -247,13 +263,39 @@ export function HomePage({
         ? "Not saved yet"
         : view.kind === "browser"
           ? "This browser"
-          : null;
+          : view.kind === "drive"
+            ? "Google Drive"
+            : null;
 
-  const handleOpen = (p: ProjectMeta) => {
+  const handleOpen = async (p: ProjectMeta) => {
     if (suppressClickRef.current) return;
     if (p.id === currentProjectId) {
       onClose();
       return;
+    }
+    // A design that lives on Drive and is not on this computer yet is downloaded first.
+    if (p.remote || (locationOf(p) === "drive" && !hasProjectContents(p.id))) {
+      if (useDrive.getState().status !== "signedIn") {
+        void ask({
+          title: "Connect to Google Drive",
+          message: "This design is stored in your Google Drive. Connect Google Drive to open it here.",
+          confirmLabel: "OK",
+          cancelLabel: null,
+        });
+        return;
+      }
+      setOpeningId(p.id);
+      const ok = await runSync(() => fetchProject(p.id));
+      setOpeningId(null);
+      if (!ok) {
+        void ask({
+          title: "Couldn't open that design",
+          message: useDrive.getState().lastError ?? "It could not be downloaded from Google Drive. Try again in a moment.",
+          confirmLabel: "OK",
+          cancelLabel: null,
+        });
+        return;
+      }
     }
     onProjectLoadStart?.(p.name);
     if (openProject(p.id)) {
@@ -492,10 +534,37 @@ export function HomePage({
             <span>This browser</span>
             <span className="home-count">{kept.length}</span>
           </button>
-          <button className="home-nav disabled" disabled title="Saving to your own Google Drive is coming">
-            <span>Google Drive</span>
-            <span className="home-soon">Soon</span>
-          </button>
+          {driveStatus === "signedIn" ? (
+            <>
+              <button className={navClass(!searching && view.kind === "drive")} onClick={() => { setSearch(""); setView({ kind: "drive" }); }}>
+                <span>Google Drive</span>
+                <span className="home-count">{onDrive.length}</span>
+              </button>
+              <div className="home-drive-box">
+                <span className="home-drive-email" title={driveEmail ?? ""}>{driveEmail ?? "Connected"}</span>
+                <span className={`home-drive-state${driveError ? " bad" : ""}`}>
+                  {driveBusy ? "Syncing…" : driveError ? "Not synced" : "Up to date"}
+                </span>
+                {driveError && <span className="home-drive-error">{driveError}</span>}
+                <div className="home-drive-actions">
+                  <button className="home-link" onClick={() => void syncNow()} disabled={driveBusy}>Sync now</button>
+                  <button className="home-link" onClick={() => signOut()}>Sign out</button>
+                </div>
+              </div>
+            </>
+          ) : !driveConfigured ? (
+            <button className="home-nav" onClick={() => setSetupOpen(true)} title="Save your designs to your own Google Drive">
+              <span>Set up Google Drive</span>
+            </button>
+          ) : (
+            <div className="home-drive-box">
+              <button className="modal-btn primary home-drive-connect" disabled={driveStatus === "connecting"} onClick={() => void connectDrive()}>
+                {driveStatus === "connecting" ? "Connecting…" : wasConnected() ? "Reconnect Google Drive" : "Connect Google Drive"}
+              </button>
+              {driveError && <span className="home-drive-error">{driveError}</span>}
+              <button className="home-link" onClick={() => setSetupOpen(true)}>Change client ID</button>
+            </div>
+          )}
           {empties.length > 0 && (
             <button className="home-clean" onClick={handleClean} title="Removes designs that have no shapes in them">
               Clear {empties.length} empty {empties.length === 1 ? "design" : "designs"}
@@ -611,11 +680,15 @@ export function HomePage({
                     <div className="home-cap">
                       <button className="home-name" onClick={() => handleOpen(p)} title={p.name}>{p.name}</button>
                       <span className="home-meta">
-                        {p.objectCount} {p.objectCount === 1 ? "shape" : "shapes"} · {timeAgo(p.updatedAt)}
+                        {openingId === p.id
+                          ? "Downloading from Drive…"
+                          : p.remote
+                            ? `On Google Drive · ${timeAgo(p.updatedAt)}`
+                            : `${p.objectCount} ${p.objectCount === 1 ? "shape" : "shapes"} · ${timeAgo(p.updatedAt)}`}
                         {p.id === currentProjectId ? " · open" : ""}
                       </span>
                       {(searching || view.kind !== "folder") && folderName && <span className="home-meta">In {folderName}</span>}
-                      <span className={`home-tag ${where}`}>{where === "draft" ? "Not saved yet" : "This browser"}</span>
+                      <span className={`home-tag ${where}`}>{where === "draft" ? "Not saved yet" : where === "drive" ? "Google Drive" : "This browser"}</span>
                       <div className="home-actions">
                         <button className="home-act" onClick={() => startRenameDesign(p)} title="Rename" aria-label={`Rename ${p.name}`}>
                           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -730,6 +803,7 @@ export function HomePage({
       )}
 
       {confirmDialog}
+      <DriveSetupDialog open={setupOpen} onClose={() => setSetupOpen(false)} />
 
       {moving && (
         <div className="modal-backdrop" onClick={() => setMoving(null)}>

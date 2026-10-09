@@ -13,6 +13,8 @@ import { Inspector } from "./ui/Inspector";
 import { Tree } from "./ui/Tree";
 import { HomePage } from "./ui/HomePage";
 import { SaveDialog } from "./ui/SaveDialog";
+import { installDriveHooks, syncNow } from "./drive/sync";
+import { useDrive } from "./drive/state";
 import {
   AlignNodeIcon,
   AlignToolIcon,
@@ -483,6 +485,16 @@ export function App() {
   const [homeOpen, setHomeOpen] = useState(true);
   const [saveDialogOpen, setSaveDialogOpen] = useState(false);
   const [thumbVersion, setThumbVersion] = useState(0);
+  const driveBusy = useDrive((s) => s.busy);
+  const driveError = useDrive((s) => s.lastError);
+  const driveStatus = useDrive((s) => s.status);
+  useEffect(() => {
+    installDriveHooks();
+  }, []);
+  // Looking at Home while connected brings it up to date with Drive.
+  useEffect(() => {
+    if (homeOpen && driveStatus === "signedIn" && !useDrive.getState().busy) void syncNow();
+  }, [homeOpen, driveStatus]);
   const currentProjectId = useDoc((s) => s.currentProjectId);
   const projectList = useDoc((s) => s.projects);
   const currentLocation = locationOf(projectList.find((p) => p.id === currentProjectId) ?? {});
@@ -4607,6 +4619,14 @@ export function App() {
               title="This design has no home yet. It is kept in this browser until you save it."
             >
               Not saved yet · Save
+            </button>
+          ) : currentLocation === "drive" ? (
+            <button
+              className={`location-chip drive${driveError ? " bad" : ""}`}
+              onClick={() => void syncNow()}
+              title={driveError ?? "Saved to your Google Drive. Click to sync now."}
+            >
+              {driveBusy ? "Google Drive · Saving…" : driveError ? "Google Drive · Not synced" : "Google Drive"}
             </button>
           ) : (
             <span className="location-chip" title="Kept in this browser. Download a backup file from the File menu.">

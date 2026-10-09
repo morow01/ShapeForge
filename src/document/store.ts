@@ -58,6 +58,16 @@ import type {
   Vec3,
 } from "./types";
 
+/** Called after a change that Google Drive has to hear about. Set once by the Drive code, so this
+ *  module never imports it. */
+export type DriveHooks = {
+  onProjectChanged?: (id: string) => void;
+  onProjectDeleted?: (meta: ProjectMeta) => void;
+  onFolderRenamed?: (folderId: string) => void;
+  onFolderDeleted?: (info: { folder: FolderMeta; designIds: string[]; subfolderIds: string[] }) => void;
+};
+export const driveHooks: DriveHooks = {};
+
 /** A new design that was never touched and never given a home is just clutter once
  *  the person moves on, so it is dropped rather than left on the Home page. */
 function dropEmptyDraft(id: string) {
@@ -725,6 +735,7 @@ interface DocState {
   deleteProject: (id: string) => boolean;
   /** Renames any design, not just the open one. */
   renameProjectById: (id: string, name: string) => void;
+  refreshFolders: () => void;
   createFolder: (name: string, parentId: string | null) => string;
   renameFolder: (id: string, name: string) => void;
   /** Deletes the folder only; its designs and folders move up one level. */
@@ -924,6 +935,7 @@ export const useDoc = create<DocState>()(
         proj.nodes = s.nodes;
         saveProject(proj);
         set({ projectName: trimmed, projects: listProjects() });
+        driveHooks.onProjectChanged?.(s.currentProjectId);
       },
 
       duplicateProject: (id) => {
@@ -944,13 +956,16 @@ export const useDoc = create<DocState>()(
         if (sourceMeta?.location) setProjectLocation(newId, sourceMeta.location);
         if (sourceMeta?.folderId) setProjectFolder(newId, sourceMeta.folderId);
         set({ projects: listProjects() });
+        driveHooks.onProjectChanged?.(newId);
         return newId;
       },
 
       deleteProject: (id) => {
         flushSave();
         const s = get();
+        const deletedMeta = s.projects.find((p) => p.id === id);
         deleteProjectStorage(id);
+        if (deletedMeta) driveHooks.onProjectDeleted?.(deletedMeta);
         const remaining = listProjects();
         if (s.currentProjectId === id) {
           if (remaining.length > 0) {
@@ -977,7 +992,10 @@ export const useDoc = create<DocState>()(
         proj.name = trimmed;
         saveProject(proj);
         set({ projects: listProjects() });
+        driveHooks.onProjectChanged?.(id);
       },
+
+      refreshFolders: () => set({ folders: listFolders() }),
 
       createFolder: (name, parentId) => {
         const folder = createFolderEntry(name, parentId);
@@ -988,18 +1006,25 @@ export const useDoc = create<DocState>()(
       renameFolder: (id, name) => {
         renameFolderEntry(id, name);
         set({ folders: listFolders() });
+        driveHooks.onFolderRenamed?.(id);
       },
 
       deleteFolder: (id) => {
         flushSave();
+        const before = get();
+        const folder = before.folders.find((f) => f.id === id);
+        const designIds = before.projects.filter((p) => p.folderId === id).map((p) => p.id);
+        const subfolderIds = before.folders.filter((f) => f.parentId === id).map((f) => f.id);
         deleteFolderEntry(id);
         set({ folders: listFolders(), projects: listProjects() });
+        if (folder) driveHooks.onFolderDeleted?.({ folder, designIds, subfolderIds });
       },
 
       moveProjectToFolder: (projectId, folderId) => {
         flushSave();
         setProjectFolder(projectId, folderId);
         set({ projects: listProjects() });
+        driveHooks.onProjectChanged?.(projectId);
       },
 
       saveCurrentTo: (location) => {
@@ -1007,6 +1032,7 @@ export const useDoc = create<DocState>()(
         const s = get();
         setProjectLocation(s.currentProjectId, location);
         set({ projects: listProjects(), savedAt: Date.now(), storageBlocked: false });
+        driveHooks.onProjectChanged?.(s.currentProjectId);
       },
 
       exportCurrentProject: async () => {

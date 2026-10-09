@@ -1851,6 +1851,8 @@ export interface FolderMeta {
   name: string;
   parentId: string | null;
   createdAt: number;
+  /** The matching Google Drive folder, once one has been made. */
+  driveId?: string;
 }
 
 export interface ProjectMeta {
@@ -1862,6 +1864,13 @@ export interface ProjectMeta {
   location?: ProjectLocation;
   /** The folder this design is in; missing or null means the top level. */
   folderId?: string | null;
+  /** The matching Google Drive file, once it has been saved there. */
+  driveId?: string;
+  /** Drive's own "modified" stamp from the last time this design was sent or fetched. */
+  driveModified?: string;
+  /** True for a design known only from Drive's listing: its contents are not on this
+   *  computer yet and are fetched the first time it is opened. */
+  remote?: boolean;
 }
 
 export interface ProjectData {

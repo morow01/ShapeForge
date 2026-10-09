@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import type { ProjectLocation } from "../document/types";
+import { connectDrive } from "../drive/actions";
+import { useDrive } from "../drive/state";
 
 type SaveDialogProps = {
   open: boolean;
@@ -11,11 +13,20 @@ type SaveDialogProps = {
 /**
  * Asked the first time a new design is saved: where should it live? Until now the
  * design is a draft, kept in this browser so nothing is lost, but with no home chosen.
- * Google Drive is shown so the choice is visible, but is not available yet.
+ * Google Drive is offered once it is connected; until then the row explains how.
  */
 export function SaveDialog({ open, name, onClose, onSave }: SaveDialogProps) {
   const [draftName, setDraftName] = useState(name);
   const [location, setLocation] = useState<ProjectLocation>("browser");
+  const driveConfigured = useDrive((s) => s.configured);
+  const driveStatus = useDrive((s) => s.status);
+  const driveEmail = useDrive((s) => s.email);
+  const signedIn = driveStatus === "signedIn";
+
+  // Once connected from this dialog, Drive is the natural choice.
+  useEffect(() => {
+    if (open && signedIn) setLocation("drive");
+  }, [open, signedIn]);
 
   useEffect(() => {
     if (open) setDraftName(name);
@@ -55,11 +66,22 @@ export function SaveDialog({ open, name, onClose, onSave }: SaveDialogProps) {
             <span>Stays on this computer. Clearing this site's data erases it, so download a backup now and then.</span>
           </span>
         </label>
-        <label className="save-choice disabled">
-          <input type="radio" name="save-where" disabled />
+        <label className={`save-choice${location === "drive" ? " on" : ""}${signedIn ? "" : " disabled"}`}>
+          <input type="radio" name="save-where" checked={location === "drive"} disabled={!signedIn} onChange={() => setLocation("drive")} />
           <span className="save-choice-text">
-            <b>Google Drive <span className="home-soon">Soon</span></b>
-            <span>Your own Drive, available on every computer you sign in on.</span>
+            <b>Google Drive</b>
+            <span>
+              {signedIn
+                ? `Saved to the ShapeForge folder in ${driveEmail ?? "your Drive"}, and available on every computer you sign in on.`
+                : driveConfigured
+                  ? "Your own Drive, available on every computer you sign in on."
+                  : "Set up Google Drive from the Home page first."}
+            </span>
+            {!signedIn && driveConfigured && (
+              <button type="button" className="modal-btn primary save-connect" disabled={driveStatus === "connecting"} onClick={() => void connectDrive()}>
+                {driveStatus === "connecting" ? "Connecting…" : "Connect Google Drive"}
+              </button>
+            )}
           </span>
         </label>
         <div className="save-buttons">

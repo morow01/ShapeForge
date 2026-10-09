@@ -5475,3 +5475,35 @@ button.stepper-btn:disabled {
 }
 .home-side-add:hover { background: #e3eaef; color: #00807e; }
 .home-side-empty { margin: 0; padding: 4px 10px 6px; font-size: 12px; color: #a3afb8; }
+.home-side-add {
+  width: 26px;
+  height: 26px;
+  border: 1px solid #aebdc7;
+  border-radius: 8px;
+  background: #fff;
+  color: #00807e;
+  font-size: 18px;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+}
+.home-side-add:hover { background: #e6f7f7; border-color: #00a7a5; color: #006b69; }
+
+.home-tag.drive { background: #e6f1fb; color: #0c447c; border-color: #b5d4f4; }
+.location-chip.drive { background: #e6f1fb; color: #0c447c; border-color: #b5d4f4; }
+.location-chip.drive.bad { background: #fdf0e6; color: #8a4a00; border-color: #f1cba4; }
+.home-drive-box { margin: 4px 0 6px; padding: 8px 10px; border: 1px solid #e2e8f0; border-radius: 10px; background: #fafcfd; display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.home-drive-email { color: #1f2a33; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.home-drive-state { color: #3b6d11; }
+.home-drive-state.bad { color: #b45309; }
+.home-drive-error { color: #b45309; line-height: 1.4; }
+.home-drive-actions { display: flex; gap: 12px; margin-top: 2px; }
+.home-link { border: 0; background: none; padding: 0; min-height: 0; width: auto; font-size: 12px; font-weight: 500; color: #00807e; cursor: pointer; text-align: left; }
+.home-link:hover:not(:disabled) { background: none; text-decoration: underline; }
+.home-link:disabled { color: #a3afb8; cursor: default; }
+.modal-btn.home-drive-connect { width: 100%; justify-content: center; }
+.save-connect { margin-top: 6px; align-self: flex-start; width: auto; }
+.drive-setup { max-width: 520px; max-height: 90vh; overflow-y: auto; }
+.drive-steps { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 8px; font-size: 13px; line-height: 1.5; color: #4a5a66; }
+.drive-steps code { background: #eef2f5; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+.drive-steps a { color: #00807e; }
+.drive-problem { margin: 0; color: #b42318; font-size: 13px; }

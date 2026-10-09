@@ -362,6 +362,49 @@ export function setProjectFolder(id: string, folderId: string | null): boolean {
   }
 }
 
+/** Reads and rewrites the saved list of designs in one step, for the Drive code. */
+export function updateProjectMeta(id: string, change: (meta: ProjectMeta) => void): boolean {
+  try {
+    const raw = localStorage.getItem(INDEX_KEY);
+    if (!raw) return false;
+    const list = JSON.parse(raw) as ProjectMeta[];
+    const entry = list.find((p) => p.id === id);
+    if (!entry) return false;
+    change(entry);
+    localStorage.setItem(INDEX_KEY, JSON.stringify(list));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Adds a design to the list without any contents: one that exists on Drive but has not
+ *  been opened on this computer yet. Does nothing if the id is already known. */
+export function addRemoteProject(meta: ProjectMeta): void {
+  try {
+    const raw = localStorage.getItem(INDEX_KEY);
+    const list = raw ? (JSON.parse(raw) as ProjectMeta[]) : [];
+    if (list.some((p) => p.id === meta.id)) return;
+    list.push(meta);
+    list.sort((a, b) => b.updatedAt - a.updatedAt);
+    localStorage.setItem(INDEX_KEY, JSON.stringify(list));
+  } catch {
+    /* the listing is only a convenience; Drive still has the file */
+  }
+}
+
+export function hasProjectContents(id: string): boolean {
+  try {
+    return localStorage.getItem(PROJECT_PREFIX + id) !== null;
+  } catch {
+    return false;
+  }
+}
+
+export function writeFolderList(list: FolderMeta[]): boolean {
+  return writeFolders(list);
+}
+
 export function listFolders(): FolderMeta[] {
   try {
     const parsed = JSON.parse(localStorage.getItem(FOLDERS_KEY) ?? "[]");
@@ -384,9 +427,10 @@ function writeFolders(list: FolderMeta[]): boolean {
   }
 }
 
-export function createFolderEntry(name: string, parentId: string | null): FolderMeta {
+export function createFolderEntry(name: string, parentId: string | null, driveId?: string, id?: string): FolderMeta {
   const folder: FolderMeta = {
-    id: `f-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+    ...(driveId ? { driveId } : {}),
+    id: id ?? `f-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
     name: name.trim() || "New folder",
     parentId,
     createdAt: Date.now(),
@@ -488,14 +532,13 @@ export function saveProject(project: ProjectData): boolean {
 
     const existingIdx = list.findIndex((p) => p.id === project.id);
     const meta: ProjectMeta = {
+      // An autosave must never move a design to a different home or folder, or lose its Drive link.
+      ...(existingIdx >= 0 ? list[existingIdx] : {}),
       id: project.id,
       name: project.name,
       createdAt: project.createdAt,
       updatedAt: project.updatedAt,
       objectCount: project.nodes.length,
-      // An autosave must never move a design to a different home or folder.
-      ...(existingIdx >= 0 && list[existingIdx].location ? { location: list[existingIdx].location } : {}),
-      ...(existingIdx >= 0 && list[existingIdx].folderId ? { folderId: list[existingIdx].folderId } : {}),
     };
 
     if (existingIdx >= 0) {
@@ -594,7 +637,7 @@ export function saveCameraState(state: StoredCamera): boolean {
   }
 }
 
-function collectImportBlobIds(nodes: SceneNode[], ids: Set<string>) {
+export function collectImportBlobIds(nodes: SceneNode[], ids: Set<string>) {
   for (const n of nodes) {
     if (n.type === "import") ids.add(n.blobId);
     else if (n.type === "group") collectImportBlobIds(n.children, ids);
