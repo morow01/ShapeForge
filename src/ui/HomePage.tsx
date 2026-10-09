@@ -212,7 +212,7 @@ export function HomePage({
                         <button className="home-act" onClick={() => handleDownload(p)} title="Download backup file" aria-label={`Download ${p.name}`}>
                           <ExportIcon className="home-act-icon" />
                         </button>
-                        <button className="home-act danger" onClick={() => handleDelete(p)} title="Delete" aria-label={`Delete ${p.name}`}>
+                        <button className="home-act delete" onClick={() => handleDelete(p)} title="Delete" aria-label={`Delete ${p.name}`}>
                           <TrashIcon className="home-act-icon" />
                         </button>
                       </div>

@@ -20,7 +20,22 @@ const ACTIVE_PROJECT_KEY = "cad.active_project_id";
 const PROJECT_PREFIX = "cad.project.";
 const LEGACY_KEY = "cad.document";
 const CAMERA_KEY = "cad.camera";
-const THUMB_PREFIX = "cad.thumb.";
+// "2" marks the larger, smoother pictures; the first, smaller ones (cad.thumb.) are discarded.
+const THUMB_PREFIX = "cad.thumb2.";
+const OLD_THUMB_PREFIX = "cad.thumb.";
+let oldThumbnailsPurged = false;
+
+function purgeOldThumbnails(): void {
+  if (oldThumbnailsPurged) return;
+  oldThumbnailsPurged = true;
+  try {
+    for (const key of Object.keys(localStorage)) {
+      if (key.startsWith(OLD_THUMB_PREFIX)) localStorage.removeItem(key);
+    }
+  } catch {
+    /* nothing to purge if storage is unavailable */
+  }
+}
 const VERSION = 1;
 
 interface StoredLegacy {
@@ -339,6 +354,7 @@ export function saveThumbnail(id: string, dataUrl: string): void {
 }
 
 export function loadThumbnail(id: string): string | null {
+  purgeOldThumbnails();
   try {
     return localStorage.getItem(THUMB_PREFIX + id);
   } catch {

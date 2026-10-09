@@ -5232,3 +5232,15 @@ button.stepper-btn:disabled {
   width: auto;
 }
 .home-clean:hover { background: #fdf3f2; color: #b42318; border-color: #f0c1bd; }
+.home-actions { gap: 6px; align-items: center; }
+.home-act {
+  width: 32px;
+  height: 32px;
+  min-height: 0;
+  padding: 0;
+  margin: 0;
+  flex: 0 0 auto;
+  border-radius: 8px;
+}
+.home-act-icon { width: 18px; height: 18px; }
+.home-act.delete:hover { background: #fdecec; color: #b42318; border-color: #f4c6c2; }
