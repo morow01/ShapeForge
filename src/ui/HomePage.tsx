@@ -1104,8 +1104,9 @@ export function HomePage({
                     </button>
                     <span className="col-folder home-row-muted" title={folderName ?? ""}>{folderName ?? "—"}</span>
                     <span className={`col-tags home-row-tags${tagsOpen.has(p.id) ? " open" : ""}`}>
-                      {(p.tags ?? []).map((t, i) => (
-                        <button key={t} className={`home-tagchip${i >= 3 ? " extra" : ""}`} onClick={() => { setSearch(""); setView({ kind: "tags", tags: [t] }); }} title={`Show everything tagged ${t}`}>
+                      <span className="tags-first">
+                      {(p.tags ?? []).slice(0, 3).map((t) => (
+                        <button key={t} className="home-tagchip" onClick={() => { setSearch(""); setView({ kind: "tags", tags: [t] }); }} title={`Show everything tagged ${t}`}>
                           <TagIcon size={9} className="home-tagchip-icon" />{t}
                         </button>
                       ))}
@@ -1119,6 +1120,18 @@ export function HomePage({
                               {tagsOpen.has(p.id) ? "Show less" : `+${(p.tags ?? []).length - 3}`}
                             </button>
                           )}
+                      </span>
+                      {(p.tags ?? []).length > 3 && (
+                        <span className="home-tagextra">
+                          <span className="home-tagextra-inner">
+                            {(p.tags ?? []).slice(3).map((t) => (
+                              <button key={t} className="home-tagchip" onClick={() => { setSearch(""); setView({ kind: "tags", tags: [t] }); }} title={`Show everything tagged ${t}`}>
+                                <TagIcon size={9} className="home-tagchip-icon" />{t}
+                              </button>
+                            ))}
+                          </span>
+                        </span>
+                      )}
                     </span>
                     <span className="col-shapes home-row-muted">{openingId === p.id ? "Downloading…" : p.remote ? "—" : p.objectCount}</span>
                     <span className="col-changed home-row-muted" title={new Date(p.updatedAt).toLocaleString()}>{timeAgo(p.updatedAt)}</span>
@@ -1206,8 +1219,8 @@ export function HomePage({
                       {(searching || view.kind !== "folder" || viewFolderId === null) && folderName && <span className="home-meta">In {folderName}</span>}
                       {(p.tags ?? []).length > 0 && (
                         <span className={`home-tagrow${tagsOpen.has(p.id) ? " open" : ""}`}>
-                          {(p.tags ?? []).map((t, i) => (
-                            <button key={t} className={`home-tagchip${i >= 3 ? " extra" : ""}`} onClick={() => { setSearch(""); setView({ kind: "tags", tags: [t] }); }} title={`Show everything tagged ${t}`}>
+                          {(p.tags ?? []).slice(0, 3).map((t) => (
+                            <button key={t} className="home-tagchip" onClick={() => { setSearch(""); setView({ kind: "tags", tags: [t] }); }} title={`Show everything tagged ${t}`}>
                               <TagIcon size={9} className="home-tagchip-icon" />{t}
                             </button>
                           ))}
@@ -1220,6 +1233,17 @@ export function HomePage({
                             >
                               {tagsOpen.has(p.id) ? "Show less" : `+${(p.tags ?? []).length - 3}`}
                             </button>
+                          )}
+                          {(p.tags ?? []).length > 3 && (
+                            <span className="home-tagextra">
+                              <span className="home-tagextra-inner">
+                                {(p.tags ?? []).slice(3).map((t) => (
+                                  <button key={t} className="home-tagchip" onClick={() => { setSearch(""); setView({ kind: "tags", tags: [t] }); }} title={`Show everything tagged ${t}`}>
+                                    <TagIcon size={9} className="home-tagchip-icon" />{t}
+                                  </button>
+                                ))}
+                              </span>
+                            </span>
                           )}
                         </span>
                       )}

@@ -5788,13 +5788,14 @@ button.home-tagmore { border: 0; background: none; padding: 1px 4px; min-height:
 button.home-tagmore:hover { text-decoration: underline; }
 .home-row-tags.open { flex-wrap: wrap; overflow: visible; }
 
-
-/* Past the third tag, chips fold away. Hovering the design (or clicking +N) unfolds the whole list in place. */
-.home-tagchip.extra { display: none; }
-.home-card:hover .home-tagrow .home-tagchip.extra,
-.home-tagrow.open .home-tagchip.extra,
-.home-row:hover .home-row-tags .home-tagchip.extra,
-.home-row-tags.open .home-tagchip.extra { display: inline-flex; }
-.home-card:hover .home-tagrow:not(.open) .home-tagmore { display: none; }
+/* Past the third tag the chips live in a wrapper whose height eases open when the design is hovered. */
+.home-tagextra { flex-basis: 100%; display: grid; grid-template-rows: 0fr; opacity: 0; margin-top: -4px; transition: grid-template-rows 0.22s ease, opacity 0.18s ease, margin-top 0.22s ease; }
+.home-tagextra-inner { overflow: hidden; min-height: 0; display: flex; flex-wrap: wrap; gap: 4px; }
+.home-card:hover .home-tagextra, .home-tagrow.open .home-tagextra,
+.home-row:hover .home-tagextra, .home-row-tags.open .home-tagextra { grid-template-rows: 1fr; opacity: 1; margin-top: 0; }
+.home-card:hover .home-tagrow:not(.open) .home-tagmore,
 .home-row:hover .home-row-tags:not(.open) .home-tagmore { display: none; }
-.home-row:hover .home-row-tags { flex-wrap: wrap; overflow: visible; }
+.home-row-tags { flex-direction: column; align-items: stretch; overflow: visible; }
+.tags-first { display: flex; flex-wrap: nowrap; gap: 4px; overflow: hidden; min-width: 0; }
+.home-row-tags .home-tagextra-inner .home-tagchip { white-space: nowrap; flex-shrink: 0; }
+@media (prefers-reduced-motion: reduce) { .home-tagextra { transition: none; } }
