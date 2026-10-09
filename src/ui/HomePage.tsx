@@ -202,6 +202,15 @@ export function HomePage({
   const [historyFor, setHistoryFor] = useState<string | null>(null);
   const [tagging, setTagging] = useState<ProjectMeta[] | null>(null);
   const [, setTagTick] = useState(0);
+  // Designs whose full list of tags is showing (the rest show the first three and a "+N").
+  const [tagsOpen, setTagsOpen] = useState<Set<string>>(new Set());
+  const toggleTagsOpen = (id: string) =>
+    setTagsOpen((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   const [managingTags, setManagingTags] = useState(false);
   const [tagsCollapsed, setTagsCollapsed] = useState(() => {
     try {
@@ -642,7 +651,7 @@ export function HomePage({
 
   const beginPress = (e: React.PointerEvent, p: ProjectMeta, thumb: string | null) => {
     if (e.button !== 0 || e.pointerType === "touch") return;
-    if ((e.target as Element).closest(".home-actions, .home-check, .home-star, .home-edit, .home-tagchip, .home-row-actions, .home-row-check")) return;
+    if ((e.target as Element).closest(".home-actions, .home-check, .home-star, .home-edit, .home-tagchip, .home-tagmore, .home-row-actions, .home-row-check")) return;
     // Dragging one of several selected designs takes all of them.
     const group = selected.has(p.id) && selectedDesigns.length > 1 ? selectedDesigns.map((d) => d.id) : [p.id];
     const label = group.length > 1 ? `${group.length} designs` : p.name;
@@ -1094,13 +1103,22 @@ export function HomePage({
                       {where !== "drive" && <span className={`home-tag ${where} home-row-tag`}>{where === "draft" ? "Not saved yet" : "This browser"}</span>}
                     </button>
                     <span className="col-folder home-row-muted" title={folderName ?? ""}>{folderName ?? "—"}</span>
-                    <span className="col-tags home-row-tags">
-                      {(p.tags ?? []).slice(0, 3).map((t) => (
+                    <span className={`col-tags home-row-tags${tagsOpen.has(p.id) ? " open" : ""}`}>
+                      {(p.tags ?? []).slice(0, tagsOpen.has(p.id) ? undefined : 3).map((t) => (
                         <button key={t} className="home-tagchip" onClick={() => { setSearch(""); setView({ kind: "tags", tags: [t] }); }} title={`Show everything tagged ${t}`}>
                           <TagIcon size={9} className="home-tagchip-icon" />{t}
                         </button>
                       ))}
-                      {(p.tags ?? []).length > 3 && <span className="home-tagmore">+{(p.tags ?? []).length - 3}</span>}
+                      {(p.tags ?? []).length > 3 && (
+                            <button
+                              className="home-tagmore"
+                              aria-expanded={tagsOpen.has(p.id)}
+                              title={tagsOpen.has(p.id) ? "Show fewer tags" : `Also: ${(p.tags ?? []).slice(3).join(", ")}`}
+                              onClick={() => toggleTagsOpen(p.id)}
+                            >
+                              {tagsOpen.has(p.id) ? "Show less" : `+${(p.tags ?? []).length - 3}`}
+                            </button>
+                          )}
                     </span>
                     <span className="col-shapes home-row-muted">{openingId === p.id ? "Downloading…" : p.remote ? "—" : p.objectCount}</span>
                     <span className="col-changed home-row-muted" title={new Date(p.updatedAt).toLocaleString()}>{timeAgo(p.updatedAt)}</span>
@@ -1188,12 +1206,21 @@ export function HomePage({
                       {(searching || view.kind !== "folder" || viewFolderId === null) && folderName && <span className="home-meta">In {folderName}</span>}
                       {(p.tags ?? []).length > 0 && (
                         <span className="home-tagrow">
-                          {(p.tags ?? []).slice(0, 3).map((t) => (
+                          {(p.tags ?? []).slice(0, tagsOpen.has(p.id) ? undefined : 3).map((t) => (
                             <button key={t} className="home-tagchip" onClick={() => { setSearch(""); setView({ kind: "tags", tags: [t] }); }} title={`Show everything tagged ${t}`}>
                               <TagIcon size={9} className="home-tagchip-icon" />{t}
                             </button>
                           ))}
-                          {(p.tags ?? []).length > 3 && <span className="home-tagmore">+{(p.tags ?? []).length - 3}</span>}
+                          {(p.tags ?? []).length > 3 && (
+                            <button
+                              className="home-tagmore"
+                              aria-expanded={tagsOpen.has(p.id)}
+                              title={tagsOpen.has(p.id) ? "Show fewer tags" : `Also: ${(p.tags ?? []).slice(3).join(", ")}`}
+                              onClick={() => toggleTagsOpen(p.id)}
+                            >
+                              {tagsOpen.has(p.id) ? "Show less" : `+${(p.tags ?? []).length - 3}`}
+                            </button>
+                          )}
                         </span>
                       )}
                       {/* Drive is where designs normally live, so only the exceptions are labelled. */}

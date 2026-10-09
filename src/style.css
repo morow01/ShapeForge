@@ -5782,3 +5782,8 @@ button.stepper-btn:disabled {
 .home-folder-more:hover { background: #e6f7f7; color: #00807e; }
 .home-folder-more svg { display: block; }
 .home-page.is-dragging .home-folder-more { visibility: hidden; }
+
+/* "+N" is a button that shows every tag. */
+button.home-tagmore { border: 0; background: none; padding: 1px 4px; min-height: 0; width: auto; font-size: 11px; color: #00807e; cursor: pointer; align-self: center; white-space: nowrap; flex-shrink: 0; }
+button.home-tagmore:hover { text-decoration: underline; }
+.home-row-tags.open { flex-wrap: wrap; overflow: visible; }
