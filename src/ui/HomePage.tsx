@@ -4,6 +4,7 @@ import { binCount as countBin, collectFolderTree, exportProjectFile, hasProjectC
 import { BinView } from "./BinView";
 import { VersionHistoryDialog } from "./VersionHistoryDialog";
 import { TagsDialog } from "./TagsDialog";
+import { BinIcon, ClockIcon, CloudIcon, DraftIcon, FolderIcon, GridIcon, MonitorIcon, StarIcon, TagIcon } from "./NavIcons";
 import { sameTag, uniqueTags } from "../document/tags";
 import type { FolderMeta, ProjectMeta } from "../document/types";
 import { APP_NAME, APP_VERSION } from "../version";
@@ -528,15 +529,14 @@ export function HomePage({
             onClick={() => { setSearch(""); setView({ kind: "folder", id: null }); }}
             {...dropProps(null)}
           >
-            <span>All designs</span>
+            <span className="home-nav-main"><GridIcon className="home-nav-icon" /><span className="home-nav-name">All designs</span></span>
             <span className="home-count">{projects.length}</span>
           </button>
           <button className={navClass(!searching && view.kind === "recent")} onClick={() => { setSearch(""); setView({ kind: "recent" }); }}>
-            <span>Recent</span>
+            <span className="home-nav-main"><ClockIcon className="home-nav-icon" /><span className="home-nav-name">Recent</span></span>
           </button>
-
           <button className={navClass(!searching && view.kind === "starred")} onClick={() => { setSearch(""); setView({ kind: "starred" }); }}>
-            <span>★ Starred</span>
+            <span className="home-nav-main"><StarIcon className="home-nav-icon star" /><span className="home-nav-name">Starred</span></span>
             <span className="home-count">{starredList.length}</span>
           </button>
 
@@ -553,44 +553,45 @@ export function HomePage({
             <button
               key={folder.id}
               className={navClass(!searching && view.kind === "folder" && viewFolderId === folder.id, dropTarget === folder.id)}
-              style={{ paddingLeft: 10 + depth * 14 }}
+              style={{ paddingLeft: 10 + depth * 16 }}
               onClick={() => { setSearch(""); setView({ kind: "folder", id: folder.id }); }}
               {...dropProps(folder.id)}
             >
-              <span className="home-nav-name">{folder.name}</span>
+              <span className="home-nav-main"><FolderIcon className="home-nav-icon" /><span className="home-nav-name">{folder.name}</span></span>
               <span className="home-count">{countIn(folder.id)}</span>
             </button>
           ))}
 
-          {allTags.length > 0 && (
-            <>
-              <div className="home-side-label">Tags</div>
-              {allTags.map((tag) => (
-                <button
-                  key={tag}
-                  className={navClass(!searching && view.kind === "tag" && sameTag(view.tag, tag))}
-                  onClick={() => { setSearch(""); setView({ kind: "tag", tag }); }}
-                >
-                  <span className="home-nav-name">{tag}</span>
-                  <span className="home-count">{tagCount(tag)}</span>
-                </button>
-              ))}
-            </>
-          )}
+          <div className="home-side-label">Tags</div>
+          {allTags.length === 0 && <p className="home-side-empty">Right-click a design and choose Tags</p>}
+          {allTags.map((tag) => (
+            <button
+              key={tag}
+              className={navClass(!searching && view.kind === "tag" && sameTag(view.tag, tag))}
+              onClick={() => { setSearch(""); setView({ kind: "tag", tag }); }}
+            >
+              <span className="home-nav-main"><TagIcon className="home-nav-icon tag" /><span className="home-nav-name">{tag}</span></span>
+              <span className="home-count">{tagCount(tag)}</span>
+            </button>
+          ))}
 
-          <div className="home-side-label">Where they are</div>
-          <button className={navClass(!searching && view.kind === "draft")} onClick={() => { setSearch(""); setView({ kind: "draft" }); }}>
-            <span>Not saved yet</span>
-            <span className="home-count">{drafts.length}</span>
-          </button>
-          <button className={navClass(!searching && view.kind === "browser")} onClick={() => { setSearch(""); setView({ kind: "browser" }); }}>
-            <span>This browser</span>
-            <span className="home-count">{kept.length}</span>
-          </button>
+          <div className="home-side-label">Stored in</div>
+          {(drafts.length > 0 || view.kind === "draft") && (
+            <button className={navClass(!searching && view.kind === "draft")} onClick={() => { setSearch(""); setView({ kind: "draft" }); }}>
+              <span className="home-nav-main"><DraftIcon className="home-nav-icon" /><span className="home-nav-name">Not saved yet</span></span>
+              <span className="home-count">{drafts.length}</span>
+            </button>
+          )}
+          {(kept.length > 0 || driveStatus !== "signedIn" || view.kind === "browser") && (
+            <button className={navClass(!searching && view.kind === "browser")} onClick={() => { setSearch(""); setView({ kind: "browser" }); }}>
+              <span className="home-nav-main"><MonitorIcon className="home-nav-icon" /><span className="home-nav-name">This browser</span></span>
+              <span className="home-count">{kept.length}</span>
+            </button>
+          )}
           {driveStatus === "signedIn" ? (
             <>
               <button className={navClass(!searching && view.kind === "drive")} onClick={() => { setSearch(""); setView({ kind: "drive" }); }}>
-                <span>Google Drive</span>
+                <span className="home-nav-main"><CloudIcon className="home-nav-icon" /><span className="home-nav-name">Google Drive</span></span>
                 <span className="home-count">{onDrive.length}</span>
               </button>
               <div className="home-drive-box">
@@ -607,7 +608,7 @@ export function HomePage({
             </>
           ) : !driveConfigured ? (
             <button className="home-nav" onClick={() => setSetupOpen(true)} title="Save your designs to your own Google Drive">
-              <span>Set up Google Drive</span>
+              <span className="home-nav-main"><CloudIcon className="home-nav-icon" /><span className="home-nav-name">Set up Google Drive</span></span>
             </button>
           ) : (
             <div className="home-drive-box">
@@ -618,18 +619,22 @@ export function HomePage({
               <button className="home-link" onClick={() => setSetupOpen(true)}>Change client ID</button>
             </div>
           )}
+
+          <div className="home-side-spacer" />
           <button className={navClass(!searching && view.kind === "bin")} onClick={() => { setSearch(""); setView({ kind: "bin" }); }}>
-            <span>Bin</span>
-            <span className="home-count">{binCount}</span>
+            <span className="home-nav-main"><BinIcon className="home-nav-icon" /><span className="home-nav-name">Bin</span></span>
+            {binCount > 0 && <span className="home-count">{binCount}</span>}
           </button>
           {empties.length > 0 && (
             <button className="home-clean" onClick={handleClean} title="Removes designs that have no shapes in them">
               Clear {empties.length} empty {empties.length === 1 ? "design" : "designs"}
             </button>
           )}
-          <p className="home-side-note">
-            Designs in this browser live only on this computer. Download a backup file to keep a copy elsewhere.
-          </p>
+          {(kept.length > 0 || driveStatus !== "signedIn") && (
+            <p className="home-side-note">
+              Designs kept in this browser live only on this computer. Download a backup file to keep a copy elsewhere.
+            </p>
+          )}
         </nav>
 
         <main className="home-main">
@@ -763,7 +768,7 @@ export function HomePage({
                         <span className="home-tagrow">
                           {(p.tags ?? []).slice(0, 3).map((t) => (
                             <button key={t} className="home-tagchip" onClick={() => { setSearch(""); setView({ kind: "tag", tag: t }); }} title={`Show everything tagged ${t}`}>
-                              {t}
+                              <TagIcon size={10} className="home-tagchip-icon" />{t}
                             </button>
                           ))}
                           {(p.tags ?? []).length > 3 && <span className="home-tagmore">+{(p.tags ?? []).length - 3}</span>}

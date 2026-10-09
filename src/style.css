@@ -5552,3 +5552,30 @@ button.stepper-btn:disabled {
 .tag-chip:hover { border-color: #00a7a5; }
 .tag-chip.all { background: #d7f1f0; border-color: #00a7a5; color: #006b69; }
 .tag-chip.some { background: #f3f7f9; border-style: dashed; color: #52616c; }
+
+/* Sidebar redesign: icons, quieter section headers, a clear active row. */
+.home-side { display: flex; flex-direction: column; gap: 1px; }
+.home-nav { justify-content: space-between; gap: 8px; padding: 7px 10px; font-size: 13.5px; font-weight: 500; color: #3d4c57; border-radius: 8px; }
+.home-nav-main { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.home-nav-icon { flex-shrink: 0; color: #7d8b96; }
+.home-nav-icon.star { color: #d9962b; }
+.home-nav-icon.tag { color: #5aa7a5; }
+.home-nav:hover .home-nav-icon { color: #52616c; }
+.home-nav.on .home-nav-icon { color: #00807e; }
+.home-nav.on .home-nav-icon.star { color: #d9962b; }
+.home-count { font-size: 12px; font-weight: 400; color: #9aa7b1; font-variant-numeric: tabular-nums; }
+.home-nav.on .home-count { color: #4f9b99; }
+.home-side-label, .home-side-head { font-size: 10.5px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: #8a97a1; padding: 18px 10px 5px; margin: 0; }
+.home-side-head { display: flex; align-items: center; justify-content: space-between; padding-right: 4px; }
+.home-side-empty { font-size: 12px; color: #a3afb8; padding: 2px 10px 4px 38px; margin: 0; line-height: 1.4; }
+.home-side-spacer { flex: 1; min-height: 14px; }
+.home-side-note { font-size: 11.5px; color: #98a4ad; line-height: 1.5; padding: 10px 10px 0; }
+.home-drive-box { margin: 4px 4px 2px; }
+.home-tagchip { display: inline-flex; align-items: center; gap: 3px; }
+.home-tagchip-icon { color: #7aa9a8; flex-shrink: 0; }
+.tag-chip { display: inline-flex; align-items: center; gap: 5px; }
+.tag-chip-icon { color: #7aa9a8; }
+.tag-chip.all .tag-chip-icon { color: #00807e; }
+.tag-chip-mark { font-weight: 600; }
+.tag-chip.suggestion { border-style: dashed; color: #6b7a86; background: #fafcfd; }
+.tag-chip.suggestion:hover { color: #00807e; }

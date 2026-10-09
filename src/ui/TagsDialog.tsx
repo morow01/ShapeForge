@@ -2,6 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import { useDoc } from "../document/store";
 import { MAX_TAG_LENGTH, cleanTag, sameTag, uniqueTags } from "../document/tags";
 import type { ProjectMeta } from "../document/types";
+import { TagIcon } from "./NavIcons";
+
+/** Offered until the person has tags of their own, so there is something to click straight away. */
+const SAMPLE_TAGS = ["Idea", "Prototype", "Final", "Printed", "Client", "Needs fixing", "Archive"];
 
 type TagsDialogProps = {
   /** The designs being tagged; null keeps the dialog closed. */
@@ -95,11 +99,24 @@ export function TagsDialog({ designs, known, onClose }: TagsDialogProps) {
               onClick={() => cycle(t)}
               title={marks[t] === "some" ? "Only some of the selected designs have this tag" : undefined}
             >
-              {marks[t] === "all" ? "✓ " : marks[t] === "some" ? "– " : ""}
+              <TagIcon size={12} className="tag-chip-icon" />
               {t}
+              {marks[t] === "all" ? <span className="tag-chip-mark"> ✓</span> : marks[t] === "some" ? <span className="tag-chip-mark"> –</span> : null}
             </button>
           ))}
         </div>
+        {SAMPLE_TAGS.some((t) => !names.some((n) => sameTag(n, t))) && (
+          <>
+            <div className="save-label">Suggestions</div>
+            <div className="tag-chips">
+              {SAMPLE_TAGS.filter((t) => !names.some((n) => sameTag(n, t))).map((t) => (
+                <button key={t} type="button" className="tag-chip suggestion" onClick={() => setMarks((m) => ({ ...m, [t]: "all" }))}>
+                  + {t}
+                </button>
+              ))}
+            </div>
+          </>
+        )}
         <label className="save-label" htmlFor="tag-new">New tag</label>
         <input
           id="tag-new"
