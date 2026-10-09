@@ -440,6 +440,77 @@ export async function pullIndex(openProjectId?: string): Promise<void> {
 
 // ---- moves, renames and deletes ----
 
+// ---- feedback notes ----
+
+export type SyncedNote = { id: string; text: string; version: string; at: number; done: boolean; updatedAt?: number };
+type NotesFile = { format: "shapeforge-notes"; notes: SyncedNote[]; deleted: Record<string, number> };
+
+const NOTES_FILE_NAME = "feedback-notes.json";
+const TOMBSTONE_MS = 30 * 24 * 60 * 60 * 1000;
+const noteStamp = (n: SyncedNote) => n.updatedAt ?? n.at;
+
+/** Two lists of notes become one: the latest edit of each note wins, and a delete wins over an older copy. */
+export function mergeNotes(
+  localNotes: SyncedNote[],
+  localDeleted: Record<string, number>,
+  remoteNotes: SyncedNote[],
+  remoteDeleted: Record<string, number>,
+): { notes: SyncedNote[]; deleted: Record<string, number> } {
+  const byId = new Map<string, SyncedNote>();
+  // Remote first, so on an exact tie this computer's copy is kept.
+  for (const n of [...remoteNotes, ...localNotes]) {
+    const current = byId.get(n.id);
+    if (!current || noteStamp(n) >= noteStamp(current)) byId.set(n.id, n);
+  }
+  const deleted: Record<string, number> = { ...remoteDeleted };
+  for (const [id, at] of Object.entries(localDeleted)) deleted[id] = Math.max(deleted[id] ?? 0, at);
+  const cutoff = Date.now() - TOMBSTONE_MS;
+  for (const [id, at] of Object.entries(deleted)) {
+    const note = byId.get(id);
+    if (note && noteStamp(note) > at) delete deleted[id]; // edited after it was deleted somewhere else: it stays
+    else byId.delete(id);
+    if (deleted[id] !== undefined && at < cutoff) delete deleted[id];
+  }
+  const notes = [...byId.values()].sort((a, b) => b.at - a.at || a.id.localeCompare(b.id));
+  return { notes, deleted };
+}
+
+const canonNotes = (notes: SyncedNote[], deleted: Record<string, number>) =>
+  JSON.stringify([
+    [...notes].sort((a, b) => b.at - a.at || a.id.localeCompare(b.id)).map((n) => [n.id, n.text, n.version, n.at, n.done, n.updatedAt ?? null]),
+    Object.entries(deleted).sort(([a], [b]) => a.localeCompare(b)),
+  ]);
+
+/** Brings the notes on this computer and the copy in Drive level, and returns the combined list. */
+export async function syncNotesWithDrive(
+  local: SyncedNote[],
+  localDeleted: Record<string, number>,
+): Promise<{ notes: SyncedNote[]; deleted: Record<string, number> }> {
+  const { rootId } = await ensureRoot();
+  const file = await driveApi().findByKind("notes");
+  let remote: NotesFile | null = null;
+  if (file) {
+    try {
+      remote = JSON.parse(await driveApi().downloadText(file.id)) as NotesFile;
+    } catch {
+      remote = null; // unreadable: it is replaced by the merged copy below
+    }
+  }
+  const merged = mergeNotes(local, localDeleted, remote?.notes ?? [], remote?.deleted ?? {});
+  if (!remote || canonNotes(remote.notes ?? [], remote.deleted ?? {}) !== canonNotes(merged.notes, merged.deleted)) {
+    const body: NotesFile = { format: "shapeforge-notes", notes: merged.notes, deleted: merged.deleted };
+    await driveApi().upload({
+      fileId: file?.id,
+      name: NOTES_FILE_NAME,
+      parentId: rootId,
+      mimeType: "application/json",
+      body: JSON.stringify(body),
+      kind: "notes",
+    });
+  }
+  return merged;
+}
+
 // ---- version history ----
 
 export type DesignVersion = { id: string; at: number; label: string | null; manual: boolean; shapes: number | null };

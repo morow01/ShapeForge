@@ -9,7 +9,7 @@
 export const FOLDER_MIME = "application/vnd.google-apps.folder";
 export const APP_TAG = { key: "shapeforge", value: "1" } as const;
 
-export type DriveKind = "root" | "assets" | "folder" | "design" | "blob" | "version" | "versions";
+export type DriveKind = "root" | "assets" | "folder" | "design" | "blob" | "version" | "versions" | "notes";
 
 /** Saved versions carry their own tag, so the regular listing of designs never has to page through them. */
 export const VERSION_TAG = { key: "shapeforgeVersion", value: "1" } as const;
@@ -107,6 +107,19 @@ export class DriveApi {
       pageToken = data.nextPageToken;
     } while (pageToken);
     return out;
+  }
+
+  /** The one file of a given kind ShapeForge keeps (the feedback notes), if it exists. */
+  async findByKind(kind: DriveKind): Promise<DriveFile | undefined> {
+    const params = new URLSearchParams({
+      q: `appProperties has { key='${APP_TAG.key}' and value='${APP_TAG.value}' } and appProperties has { key='kind' and value='${kind}' } and trashed = false`,
+      fields: `files(${FIELDS})`,
+      pageSize: "10",
+      orderBy: "modifiedTime desc",
+      spaces: "drive",
+    });
+    const res = await this.request(`${API}?${params}`);
+    return ((await res.json()) as { files?: DriveFile[] }).files?.[0];
   }
 
   /** The folder the saved versions are kept in, if it exists. */
