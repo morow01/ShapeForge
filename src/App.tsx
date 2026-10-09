@@ -15,7 +15,7 @@ import { HomePage } from "./ui/HomePage";
 import { SaveDialog } from "./ui/SaveDialog";
 import { installDriveHooks, syncNow } from "./drive/sync";
 import { useDrive } from "./drive/state";
-import { restoreSession, signIn, wasConnected } from "./drive/auth";
+import { armQuietReconnect, restoreSession } from "./drive/auth";
 import {
   AlignNodeIcon,
   AlignToolIcon,
@@ -495,14 +495,12 @@ export function App() {
     // The sign-in lives in memory, so after a refresh the first click anywhere quietly signs
     // back in (Google only allows its window to open from a click). Failures stay silent: the
     // Home page still offers Reconnect.
-    if (!wasConnected()) return;
-    const reconnect = () => {
-      window.removeEventListener("pointerdown", reconnect, true);
-      if (useDrive.getState().status === "signedOut") void signIn().catch(() => {});
-    };
-    window.addEventListener("pointerdown", reconnect, true);
-    return () => window.removeEventListener("pointerdown", reconnect, true);
+    if (useDrive.getState().status === "signedOut") armQuietReconnect();
   }, []);
+  // Coming back online (or reconnecting) sends whatever changed while signed out.
+  useEffect(() => {
+    if (driveStatus === "signedIn" && !useDrive.getState().busy) void syncNow();
+  }, [driveStatus]);
   // Looking at Home while connected brings it up to date with Drive.
   useEffect(() => {
     if (homeOpen && driveStatus === "signedIn" && !useDrive.getState().busy) void syncNow();

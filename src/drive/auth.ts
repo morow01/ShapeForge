@@ -79,6 +79,7 @@ function ensureClient(): TokenClient {
         expiresAt: Date.now() + (Number(response.expires_in) || 3600) * 1000 - 60_000,
       };
       rememberToken();
+      watchExpiry();
       // Google lets people untick individual permissions, so check Drive was really granted.
       if (!google()!.accounts.oauth2.hasGrantedAllScopes(response, DRIVE_FILE_SCOPE)) {
         token = null;
@@ -126,6 +127,20 @@ async function fetchEmail(accessToken: string): Promise<string | null> {
   }
 }
 
+let expiryTimer: ReturnType<typeof setTimeout> | undefined;
+
+/** When the token runs out, show it plainly and get the quick reconnect ready. */
+function watchExpiry() {
+  clearTimeout(expiryTimer);
+  if (!token) return;
+  expiryTimer = setTimeout(() => {
+    if (token && Date.now() < token.expiresAt) return watchExpiry();
+    token = null;
+    useDrive.getState().setStatus("signedOut");
+    armQuietReconnect();
+  }, Math.max(1000, token.expiresAt - Date.now() + 500));
+}
+
 /* The token only lasts about an hour, so keeping it for this browser tab (not on disk) lets a
    refresh carry on signed in. Closing the tab forgets it. */
 const TOKEN_KEY = "cad.driveToken";
@@ -148,6 +163,7 @@ export function restoreSession(): void {
       | null;
     if (saved?.value && saved.expiresAt && Date.now() < saved.expiresAt) {
       token = { value: saved.value, expiresAt: saved.expiresAt };
+      watchExpiry();
       useDrive.getState().setStatus("signedIn", saved.email ?? null);
     } else {
       sessionStorage.removeItem(TOKEN_KEY);
@@ -209,8 +225,23 @@ export async function getAccessToken(): Promise<string> {
   } catch (error) {
     // Without a click the browser may refuse the popup: the person has to reconnect by hand.
     useDrive.getState().setStatus("signedOut");
+    armQuietReconnect();
     throw error;
   }
+}
+
+let quietArmed = false;
+
+/** Google only opens its window from a click, so the next click anywhere quietly signs back in. */
+export function armQuietReconnect(): void {
+  if (quietArmed || !wasConnected()) return;
+  quietArmed = true;
+  const reconnect = () => {
+    window.removeEventListener("pointerdown", reconnect, true);
+    quietArmed = false;
+    if (useDrive.getState().status === "signedOut") void signIn().catch(() => {});
+  };
+  window.addEventListener("pointerdown", reconnect, true);
 }
 
 export function hasToken(): boolean {
