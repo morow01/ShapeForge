@@ -5620,21 +5620,17 @@ button.stepper-btn:disabled {
 .home-nav-icon.tag { color: #2f7f7d; }
 .home-nav:hover .home-nav-icon.tag, .home-nav.on .home-nav-icon.tag { color: #2f7f7d; }
 
-/* The card's actions live in one menu button, so cards end where their content does. */
-.home-more { position: absolute; top: 8px; right: 40px; z-index: 2; width: 26px; height: 26px; min-height: 0; padding: 0; border: 0; border-radius: 8px; background: rgba(255,255,255,0.85); color: #6b7a86; cursor: pointer; display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity 0.12s; }
-.home-card:hover .home-more, .home-card:focus-within .home-more { opacity: 1; }
-.home-more:hover { background: #fff; color: #00807e; }
-.home-more svg { display: block; }
-.home-page.is-dragging .home-more { visibility: hidden; }
-
-/* Quick actions float over the bottom of the thumbnail on hover, so cards need no spare room for them. */
-.home-more { display: none; }
+/* One edit entry point per card: a pencil beside the star. Everything else lives in the right-click menu. */
 .home-thumbwrap { position: relative; display: block; }
 .home-thumbwrap .home-thumb { width: 100%; }
-.home-hoverbar { position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%); display: flex; align-items: center; gap: 2px; padding: 3px; border-radius: 10px; background: rgba(255,255,255,0.94); box-shadow: 0 1px 6px rgba(15,23,42,0.18); opacity: 0; pointer-events: none; transition: opacity 0.12s; z-index: 2; }
-.home-card:hover .home-hoverbar, .home-card:focus-within .home-hoverbar { opacity: 1; pointer-events: auto; }
-.home-hb { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; min-height: 0; padding: 0; border: 0; border-radius: 7px; background: transparent; color: #52616c; cursor: pointer; }
-.home-hb:hover { background: #e6f7f7; color: #00807e; }
-.home-hb.delete:hover { background: #fdf0ef; color: #b42318; }
-.home-hb svg { display: block; }
-.home-page.is-dragging .home-hoverbar { visibility: hidden; }
+.home-edit { position: absolute; top: 8px; right: 40px; z-index: 2; width: 26px; height: 26px; min-height: 0; padding: 0; border: 0; border-radius: 8px; background: rgba(255,255,255,0.85); color: #8a97a1; cursor: pointer; display: flex; align-items: center; justify-content: center; opacity: 0; transition: opacity 0.12s; }
+.home-card:hover .home-edit, .home-card:focus-within .home-edit { opacity: 1; }
+.home-edit:hover { background: #fff; color: #00807e; }
+.home-edit svg { display: block; }
+.home-page.is-dragging .home-edit { visibility: hidden; }
+.edit-star { display: inline-flex; align-items: center; gap: 8px; margin: 10px 0 4px; padding: 6px 12px; min-height: 0; width: auto; border: 1px solid #d3dde4; background: #fff; color: #6b7a86; border-radius: 999px; font-size: 13px; cursor: pointer; }
+.edit-star:hover { border-color: #d9962b; color: #b97a14; }
+.edit-star.on { background: #fff6e0; border-color: #e8c26e; color: #8a5a00; }
+.edit-star.on svg { fill: #d9962b; color: #d9962b; }
+
+.home-drive-why { font-size: 11.5px; line-height: 1.4; color: #8a97a1; }

@@ -18,7 +18,7 @@ import { getBlob, putBlob } from "../document/blobStore";
 import type { FolderMeta, ProjectData, ProjectMeta } from "../document/types";
 import { DriveApi, DriveAuthError, DriveError, FOLDER_MIME } from "./api";
 import type { DriveFile } from "./api";
-import { getAccessToken, hasToken } from "./auth";
+import { getAccessToken, hasToken, signedOutByGoogle } from "./auth";
 import { APP_FOLDER_NAME, ASSETS_FOLDER_NAME } from "./config";
 import { useDrive } from "./state";
 import { decodeTags, encodeTags } from "../document/tags";
@@ -630,7 +630,10 @@ export async function runSync<T>(job: () => Promise<T>): Promise<T | undefined> 
     useDrive.getState().markSynced();
     return result;
   } catch (error) {
-    if (error instanceof DriveAuthError) useDrive.getState().setStatus("signedOut");
+    if (error instanceof DriveAuthError) {
+      signedOutByGoogle();
+      useDrive.getState().setStatus("signedOut");
+    }
     useDrive.getState().setError(
       error instanceof Error && error.message ? error.message : "Couldn't reach Google Drive. Your changes will be sent next time.",
     );

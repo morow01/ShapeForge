@@ -3,7 +3,7 @@ import { useDoc } from "../document/store";
 import { binCount as countBin, collectFolderTree, exportProjectFile, hasProjectContents, loadProject, loadThumbnail, locationOf } from "../document/persist";
 import { BinView } from "./BinView";
 import { VersionHistoryDialog } from "./VersionHistoryDialog";
-import { TagsDialog } from "./TagsDialog";
+import { EditDialog } from "./EditDialog";
 import { BinIcon, ClockIcon, CloudIcon, DraftIcon, FolderIcon, GridIcon, MonitorIcon, StarIcon, TagIcon } from "./NavIcons";
 import { sameTag, uniqueTags } from "../document/tags";
 import type { FolderMeta, ProjectMeta } from "../document/types";
@@ -11,7 +11,7 @@ import { APP_NAME, APP_VERSION } from "../version";
 import { useConfirm } from "./ConfirmDialog";
 import { DriveSetupDialog } from "./DriveSetupDialog";
 import { connectDrive } from "../drive/actions";
-import { signOut, wasConnected } from "../drive/auth";
+import { lastSignOut, signOut, wasConnected } from "../drive/auth";
 import { fetchProject, runSync, syncNow } from "../drive/sync";
 import { useDrive } from "../drive/state";
 import { FolderOpenIcon, PlusIcon, TrashIcon } from "./icons";
@@ -465,11 +465,6 @@ export function HomePage({
     setNameDialog({ mode: "new", parentId });
   };
 
-  const startRenameDesign = (p: ProjectMeta) => {
-    setNameDraft(p.name);
-    setNameDialog({ mode: "renameDesign", projectId: p.id, parentId: null });
-  };
-
   const startRename = (f: FolderMeta) => {
     setNameDraft(f.name);
     setNameDialog({ mode: "rename", folderId: f.id, parentId: f.parentId });
@@ -545,7 +540,7 @@ export function HomePage({
 
   const beginPress = (e: React.PointerEvent, p: ProjectMeta, thumb: string | null) => {
     if (e.button !== 0 || e.pointerType === "touch") return;
-    if ((e.target as Element).closest(".home-actions, .home-check, .home-star, .home-hoverbar, .home-tagchip")) return;
+    if ((e.target as Element).closest(".home-actions, .home-check, .home-star, .home-edit, .home-tagchip")) return;
     // Dragging one of several selected designs takes all of them.
     const group = selected.has(p.id) && selectedDesigns.length > 1 ? selectedDesigns.map((d) => d.id) : [p.id];
     const label = group.length > 1 ? `${group.length} designs` : p.name;
@@ -718,6 +713,14 @@ export function HomePage({
                 {driveStatus === "connecting" ? "Connecting…" : wasConnected() ? "Reconnect Google Drive" : "Connect Google Drive"}
               </button>
               {driveError && <span className="home-drive-error">{driveError}</span>}
+              {(() => {
+                const out = lastSignOut();
+                return out ? (
+                  <span className="home-drive-why" title={out.reason}>
+                    Signed out at {new Date(out.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}: {out.reason}
+                  </span>
+                ) : null;
+              })()}
               <button className="home-link" onClick={() => setSetupOpen(true)}>Change client ID</button>
             </div>
           )}
@@ -862,6 +865,14 @@ export function HomePage({
                       {selected.has(p.id) ? "✓" : ""}
                     </button>
                     <button
+                      className="home-edit"
+                      aria-label={`Edit ${p.name}`}
+                      title="Edit name, tags and star"
+                      onClick={() => setTagging([p])}
+                    >
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z" /></svg>
+                    </button>
+                    <button
                       className={`home-star${p.starred ? " on" : ""}`}
                       aria-pressed={!!p.starred}
                       aria-label={p.starred ? `Remove the star from ${p.name}` : `Star ${p.name}`}
@@ -885,32 +896,6 @@ export function HomePage({
                           </svg>
                         )}
                       </button>
-                      <div className="home-hoverbar" role="toolbar" aria-label={`Actions for ${p.name}`}>
-                        <button className="home-hb" onClick={() => startRenameDesign(p)} title="Rename" aria-label={`Rename ${p.name}`}>
-                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 20h4L19 9l-4-4L4 16z" /></svg>
-                        </button>
-                        <button className="home-hb" onClick={() => setTagging([p])} title="Tags" aria-label={`Tags for ${p.name}`}>
-                          <TagIcon size={15} />
-                        </button>
-                        <button className="home-hb" onClick={() => startMove([p])} title="Move to folder" aria-label={`Move ${p.name} to a folder`}>
-                          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /><path d="M9 13h6m-2.5-2.5L15 13l-2.5 2.5" /></svg>
-                        </button>
-                        <button className="home-hb delete" onClick={() => handleDelete(p)} title="Delete" aria-label={`Delete ${p.name}`}>
-                          <TrashIcon className="home-act-icon" />
-                        </button>
-                        <button
-                          className="home-hb"
-                          aria-haspopup="menu"
-                          title="More"
-                          aria-label={`More actions for ${p.name}`}
-                          onClick={(e) => {
-                            const r = e.currentTarget.getBoundingClientRect();
-                            setMenu({ x: Math.max(8, r.right - 180), y: r.bottom + 4, target: { kind: "design", project: p } });
-                          }}
-                        >
-                          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5.5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="18.5" cy="12" r="1.7" /></svg>
-                        </button>
-                      </div>
                     </div>
                     <div className="home-cap">
                       <button className="home-name" onClick={() => handleOpen(p)} title={p.name}>{p.name}</button>
@@ -1003,12 +988,8 @@ export function HomePage({
               return (
                 <>
                   {!many && <button role="menuitem" onClick={() => { setMenu(null); handleOpen(p); }}>Open</button>}
-                  {!many && <button role="menuitem" onClick={() => { setMenu(null); startRenameDesign(p); }}>Rename…</button>}
+                  <button role="menuitem" onClick={() => { setMenu(null); setTagging(group); }}>{many ? `Edit ${group.length} designs…` : "Edit…"}</button>
                   <button role="menuitem" onClick={() => { setMenu(null); startMove(group); }}>{many ? `Move ${group.length} designs…` : "Move to folder…"}</button>
-                  <button role="menuitem" onClick={() => { setMenu(null); toggleStar(group.map((d) => d.id)); }}>
-                    {group.every((d) => d.starred) ? "Remove star" : many ? "Star all" : "Star"}
-                  </button>
-                  <button role="menuitem" onClick={() => { setMenu(null); setTagging(group); }}>Tags…</button>
                   {!many && driveStatus === "signedIn" && locationOf(p) === "drive" && (
                     <button role="menuitem" onClick={() => { setMenu(null); setHistoryFor(p.id); }}>Version history…</button>
                   )}
@@ -1035,7 +1016,7 @@ export function HomePage({
         </div>
       )}
 
-      <TagsDialog designs={tagging} known={allTags} onClose={() => setTagging(null)} />
+      <EditDialog designs={tagging} known={allTags} onClose={() => setTagging(null)} />
       <VersionHistoryDialog open={historyFor !== null} projectId={historyFor ?? ""} onClose={() => setHistoryFor(null)} />
       {confirmDialog}
       <DriveSetupDialog open={setupOpen} onClose={() => setSetupOpen(false)} />
