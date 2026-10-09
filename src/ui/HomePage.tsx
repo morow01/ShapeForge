@@ -3,6 +3,7 @@ import { useDoc } from "../document/store";
 import { exportProjectFile, loadProject, loadThumbnail, locationOf } from "../document/persist";
 import type { FolderMeta, ProjectMeta } from "../document/types";
 import { APP_NAME } from "../version";
+import { useConfirm } from "./ConfirmDialog";
 import { DuplicateIcon, ExportIcon, FolderOpenIcon, PlusIcon, TrashIcon } from "./icons";
 
 function timeAgo(timestamp: number): string {
@@ -123,6 +124,7 @@ export function HomePage({
   dragRef.current = drag;
   const pressRef = useRef<{ ids: string[]; name: string; thumb: string | null; x: number; y: number } | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const { ask, dialog: confirmDialog } = useConfirm();
   // The click that ends a drag must not also open the design under the pointer.
   const suppressClickRef = useRef(false);
 
@@ -156,6 +158,8 @@ export function HomePage({
       setDropTarget("none");
       if (e.type === "pointerup" && target !== "none") {
         for (const id of press.ids) useDoc.getState().moveProjectToFolder(id, target);
+        // They have moved, so they are no longer "picked".
+        setSelected(new Set());
       }
     };
     window.addEventListener("pointermove", onMove);
@@ -167,6 +171,11 @@ export function HomePage({
       window.removeEventListener("pointercancel", onUp);
     };
   }, [open]);
+
+  // A selection belongs to the folder or search it was made in.
+  useEffect(() => {
+    setSelected(new Set());
+  }, [view, search]);
 
   // The right-click menu closes on any click elsewhere, Escape, scrolling or resizing.
   useEffect(() => {
@@ -260,14 +269,25 @@ export function HomePage({
     if (full) await exportProjectFile(full);
   };
 
-  const handleDelete = (p: ProjectMeta) => {
-    if (confirm(`Delete "${p.name}"? This cannot be undone.`)) deleteProject(p.id);
+  const handleDelete = async (p: ProjectMeta) => {
+    const ok = await ask({
+      title: "Delete design?",
+      message: `"${p.name}" will be deleted. This cannot be undone.`,
+      confirmLabel: "Delete",
+      destructive: true,
+    });
+    if (ok) deleteProject(p.id);
   };
 
-  const handleClean = () => {
-    if (confirm(`Delete ${empties.length} empty ${empties.length === 1 ? "design" : "designs"} with no shapes in them?`)) {
-      for (const p of empties) deleteProject(p.id);
-    }
+  const handleClean = async () => {
+    const count = empties.length;
+    const ok = await ask({
+      title: `Clear ${count} empty ${count === 1 ? "design" : "designs"}?`,
+      message: `${count === 1 ? "It has" : "They have"} no shapes in ${count === 1 ? "it" : "them"}. This cannot be undone.`,
+      confirmLabel: "Clear",
+      destructive: true,
+    });
+    if (ok) for (const p of empties) deleteProject(p.id);
   };
 
   const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -285,7 +305,12 @@ export function HomePage({
       /* falls through to the message below */
     }
     onProjectLoadFailed?.();
-    alert("That file could not be opened. Choose a ShapeForge (.shapeforge) or CAD JSON file.");
+    void ask({
+      title: "Couldn't open that file",
+      message: "Choose a ShapeForge (.shapeforge) or CAD JSON file.",
+      confirmLabel: "OK",
+      cancelLabel: null,
+    });
   };
 
   const startNewFolder = () => {
@@ -318,10 +343,18 @@ export function HomePage({
     setNameDialog(null);
   };
 
-  const handleDeleteFolder = (f: FolderMeta) => {
+  const handleDeleteFolder = async (f: FolderMeta) => {
     const inside = countIn(f.id) + folders.filter((x) => x.parentId === f.id).length;
-    const note = inside ? ` Its ${inside} ${inside === 1 ? "item moves" : "items move"} up one level.` : "";
-    if (!confirm(`Delete the folder "${f.name}"?${note}`)) return;
+    const note = inside
+      ? `Its ${inside} ${inside === 1 ? "item moves" : "items move"} up one level; nothing inside is deleted.`
+      : "It is empty.";
+    const ok = await ask({
+      title: "Delete folder?",
+      message: `"${f.name}" will be deleted. ${note}`,
+      confirmLabel: "Delete folder",
+      destructive: true,
+    });
+    if (!ok) return;
     deleteFolder(f.id);
     if (viewFolderId === f.id) setView({ kind: "folder", id: f.parentId });
   };
@@ -338,12 +371,18 @@ export function HomePage({
     setSelected(new Set());
   };
 
-  const handleDeleteMany = (group: ProjectMeta[]) => {
+  const handleDeleteMany = async (group: ProjectMeta[]) => {
     if (group.length === 1) {
-      handleDelete(group[0]);
+      await handleDelete(group[0]);
       return;
     }
-    if (!confirm(`Delete ${group.length} designs? This cannot be undone.`)) return;
+    const ok = await ask({
+      title: `Delete ${group.length} designs?`,
+      message: "They will be deleted. This cannot be undone.",
+      confirmLabel: `Delete ${group.length} designs`,
+      destructive: true,
+    });
+    if (!ok) return;
     for (const p of group) deleteProject(p.id);
     setSelected(new Set());
   };
@@ -675,6 +714,8 @@ export function HomePage({
           )}
         </div>
       )}
+
+      {confirmDialog}
 
       {moving && (
         <div className="modal-backdrop" onClick={() => setMoving(null)}>
