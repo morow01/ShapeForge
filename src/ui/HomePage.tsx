@@ -5,7 +5,8 @@ import { BinView } from "./BinView";
 import { VersionHistoryDialog } from "./VersionHistoryDialog";
 import { EditDialog } from "./EditDialog";
 import { BinIcon, ClockIcon, CloudIcon, DraftIcon, FolderIcon, GridIcon, MonitorIcon, StarIcon, TagIcon } from "./NavIcons";
-import { loadTagRegistry, removeFromTagRegistry, sameTag, uniqueTags } from "../document/tags";
+import { addToTagRegistry, cleanTag, loadTagRegistry, removeFromTagRegistry, sameTag, uniqueTags } from "../document/tags";
+import { TagManager } from "./TagManager";
 import type { FolderMeta, ProjectMeta } from "../document/types";
 import { APP_NAME, APP_VERSION } from "../version";
 import { useConfirm } from "./ConfirmDialog";
@@ -180,6 +181,23 @@ export function HomePage({
   const [historyFor, setHistoryFor] = useState<string | null>(null);
   const [tagging, setTagging] = useState<ProjectMeta[] | null>(null);
   const [, setTagTick] = useState(0);
+  const [managingTags, setManagingTags] = useState(false);
+  const [tagsCollapsed, setTagsCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem("cad.tagsCollapsed") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggleTagsCollapsed = () =>
+    setTagsCollapsed((v) => {
+      try {
+        localStorage.setItem("cad.tagsCollapsed", v ? "0" : "1");
+      } catch {
+        /* the choice is simply not remembered */
+      }
+      return !v;
+    });
   const [sideWidth, setSideWidth] = useState(readSideWidth);
   const [sort, setSortState] = useState<SortState>(readSort);
   const setSort = (next: SortState) => {
@@ -593,6 +611,28 @@ export function HomePage({
     setTagTick((n) => n + 1);
   };
 
+  const addTag = (tag: string) => {
+    addToTagRegistry([tag]);
+    setTagTick((n) => n + 1);
+  };
+
+  /** Renames a tag on every design that has it and in the list. Returns a message if it could not be done. */
+  const renameTag = (oldTag: string, raw: string): string | null => {
+    const next = cleanTag(raw);
+    if (!next) return "Type a name for the tag.";
+    const users = projects.filter((p) => (p.tags ?? []).some((t) => sameTag(t, oldTag)));
+    if (users.length && !useDoc.getState().editTags(users.map((p) => p.id), [next], [oldTag])) {
+      return "Some designs can't hold that name. Tags are kept short so they fit in Google Drive.";
+    }
+    removeFromTagRegistry(oldTag);
+    addToTagRegistry([next]);
+    if (view.kind === "tags" && view.tags.some((t) => sameTag(t, oldTag))) {
+      setView({ kind: "tags", tags: view.tags.map((t) => (sameTag(t, oldTag) ? next : t)) });
+    }
+    setTagTick((n) => n + 1);
+    return null;
+  };
+
   const navClass = (active: boolean, drop?: boolean) => `home-nav${active ? " on" : ""}${drop ? " drop" : ""}`;
   const atRoot = !searching && view.kind === "folder" && viewFolderId === null;
 
@@ -688,9 +728,27 @@ export function HomePage({
             </button>
           ))}
 
-          <div className="home-side-label">Tags</div>
-          {allTags.length === 0 && <p className="home-side-empty">No tags yet. Edit a design to add some.</p>}
-          {allTags.map((tag) => {
+          <div className="home-side-head tags-head">
+            <button
+              className="home-side-toggle"
+              aria-expanded={!tagsCollapsed}
+              onClick={toggleTagsCollapsed}
+              title={tagsCollapsed ? "Show tags" : "Hide tags"}
+            >
+              <svg className={`home-chevron${tagsCollapsed ? " closed" : ""}`} width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M2 3.5 5 6.5 8 3.5" />
+              </svg>
+              <span>Tags</span>
+              {tagsCollapsed && view.kind === "tags" && <span className="home-side-badge">{view.tags.length}</span>}
+            </button>
+            <button className="home-side-add subtle" onClick={() => setManagingTags(true)} title="Manage tags" aria-label="Manage tags">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M4 7h10M18 7h2M4 17h2M10 17h10" /><circle cx="16" cy="7" r="2" /><circle cx="8" cy="17" r="2" />
+              </svg>
+            </button>
+          </div>
+          {!tagsCollapsed && allTags.length === 0 && <p className="home-side-empty">No tags yet. Use Manage tags to add some.</p>}
+          {(tagsCollapsed ? [] : allTags).map((tag) => {
             const checked = !searching && view.kind === "tags" && view.tags.some((t) => sameTag(t, tag));
             const count = tagCount(tag);
             return (
@@ -1069,6 +1127,15 @@ export function HomePage({
       )}
 
       <EditDialog designs={tagging} known={allTags} onClose={() => setTagging(null)} />
+      <TagManager
+        open={managingTags}
+        tags={allTags}
+        count={tagCount}
+        onAdd={addTag}
+        onRename={renameTag}
+        onDelete={(tag) => void handleDeleteTag(tag)}
+        onClose={() => setManagingTags(false)}
+      />
       <VersionHistoryDialog open={historyFor !== null} projectId={historyFor ?? ""} onClose={() => setHistoryFor(null)} />
       {confirmDialog}
       <DriveSetupDialog open={setupOpen} onClose={() => setSetupOpen(false)} />
