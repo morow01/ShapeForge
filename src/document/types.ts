@@ -1845,6 +1845,14 @@ export const isGroup = (n: SceneNode): n is GroupNode => n.type === "group";
  *  this existed, which was always kept in the browser. */
 export type ProjectLocation = "draft" | "browser" | "drive";
 
+/** A folder on the Home page. Folders nest through parentId (null = top level). */
+export interface FolderMeta {
+  id: string;
+  name: string;
+  parentId: string | null;
+  createdAt: number;
+}
+
 export interface ProjectMeta {
   id: string;
   name: string;
@@ -1852,6 +1860,8 @@ export interface ProjectMeta {
   updatedAt: number;
   objectCount: number;
   location?: ProjectLocation;
+  /** The folder this design is in; missing or null means the top level. */
+  folderId?: string | null;
 }
 
 export interface ProjectData {

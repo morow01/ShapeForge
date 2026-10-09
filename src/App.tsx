@@ -3634,13 +3634,18 @@ export function App() {
   }, []);
 
   /** New design from Home. An untouched draft is reused rather than leaving a trail of empty ones. */
-  const newFromHome = useCallback(() => {
+  const newFromHome = useCallback((folderId: string | null) => {
     const state = useDoc.getState();
     const meta = state.projects.find((p) => p.id === state.currentProjectId);
     if (!state.nodes.length && locationOf(meta ?? {}) === "draft") {
       setIsEditingTitle(true);
     } else {
       createNewDesign();
+    }
+    // A new design goes into the folder that was being viewed.
+    const after = useDoc.getState();
+    if (folderId || after.projects.find((p) => p.id === after.currentProjectId)?.folderId) {
+      after.moveProjectToFolder(after.currentProjectId, folderId);
     }
     setHomeOpen(false);
   }, [createNewDesign]);

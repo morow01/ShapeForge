@@ -5,6 +5,7 @@ import type {
   BooleanOp,
   CameraMode,
   EditOp,
+  FolderMeta,
   LowPoly,
   PrimitiveKind,
   ProjectData,
@@ -21,6 +22,7 @@ const PROJECT_PREFIX = "cad.project.";
 const LEGACY_KEY = "cad.document";
 const CAMERA_KEY = "cad.camera";
 // "2" marks the larger, smoother pictures; the first, smaller ones (cad.thumb.) are discarded.
+const FOLDERS_KEY = "cad.folders";
 const THUMB_PREFIX = "cad.thumb2.";
 const OLD_THUMB_PREFIX = "cad.thumb.";
 let oldThumbnailsPurged = false;
@@ -343,6 +345,86 @@ export function setProjectLocation(id: string, location: ProjectLocation): boole
   }
 }
 
+/** Moves a design into a folder (null = top level) without touching its contents. */
+export function setProjectFolder(id: string, folderId: string | null): boolean {
+  try {
+    const raw = localStorage.getItem(INDEX_KEY);
+    if (!raw) return false;
+    const list = JSON.parse(raw) as ProjectMeta[];
+    const entry = list.find((p) => p.id === id);
+    if (!entry) return false;
+    if (folderId) entry.folderId = folderId;
+    else delete entry.folderId;
+    localStorage.setItem(INDEX_KEY, JSON.stringify(list));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function listFolders(): FolderMeta[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(FOLDERS_KEY) ?? "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (f): f is FolderMeta =>
+        !!f && typeof f.id === "string" && typeof f.name === "string" && (f.parentId === null || typeof f.parentId === "string"),
+    );
+  } catch {
+    return [];
+  }
+}
+
+function writeFolders(list: FolderMeta[]): boolean {
+  try {
+    localStorage.setItem(FOLDERS_KEY, JSON.stringify(list));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function createFolderEntry(name: string, parentId: string | null): FolderMeta {
+  const folder: FolderMeta = {
+    id: `f-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+    name: name.trim() || "New folder",
+    parentId,
+    createdAt: Date.now(),
+  };
+  writeFolders([...listFolders(), folder]);
+  return folder;
+}
+
+export function renameFolderEntry(id: string, name: string): void {
+  const trimmed = name.trim();
+  if (!trimmed) return;
+  writeFolders(listFolders().map((f) => (f.id === id ? { ...f, name: trimmed } : f)));
+}
+
+/** Removes a folder only. Whatever was inside it (designs and folders) moves up one level. */
+export function deleteFolderEntry(id: string): void {
+  const folders = listFolders();
+  const doomed = folders.find((f) => f.id === id);
+  if (!doomed) return;
+  writeFolders(
+    folders.filter((f) => f.id !== id).map((f) => (f.parentId === id ? { ...f, parentId: doomed.parentId } : f)),
+  );
+  try {
+    const raw = localStorage.getItem(INDEX_KEY);
+    if (!raw) return;
+    const list = JSON.parse(raw) as ProjectMeta[];
+    for (const p of list) {
+      if (p.folderId === id) {
+        if (doomed.parentId) p.folderId = doomed.parentId;
+        else delete p.folderId;
+      }
+    }
+    localStorage.setItem(INDEX_KEY, JSON.stringify(list));
+  } catch {
+    /* the folder is gone either way; designs keep working */
+  }
+}
+
 /** Small preview picture shown on the Home page card. Kept apart from the design so
  *  a design's own save stays small; a missing or unwritable one just shows a placeholder. */
 export function saveThumbnail(id: string, dataUrl: string): void {
@@ -411,8 +493,9 @@ export function saveProject(project: ProjectData): boolean {
       createdAt: project.createdAt,
       updatedAt: project.updatedAt,
       objectCount: project.nodes.length,
-      // An autosave must never move a design to a different home.
+      // An autosave must never move a design to a different home or folder.
       ...(existingIdx >= 0 && list[existingIdx].location ? { location: list[existingIdx].location } : {}),
+      ...(existingIdx >= 0 && list[existingIdx].folderId ? { folderId: list[existingIdx].folderId } : {}),
     };
 
     if (existingIdx >= 0) {

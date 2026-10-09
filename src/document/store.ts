@@ -13,16 +13,21 @@ import {
   tidy,
 } from "./transform";
 import {
+  createFolderEntry,
+  deleteFolderEntry,
   deleteProjectStorage,
   exportProjectFile,
   getActiveProjectId,
+  listFolders,
   listProjects,
   loadCameraState,
   loadProject,
   parseProjectFile,
+  renameFolderEntry,
   restoreProjectFileBlobs,
   saveProject,
   setActiveProjectId,
+  setProjectFolder,
   setProjectLocation,
 } from "./persist";
 import {
@@ -38,6 +43,7 @@ import type {
   BuildNode,
   EditOp,
   EditNode,
+  FolderMeta,
   GroupNode,
   ImportNode,
   SketchData,
@@ -700,6 +706,8 @@ interface DocState {
   currentProjectId: string;
   projectName: string;
   projects: ProjectMeta[];
+  /** Home page folders. */
+  folders: FolderMeta[];
   nodes: SceneNode[];
   /** Multi-select, in click order. */
   selectedIds: string[];
@@ -715,6 +723,11 @@ interface DocState {
   renameProject: (name: string) => void;
   duplicateProject: (id: string) => string | null;
   deleteProject: (id: string) => boolean;
+  createFolder: (name: string, parentId: string | null) => string;
+  renameFolder: (id: string, name: string) => void;
+  /** Deletes the folder only; its designs and folders move up one level. */
+  deleteFolder: (id: string) => void;
+  moveProjectToFolder: (projectId: string, folderId: string | null) => void;
   /** Chooses where the open design is kept. A new design starts as a draft, which
    *  autosaves in this browser but has not been given a home. */
   saveCurrentTo: (location: ProjectLocation) => void;
@@ -835,6 +848,7 @@ export const useDoc = create<DocState>()(
       currentProjectId: activeProject.id,
       projectName: activeProject.name,
       projects: initialProjects,
+      folders: listFolders(),
       nodes: restored,
       selectedIds: [],
       showResult: false,
@@ -924,8 +938,9 @@ export const useDoc = create<DocState>()(
           updatedAt: Date.now(),
         };
         saveProject(newProj);
-        const sourceLocation = get().projects.find((p) => p.id === id)?.location;
-        if (sourceLocation) setProjectLocation(newId, sourceLocation);
+        const sourceMeta = get().projects.find((p) => p.id === id);
+        if (sourceMeta?.location) setProjectLocation(newId, sourceMeta.location);
+        if (sourceMeta?.folderId) setProjectFolder(newId, sourceMeta.folderId);
         set({ projects: listProjects() });
         return newId;
       },
@@ -945,6 +960,29 @@ export const useDoc = create<DocState>()(
           set({ projects: remaining });
         }
         return true;
+      },
+
+      createFolder: (name, parentId) => {
+        const folder = createFolderEntry(name, parentId);
+        set({ folders: listFolders() });
+        return folder.id;
+      },
+
+      renameFolder: (id, name) => {
+        renameFolderEntry(id, name);
+        set({ folders: listFolders() });
+      },
+
+      deleteFolder: (id) => {
+        flushSave();
+        deleteFolderEntry(id);
+        set({ folders: listFolders(), projects: listProjects() });
+      },
+
+      moveProjectToFolder: (projectId, folderId) => {
+        flushSave();
+        setProjectFolder(projectId, folderId);
+        set({ projects: listProjects() });
       },
 
       saveCurrentTo: (location) => {
