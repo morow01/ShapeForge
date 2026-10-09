@@ -93,6 +93,18 @@ type DragState = { ids: string[]; name: string; thumb: string | null; x: number;
 
 const DRAG_START_DISTANCE = 6;
 
+const SIDE_WIDTH_KEY = "cad.homeSideWidth";
+const DEFAULT_SIDE_WIDTH = 240;
+const clampSideWidth = (w: number) => Math.max(190, Math.min(460, Math.round(w)));
+function readSideWidth(): number {
+  try {
+    const saved = Number(localStorage.getItem(SIDE_WIDTH_KEY));
+    return saved ? clampSideWidth(saved) : DEFAULT_SIDE_WIDTH;
+  } catch {
+    return DEFAULT_SIDE_WIDTH;
+  }
+}
+
 /**
  * The start page: folders and designs, with where each design is kept. It sits over
  * the editor rather than replacing it, so the editor stays loaded behind it and
@@ -135,6 +147,33 @@ export function HomePage({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [historyFor, setHistoryFor] = useState<string | null>(null);
   const [tagging, setTagging] = useState<ProjectMeta[] | null>(null);
+  const [sideWidth, setSideWidth] = useState(readSideWidth);
+  const startResize = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    const handle = e.currentTarget;
+    handle.setPointerCapture(e.pointerId);
+    const move = (ev: PointerEvent) => setSideWidth(clampSideWidth(ev.clientX));
+    const up = (ev: PointerEvent) => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+      handle.releasePointerCapture(ev.pointerId);
+      try {
+        localStorage.setItem(SIDE_WIDTH_KEY, String(clampSideWidth(ev.clientX)));
+      } catch {
+        /* the width simply is not remembered */
+      }
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+  };
+  const resetSideWidth = () => {
+    setSideWidth(DEFAULT_SIDE_WIDTH);
+    try {
+      localStorage.removeItem(SIDE_WIDTH_KEY);
+    } catch {
+      /* nothing stored to clear */
+    }
+  };
   const toggleStar = useDoc((s) => s.toggleStar);
   const { ask, dialog: confirmDialog } = useConfirm();
   const driveConfigured = useDrive((s) => s.configured);
@@ -522,7 +561,17 @@ export function HomePage({
         <input ref={fileInputRef} type="file" accept=".shapeforge,.json" hidden onChange={handleFile} />
       </header>
 
-      <div className="home-body">
+      <div className="home-body" style={{ gridTemplateColumns: `${sideWidth}px minmax(0, 1fr)` }}>
+        <div
+          className="home-resizer"
+          style={{ left: sideWidth - 3 }}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize the sidebar"
+          title="Drag to resize. Double-click to reset."
+          onPointerDown={startResize}
+          onDoubleClick={resetSideWidth}
+        />
         <nav className="home-side" aria-label="Locations">
           <button
             className={navClass(atRoot, dropTarget === null)}
@@ -570,7 +619,7 @@ export function HomePage({
               className={navClass(!searching && view.kind === "tag" && sameTag(view.tag, tag))}
               onClick={() => { setSearch(""); setView({ kind: "tag", tag }); }}
             >
-              <span className="home-nav-main"><TagIcon className="home-nav-icon tag" /><span className="home-nav-name">{tag}</span></span>
+              <span className="home-nav-main"><TagIcon size={13} className="home-nav-icon tag" /><span className="home-nav-name">{tag}</span></span>
               <span className="home-count">{tagCount(tag)}</span>
             </button>
           ))}
@@ -737,7 +786,7 @@ export function HomePage({
                       title={p.starred ? "Remove star" : "Star"}
                       onClick={() => toggleStar([p.id])}
                     >
-                      {p.starred ? "★" : "☆"}
+                      <StarIcon size={17} />
                     </button>
                     <button
                       className="home-thumb"
@@ -768,7 +817,7 @@ export function HomePage({
                         <span className="home-tagrow">
                           {(p.tags ?? []).slice(0, 3).map((t) => (
                             <button key={t} className="home-tagchip" onClick={() => { setSearch(""); setView({ kind: "tag", tag: t }); }} title={`Show everything tagged ${t}`}>
-                              <TagIcon size={10} className="home-tagchip-icon" />{t}
+                              <TagIcon size={9} className="home-tagchip-icon" />{t}
                             </button>
                           ))}
                           {(p.tags ?? []).length > 3 && <span className="home-tagmore">+{(p.tags ?? []).length - 3}</span>}

@@ -99,7 +99,7 @@ export function TagsDialog({ designs, known, onClose }: TagsDialogProps) {
               onClick={() => cycle(t)}
               title={marks[t] === "some" ? "Only some of the selected designs have this tag" : undefined}
             >
-              <TagIcon size={12} className="tag-chip-icon" />
+              <TagIcon size={11} className="tag-chip-icon" />
               {t}
               {marks[t] === "all" ? <span className="tag-chip-mark"> ✓</span> : marks[t] === "some" ? <span className="tag-chip-mark"> –</span> : null}
             </button>

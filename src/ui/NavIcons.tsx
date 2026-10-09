@@ -49,10 +49,10 @@ export const FolderIcon = (p: IconProps) => (
   </Svg>
 );
 
+/** A hash sign: tags are written #like-this. */
 export const TagIcon = (p: IconProps) => (
   <Svg {...p}>
-    <path d="M3.5 12.5V4.5a1 1 0 0 1 1-1h8l8 8-9 9z" />
-    <circle cx="8" cy="8" r="1.3" />
+    <path d="M9.5 3.5 7.5 20.5M16.5 3.5l-2 17M4 9h16.5M3.5 15H20" />
   </Svg>
 );
 

@@ -5579,3 +5579,16 @@ button.stepper-btn:disabled {
 .tag-chip-mark { font-weight: 600; }
 .tag-chip.suggestion { border-style: dashed; color: #6b7a86; background: #fafcfd; }
 .tag-chip.suggestion:hover { color: #00807e; }
+
+/* Resizable sidebar, card star matching the sidebar star, hash tag icon. */
+.home-body { position: relative; }
+.home-resizer { position: absolute; top: 0; bottom: 0; width: 7px; z-index: 5; cursor: col-resize; touch-action: none; }
+.home-resizer::after { content: ""; position: absolute; left: 3px; top: 0; bottom: 0; width: 1px; background: transparent; transition: background 0.12s, width 0.12s, left 0.12s; }
+.home-resizer:hover::after, .home-resizer:active::after { background: #00a7a5; width: 3px; left: 2px; }
+.home-star { color: #c4cdd4; }
+.home-star svg { display: block; }
+.home-star.on { color: #d9962b; }
+.home-star.on svg { fill: currentColor; }
+.home-star:hover { color: #d9962b; }
+.home-nav-icon.tag { color: #7d8b96; }
+.home-tagchip-icon, .tag-chip-icon { stroke-width: 2; }
