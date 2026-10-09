@@ -4590,7 +4590,7 @@ export function App() {
             <span>Designs</span>
           </button>
           <div className="brand">
-            <span className="brand-mark">S</span>
+            <img className="brand-logo" src={`${import.meta.env.BASE_URL}logo.svg`} alt="" width={24} height={26} draggable={false} />
             <span className="brand-name">{APP_NAME}</span>
             <span className="brand-version">v{APP_VERSION}</span>
           </div>

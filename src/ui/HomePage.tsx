@@ -704,7 +704,7 @@ export function HomePage({
     <div className={`home-page${drag ? " is-dragging" : ""}`} role="dialog" aria-label="All designs" data-previews={thumbVersion}>
       <header className="home-top">
         <div className="home-brand">
-          <span className="brand-mark">S</span>
+          <img className="brand-logo" src={`${import.meta.env.BASE_URL}logo.svg`} alt="" width={24} height={26} draggable={false} />
           <span className="brand-name">{APP_NAME}</span>
           <span className="brand-version">v{APP_VERSION}</span>
         </div>
