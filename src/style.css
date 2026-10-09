@@ -5592,3 +5592,19 @@ button.stepper-btn:disabled {
 .home-star:hover { color: #d9962b; }
 .home-nav-icon.tag { color: #7d8b96; }
 .home-tagchip-icon, .tag-chip-icon { stroke-width: 2; }
+
+.home-sortbar { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin: 0 0 10px; font-size: 12.5px; color: #6b7a86; }
+.home-sort-select { border: 1px solid #d3dde4; background: #fff; color: #3d4c57; font-size: 12.5px; padding: 4px 8px; border-radius: 8px; min-height: 0; width: auto; cursor: pointer; }
+.home-sort-select:hover { border-color: #00a7a5; }
+.home-sort-dir { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; min-height: 0; padding: 0; border: 1px solid #d3dde4; background: #fff; color: #3d4c57; border-radius: 8px; cursor: pointer; }
+.home-sort-dir:hover { border-color: #00a7a5; color: #00807e; }
+.home-sort-dir svg { display: block; transition: transform 0.15s; }
+
+/* Connector lines in the folder tree: a vertical guide for each open branch, an elbow or tee to the folder. */
+.home-nav-main .tree-cells { display: flex; align-self: stretch; flex-shrink: 0; margin: 0 -2px 0 0; }
+.tree-cell { position: relative; width: 16px; align-self: stretch; flex-shrink: 0; }
+.tree-cell.line::before, .tree-cell.tee::before, .tree-cell.elbow::before { content: ""; position: absolute; left: 7px; width: 0; border-left: 1px solid #cfd9e0; top: -9px; bottom: -9px; }
+.tree-cell.elbow::before { bottom: 50%; border-bottom: 1px solid #cfd9e0; width: 8px; border-bottom-left-radius: 5px; }
+.tree-cell.tee::after { content: ""; position: absolute; left: 7px; top: 50%; width: 9px; border-top: 1px solid #cfd9e0; }
+.home-nav-main { gap: 4px; }
+.home-nav-main > .home-nav-icon { margin-right: 6px; }

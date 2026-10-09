@@ -60,18 +60,19 @@ function folderPath(folders: FolderMeta[], id: string | null): FolderMeta[] {
 }
 
 /** Every folder as a flat list in tree order, with how deep each one sits. */
-function folderTree(folders: FolderMeta[]): { folder: FolderMeta; depth: number }[] {
-  const out: { folder: FolderMeta; depth: number }[] = [];
-  const walk = (parentId: string | null, depth: number) => {
-    folders
-      .filter((f) => f.parentId === parentId)
-      .sort((a, b) => a.name.localeCompare(b.name))
-      .forEach((f) => {
-        out.push({ folder: f, depth });
-        walk(f.id, depth + 1);
-      });
+/** `last` is whether it is the final child of its parent; `more[k]` is whether the ancestor at depth k has
+ *  siblings still to come, which decides if a vertical connector line runs down past this row. */
+function folderTree(folders: FolderMeta[]): { folder: FolderMeta; depth: number; last: boolean; more: boolean[] }[] {
+  const out: { folder: FolderMeta; depth: number; last: boolean; more: boolean[] }[] = [];
+  const walk = (parentId: string | null, depth: number, more: boolean[]) => {
+    const kids = folders.filter((f) => f.parentId === parentId).sort((a, b) => a.name.localeCompare(b.name));
+    kids.forEach((f, i) => {
+      const last = i === kids.length - 1;
+      out.push({ folder: f, depth, last, more });
+      walk(f.id, depth + 1, [...more, !last]);
+    });
   };
-  walk(null, 0);
+  walk(null, 0, []);
   return out;
 }
 
@@ -92,6 +93,37 @@ type MenuState = {
 type DragState = { ids: string[]; name: string; thumb: string | null; x: number; y: number } | null;
 
 const DRAG_START_DISTANCE = 6;
+
+type SortKey = "updated" | "name" | "created";
+type SortState = { key: SortKey; dir: "asc" | "desc" };
+const SORT_KEY = "cad.homeSort";
+const SORT_LABELS: Record<SortKey, string> = { updated: "Last changed", name: "Name", created: "Date created" };
+/** Names read A to Z, dates newest first, until the person flips them. */
+const DEFAULT_DIR: Record<SortKey, "asc" | "desc"> = { updated: "desc", name: "asc", created: "desc" };
+
+function readSort(): SortState {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SORT_KEY) ?? "null") as SortState | null;
+    if (saved && saved.key in SORT_LABELS && (saved.dir === "asc" || saved.dir === "desc")) return saved;
+  } catch {
+    /* fall back to the default */
+  }
+  return { key: "updated", dir: "desc" };
+}
+
+function sortDesigns(list: ProjectMeta[], sort: SortState): ProjectMeta[] {
+  const sign = sort.dir === "asc" ? 1 : -1;
+  return [...list].sort((a, b) => {
+    const diff =
+      sort.key === "name"
+        ? a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" })
+        : sort.key === "created"
+          ? (a.createdAt ?? 0) - (b.createdAt ?? 0)
+          : (a.updatedAt ?? 0) - (b.updatedAt ?? 0);
+    // Designs that tie keep a steady order, newest changes first.
+    return diff !== 0 ? diff * sign : (b.updatedAt ?? 0) - (a.updatedAt ?? 0);
+  });
+}
 
 const SIDE_WIDTH_KEY = "cad.homeSideWidth";
 const DEFAULT_SIDE_WIDTH = 240;
@@ -148,6 +180,15 @@ export function HomePage({
   const [historyFor, setHistoryFor] = useState<string | null>(null);
   const [tagging, setTagging] = useState<ProjectMeta[] | null>(null);
   const [sideWidth, setSideWidth] = useState(readSideWidth);
+  const [sort, setSortState] = useState<SortState>(readSort);
+  const setSort = (next: SortState) => {
+    setSortState(next);
+    try {
+      localStorage.setItem(SORT_KEY, JSON.stringify(next));
+    } catch {
+      /* the choice is simply not remembered */
+    }
+  };
   const startResize = (e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault();
     const handle = e.currentTarget;
@@ -296,6 +337,8 @@ export function HomePage({
     designs = viewFolderId === null ? projects : projects.filter((p) => p.folderId === viewFolderId);
     subfolders = folders.filter((f) => f.parentId === viewFolderId).sort((a, b) => a.name.localeCompare(b.name));
   }
+
+  if (view.kind !== "recent" || searching) designs = sortDesigns(designs, sort);
 
   // Only designs that are on screen count as selected, so a bulk action can never touch
   // something in a folder you have since left.
@@ -598,15 +641,25 @@ export function HomePage({
             </button>
           </div>
           {folders.length === 0 && <p className="home-side-empty">No folders yet</p>}
-          {folderTree(folders).map(({ folder, depth }) => (
+          {folderTree(folders).map(({ folder, depth, last, more }) => (
             <button
               key={folder.id}
               className={navClass(!searching && view.kind === "folder" && viewFolderId === folder.id, dropTarget === folder.id)}
-              style={{ paddingLeft: 10 + depth * 16 }}
               onClick={() => { setSearch(""); setView({ kind: "folder", id: folder.id }); }}
               {...dropProps(folder.id)}
             >
-              <span className="home-nav-main"><FolderIcon className="home-nav-icon" /><span className="home-nav-name">{folder.name}</span></span>
+              <span className="home-nav-main">
+                {depth > 0 && (
+                  <span className="tree-cells" aria-hidden="true">
+                    {Array.from({ length: depth }, (_, i) => {
+                      const k = i + 1;
+                      const cell = k < depth ? (more[k] ? "line" : "blank") : last ? "elbow" : "tee";
+                      return <span key={k} className={`tree-cell ${cell}`} />;
+                    })}
+                  </span>
+                )}
+                <FolderIcon className="home-nav-icon" /><span className="home-nav-name">{folder.name}</span>
+              </span>
               <span className="home-count">{countIn(folder.id)}</span>
             </button>
           ))}
@@ -754,6 +807,35 @@ export function HomePage({
                 <button className="modal-btn" onClick={() => setSelected(new Set(designs.map((d) => d.id)))}>Select all {designs.length}</button>
               )}
               <button className="modal-btn" onClick={() => setSelected(new Set())}>Clear</button>
+            </div>
+          )}
+
+          {designs.length > 1 && (view.kind !== "recent" || searching) && (
+            <div className="home-sortbar">
+              <label htmlFor="home-sort">Sort by</label>
+              <select
+                id="home-sort"
+                className="home-sort-select"
+                value={sort.key}
+                onChange={(e) => {
+                  const key = e.target.value as SortKey;
+                  setSort({ key, dir: DEFAULT_DIR[key] });
+                }}
+              >
+                {(Object.keys(SORT_LABELS) as SortKey[]).map((k) => (
+                  <option key={k} value={k}>{SORT_LABELS[k]}</option>
+                ))}
+              </select>
+              <button
+                className="home-sort-dir"
+                onClick={() => setSort({ ...sort, dir: sort.dir === "asc" ? "desc" : "asc" })}
+                title={sort.dir === "asc" ? "Ascending. Click to reverse." : "Descending. Click to reverse."}
+                aria-label={sort.dir === "asc" ? "Sorted ascending, click to reverse" : "Sorted descending, click to reverse"}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ transform: sort.dir === "asc" ? "rotate(180deg)" : undefined }}>
+                  <path d="M12 5v14M6 13l6 6 6-6" />
+                </svg>
+              </button>
             </div>
           )}
 
