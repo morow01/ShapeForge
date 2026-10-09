@@ -5445,3 +5445,9 @@ button.stepper-btn:disabled {
   border-color: transparent;
   background-color: #d7f1f0;
 }
+/* While a design is being dragged, the buttons on cards and folders cannot be used, so hide them. */
+.home-page.is-dragging .home-folder-actions,
+.home-page.is-dragging .home-actions { visibility: hidden; }
+/* The folder's inner button must never paint over the folder's own highlight. */
+.home-page .home-folder-open:hover:not(:disabled),
+.home-page.is-dragging .home-folder-open { background: transparent; border-color: transparent; }
