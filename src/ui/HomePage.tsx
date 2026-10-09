@@ -716,14 +716,6 @@ export function HomePage({
           onDoubleClick={resetSideWidth}
         />
         <nav className="home-side" aria-label="Locations">
-          <button
-            className={navClass(atRoot, dropTarget === null)}
-            onClick={() => { setSearch(""); setView({ kind: "folder", id: null }); }}
-            {...dropProps(null)}
-          >
-            <span className="home-nav-main"><GridIcon className="home-nav-icon" /><span className="home-nav-name">All designs</span></span>
-            <span className="home-count">{projects.length}</span>
-          </button>
           <button className={navClass(!searching && view.kind === "recent")} onClick={() => { setSearch(""); setView({ kind: "recent" }); }}>
             <span className="home-nav-main"><ClockIcon className="home-nav-icon" /><span className="home-nav-name">Recent</span></span>
           </button>
@@ -740,7 +732,15 @@ export function HomePage({
               </svg>
             </button>
           </div>
-          {folders.length === 0 && <p className="home-side-empty">No folders yet</p>}
+          <button
+            className={navClass(atRoot, dropTarget === null)}
+            onClick={() => { setSearch(""); setView({ kind: "folder", id: null }); }}
+            {...dropProps(null)}
+          >
+            <span className="home-nav-main"><GridIcon className="home-nav-icon" /><span className="home-nav-name">All designs</span></span>
+            <span className="home-count">{projects.length}</span>
+          </button>
+          {folders.length === 0 && <p className="home-side-empty home-side-empty-tree">No folders yet</p>}
           {folderTree(folders).map(({ folder, depth, last, more }) => (
             <button
               key={folder.id}
@@ -749,15 +749,14 @@ export function HomePage({
               {...dropProps(folder.id)}
             >
               <span className="home-nav-main">
-                {depth > 0 && (
-                  <span className="tree-cells" aria-hidden="true">
-                    {Array.from({ length: depth }, (_, i) => {
-                      const k = i + 1;
-                      const cell = k < depth ? (more[k] ? "line" : "blank") : last ? "elbow" : "tee";
-                      return <span key={k} className={`tree-cell ${cell}`} />;
-                    })}
-                  </span>
-                )}
+                <span className="tree-cells" aria-hidden="true">
+                  {Array.from({ length: depth + 1 }, (_, i) => {
+                    const k = i + 1;
+                    // Slot k carries the line of the ancestor at that level; the last slot joins this folder.
+                    const cell = k < depth + 1 ? (more[k - 1] ? "line" : "blank") : last ? "elbow" : "tee";
+                    return <span key={k} className={`tree-cell ${cell}`} />;
+                  })}
+                </span>
                 <FolderIcon className="home-nav-icon" /><span className="home-nav-name">{folder.name}</span>
               </span>
               <span className="home-count">{countIn(folder.id)}</span>

@@ -5710,3 +5710,6 @@ button.stepper-btn:disabled {
 .home-menu .menu-icon { flex-shrink: 0; color: #7d8b96; }
 .home-menu button:hover .menu-icon { color: #00807e; }
 .home-menu .danger-item .menu-icon, .home-menu .danger-item:hover .menu-icon { color: #b42318; }
+
+/* "All designs" is the root of the folder tree. */
+.home-side-empty-tree { padding-left: 38px; }
