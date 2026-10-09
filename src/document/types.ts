@@ -1838,12 +1838,42 @@ export const MAX_BUILD_SOURCES = 4;
 
 export const isGroup = (n: SceneNode): n is GroupNode => n.type === "group";
 
+/** Where a design is kept. "draft" is a new design the person has not chosen a
+ *  home for yet (it still autosaves in this browser so nothing is lost);
+ *  "browser" is a design deliberately kept in this browser; "drive" is reserved
+ *  for Google Drive. A saved index entry with no location is a design from before
+ *  this existed, which was always kept in the browser. */
+export type ProjectLocation = "draft" | "browser" | "drive";
+
+/** A folder on the Home page. Folders nest through parentId (null = top level). */
+export interface FolderMeta {
+  id: string;
+  name: string;
+  parentId: string | null;
+  createdAt: number;
+  /** The matching Google Drive folder, once one has been made. */
+  driveId?: string;
+}
+
 export interface ProjectMeta {
   id: string;
   name: string;
   createdAt: number;
   updatedAt: number;
   objectCount: number;
+  location?: ProjectLocation;
+  /** The folder this design is in; missing or null means the top level. */
+  folderId?: string | null;
+  /** The matching Google Drive file, once it has been saved there. */
+  driveId?: string;
+  /** Drive's own "modified" stamp from the last time this design was sent or fetched. */
+  driveModified?: string;
+  /** True for a design known only from Drive's listing: its contents are not on this
+   *  computer yet and are fetched the first time it is opened. */
+  remote?: boolean;
+  /** Short labels the person added, for finding designs across folders. */
+  tags?: string[];
+  starred?: boolean;
 }
 
 export interface ProjectData {

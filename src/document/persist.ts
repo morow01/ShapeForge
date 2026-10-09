@@ -5,10 +5,12 @@ import type {
   BooleanOp,
   CameraMode,
   EditOp,
+  FolderMeta,
   LowPoly,
   PrimitiveKind,
   ProjectData,
   ProjectFile,
+  ProjectLocation,
   ProjectMeta,
   SceneNode,
   Vec3,
@@ -19,6 +21,23 @@ const ACTIVE_PROJECT_KEY = "cad.active_project_id";
 const PROJECT_PREFIX = "cad.project.";
 const LEGACY_KEY = "cad.document";
 const CAMERA_KEY = "cad.camera";
+// "2" marks the larger, smoother pictures; the first, smaller ones (cad.thumb.) are discarded.
+const FOLDERS_KEY = "cad.folders";
+const THUMB_PREFIX = "cad.thumb2.";
+const OLD_THUMB_PREFIX = "cad.thumb.";
+let oldThumbnailsPurged = false;
+
+function purgeOldThumbnails(): void {
+  if (oldThumbnailsPurged) return;
+  oldThumbnailsPurged = true;
+  try {
+    for (const key of Object.keys(localStorage)) {
+      if (key.startsWith(OLD_THUMB_PREFIX)) localStorage.removeItem(key);
+    }
+  } catch {
+    /* nothing to purge if storage is unavailable */
+  }
+}
 const VERSION = 1;
 
 interface StoredLegacy {
@@ -288,6 +307,9 @@ export function listProjects(): ProjectMeta[] {
   };
 
   saveProject(initialProject);
+  // A first-ever launch has not chosen a home for its design yet; one carried over
+  // from the old single-document storage was already being kept.
+  setProjectLocation(initialProject.id, initialNodes.length ? "browser" : "draft");
   setActiveProjectId(initialProject.id);
 
   return [
@@ -297,8 +319,197 @@ export function listProjects(): ProjectMeta[] {
       createdAt: initialProject.createdAt,
       updatedAt: initialProject.updatedAt,
       objectCount: initialProject.nodes.length,
+      location: initialNodes.length ? "browser" : "draft",
     },
   ];
+}
+
+/** Where a design is kept; a design saved before locations existed is in the browser. */
+export function locationOf(meta: Pick<ProjectMeta, "location">): ProjectLocation {
+  return meta.location ?? "browser";
+}
+
+/** Records where a design lives without touching its contents. */
+export function setProjectLocation(id: string, location: ProjectLocation): boolean {
+  try {
+    const raw = localStorage.getItem(INDEX_KEY);
+    if (!raw) return false;
+    const list = JSON.parse(raw) as ProjectMeta[];
+    const entry = list.find((p) => p.id === id);
+    if (!entry) return false;
+    entry.location = location;
+    localStorage.setItem(INDEX_KEY, JSON.stringify(list));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Moves a design into a folder (null = top level) without touching its contents. */
+export function setProjectFolder(id: string, folderId: string | null): boolean {
+  try {
+    const raw = localStorage.getItem(INDEX_KEY);
+    if (!raw) return false;
+    const list = JSON.parse(raw) as ProjectMeta[];
+    const entry = list.find((p) => p.id === id);
+    if (!entry) return false;
+    if (folderId) entry.folderId = folderId;
+    else delete entry.folderId;
+    localStorage.setItem(INDEX_KEY, JSON.stringify(list));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Reads and rewrites the saved list of designs in one step, for the Drive code. */
+export function updateProjectMeta(id: string, change: (meta: ProjectMeta) => void): boolean {
+  try {
+    const raw = localStorage.getItem(INDEX_KEY);
+    if (!raw) return false;
+    const list = JSON.parse(raw) as ProjectMeta[];
+    const entry = list.find((p) => p.id === id);
+    if (!entry) return false;
+    change(entry);
+    localStorage.setItem(INDEX_KEY, JSON.stringify(list));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Adds a design to the list without any contents: one that exists on Drive but has not
+ *  been opened on this computer yet. Does nothing if the id is already known. */
+export function addRemoteProject(meta: ProjectMeta): void {
+  try {
+    const raw = localStorage.getItem(INDEX_KEY);
+    const list = raw ? (JSON.parse(raw) as ProjectMeta[]) : [];
+    if (list.some((p) => p.id === meta.id)) return;
+    list.push(meta);
+    list.sort((a, b) => b.updatedAt - a.updatedAt);
+    localStorage.setItem(INDEX_KEY, JSON.stringify(list));
+  } catch {
+    /* the listing is only a convenience; Drive still has the file */
+  }
+}
+
+export function hasProjectContents(id: string): boolean {
+  try {
+    return localStorage.getItem(PROJECT_PREFIX + id) !== null;
+  } catch {
+    return false;
+  }
+}
+
+export function writeFolderList(list: FolderMeta[]): boolean {
+  return writeFolders(list);
+}
+
+export function listFolders(): FolderMeta[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(FOLDERS_KEY) ?? "[]");
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (f): f is FolderMeta =>
+        !!f && typeof f.id === "string" && typeof f.name === "string" && (f.parentId === null || typeof f.parentId === "string"),
+    );
+  } catch {
+    return [];
+  }
+}
+
+function writeFolders(list: FolderMeta[]): boolean {
+  try {
+    localStorage.setItem(FOLDERS_KEY, JSON.stringify(list));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function createFolderEntry(name: string, parentId: string | null, driveId?: string, id?: string): FolderMeta {
+  const folder: FolderMeta = {
+    ...(driveId ? { driveId } : {}),
+    id: id ?? `f-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+    name: name.trim() || "New folder",
+    parentId,
+    createdAt: Date.now(),
+  };
+  writeFolders([...listFolders(), folder]);
+  return folder;
+}
+
+export function renameFolderEntry(id: string, name: string): void {
+  const trimmed = name.trim();
+  if (!trimmed) return;
+  writeFolders(listFolders().map((f) => (f.id === id ? { ...f, name: trimmed } : f)));
+}
+
+/** Puts a folder inside another (null = the top level). Refuses to put a folder inside itself or its own subfolders. */
+export function moveFolderEntry(id: string, parentId: string | null): boolean {
+  const folders = listFolders();
+  const folder = folders.find((f) => f.id === id);
+  if (!folder || (folder.parentId ?? null) === parentId) return false;
+  if (parentId !== null) {
+    if (!folders.some((f) => f.id === parentId)) return false;
+    // Walk up from the new parent: meeting the folder itself would make a loop.
+    const seen = new Set<string>();
+    let cursor: string | null = parentId;
+    while (cursor && !seen.has(cursor)) {
+      if (cursor === id) return false;
+      seen.add(cursor);
+      cursor = folders.find((f) => f.id === cursor)?.parentId ?? null;
+    }
+  }
+  writeFolders(folders.map((f) => (f.id === id ? { ...f, parentId } : f)));
+  return true;
+}
+
+/** Removes a folder only. Whatever was inside it (designs and folders) moves up one level. */
+export function deleteFolderEntry(id: string): void {
+  const folders = listFolders();
+  const doomed = folders.find((f) => f.id === id);
+  if (!doomed) return;
+  writeFolders(
+    folders.filter((f) => f.id !== id).map((f) => (f.parentId === id ? { ...f, parentId: doomed.parentId } : f)),
+  );
+  try {
+    const raw = localStorage.getItem(INDEX_KEY);
+    if (!raw) return;
+    const list = JSON.parse(raw) as ProjectMeta[];
+    for (const p of list) {
+      if (p.folderId === id) {
+        if (doomed.parentId) p.folderId = doomed.parentId;
+        else delete p.folderId;
+      }
+    }
+    localStorage.setItem(INDEX_KEY, JSON.stringify(list));
+  } catch {
+    /* the folder is gone either way; designs keep working */
+  }
+}
+
+/** Small preview picture shown on the Home page card. Kept apart from the design so
+ *  a design's own save stays small; a missing or unwritable one just shows a placeholder. */
+/** Set by the Drive code, so a new preview picture can be sent along with the design. */
+export const thumbnailHooks: { onSaved?: (id: string) => void } = {};
+
+export function saveThumbnail(id: string, dataUrl: string): void {
+  try {
+    localStorage.setItem(THUMB_PREFIX + id, dataUrl);
+    thumbnailHooks.onSaved?.(id);
+  } catch {
+    /* a thumbnail is never worth failing for */
+  }
+}
+
+export function loadThumbnail(id: string): string | null {
+  purgeOldThumbnails();
+  try {
+    return localStorage.getItem(THUMB_PREFIX + id);
+  } catch {
+    return null;
+  }
 }
 
 export function getActiveProjectId(): string {
@@ -343,7 +554,10 @@ export function saveProject(project: ProjectData): boolean {
       list = [];
     }
 
+    const existingIdx = list.findIndex((p) => p.id === project.id);
     const meta: ProjectMeta = {
+      // An autosave must never move a design to a different home or folder, or lose its Drive link.
+      ...(existingIdx >= 0 ? list[existingIdx] : {}),
       id: project.id,
       name: project.name,
       createdAt: project.createdAt,
@@ -351,7 +565,6 @@ export function saveProject(project: ProjectData): boolean {
       objectCount: project.nodes.length,
     };
 
-    const existingIdx = list.findIndex((p) => p.id === project.id);
     if (existingIdx >= 0) {
       list[existingIdx] = meta;
     } else {
@@ -366,9 +579,226 @@ export function saveProject(project: ProjectData): boolean {
   }
 }
 
+/* ---- Bin: deleted designs wait here for a while before they are gone for good ---- */
+
+const BIN_INDEX_KEY = "cad.bin";
+const BIN_DATA_PREFIX = "cad.bin.data.";
+const BIN_THUMB_PREFIX = "cad.bin.thumb.";
+export const BIN_DAYS = 30;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** viaFolder is set when the design went into the Bin as part of a deleted folder. */
+export type BinEntry = { meta: ProjectMeta; deletedAt: number; viaFolder?: string };
+/** A deleted folder with everything below it: `folders` is the folder itself and its subfolders. */
+export type BinFolderEntry = { id: string; folders: FolderMeta[]; deletedAt: number };
+
+const BIN_FOLDERS_KEY = "cad.bin.folders";
+
+function readBinFolders(): BinFolderEntry[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(BIN_FOLDERS_KEY) ?? "[]") as BinFolderEntry[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeBinFolders(list: BinFolderEntry[]): void {
+  localStorage.setItem(BIN_FOLDERS_KEY, JSON.stringify(list));
+}
+
+/** A folder's id followed by every folder below it. */
+export function collectFolderTree(rootId: string): string[] {
+  const all = listFolders();
+  const out = [rootId];
+  for (let i = 0; i < out.length; i++) for (const f of all) if (f.parentId === out[i] && !out.includes(f.id)) out.push(f.id);
+  return out;
+}
+
+/** Deleted folders, newest first. */
+export function listBinFolders(): BinFolderEntry[] {
+  const list = readBinFolders();
+  const now = Date.now();
+  const live = list.filter((e) => now - e.deletedAt < BIN_DAYS * DAY_MS);
+  if (live.length !== list.length) {
+    try {
+      writeBinFolders(live);
+    } catch {
+      /* tidied up next time */
+    }
+  }
+  return live.sort((a, b) => b.deletedAt - a.deletedAt);
+}
+
+/** What the Bin holds at the top level: loose designs and whole folders. */
+export function binCount(): number {
+  return listBin().filter((e) => !e.viaFolder).length + listBinFolders().length;
+}
+
+/** Number of designs inside a binned folder. */
+export function binFolderDesignCount(rootId: string): number {
+  return readBin().filter((e) => e.viaFolder === rootId).length;
+}
+
+/** Takes a folder and its subfolders out of the list and keeps a record for Restore. */
+export function binFolderTree(rootId: string, at: number): boolean {
+  try {
+    const ids = collectFolderTree(rootId);
+    const all = listFolders();
+    const doomed = ids.map((id) => all.find((f) => f.id === id)).filter((f): f is FolderMeta => !!f);
+    if (!doomed.length) return false;
+    writeBinFolders([...readBinFolders().filter((e) => e.id !== rootId), { id: rootId, folders: doomed, deletedAt: at }]);
+    writeFolders(all.filter((f) => !ids.includes(f.id)));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Brings a deleted folder back with its subfolders and designs. Returns the designs restored. */
+export function restoreBinFolder(rootId: string): string[] | null {
+  try {
+    const entry = readBinFolders().find((e) => e.id === rootId);
+    if (!entry) return null;
+    const current = listFolders();
+    const restored = entry.folders
+      .filter((f) => !current.some((c) => c.id === f.id))
+      .map((f) => {
+        const { driveId: _drop, ...rest } = f;
+        void _drop;
+        const parentGone = f.id === rootId && f.parentId && !current.some((c) => c.id === f.parentId);
+        return parentGone ? { ...rest, parentId: null } : rest;
+      });
+    writeFolders([...current, ...restored]);
+    const designIds = readBin().filter((e) => e.viaFolder === rootId).map((e) => e.meta.id);
+    const back = designIds.filter((id) => restoreFromBin(id));
+    writeBinFolders(readBinFolders().filter((e) => e.id !== rootId));
+    return back;
+  } catch {
+    return null;
+  }
+}
+
+/** Removes a deleted folder, and the designs that went with it, for good. */
+export function deleteBinFolder(rootId: string): void {
+  try {
+    deleteFromBin(readBin().filter((e) => e.viaFolder === rootId).map((e) => e.meta.id));
+    writeBinFolders(readBinFolders().filter((e) => e.id !== rootId));
+  } catch {
+    /* nothing more to do */
+  }
+}
+
+function readBin(): BinEntry[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(BIN_INDEX_KEY) ?? "[]") as BinEntry[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeBin(list: BinEntry[]): void {
+  localStorage.setItem(BIN_INDEX_KEY, JSON.stringify(list));
+}
+
+function dropBinData(id: string): void {
+  localStorage.removeItem(BIN_DATA_PREFIX + id);
+  localStorage.removeItem(BIN_THUMB_PREFIX + id);
+}
+
+/** Deleted designs, newest first. Anything older than the keep time is cleared out here. */
+export function listBin(): BinEntry[] {
+  const list = readBin();
+  const now = Date.now();
+  const live = list.filter((e) => now - e.deletedAt < BIN_DAYS * DAY_MS);
+  if (live.length !== list.length) {
+    try {
+      for (const e of list) if (!live.includes(e)) dropBinData(e.meta.id);
+      writeBin(live);
+    } catch {
+      /* it is tidied up next time */
+    }
+  }
+  return live.sort((a, b) => b.deletedAt - a.deletedAt);
+}
+
+/** Days left before a binned design is cleared. */
+export function binDaysLeft(entry: { deletedAt: number }): number {
+  return Math.max(0, Math.ceil(BIN_DAYS - (Date.now() - entry.deletedAt) / DAY_MS));
+}
+
+/** Copies a design into the Bin just before it is deleted. Empty designs are not worth keeping. */
+export function moveToBin(id: string, via?: { folderId: string; at: number }): boolean {
+  try {
+    const rawIndex = localStorage.getItem(INDEX_KEY);
+    const meta = rawIndex ? (JSON.parse(rawIndex) as ProjectMeta[]).find((p) => p.id === id) : undefined;
+    const data = localStorage.getItem(PROJECT_PREFIX + id);
+    if (!meta || meta.remote || meta.objectCount === 0 || !data) return false;
+    localStorage.setItem(BIN_DATA_PREFIX + id, data);
+    const thumb = localStorage.getItem(THUMB_PREFIX + id);
+    if (thumb) localStorage.setItem(BIN_THUMB_PREFIX + id, thumb);
+    writeBin([
+      ...readBin().filter((e) => e.meta.id !== id),
+      { meta: { ...meta }, deletedAt: via?.at ?? Date.now(), ...(via ? { viaFolder: via.folderId } : {}) },
+    ]);
+    return true;
+  } catch {
+    dropBinData(id);
+    return false;
+  }
+}
+
+export function loadBinThumbnail(id: string): string | null {
+  try {
+    return localStorage.getItem(BIN_THUMB_PREFIX + id);
+  } catch {
+    return null;
+  }
+}
+
+/** Puts a binned design back. It is sent to Drive as a new file if Drive is connected. */
+export function restoreFromBin(id: string): boolean {
+  try {
+    const list = readBin();
+    const entry = list.find((e) => e.meta.id === id);
+    const data = localStorage.getItem(BIN_DATA_PREFIX + id);
+    if (!entry || !data) return false;
+    localStorage.setItem(PROJECT_PREFIX + id, data);
+    const thumb = localStorage.getItem(BIN_THUMB_PREFIX + id);
+    if (thumb) localStorage.setItem(THUMB_PREFIX + id, thumb);
+    const meta: ProjectMeta = { ...entry.meta, updatedAt: Date.now() };
+    delete meta.driveId;
+    delete meta.driveModified;
+    delete meta.remote;
+    if (meta.folderId && !listFolders().some((f) => f.id === meta.folderId)) delete meta.folderId;
+    const rawIndex = localStorage.getItem(INDEX_KEY);
+    const index = (rawIndex ? (JSON.parse(rawIndex) as ProjectMeta[]) : []).filter((p) => p.id !== id);
+    index.push(meta);
+    localStorage.setItem(INDEX_KEY, JSON.stringify(index));
+    dropBinData(id);
+    writeBin(list.filter((e) => e.meta.id !== id));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Removes designs from the Bin for good. */
+export function deleteFromBin(ids: string[]): void {
+  try {
+    const gone = new Set(ids);
+    for (const id of gone) dropBinData(id);
+    writeBin(readBin().filter((e) => !gone.has(e.meta.id)));
+  } catch {
+    /* nothing more to do */
+  }
+}
+
 export function deleteProjectStorage(id: string): boolean {
   try {
     localStorage.removeItem(PROJECT_PREFIX + id);
+    localStorage.removeItem(THUMB_PREFIX + id);
     const raw = localStorage.getItem(INDEX_KEY);
     if (raw) {
       const list = (JSON.parse(raw) as ProjectMeta[]).filter((p) => p.id !== id);
@@ -447,7 +877,7 @@ export function saveCameraState(state: StoredCamera): boolean {
   }
 }
 
-function collectImportBlobIds(nodes: SceneNode[], ids: Set<string>) {
+export function collectImportBlobIds(nodes: SceneNode[], ids: Set<string>) {
   for (const n of nodes) {
     if (n.type === "import") ids.add(n.blobId);
     else if (n.type === "group") collectImportBlobIds(n.children, ids);

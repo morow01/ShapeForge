@@ -11,7 +11,12 @@ import { readViewportQuality, VIEWPORT_QUALITY_KEY, type ViewportQuality } from 
 import type { FaceBounds, FaceResizeFrame } from "./viewport/FaceResizeHandles";
 import { Inspector } from "./ui/Inspector";
 import { Tree } from "./ui/Tree";
-import { ProjectsModal } from "./ui/ProjectsModal";
+import { HomePage } from "./ui/HomePage";
+import { SaveDialog } from "./ui/SaveDialog";
+import { VersionHistoryDialog } from "./ui/VersionHistoryDialog";
+import { installDriveHooks, syncNow } from "./drive/sync";
+import { useDrive } from "./drive/state";
+import { armQuietReconnect, restoreSession } from "./drive/auth";
 import {
   AlignNodeIcon,
   AlignToolIcon,
@@ -106,13 +111,14 @@ import { MAX_BUILD_SOURCES, PRIMITIVES, PRIMITIVE_CATEGORIES, SKETCH_CURVE_SEGME
 import { findAssemblyOwner, findNode, parentOf, resolveNodeTransparent, resolveNodeColor, updateNode, walk } from "./document/tree";
 import { bakeScale } from "./document/bake";
 import { putBlob } from "./document/blobStore";
-import { loadCameraState } from "./document/persist";
+import { loadCameraState, loadThumbnail, locationOf, saveThumbnail } from "./document/persist";
 import type { EditOp, GroupNode, ImportNode, PrimitiveKind, SceneNode, ShellOp, HollowRim, ResizeFaceOp, SketchData, Vec3 } from "./document/types";
 import { RETRYABLE_MESH_ERROR } from "./kernel/types";
 import type { EditSpec, ExportQuality, NodeSpec, PreviewBuild, ScenePart } from "./kernel/types";
 import type { CameraMode, CollisionHighlightStyle, DuplicateResult, Scene, ToolMode, WireframeMode } from "./viewport/scene";
 import { cellColour, DEFAULT_CELL_DISPLAY, type CellDisplay } from "./viewport/cellColours";
 import { APP_NAME, APP_VERSION } from "./version";
+import { CloudIcon, MonitorIcon } from "./ui/NavIcons";
 import { FeedbackNotes } from "./ui/FeedbackNotes";
 
 /** Shown when Hollow is pressed with nothing selected; cleared as soon as a
@@ -477,7 +483,32 @@ export function App() {
   const storageBlocked = useDoc((s) => s.storageBlocked);
   const projectName = useDoc((s) => s.projectName);
   const sceneRef = useRef<Scene | null>(null);
-  const [projectsModalOpen, setProjectsModalOpen] = useState(false);
+  // The app opens on the Home page; the editor is already loaded behind it.
+  const [homeOpen, setHomeOpen] = useState(true);
+  const [saveDialogOpen, setSaveDialogOpen] = useState(false);
+  const [thumbVersion, setThumbVersion] = useState(0);
+  const driveBusy = useDrive((s) => s.busy);
+  const driveError = useDrive((s) => s.lastError);
+  const driveStatus = useDrive((s) => s.status);
+  useEffect(() => {
+    installDriveHooks();
+    restoreSession();
+    // The sign-in lives in memory, so after a refresh the first click anywhere quietly signs
+    // back in (Google only allows its window to open from a click). Failures stay silent: the
+    // Home page still offers Reconnect.
+    if (useDrive.getState().status === "signedOut") armQuietReconnect();
+  }, []);
+  // Coming back online (or reconnecting) sends whatever changed while signed out.
+  useEffect(() => {
+    if (driveStatus === "signedIn" && !useDrive.getState().busy) void syncNow();
+  }, [driveStatus]);
+  // Looking at Home while connected brings it up to date with Drive.
+  useEffect(() => {
+    if (homeOpen && driveStatus === "signedIn" && !useDrive.getState().busy) void syncNow();
+  }, [homeOpen, driveStatus]);
+  const currentProjectId = useDoc((s) => s.currentProjectId);
+  const projectList = useDoc((s) => s.projects);
+  const currentLocation = locationOf(projectList.find((p) => p.id === currentProjectId) ?? {});
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [surfaceSource, setSurfaceSource] = useState<string | null>(null);
   const [surfaceTarget, setSurfaceTarget] = useState<string | null>(null);
@@ -489,6 +520,7 @@ export function App() {
   const [pathPatternSource, setPathPatternSource] = useState<SceneNode | null>(null);
   const [viewportQuality, setViewportQuality] = useState<ViewportQuality>(readViewportQuality);
   const [exportModalOpen, setExportModalOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [newDesignPromptOpen, setNewDesignPromptOpen] = useState(false);
   const [fileMenuOpen, setFileMenuOpen] = useState(false);
   const fileMenuRef = useRef<HTMLDivElement>(null);
@@ -551,6 +583,7 @@ export function App() {
     renameProject,
     newProject,
     exportCurrentProject,
+    saveCurrentTo,
   } = useDoc.getState();
 
   // Ticks the "Saved 2m ago" label without re-rendering on every frame.
@@ -3590,6 +3623,63 @@ export function App() {
     setNewDesignPromptOpen(false);
   }, [newProject]);
 
+  /** Back to the Home page, leaving a small picture of the design for its card. */
+  const openHome = useCallback(() => {
+    const state = useDoc.getState();
+    if (state.nodes.length) {
+      const shot = sceneRef.current?.captureThumbnail();
+      if (shot) saveThumbnail(state.currentProjectId, shot);
+    }
+    setHomeOpen(true);
+  }, []);
+
+  // The design that is open when the app starts never gets "left", so its card would
+  // have no picture. Once it has finished building behind the Home page, take one.
+  useEffect(() => {
+    if (!homeOpen || sceneBusy || !nodes.length || loadThumbnail(currentProjectId)) return;
+    const t = window.setTimeout(() => {
+      const shot = sceneRef.current?.captureThumbnail();
+      if (shot) {
+        saveThumbnail(currentProjectId, shot);
+        setThumbVersion((n) => n + 1);
+      }
+    }, 600);
+    return () => window.clearTimeout(t);
+  }, [homeOpen, sceneBusy, nodes.length, currentProjectId]);
+
+  /** Signed in to Drive, everything lives there and nothing is asked; otherwise ask where. */
+  const chooseHome = useCallback(() => {
+    if (useDrive.getState().status === "signedIn") useDoc.getState().saveCurrentTo("drive");
+    else setSaveDialogOpen(true);
+  }, []);
+
+  /** Save: a design with no home yet asks where to keep it; any other just saves
+   *  where it already is. */
+  const saveNow = useCallback(() => {
+    const state = useDoc.getState();
+    const meta = state.projects.find((p) => p.id === state.currentProjectId);
+    const where = locationOf(meta ?? {});
+    if (where === "draft") chooseHome();
+    else state.saveCurrentTo(where);
+  }, [chooseHome]);
+
+  /** New design from Home. An untouched draft is reused rather than leaving a trail of empty ones. */
+  const newFromHome = useCallback((folderId: string | null) => {
+    const state = useDoc.getState();
+    const meta = state.projects.find((p) => p.id === state.currentProjectId);
+    if (!state.nodes.length && locationOf(meta ?? {}) === "draft") {
+      setIsEditingTitle(true);
+    } else {
+      createNewDesign();
+    }
+    // A new design goes into the folder that was being viewed.
+    const after = useDoc.getState();
+    if (folderId || after.projects.find((p) => p.id === after.currentProjectId)?.folderId) {
+      after.moveProjectToFolder(after.currentProjectId, folderId);
+    }
+    setHomeOpen(false);
+  }, [createNewDesign]);
+
   /** Asks first when there is something on screen to lose track of. An empty
    *  scene has nothing to confirm, so it just goes. */
   const startNewDesign = useCallback(() => {
@@ -4187,10 +4277,10 @@ export function App() {
         selectMany(useDoc.getState().nodes.map((node) => node.id));
       } else if (mod && e.key.toLowerCase() === "o") {
         e.preventDefault();
-        setProjectsModalOpen(true);
+        openHome();
       } else if (mod && e.key.toLowerCase() === "s") {
         e.preventDefault();
-        exportCurrentProject();
+        saveNow();
       } else if (mod && e.key.toLowerCase() === "p") {
         e.preventDefault();
         setBlueprintOpen(true);
@@ -4271,7 +4361,7 @@ export function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [removeSelected, selectMany, undo, redo, group, ungroup, toggleTransparency, dropSelected, ungroupSelected, groupSelected, commitBuild, exportCurrentProject, newProject, cycleWireframe, zoomToSelected, toggleHoleSelected]);
+  }, [removeSelected, selectMany, undo, redo, group, ungroup, toggleTransparency, dropSelected, ungroupSelected, groupSelected, commitBuild, openHome, saveNow, newProject, cycleWireframe, zoomToSelected, toggleHoleSelected]);
 
   // The big card is for work the user is WAITING on: opening a file,
   // exporting, the first build of a document. A rebuild triggered by an edit
@@ -4490,11 +4580,14 @@ export function App() {
     <div className={`app-shell${objectsPanelOpen ? "" : " objects-collapsed"}${allTools ? "" : " rail-compact"}${showRailLabels ? " rail-expanded" : ""}`}>
       <header className="topbar">
         <div className="topbar-left">
-          <div className="brand">
-            <span className="brand-mark">S</span>
-            <span className="brand-name">{APP_NAME}</span>
-            <span className="brand-version">v{APP_VERSION}</span>
-          </div>
+          <button
+            className="topbar-logo-btn"
+            onClick={openHome}
+            title="All designs (Ctrl+O)"
+            aria-label="All designs"
+          >
+            <img className="brand-logo" src={`${import.meta.env.BASE_URL}logo.svg`} alt="" width={24} height={26} draggable={false} />
+          </button>
 
           <div className="project-title-container">
             {isEditingTitle ? (
@@ -4531,6 +4624,30 @@ export function App() {
             )}
           </div>
 
+          {currentLocation === "draft" ? (
+            <button
+              className="location-chip draft"
+              onClick={chooseHome}
+              title="This design has no home yet. It is kept in this browser until you save it."
+            >
+              Not saved yet · Save
+            </button>
+          ) : currentLocation === "drive" ? (
+            <button
+              className={`status-btn ${driveError ? "bad" : driveBusy ? "busy" : "ok"}`}
+              onClick={() => void syncNow()}
+              title={driveError ?? (driveBusy ? "Saving to your Google Drive…" : "Saved to your Google Drive. Click to sync now.")}
+              aria-label={driveError ? "Not synced with Google Drive" : driveBusy ? "Saving to Google Drive" : "Saved to Google Drive"}
+            >
+              <CloudIcon size={17} />
+              {driveError ? <span>Not synced</span> : <span className="status-dot" aria-hidden="true" />}
+            </button>
+          ) : (
+            <span className="status-btn browser" title="Kept in this browser only. Download a backup file from the File menu." aria-label="Kept in this browser">
+              <MonitorIcon size={16} />
+            </span>
+          )}
+
           <div className="file-menu-container" ref={fileMenuRef}>
             <button
               className={`topbar-btn file-menu-btn ${fileMenuOpen ? "on" : ""}`}
@@ -4558,7 +4675,7 @@ export function App() {
                 </button>
                 <button
                   role="menuitem"
-                  onClick={() => { setFileMenuOpen(false); setProjectsModalOpen(true); }}
+                  onClick={() => { setFileMenuOpen(false); openHome(); }}
                 >
                   <ProjectsIcon className="topbar-icon" />
                   <span className="item-label">Open…</span>
@@ -4574,11 +4691,27 @@ export function App() {
                 <hr />
                 <button
                   role="menuitem"
-                  onClick={() => { setFileMenuOpen(false); exportCurrentProject(); }}
+                  onClick={() => { setFileMenuOpen(false); saveNow(); }}
                 >
                   <SaveFileIcon className="topbar-icon" />
                   <span className="item-label">Save</span>
                   <span className="item-key">Ctrl+S</span>
+                </button>
+                {currentLocation === "drive" && (
+                  <button
+                    role="menuitem"
+                    onClick={() => { setFileMenuOpen(false); setHistoryOpen(true); }}
+                  >
+                    <SaveFileIcon className="topbar-icon" />
+                    <span className="item-label">Version history…</span>
+                  </button>
+                )}
+                <button
+                  role="menuitem"
+                  onClick={() => { setFileMenuOpen(false); exportCurrentProject(); }}
+                >
+                  <ExportIcon className="topbar-icon" />
+                  <span className="item-label">Download backup file</span>
                 </button>
                 <button
                   role="menuitem"
@@ -4595,6 +4728,8 @@ export function App() {
                   <span className="item-label">2D Blueprint & Cut List…</span>
                   <span className="item-key">Ctrl+P</span>
                 </button>
+                <hr />
+                <div className="file-menu-about">{APP_NAME} v{APP_VERSION}</div>
               </div>
             )}
           </div>
@@ -8099,9 +8234,11 @@ export function App() {
 
       </aside>
 
-      <ProjectsModal
-        isOpen={projectsModalOpen}
-        onClose={() => setProjectsModalOpen(false)}
+      <HomePage
+        open={homeOpen}
+        onClose={() => setHomeOpen(false)}
+        onNewDesign={newFromHome}
+        thumbVersion={thumbVersion}
         onProjectLoadStart={(name) => {
           setError(null);
           setFileOperation({
@@ -8115,6 +8252,20 @@ export function App() {
           setFileOperation((current) => current ? { ...current, waitingForScene: true } : null);
         }}
         onProjectLoadFailed={() => setFileOperation(null)}
+      />
+
+      <VersionHistoryDialog open={historyOpen} projectId={currentProjectId} onClose={() => setHistoryOpen(false)} />
+      <SaveDialog
+        open={saveDialogOpen}
+        name={projectName}
+        onClose={() => setSaveDialogOpen(false)}
+        onSave={(name, location) => {
+          if (name !== projectName) renameProject(name);
+          saveCurrentTo(location);
+          const shot = useDoc.getState().nodes.length ? sceneRef.current?.captureThumbnail() : null;
+          if (shot) saveThumbnail(useDoc.getState().currentProjectId, shot);
+          setSaveDialogOpen(false);
+        }}
       />
 
       <SettingsModal
@@ -8250,3 +8401,4 @@ function timeAgo(then: number, now: number): string {
   const mins = Math.round(secs / 60);
   return mins < 60 ? `${mins}m ago` : `${Math.round(mins / 60)}h ago`;
 }
+

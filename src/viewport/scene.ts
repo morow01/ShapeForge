@@ -1374,6 +1374,72 @@ export class Scene {
    *  feel. Not read anywhere performance-sensitive. */
   private recentFrameTimes: number[] = [];
 
+  /** A small JPEG of the current view for the Home page card. The canvas does not
+   *  keep its pixels between frames, so a frame is drawn and read in the same call.
+   *  The view cube is left out of the picture. */
+  captureThumbnail(width = 480, height = 320): string | null {
+    const cubeWasVisible = this.navCubeVisible;
+    // Frame the whole model for the picture, then put the camera back exactly as it was.
+    const savedPosition = this.camera.position.clone();
+    const savedTarget = this.controls.target.clone();
+    const savedFrustum = this.camera instanceof THREE.OrthographicCamera
+      ? { left: this.camera.left, right: this.camera.right, top: this.camera.top, bottom: this.camera.bottom }
+      : null;
+    try {
+      this.navCubeVisible = false;
+      const visibleIds = [...this.parts.entries()].filter(([, view]) => view.group.visible).map(([id]) => id);
+      if (visibleIds.length) this.zoomToFit(visibleIds, true);
+      this.renderFrame();
+      const source = this.renderer.domElement;
+      if (!source.width || !source.height) return null;
+      // Shrinking a big canvas to a small one in a single step leaves jagged edges:
+      // the browser samples only a few of the source pixels. Halving repeatedly
+      // averages them, which is what makes the picture look smooth.
+      const scale = Math.min(width / source.width, height / source.height);
+      const targetW = Math.max(1, Math.round(source.width * scale));
+      const targetH = Math.max(1, Math.round(source.height * scale));
+      let current: HTMLCanvasElement = document.createElement("canvas");
+      current.width = source.width;
+      current.height = source.height;
+      const first = current.getContext("2d");
+      if (!first) return null;
+      first.drawImage(source, 0, 0);
+      while (current.width / 2 >= targetW && current.height / 2 >= targetH) {
+        const half = document.createElement("canvas");
+        half.width = Math.max(1, Math.floor(current.width / 2));
+        half.height = Math.max(1, Math.floor(current.height / 2));
+        const hctx = half.getContext("2d");
+        if (!hctx) return null;
+        hctx.imageSmoothingEnabled = true;
+        hctx.imageSmoothingQuality = "high";
+        hctx.drawImage(current, 0, 0, half.width, half.height);
+        current = half;
+      }
+      const out = document.createElement("canvas");
+      out.width = width;
+      out.height = height;
+      const ctx = out.getContext("2d");
+      if (!ctx) return null;
+      ctx.fillStyle = "#eef2f5";
+      ctx.fillRect(0, 0, width, height);
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = "high";
+      ctx.drawImage(current, (width - targetW) / 2, (height - targetH) / 2, targetW, targetH);
+      return out.toDataURL("image/jpeg", 0.86);
+    } catch {
+      return null;
+    } finally {
+      this.navCubeVisible = cubeWasVisible;
+      this.camera.position.copy(savedPosition);
+      this.controls.target.copy(savedTarget);
+      if (savedFrustum && this.camera instanceof THREE.OrthographicCamera) {
+        Object.assign(this.camera, savedFrustum);
+        this.camera.updateProjectionMatrix();
+      }
+      this.controls.update();
+    }
+  }
+
   getFps(): number {
     const now = performance.now();
     this.recentFrameTimes = this.recentFrameTimes.filter((t) => now - t <= 1000);
@@ -8423,7 +8489,7 @@ export class Scene {
 
   /** Smoothly pans and zooms the camera to frame either the selected objects
    *  or all objects in the scene if nothing is selected, filling the screen. */
-  zoomToFit(ids?: string[]) {
+  zoomToFit(ids?: string[], instant = false) {
     cancelAnimationFrame(this.navAnimFrame);
     const targetIds = ids && ids.length > 0 ? ids : this.selectedIds;
     const box = new THREE.Box3();
@@ -8523,6 +8589,14 @@ export class Scene {
 
       const orthoDist = Math.max(3000, fitHalfH * 3);
       endPos = center.clone().add(camZ.clone().multiplyScalar(orthoDist));
+    }
+
+    // Jump straight there, without the animation or the camera save that follows it.
+    if (instant) {
+      this.camera.position.copy(endPos);
+      this.controls.target.copy(center);
+      this.controls.update();
+      return;
     }
 
     const duration = 350;

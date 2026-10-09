@@ -13,17 +13,29 @@ import {
   tidy,
 } from "./transform";
 import {
+  createFolderEntry,
+  deleteFolderEntry,
   deleteProjectStorage,
   exportProjectFile,
   getActiveProjectId,
+  listFolders,
   listProjects,
   loadCameraState,
   loadProject,
   parseProjectFile,
+  renameFolderEntry,
   restoreProjectFileBlobs,
   saveProject,
   setActiveProjectId,
+  setProjectFolder,
+  setProjectLocation,
+  moveToBin,
+  updateProjectMeta,
+  collectFolderTree,
+  moveFolderEntry,
+  binFolderTree,
 } from "./persist";
+import { addToTagRegistry, sameTag, tagsFitDrive, uniqueTags } from "./tags";
 import {
   TRI_BY_ANGLES,
   applyTriangleAngle,
@@ -37,6 +49,7 @@ import type {
   BuildNode,
   EditOp,
   EditNode,
+  FolderMeta,
   GroupNode,
   ImportNode,
   SketchData,
@@ -44,11 +57,30 @@ import type {
   ObjectNode,
   PrimitiveKind,
   ProjectData,
+  ProjectLocation,
   ProjectMeta,
   PushPullOp,
   SceneNode,
   Vec3,
 } from "./types";
+
+/** Called after a change that Google Drive has to hear about. Set once by the Drive code, so this
+ *  module never imports it. */
+export type DriveHooks = {
+  onProjectChanged?: (id: string) => void;
+  onProjectDeleted?: (meta: ProjectMeta) => void;
+  onFolderRenamed?: (folderId: string) => void;
+  onFolderMoved?: (folderId: string) => void;
+  onFolderDeleted?: (info: { folder: FolderMeta; designIds: string[]; subfolderIds: string[] }) => void;
+};
+export const driveHooks: DriveHooks = {};
+
+/** A new design that was never touched and never given a home is just clutter once
+ *  the person moves on, so it is dropped rather than left on the Home page. */
+function dropEmptyDraft(id: string) {
+  const meta = listProjects().find((p) => p.id === id);
+  if (meta && meta.location === "draft" && meta.objectCount === 0) deleteProjectStorage(id);
+}
 
 // Restored synchronously at module load, so the first render already has the
 // saved document — no hydration flash, and no bogus entry in the undo history.
@@ -691,6 +723,8 @@ interface DocState {
   currentProjectId: string;
   projectName: string;
   projects: ProjectMeta[];
+  /** Home page folders. */
+  folders: FolderMeta[];
   nodes: SceneNode[];
   /** Multi-select, in click order. */
   selectedIds: string[];
@@ -705,7 +739,25 @@ interface DocState {
   openProject: (id: string) => boolean;
   renameProject: (name: string) => void;
   duplicateProject: (id: string) => string | null;
-  deleteProject: (id: string) => boolean;
+  deleteProject: (id: string, via?: { folderId: string; at: number }) => boolean;
+  /** Renames any design, not just the open one. */
+  renameProjectById: (id: string, name: string) => void;
+  refreshFolders: () => void;
+  createFolder: (name: string, parentId: string | null) => string;
+  renameFolder: (id: string, name: string) => void;
+  /** Deletes the folder only; its designs and folders move up one level. */
+  deleteFolder: (id: string) => void;
+  /** Puts a folder inside another (null = top level). False if that is not allowed. */
+  moveFolder: (id: string, parentId: string | null) => boolean;
+  moveProjectToFolder: (projectId: string, folderId: string | null) => void;
+  /** Chooses where the open design is kept. A new design starts as a draft, which
+   *  autosaves in this browser but has not been given a home. */
+  saveCurrentTo: (location: ProjectLocation) => void;
+  moveProjectsToLocation: (ids: string[], location: ProjectLocation) => void;
+  /** Stars every design given, or removes the star when they all have one already. */
+  toggleStar: (ids: string[]) => void;
+  /** Adds and removes tags on several designs at once. False if a design could not hold them all. */
+  editTags: (ids: string[], add: string[], remove: string[]) => boolean;
   exportCurrentProject: () => Promise<void>;
   importProjectFile: (file: File) => Promise<boolean>;
   importProjectData: (data: ProjectData) => string;
@@ -823,6 +875,7 @@ export const useDoc = create<DocState>()(
       currentProjectId: activeProject.id,
       projectName: activeProject.name,
       projects: initialProjects,
+      folders: listFolders(),
       nodes: restored,
       selectedIds: [],
       showResult: false,
@@ -832,6 +885,7 @@ export const useDoc = create<DocState>()(
 
       newProject: (name) => {
         flushSave();
+        dropEmptyDraft(get().currentProjectId);
         const newId = `p-${Date.now()}`;
         const newProjName = name?.trim() || "Untitled Project";
         const newProj: ProjectData = {
@@ -843,6 +897,7 @@ export const useDoc = create<DocState>()(
           nodes: [],
         };
         saveProject(newProj);
+        setProjectLocation(newId, "draft");
         setActiveProjectId(newId);
         const updatedProjects = listProjects();
 
@@ -862,6 +917,7 @@ export const useDoc = create<DocState>()(
         flushSave();
         const proj = loadProject(id);
         if (!proj) return false;
+        if (id !== get().currentProjectId) dropEmptyDraft(get().currentProjectId);
         setActiveProjectId(proj.id);
         const updatedProjects = listProjects();
 
@@ -893,6 +949,7 @@ export const useDoc = create<DocState>()(
         proj.nodes = s.nodes;
         saveProject(proj);
         set({ projectName: trimmed, projects: listProjects() });
+        driveHooks.onProjectChanged?.(s.currentProjectId);
       },
 
       duplicateProject: (id) => {
@@ -909,14 +966,22 @@ export const useDoc = create<DocState>()(
           updatedAt: Date.now(),
         };
         saveProject(newProj);
+        const sourceMeta = get().projects.find((p) => p.id === id);
+        if (sourceMeta?.location) setProjectLocation(newId, sourceMeta.location);
+        if (sourceMeta?.folderId) setProjectFolder(newId, sourceMeta.folderId);
+        if (sourceMeta?.tags?.length) updateProjectMeta(newId, (m) => { m.tags = [...sourceMeta.tags!]; });
         set({ projects: listProjects() });
+        driveHooks.onProjectChanged?.(newId);
         return newId;
       },
 
-      deleteProject: (id) => {
+      deleteProject: (id, via) => {
         flushSave();
         const s = get();
+        const deletedMeta = s.projects.find((p) => p.id === id);
+        moveToBin(id, via);
         deleteProjectStorage(id);
+        if (deletedMeta) driveHooks.onProjectDeleted?.(deletedMeta);
         const remaining = listProjects();
         if (s.currentProjectId === id) {
           if (remaining.length > 0) {
@@ -928,6 +993,115 @@ export const useDoc = create<DocState>()(
           set({ projects: remaining });
         }
         return true;
+      },
+
+      renameProjectById: (id, name) => {
+        const trimmed = name.trim();
+        if (!trimmed) return;
+        if (id === get().currentProjectId) {
+          get().renameProject(trimmed);
+          return;
+        }
+        flushSave();
+        const proj = loadProject(id);
+        if (!proj) return;
+        proj.name = trimmed;
+        saveProject(proj);
+        set({ projects: listProjects() });
+        driveHooks.onProjectChanged?.(id);
+      },
+
+      refreshFolders: () => set({ folders: listFolders() }),
+
+      createFolder: (name, parentId) => {
+        const folder = createFolderEntry(name, parentId);
+        set({ folders: listFolders() });
+        return folder.id;
+      },
+
+      renameFolder: (id, name) => {
+        renameFolderEntry(id, name);
+        set({ folders: listFolders() });
+        driveHooks.onFolderRenamed?.(id);
+      },
+
+      moveFolder: (id, parentId) => {
+        if (!moveFolderEntry(id, parentId)) return false;
+        set({ folders: listFolders() });
+        driveHooks.onFolderMoved?.(id);
+        return true;
+      },
+
+      deleteFolder: (id) => {
+        flushSave();
+        const before = get();
+        const folder = before.folders.find((f) => f.id === id);
+        if (!folder) return;
+        // The folder and everything inside it go to the Bin together, and come back together.
+        const at = Date.now();
+        const tree = collectFolderTree(id);
+        const designIds = before.projects.filter((p) => p.folderId && tree.includes(p.folderId)).map((p) => p.id);
+        for (const designId of designIds) get().deleteProject(designId, { folderId: id, at });
+        if (!binFolderTree(id, at)) deleteFolderEntry(id);
+        set({ folders: listFolders(), projects: listProjects() });
+        driveHooks.onFolderDeleted?.({ folder, designIds: [], subfolderIds: [] });
+      },
+
+      moveProjectToFolder: (projectId, folderId) => {
+        flushSave();
+        setProjectFolder(projectId, folderId);
+        set({ projects: listProjects() });
+        driveHooks.onProjectChanged?.(projectId);
+      },
+
+      toggleStar: (ids) => {
+        const metas = listProjects().filter((p) => ids.includes(p.id));
+        const star = !metas.every((p) => p.starred);
+        for (const p of metas) {
+          updateProjectMeta(p.id, (m) => {
+            if (star) m.starred = true;
+            else delete m.starred;
+          });
+          driveHooks.onProjectChanged?.(p.id);
+        }
+        set({ projects: listProjects() });
+      },
+
+      editTags: (ids, add, remove) => {
+        let allFit = true;
+        for (const p of listProjects().filter((x) => ids.includes(x.id))) {
+          const kept = (p.tags ?? []).filter((t) => !remove.some((r) => sameTag(r, t)));
+          const next = uniqueTags([...kept, ...add]);
+          if (!tagsFitDrive(next)) {
+            allFit = false;
+            continue;
+          }
+          updateProjectMeta(p.id, (m) => {
+            if (next.length) m.tags = next;
+            else delete m.tags;
+          });
+          driveHooks.onProjectChanged?.(p.id);
+        }
+        addToTagRegistry(add);
+        set({ projects: listProjects() });
+        return allFit;
+      },
+
+      moveProjectsToLocation: (ids, location) => {
+        flushSave();
+        for (const id of ids) {
+          if (!setProjectLocation(id, location)) continue;
+          driveHooks.onProjectChanged?.(id);
+        }
+        set({ projects: listProjects() });
+      },
+
+      saveCurrentTo: (location) => {
+        flushSave();
+        const s = get();
+        setProjectLocation(s.currentProjectId, location);
+        set({ projects: listProjects(), savedAt: Date.now(), storageBlocked: false });
+        driveHooks.onProjectChanged?.(s.currentProjectId);
       },
 
       exportCurrentProject: async () => {
@@ -962,6 +1136,8 @@ export const useDoc = create<DocState>()(
       importProjectData: (proj) => {
         flushSave();
         saveProject(proj);
+        // A file the person chose to open is a design they meant to keep.
+        setProjectLocation(proj.id, "browser");
         setActiveProjectId(proj.id);
         const updatedProjects = listProjects();
 

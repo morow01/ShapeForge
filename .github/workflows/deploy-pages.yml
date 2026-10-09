@@ -40,6 +40,9 @@ jobs:
       - run: npm run build
         env:
           GITHUB_PAGES: "true"
+          # The Google sign-in client ID is public (every web app ships it). Set it once under the
+          # repository's Settings > Secrets and variables > Actions > Variables as GOOGLE_CLIENT_ID.
+          VITE_GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
