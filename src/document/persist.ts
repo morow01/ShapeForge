@@ -445,6 +445,26 @@ export function renameFolderEntry(id: string, name: string): void {
   writeFolders(listFolders().map((f) => (f.id === id ? { ...f, name: trimmed } : f)));
 }
 
+/** Puts a folder inside another (null = the top level). Refuses to put a folder inside itself or its own subfolders. */
+export function moveFolderEntry(id: string, parentId: string | null): boolean {
+  const folders = listFolders();
+  const folder = folders.find((f) => f.id === id);
+  if (!folder || (folder.parentId ?? null) === parentId) return false;
+  if (parentId !== null) {
+    if (!folders.some((f) => f.id === parentId)) return false;
+    // Walk up from the new parent: meeting the folder itself would make a loop.
+    const seen = new Set<string>();
+    let cursor: string | null = parentId;
+    while (cursor && !seen.has(cursor)) {
+      if (cursor === id) return false;
+      seen.add(cursor);
+      cursor = folders.find((f) => f.id === cursor)?.parentId ?? null;
+    }
+  }
+  writeFolders(folders.map((f) => (f.id === id ? { ...f, parentId } : f)));
+  return true;
+}
+
 /** Removes a folder only. Whatever was inside it (designs and folders) moves up one level. */
 export function deleteFolderEntry(id: string): void {
   const folders = listFolders();

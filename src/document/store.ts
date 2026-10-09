@@ -32,6 +32,7 @@ import {
   moveToBin,
   updateProjectMeta,
   collectFolderTree,
+  moveFolderEntry,
   binFolderTree,
 } from "./persist";
 import { addToTagRegistry, sameTag, tagsFitDrive, uniqueTags } from "./tags";
@@ -69,6 +70,7 @@ export type DriveHooks = {
   onProjectChanged?: (id: string) => void;
   onProjectDeleted?: (meta: ProjectMeta) => void;
   onFolderRenamed?: (folderId: string) => void;
+  onFolderMoved?: (folderId: string) => void;
   onFolderDeleted?: (info: { folder: FolderMeta; designIds: string[]; subfolderIds: string[] }) => void;
 };
 export const driveHooks: DriveHooks = {};
@@ -745,6 +747,8 @@ interface DocState {
   renameFolder: (id: string, name: string) => void;
   /** Deletes the folder only; its designs and folders move up one level. */
   deleteFolder: (id: string) => void;
+  /** Puts a folder inside another (null = top level). False if that is not allowed. */
+  moveFolder: (id: string, parentId: string | null) => boolean;
   moveProjectToFolder: (projectId: string, folderId: string | null) => void;
   /** Chooses where the open design is kept. A new design starts as a draft, which
    *  autosaves in this browser but has not been given a home. */
@@ -1019,6 +1023,13 @@ export const useDoc = create<DocState>()(
         renameFolderEntry(id, name);
         set({ folders: listFolders() });
         driveHooks.onFolderRenamed?.(id);
+      },
+
+      moveFolder: (id, parentId) => {
+        if (!moveFolderEntry(id, parentId)) return false;
+        set({ folders: listFolders() });
+        driveHooks.onFolderMoved?.(id);
+        return true;
       },
 
       deleteFolder: (id) => {

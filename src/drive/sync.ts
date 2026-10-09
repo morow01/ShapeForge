@@ -962,6 +962,9 @@ export function installDriveHooks(): void {
     const folder = listFolders().find((f) => f.id === folderId);
     if (folder) pushFolderToDrive(folderId, (driveId) => driveApi().updateMetadata(driveId, { name: folder.name }));
   };
+  driveHooks.onFolderMoved = (folderId) => {
+    void runSync(() => moveFolderOnDrive(folderId));
+  };
   driveHooks.onFolderDeleted = ({ folder, designIds, subfolderIds }) => {
     if (!folder.driveId) return;
     void runSync(async () => {

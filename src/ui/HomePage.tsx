@@ -5,6 +5,7 @@ import { BinView } from "./BinView";
 import { VersionHistoryDialog } from "./VersionHistoryDialog";
 import { EditDialog } from "./EditDialog";
 import { BinIcon, ClockIcon, CloudIcon, CopyIcon, DownloadIcon, DraftIcon, EyeIcon, FolderIcon, GridIcon, HistoryIcon, MonitorIcon, MoveFolderIcon, OpenIcon, PencilIcon, StarIcon, TagIcon } from "./NavIcons";
+import { collectFolderTree as folderSubtree } from "../document/persist";
 import { addToTagRegistry, cleanTag, loadTagRegistry, removeFromTagRegistry, sameTag, uniqueTags } from "../document/tags";
 import { TagManager } from "./TagManager";
 import type { FolderMeta, ProjectMeta } from "../document/types";
@@ -91,7 +92,7 @@ type MenuState = {
 } | null;
 
 /** A design being dragged to a folder: follows the pointer until it is let go. */
-type DragState = { ids: string[]; name: string; thumb: string | null; x: number; y: number; /** Set when a tag, not designs, is being dragged. */ tag?: string } | null;
+type DragState = { ids: string[]; name: string; thumb: string | null; x: number; y: number; /** Set when a tag, not designs, is being dragged. */ tag?: string; /** Set when a folder is being dragged. */ folderId?: string } | null;
 
 const DRAG_START_DISTANCE = 6;
 
@@ -176,7 +177,10 @@ export function HomePage({
   const [drag, setDrag] = useState<DragState>(null);
   const dragRef = useRef<DragState>(null);
   dragRef.current = drag;
-  const pressRef = useRef<{ ids: string[]; name: string; thumb: string | null; x: number; y: number; tag?: string } | null>(null);
+  const pressRef = useRef<{ ids: string[]; name: string; thumb: string | null; x: number; y: number; tag?: string; folderId?: string } | null>(null);
+  const moveFolder = useDoc((s) => s.moveFolder);
+  const [movingFolder, setMovingFolder] = useState<FolderMeta | null>(null);
+  const [folderMoveTarget, setFolderMoveTarget] = useState<string | null>(null);
   const selectedIdsRef = useRef<string[]>([]);
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<number | undefined>(undefined);
@@ -274,7 +278,7 @@ export function HomePage({
       if (!press) return;
       if (!dragRef.current && Math.hypot(e.clientX - press.x, e.clientY - press.y) < DRAG_START_DISTANCE) return;
       setMenu(null);
-      setDrag({ ids: press.ids, name: press.name, thumb: press.thumb, x: e.clientX, y: e.clientY, tag: press.tag });
+      setDrag({ ids: press.ids, name: press.name, thumb: press.thumb, x: e.clientX, y: e.clientY, tag: press.tag, folderId: press.folderId });
       setDropTarget(dropAt(e.clientX, e.clientY, !!press.tag));
     };
     const onUp = (e: PointerEvent) => {
@@ -286,6 +290,13 @@ export function HomePage({
       window.setTimeout(() => { suppressClickRef.current = false; }, 80);
       setDrag(null);
       setDropTarget("none");
+      if (press.folderId) {
+        // A folder dropped on another folder (or on All designs) moves inside it.
+        if (e.type === "pointerup" && target !== "none" && !(typeof target === "string" && target.startsWith("design:"))) {
+          if (!useDoc.getState().moveFolder(press.folderId, target)) showToast("A folder can't go inside itself or one of its own folders.");
+        }
+        return;
+      }
       if (press.tag) {
         // A tag dropped on a design gives it that tag; on one of several picked designs, gives it to all of them.
         if (e.type === "pointerup" && typeof target === "string" && target.startsWith("design:")) {
@@ -584,6 +595,12 @@ export function HomePage({
    *  would change nothing, so it should not look like a target. */
   const dropProps = (folderId: string | null): { "data-drop"?: string } => {
     if (drag?.tag) return {};
+    if (drag?.folderId) {
+      // Not onto itself, its own subfolders, or where it already is.
+      if (folderId !== null && folderSubtree(drag.folderId).includes(folderId)) return {};
+      if ((folders.find((f) => f.id === drag.folderId)?.parentId ?? null) === folderId) return {};
+      return { "data-drop": folderId ?? "root" };
+    }
     if (drag && drag.ids.every((id) => (projects.find((p) => p.id === id)?.folderId ?? null) === folderId)) return {};
     return { "data-drop": folderId ?? "root" };
   };
@@ -592,6 +609,17 @@ export function HomePage({
   const beginTagPress = (e: React.PointerEvent, tag: string) => {
     if (e.button !== 0 || e.pointerType === "touch") return;
     pressRef.current = { ids: [], name: tag, thumb: null, tag, x: e.clientX, y: e.clientY };
+  };
+
+  /** Pressing a folder in the sidebar and moving makes it draggable onto another folder. A plain click still opens it. */
+  const beginFolderPress = (e: React.PointerEvent, f: FolderMeta) => {
+    if (e.button !== 0 || e.pointerType === "touch") return;
+    pressRef.current = { ids: [], name: f.name, thumb: null, folderId: f.id, x: e.clientX, y: e.clientY };
+  };
+
+  const startMoveFolder = (f: FolderMeta) => {
+    setMovingFolder(f);
+    setFolderMoveTarget(f.parentId ?? null);
   };
 
   const beginPress = (e: React.PointerEvent, p: ProjectMeta, thumb: string | null) => {
@@ -745,7 +773,9 @@ export function HomePage({
             <button
               key={folder.id}
               className={navClass(!searching && view.kind === "folder" && viewFolderId === folder.id, dropTarget === folder.id)}
-              onClick={() => { setSearch(""); setView({ kind: "folder", id: folder.id }); }}
+              onPointerDown={(e) => beginFolderPress(e, folder)}
+              onContextMenu={(e) => openMenu(e, { kind: "folder", folder })}
+              onClick={() => { if (suppressClickRef.current) return; setSearch(""); setView({ kind: "folder", id: folder.id }); }}
               {...dropProps(folder.id)}
             >
               <span className="home-nav-main">
@@ -1102,7 +1132,12 @@ export function HomePage({
 
       {drag && (
         <>
-          {drag.tag ? (
+          {drag.folderId ? (
+            <div className="home-ghost tag-ghost folder-ghost" style={{ left: drag.x + 14, top: drag.y + 14 }} aria-hidden="true">
+              <FolderIcon size={13} />
+              <b>{drag.name}</b>
+            </div>
+          ) : drag.tag ? (
             <div className="home-ghost tag-ghost" style={{ left: drag.x + 14, top: drag.y + 14 }} aria-hidden="true">
               <TagIcon size={12} />
               <b>{drag.tag}</b>
@@ -1115,7 +1150,9 @@ export function HomePage({
             </div>
           )}
           <div className="home-drag-hint" role="status">
-            {drag.tag
+            {drag.folderId
+              ? `Drop "${drag.name}" on a folder to put it inside. Drop on All designs to make it a top-level folder.`
+              : drag.tag
               ? `Drop on a design to add the tag "${drag.tag}". Picked designs all get it.`
               : folders.length
               ? `Drop ${drag.ids.length > 1 ? drag.name : `"${drag.name}"`} on a folder to move ${drag.ids.length > 1 ? "them" : "it"}. Drop on All designs to take ${drag.ids.length > 1 ? "them" : "it"} out of a folder.`
@@ -1170,6 +1207,11 @@ export function HomePage({
                 <>
                   <button role="menuitem" onClick={() => { setMenu(null); setSearch(""); setView({ kind: "folder", id: f.id }); }}><OpenIcon className="menu-icon" />Open</button>
                   <button role="menuitem" onClick={() => { setMenu(null); startRename(f); }}><PencilIcon className="menu-icon" />Rename…</button>
+                  <button role="menuitem" onClick={() => { setMenu(null); startNewFolder(f.id); }}>
+                    <svg className="menu-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+                    New subfolder…
+                  </button>
+                  <button role="menuitem" onClick={() => { setMenu(null); startMoveFolder(f); }}><MoveFolderIcon className="menu-icon" />Move to…</button>
                   <hr />
                   <button role="menuitem" className="danger-item" onClick={() => { setMenu(null); handleDeleteFolder(f); }}><BinIcon className="menu-icon" />Delete folder</button>
                 </>
@@ -1192,6 +1234,40 @@ export function HomePage({
       <VersionHistoryDialog open={historyFor !== null} projectId={historyFor ?? ""} onClose={() => setHistoryFor(null)} />
       {confirmDialog}
       <DriveSetupDialog open={setupOpen} onClose={() => setSetupOpen(false)} />
+
+      {movingFolder && (
+        <div className="modal-backdrop" onClick={() => setMovingFolder(null)}>
+          <div className="save-dialog" role="dialog" aria-label="Move folder" onClick={(e) => e.stopPropagation()}>
+            <h2>Move "{movingFolder.name}"</h2>
+            <div className="move-list">
+              <label className={`move-row${folderMoveTarget === null ? " on" : ""}`}>
+                <input type="radio" name="move-folder-to" checked={folderMoveTarget === null} onChange={() => setFolderMoveTarget(null)} />
+                <span>All designs (top level)</span>
+              </label>
+              {folderTree(folders)
+                .filter(({ folder }) => !folderSubtree(movingFolder.id).includes(folder.id))
+                .map(({ folder, depth }) => (
+                  <label key={folder.id} className={`move-row${folderMoveTarget === folder.id ? " on" : ""}`} style={{ paddingLeft: 10 + depth * 16 }}>
+                    <input type="radio" name="move-folder-to" checked={folderMoveTarget === folder.id} onChange={() => setFolderMoveTarget(folder.id)} />
+                    <span>{folder.name}</span>
+                  </label>
+                ))}
+            </div>
+            <div className="save-buttons">
+              <button className="modal-btn" onClick={() => setMovingFolder(null)}>Cancel</button>
+              <button
+                className="modal-btn primary"
+                onClick={() => {
+                  if (!moveFolder(movingFolder.id, folderMoveTarget)) showToast("That folder is already there, or the move isn't allowed.");
+                  setMovingFolder(null);
+                }}
+              >
+                Move
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {moving && (
         <div className="modal-backdrop" onClick={() => setMoving(null)}>
