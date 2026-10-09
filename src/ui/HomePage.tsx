@@ -747,8 +747,10 @@ export function HomePage({
               </svg>
             </button>
           </div>
-          {!tagsCollapsed && allTags.length === 0 && <p className="home-side-empty">No tags yet. Use Manage tags to add some.</p>}
-          {(tagsCollapsed ? [] : allTags).map((tag) => {
+          <div className={`tags-body${tagsCollapsed ? " closed" : ""}`} aria-hidden={tagsCollapsed}>
+          <div className="tags-body-inner">
+          {allTags.length === 0 && <p className="home-side-empty">No tags yet. Use Manage tags to add some.</p>}
+          {allTags.map((tag) => {
             const checked = !searching && view.kind === "tags" && view.tags.some((t) => sameTag(t, tag));
             const count = tagCount(tag);
             return (
@@ -770,6 +772,9 @@ export function HomePage({
               </button>
             );
           })}
+
+          </div>
+          </div>
 
           <div className="home-side-label">Stored in</div>
           {(drafts.length > 0 || view.kind === "draft") && (

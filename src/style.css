@@ -5687,3 +5687,13 @@ button.stepper-btn:disabled {
 .tag-manager-count { font-size: 12px; color: #9aa7b1; white-space: nowrap; }
 .tag-manager-delete { color: #b42318; }
 .tag-manager-note { margin: 0 0 10px; font-size: 12px; color: #8a97a1; }
+
+/* The tag list slides shut and open instead of jumping. */
+.tags-body { display: grid; grid-template-rows: 1fr; opacity: 1; transition: grid-template-rows 0.24s ease, opacity 0.2s ease; }
+.tags-body.closed { grid-template-rows: 0fr; opacity: 0; }
+.tags-body-inner { overflow: hidden; min-height: 0; display: flex; flex-direction: column; gap: 1px; }
+.tags-body.closed .tags-body-inner { visibility: hidden; transition: visibility 0s 0.24s; }
+@media (prefers-reduced-motion: reduce) {
+  .tags-body, .home-chevron { transition: none; }
+  .tags-body.closed .tags-body-inner { transition: none; }
+}
