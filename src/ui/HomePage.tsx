@@ -313,9 +313,9 @@ export function HomePage({
     });
   };
 
-  const startNewFolder = () => {
+  const startNewFolder = (parentId: string | null) => {
     setNameDraft("");
-    setNameDialog({ mode: "new", parentId: viewFolderId });
+    setNameDialog({ mode: "new", parentId });
   };
 
   const startRenameDesign = (p: ProjectMeta) => {
@@ -436,7 +436,7 @@ export function HomePage({
           aria-label="Search designs"
         />
         <span className="home-spacer" />
-        <button className="modal-btn" onClick={startNewFolder} title="Make a folder here">
+        <button className="modal-btn" onClick={() => startNewFolder(viewFolderId)} title="Make a folder here">
           <PlusIcon className="modal-btn-icon" />
           <span>New folder</span>
         </button>
@@ -465,7 +465,11 @@ export function HomePage({
             <span>Recent</span>
           </button>
 
-          {folders.length > 0 && <div className="home-side-label">Folders</div>}
+          <div className="home-side-head">
+            <span>Folders</span>
+            <button className="home-side-add" onClick={() => startNewFolder(null)} title="New folder" aria-label="New folder">+</button>
+          </div>
+          {folders.length === 0 && <p className="home-side-empty">No folders yet</p>}
           {folderTree(folders).map(({ folder, depth }) => (
             <button
               key={folder.id}
@@ -647,6 +651,11 @@ export function HomePage({
         <div className="modal-backdrop" onClick={() => setNameDialog(null)}>
           <div className="save-dialog" role="dialog" aria-label={nameDialog.mode === "new" ? "New folder" : "Rename"} onClick={(e) => e.stopPropagation()}>
             <h2>{nameDialog.mode === "new" ? "New folder" : nameDialog.mode === "renameDesign" ? "Rename design" : "Rename folder"}</h2>
+            {nameDialog.mode === "new" && (
+              <p className="save-label" style={{ margin: 0 }}>
+                In: {["All designs", ...folderPath(folders, nameDialog.parentId).map((f) => f.name)].join(" › ")}
+              </p>
+            )}
             <input
               className="save-name"
               value={nameDraft}
