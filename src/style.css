@@ -5725,3 +5725,47 @@ button.stepper-btn:disabled {
 
 /* The ShapeForge cube replaces the old letter tile. */
 .brand-logo { display: block; width: auto; height: 27px; flex-shrink: 0; user-select: none; }
+
+/* Layout switch and the plain list. */
+.home-viewtoggle { display: inline-flex; border: 1px solid #d3dde4; border-radius: 8px; overflow: hidden; background: #fff; margin-left: 4px; }
+.home-viewtoggle button { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 28px; min-height: 0; padding: 0; border: 0; background: transparent; color: #7d8b96; cursor: pointer; border-radius: 0; }
+.home-viewtoggle button + button { border-left: 1px solid #e2e8f0; }
+.home-viewtoggle button:hover { color: #00807e; background: #f1f8f8; }
+.home-viewtoggle button.on { background: #e6f7f7; color: #00807e; }
+
+.home-list { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; }
+.home-row { display: grid; grid-template-columns: 30px 54px minmax(170px, 2.4fr) minmax(90px, 1fr) minmax(130px, 1.6fr) 64px 104px 96px 64px; align-items: center; gap: 10px; padding: 6px 14px 6px 12px; border-bottom: 1px solid #eef2f5; font-size: 13px; color: #1f2a33; position: relative; user-select: none; cursor: grab; }
+.home-row:last-child { border-bottom: 0; }
+.home-row:not(.home-row-head):hover { background: #f6fafb; }
+.home-row.current { box-shadow: inset 3px 0 0 #00a7a5; }
+.home-row.selected { background: #e6f7f7; }
+.home-row.lifted { opacity: 0.4; }
+.home-page.is-dragging .home-row[data-drop-design] { outline: 2px dashed #00a7a5; outline-offset: -3px; }
+.home-page.is-dragging .home-row.tag-drop { outline: 2px solid #00a7a5; background: #eefaf9; }
+.home-row-head { cursor: default; background: #f6f9fb; font-size: 11.5px; font-weight: 600; color: #7d8b96; text-transform: uppercase; letter-spacing: 0.04em; padding-top: 8px; padding-bottom: 8px; }
+.home-col { border: 0; background: none; padding: 0; min-height: 0; width: auto; justify-self: start; font: inherit; letter-spacing: inherit; text-transform: inherit; color: inherit; cursor: pointer; }
+.home-col:hover, .home-col.on { color: #00807e; }
+.home-col-static { color: inherit; }
+.home-row .home-check.home-row-check { position: static; opacity: 1; width: 18px; height: 18px; font-size: 12px; }
+.home-row-thumb { display: block; width: 54px; height: 38px; min-height: 0; padding: 0; border: 1px solid #e2e8f0; border-radius: 6px; overflow: hidden; background: #f1f5f8; cursor: pointer; }
+.home-row-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.home-row-thumb-empty { display: block; width: 100%; height: 100%; }
+.home-row-name { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 0; padding: 0; border: 0; background: none; text-align: left; font: inherit; font-weight: 600; color: #1f2a33; cursor: pointer; width: auto; }
+.home-row-name > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.home-row-name:hover > span:first-child { color: #00807e; }
+.home-row-tag { position: static; margin: 0; flex-shrink: 0; }
+.home-row-muted { color: #6b7a86; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.home-row-tags { display: flex; flex-wrap: nowrap; gap: 4px; overflow: hidden; min-width: 0; }
+.home-row-actions { display: inline-flex; gap: 2px; justify-content: flex-end; opacity: 0; transition: opacity 0.12s; }
+.home-row:hover .home-row-actions, .home-row:focus-within .home-row-actions, .home-row-actions:has(.on) { opacity: 1; }
+.home-row-btn { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; min-height: 0; padding: 0; border: 0; border-radius: 7px; background: transparent; color: #8a97a1; cursor: pointer; }
+.home-row-btn:hover { background: #e6f7f7; color: #00807e; }
+.home-row-star.on { color: #d9962b; }
+.home-row-star.on svg { fill: currentColor; }
+.home-page.is-dragging .home-row-actions { visibility: hidden; }
+@media (max-width: 1100px) {
+  .home-row { grid-template-columns: 30px 54px minmax(150px, 2fr) minmax(120px, 1.4fr) 100px 64px; }
+  .home-row .col-folder, .home-row .col-shapes, .home-row .col-created { display: none; }
+}
+
+.home-row-tags .home-tagchip { white-space: nowrap; flex-shrink: 0; }

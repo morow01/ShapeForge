@@ -4,7 +4,7 @@ import { binCount as countBin, collectFolderTree, exportProjectFile, hasProjectC
 import { BinView } from "./BinView";
 import { VersionHistoryDialog } from "./VersionHistoryDialog";
 import { EditDialog } from "./EditDialog";
-import { BinIcon, ClockIcon, CloudIcon, CopyIcon, DownloadIcon, DraftIcon, EyeIcon, FolderIcon, GridIcon, HistoryIcon, MonitorIcon, MoveFolderIcon, OpenIcon, PencilIcon, StarIcon, TagIcon } from "./NavIcons";
+import { ListIcon, BinIcon, ClockIcon, CloudIcon, CopyIcon, DownloadIcon, DraftIcon, EyeIcon, FolderIcon, GridIcon, HistoryIcon, MonitorIcon, MoveFolderIcon, OpenIcon, PencilIcon, StarIcon, TagIcon } from "./NavIcons";
 import { collectFolderTree as folderSubtree } from "../document/persist";
 import { addToTagRegistry, cleanTag, loadTagRegistry, removeFromTagRegistry, sameTag, uniqueTags } from "../document/tags";
 import { TagManager } from "./TagManager";
@@ -99,6 +99,15 @@ const DRAG_START_DISTANCE = 6;
 type SortKey = "updated" | "name" | "created";
 type SortState = { key: SortKey; dir: "asc" | "desc" };
 const SORT_KEY = "cad.homeSort";
+const VIEW_MODE_KEY = "cad.homeViewMode";
+type ViewMode = "grid" | "list";
+function readViewMode(): ViewMode {
+  try {
+    return localStorage.getItem(VIEW_MODE_KEY) === "list" ? "list" : "grid";
+  } catch {
+    return "grid";
+  }
+}
 const SORT_LABELS: Record<SortKey, string> = { updated: "Last changed", name: "Name", created: "Date created" };
 /** Names read A to Z, dates newest first, until the person flips them. */
 const DEFAULT_DIR: Record<SortKey, "asc" | "desc"> = { updated: "desc", name: "asc", created: "desc" };
@@ -212,6 +221,15 @@ export function HomePage({
     });
   const [sideWidth, setSideWidth] = useState(readSideWidth);
   const [sort, setSortState] = useState<SortState>(readSort);
+  const [viewMode, setViewModeState] = useState<ViewMode>(readViewMode);
+  const setViewMode = (mode: ViewMode) => {
+    setViewModeState(mode);
+    try {
+      localStorage.setItem(VIEW_MODE_KEY, mode);
+    } catch {
+      /* the choice is simply not remembered */
+    }
+  };
   const setSort = (next: SortState) => {
     setSortState(next);
     try {
@@ -624,7 +642,7 @@ export function HomePage({
 
   const beginPress = (e: React.PointerEvent, p: ProjectMeta, thumb: string | null) => {
     if (e.button !== 0 || e.pointerType === "touch") return;
-    if ((e.target as Element).closest(".home-actions, .home-check, .home-star, .home-edit, .home-tagchip")) return;
+    if ((e.target as Element).closest(".home-actions, .home-check, .home-star, .home-edit, .home-tagchip, .home-row-actions, .home-row-check")) return;
     // Dragging one of several selected designs takes all of them.
     const group = selected.has(p.id) && selectedDesigns.length > 1 ? selectedDesigns.map((d) => d.id) : [p.id];
     const label = group.length > 1 ? `${group.length} designs` : p.name;
@@ -983,8 +1001,10 @@ export function HomePage({
             </div>
           )}
 
-          {designs.length > 1 && (view.kind !== "recent" || searching) && (
+          {designs.length > 0 && (
             <div className="home-sortbar">
+              {designs.length > 1 && (view.kind !== "recent" || searching) && (
+              <>
               <label htmlFor="home-sort">Sort by</label>
               <select
                 id="home-sort"
@@ -1009,10 +1029,95 @@ export function HomePage({
                   <path d="M12 5v14M6 13l6 6 6-6" />
                 </svg>
               </button>
+              </>
+              )}
+              <div className="home-viewtoggle" role="group" aria-label="Layout">
+                <button className={viewMode === "grid" ? "on" : ""} aria-pressed={viewMode === "grid"} onClick={() => setViewMode("grid")} title="Thumbnails" aria-label="Show thumbnails">
+                  <GridIcon size={15} />
+                </button>
+                <button className={viewMode === "list" ? "on" : ""} aria-pressed={viewMode === "list"} onClick={() => setViewMode("list")} title="List" aria-label="Show as a list">
+                  <ListIcon size={15} />
+                </button>
+              </div>
             </div>
           )}
 
-          {designs.length > 0 && (
+          {designs.length > 0 && viewMode === "list" && (
+            <div className="home-list" role="table" aria-label="Designs">
+              <div className="home-row home-row-head" role="row">
+                <span />
+                <span />
+                <button className={`home-col${sort.key === "name" ? " on" : ""}`} onClick={() => setSort({ key: "name", dir: sort.key === "name" ? (sort.dir === "asc" ? "desc" : "asc") : DEFAULT_DIR.name })}>
+                  Name{sort.key === "name" ? (sort.dir === "asc" ? " ↑" : " ↓") : ""}
+                </button>
+                <span className="home-col-static col-folder">Folder</span>
+                <span className="home-col-static col-tags">Tags</span>
+                <span className="home-col-static col-shapes">Shapes</span>
+                <button className={`home-col col-changed${sort.key === "updated" ? " on" : ""}`} onClick={() => setSort({ key: "updated", dir: sort.key === "updated" ? (sort.dir === "asc" ? "desc" : "asc") : DEFAULT_DIR.updated })}>
+                  Last changed{sort.key === "updated" ? (sort.dir === "asc" ? " ↑" : " ↓") : ""}
+                </button>
+                <button className={`home-col col-created${sort.key === "created" ? " on" : ""}`} onClick={() => setSort({ key: "created", dir: sort.key === "created" ? (sort.dir === "asc" ? "desc" : "asc") : DEFAULT_DIR.created })}>
+                  Created{sort.key === "created" ? (sort.dir === "asc" ? " ↑" : " ↓") : ""}
+                </button>
+                <span />
+              </div>
+              {designs.map((p) => {
+                const where = locationOf(p);
+                const thumb = loadThumbnail(p.id);
+                const folderName = p.folderId ? folders.find((f) => f.id === p.folderId)?.name : null;
+                return (
+                  <div
+                    key={p.id}
+                    role="row"
+                    className={`home-row${p.id === currentProjectId ? " current" : ""}${drag?.ids.includes(p.id) ? " lifted" : ""}${selected.has(p.id) ? " selected" : ""}${dropTarget === `design:${p.id}` ? " tag-drop" : ""}`}
+                    {...(drag?.tag && !(p.tags ?? []).some((t) => sameTag(t, drag.tag!)) ? { "data-drop-design": p.id } : {})}
+                    onPointerDown={(e) => beginPress(e, p, thumb)}
+                    onContextMenu={(e) => openMenu(e, { kind: "design", project: p })}
+                    onDoubleClick={(e) => { if (!(e.target as Element).closest("button")) handleOpen(p); }}
+                  >
+                    <button
+                      className={`home-check home-row-check${selected.has(p.id) ? " on" : ""}`}
+                      role="checkbox"
+                      aria-checked={selected.has(p.id)}
+                      aria-label={`Select ${p.name}`}
+                      onClick={() => toggleSelected(p.id)}
+                    >
+                      {selected.has(p.id) ? "✓" : ""}
+                    </button>
+                    <button className="home-row-thumb" onClick={(e) => (e.ctrlKey || e.metaKey ? toggleSelected(p.id) : handleOpen(p))} title={`Open ${p.name}`}>
+                      {thumb ? <img src={thumb} alt="" draggable={false} /> : <span className="home-row-thumb-empty" />}
+                    </button>
+                    <button className="home-row-name" onClick={() => handleOpen(p)} title={p.name}>
+                      <span>{p.name}</span>
+                      {where !== "drive" && <span className={`home-tag ${where} home-row-tag`}>{where === "draft" ? "Not saved yet" : "This browser"}</span>}
+                    </button>
+                    <span className="col-folder home-row-muted" title={folderName ?? ""}>{folderName ?? "—"}</span>
+                    <span className="col-tags home-row-tags">
+                      {(p.tags ?? []).slice(0, 3).map((t) => (
+                        <button key={t} className="home-tagchip" onClick={() => { setSearch(""); setView({ kind: "tags", tags: [t] }); }} title={`Show everything tagged ${t}`}>
+                          <TagIcon size={9} className="home-tagchip-icon" />{t}
+                        </button>
+                      ))}
+                      {(p.tags ?? []).length > 3 && <span className="home-tagmore">+{(p.tags ?? []).length - 3}</span>}
+                    </span>
+                    <span className="col-shapes home-row-muted">{openingId === p.id ? "Downloading…" : p.remote ? "—" : p.objectCount}</span>
+                    <span className="col-changed home-row-muted" title={new Date(p.updatedAt).toLocaleString()}>{timeAgo(p.updatedAt)}</span>
+                    <span className="col-created home-row-muted" title={new Date(p.createdAt).toLocaleString()}>{new Date(p.createdAt).toLocaleDateString()}</span>
+                    <span className="home-row-actions">
+                      <button className={`home-row-btn home-row-star${p.starred ? " on" : ""}`} aria-pressed={!!p.starred} aria-label={p.starred ? `Remove the star from ${p.name}` : `Star ${p.name}`} title={p.starred ? "Remove star" : "Star"} onClick={() => toggleStar([p.id])}>
+                        <StarIcon size={15} />
+                      </button>
+                      <button className="home-row-btn" aria-label={`Edit ${p.name}`} title="Edit name, tags and star" onClick={() => setTagging([p])}>
+                        <PencilIcon size={14} />
+                      </button>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {designs.length > 0 && viewMode === "grid" && (
             <div className="home-grid">
               {designs.map((p) => {
                 const where = locationOf(p);

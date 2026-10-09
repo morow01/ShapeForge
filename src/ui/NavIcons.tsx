@@ -130,3 +130,12 @@ export const EyeIcon = (p: IconProps) => (
     <circle cx="12" cy="12" r="2.8" />
   </Svg>
 );
+
+export const ListIcon = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M9 6.5h11M9 12h11M9 17.5h11" />
+    <circle cx="4.5" cy="6.5" r="0.9" fill="currentColor" />
+    <circle cx="4.5" cy="12" r="0.9" fill="currentColor" />
+    <circle cx="4.5" cy="17.5" r="0.9" fill="currentColor" />
+  </Svg>
+);
