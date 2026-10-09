@@ -5643,3 +5643,20 @@ button.stepper-btn:disabled {
 .home-nav.unused .home-nav-icon.tag { opacity: 0.55; }
 .home-nav.unused .home-count { color: #b4bfc7; }
 .home-nav.on .home-nav-name { color: #00807e; }
+
+/* Edit dialog tags: applied tags (with a remove x) apart from the ones still to add. */
+.tag-applied { min-height: 34px; padding: 8px; margin: 0 0 12px; border: 1px solid #cfe7e5; background: #f4fbfa; border-radius: 10px; }
+.tag-available { margin: 8px 0 0; max-height: 150px; overflow-y: auto; }
+.tag-chip.applied { display: inline-flex; align-items: stretch; padding: 0; background: #d7f1f0; border-color: #00a7a5; color: #006b69; overflow: hidden; cursor: default; }
+.tag-chip.applied.some { background: #f3f7f9; border: 1px dashed #8fb9b7; color: #3f6f6d; }
+.tag-chip-body { display: inline-flex; align-items: center; gap: 5px; border: 0; background: transparent; color: inherit; font: inherit; padding: 4px 4px 4px 11px; min-height: 0; width: auto; cursor: inherit; }
+.tag-chip.applied.some .tag-chip-body { cursor: pointer; }
+.tag-chip-part { font-size: 11px; opacity: 0.8; }
+.tag-chip-x { border: 0; background: transparent; color: inherit; font-size: 16px; line-height: 1; padding: 0 9px 2px 5px; min-height: 0; width: auto; cursor: pointer; opacity: 0.7; }
+.tag-chip-x:hover { opacity: 1; background: rgba(0, 0, 0, 0.07); }
+.tag-chip.available { color: #3d4c57; background: #fff; }
+.tag-chip.available:hover { color: #006b69; }
+.tag-chip-count { font-size: 11px; color: #9aa7b1; margin-left: 2px; }
+.tag-chip.create { border-style: dashed; color: #006b69; background: #f4fbfa; }
+.tag-more { border: 0; background: none; color: #00807e; font-size: 12.5px; padding: 4px 6px; min-height: 0; width: auto; cursor: pointer; }
+.tag-more:hover { text-decoration: underline; }

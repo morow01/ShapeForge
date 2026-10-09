@@ -4,10 +4,13 @@ import { MAX_TAG_LENGTH, cleanTag, sameTag, uniqueTags } from "../document/tags"
 import type { ProjectMeta } from "../document/types";
 import { StarIcon, TagIcon } from "./NavIcons";
 
+/** How many unused tags show before "Show all". Keeps the dialog short however many tags exist. */
+const COLLAPSED_COUNT = 10;
+
 type EditDialogProps = {
   /** The designs being edited; null keeps the dialog closed. */
   designs: ProjectMeta[] | null;
-  /** Every tag in use anywhere, offered for one-click reuse. */
+  /** Every tag in use anywhere or kept for later, offered for one-click reuse. */
   known: string[];
   onClose: () => void;
 };
@@ -15,16 +18,20 @@ type EditDialogProps = {
 type Mark = "all" | "some" | "none";
 
 /**
- * The one place to edit a design: its name, its star and its tags. With several designs selected only
- * the tags can be changed together; a tag only some of them have shows as partly ticked.
+ * The one place to edit a design: its name, its star and its tags. Tags the design has are shown first,
+ * each with a × to remove it; below is a search box that also makes new tags, and the tags it does not
+ * have yet. With several designs selected only the tags can be changed together, and a tag only some
+ * of them have shows as partly applied.
  */
 export function EditDialog({ designs, known, onClose }: EditDialogProps) {
   const single = designs && designs.length === 1 ? designs[0] : null;
+  const projects = useDoc((s) => s.projects);
   const [name, setName] = useState("");
   const [starred, setStarred] = useState(false);
   const [marks, setMarks] = useState<Record<string, Mark>>({});
   const [initial, setInitial] = useState<Record<string, Mark>>({});
   const [draft, setDraft] = useState("");
+  const [showAll, setShowAll] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
   // Read when the dialog opens only: the list is rebuilt on every render and must not reset what is being typed.
   const knownRef = useRef(known);
@@ -43,6 +50,7 @@ export function EditDialog({ designs, known, onClose }: EditDialogProps) {
     setName(designs.length === 1 ? designs[0].name : "");
     setStarred(designs.length === 1 ? !!designs[0].starred : false);
     setDraft("");
+    setShowAll(false);
     setProblem(null);
   }, [designs]);
 
@@ -57,14 +65,19 @@ export function EditDialog({ designs, known, onClose }: EditDialogProps) {
 
   if (!designs) return null;
 
-  const cycle = (tag: string) => setMarks((m) => ({ ...m, [tag]: m[tag] === "all" ? "none" : "all" }));
+  const setMark = (tag: string, mark: Mark) => {
+    setMarks((m) => ({ ...m, [tag]: mark }));
+    setProblem(null);
+  };
 
+  /** Applies the typed text: an existing tag with that name is switched on, otherwise it becomes a new tag. */
   const addDraft = () => {
     const tag = cleanTag(draft);
     if (!tag) return;
     const existing = Object.keys(marks).find((t) => sameTag(t, tag));
-    setMarks((m) => ({ ...m, [existing ?? tag]: "all" }));
+    setMark(existing ?? tag, "all");
     setDraft("");
+    setShowAll(false);
   };
 
   const save = () => {
@@ -91,7 +104,17 @@ export function EditDialog({ designs, known, onClose }: EditDialogProps) {
     onClose();
   };
 
-  const tagNames = Object.keys(marks).sort((a, b) => a.localeCompare(b));
+  const usage = (tag: string) => projects.filter((p) => (p.tags ?? []).some((t) => sameTag(t, tag))).length;
+  const names = Object.keys(marks);
+  const applied = names.filter((t) => marks[t] !== "none").sort((a, b) => a.localeCompare(b));
+  const needle = draft.trim().toLowerCase();
+  const available = names
+    .filter((t) => marks[t] === "none" && (!needle || t.toLowerCase().includes(needle)))
+    .sort((a, b) => usage(b) - usage(a) || a.localeCompare(b));
+  const shown = showAll || needle ? available : available.slice(0, COLLAPSED_COUNT);
+  const cleaned = cleanTag(draft);
+  const canCreate = cleaned.length > 0 && !names.some((t) => sameTag(t, cleaned));
+  const many = designs.length > 1;
 
   return (
     <div className="modal-backdrop" style={{ zIndex: 3000 }} onClick={onClose}>
@@ -121,31 +144,36 @@ export function EditDialog({ designs, known, onClose }: EditDialogProps) {
           </>
         )}
 
-        <div className="save-label">Tags</div>
-        <div className="tag-chips">
-          {tagNames.length === 0 && <span className="tag-hint">No tags yet. Type one below.</span>}
-          {tagNames.map((t) => (
-            <button
-              key={t}
-              type="button"
-              className={`tag-chip ${marks[t]}`}
-              aria-pressed={marks[t] === "all"}
-              onClick={() => cycle(t)}
-              title={marks[t] === "some" ? "Only some of the selected designs have this tag" : undefined}
-            >
-              <TagIcon size={11} className="tag-chip-icon" />
-              {t}
-              {marks[t] === "all" ? <span className="tag-chip-mark"> ✓</span> : marks[t] === "some" ? <span className="tag-chip-mark"> –</span> : null}
-            </button>
+        <div className="save-label">{many ? "On these designs" : "On this design"}</div>
+        <div className="tag-chips tag-applied">
+          {applied.length === 0 && <span className="tag-hint">No tags yet. Add one below.</span>}
+          {applied.map((t) => (
+            <span key={t} className={`tag-chip applied${marks[t] === "some" ? " some" : ""}`}>
+              <button
+                type="button"
+                className="tag-chip-body"
+                onClick={() => marks[t] === "some" && setMark(t, "all")}
+                title={marks[t] === "some" ? "Only some of the selected designs have this tag. Click to give it to all of them." : undefined}
+              >
+                <TagIcon size={11} className="tag-chip-icon" />
+                {t}
+                {marks[t] === "some" && <span className="tag-chip-part"> · some</span>}
+              </button>
+              <button type="button" className="tag-chip-x" aria-label={`Remove the tag ${t}`} title="Remove" onClick={() => setMark(t, "none")}>
+                ×
+              </button>
+            </span>
           ))}
         </div>
+
+        <div className="save-label">Add a tag</div>
         <input
           id="tag-new"
           className="save-name"
-          aria-label="New tag"
+          aria-label="Search or create a tag"
           value={draft}
           maxLength={MAX_TAG_LENGTH}
-          placeholder="Add a tag and press Enter"
+          placeholder="Search tags, or type a new one and press Enter"
           autoFocus={!single}
           onChange={(e) => { setDraft(e.target.value); setProblem(null); }}
           onKeyDown={(e) => {
@@ -156,6 +184,32 @@ export function EditDialog({ designs, known, onClose }: EditDialogProps) {
             }
           }}
         />
+        <div className="tag-chips tag-available">
+          {shown.map((t) => (
+            <button key={t} type="button" className="tag-chip available" onClick={() => setMark(t, "all")}>
+              <TagIcon size={11} className="tag-chip-icon" />
+              {t}
+              <span className="tag-chip-count">{usage(t)}</span>
+            </button>
+          ))}
+          {canCreate && (
+            <button type="button" className="tag-chip create" onClick={addDraft}>
+              + Create "{cleaned}"
+            </button>
+          )}
+          {!showAll && !needle && available.length > COLLAPSED_COUNT && (
+            <button type="button" className="tag-more" onClick={() => setShowAll(true)}>
+              Show all {available.length}
+            </button>
+          )}
+          {showAll && !needle && available.length > COLLAPSED_COUNT && (
+            <button type="button" className="tag-more" onClick={() => setShowAll(false)}>
+              Show fewer
+            </button>
+          )}
+          {shown.length === 0 && !canCreate && <span className="tag-hint">{needle ? "No other tags match." : "Every tag is already on this design."}</span>}
+        </div>
+
         {problem && <p className="drive-problem">{problem}</p>}
         <div className="save-buttons">
           <button className="modal-btn" onClick={onClose}>Cancel</button>
