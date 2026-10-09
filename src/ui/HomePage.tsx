@@ -967,6 +967,18 @@ export function HomePage({
                       <span>{countIn(f.id)} {countIn(f.id) === 1 ? "design" : "designs"}</span>
                     </span>
                   </button>
+                  <button
+                    className="home-folder-more"
+                    aria-label={`More actions for ${f.name}`}
+                    aria-haspopup="menu"
+                    title="More"
+                    onClick={(e) => {
+                      const r = e.currentTarget.getBoundingClientRect();
+                      setMenu({ x: Math.max(8, r.right - 200), y: r.bottom + 4, target: { kind: "folder", folder: f } });
+                    }}
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5.5" cy="12" r="1.7" /><circle cx="12" cy="12" r="1.7" /><circle cx="18.5" cy="12" r="1.7" /></svg>
+                  </button>
                 </div>
               ))}
             </div>

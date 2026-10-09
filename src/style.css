@@ -5774,3 +5774,11 @@ button.stepper-btn:disabled {
 .home-folder .home-folder-open { width: 100%; }
 .home-folder .home-folder-text { min-width: 0; }
 .home-folder .home-folder-text b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* A menu button that appears over the folder card on hover; it takes no room from the name. */
+.home-folder { position: relative; }
+.home-folder-more { position: absolute; top: 50%; right: 8px; transform: translateY(-50%); width: 28px; height: 28px; min-height: 0; padding: 0; border: 0; border-radius: 8px; background: rgba(255,255,255,0.92); color: #6b7a86; display: flex; align-items: center; justify-content: center; cursor: pointer; opacity: 0; transition: opacity 0.12s; }
+.home-folder:hover .home-folder-more, .home-folder:focus-within .home-folder-more { opacity: 1; }
+.home-folder-more:hover { background: #e6f7f7; color: #00807e; }
+.home-folder-more svg { display: block; }
+.home-page.is-dragging .home-folder-more { visibility: hidden; }
