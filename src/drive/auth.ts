@@ -148,9 +148,16 @@ const TOKEN_KEY = "cad.driveToken";
 const SIGNOUT_KEY = "cad.driveSignedOut";
 
 /** Remembers why the person was last signed out, so the Home page can say so. */
-function noteSignedOut(reason: string) {
+function noteSignedOut(reason: string, reconnectFailed = false) {
   try {
-    localStorage.setItem(SIGNOUT_KEY, JSON.stringify({ at: Date.now(), reason }));
+    const previous = lastSignOut();
+    // A failed reconnect right after an expiry adds to the story instead of replacing it.
+    const recent = previous && Date.now() - previous.at < 10 * 60 * 1000 && !previous.reason.includes("Reconnecting");
+    const record =
+      reconnectFailed && recent && previous
+        ? { at: previous.at, reason: `${previous.reason} Reconnecting then failed: ${reason}` }
+        : { at: Date.now(), reason };
+    localStorage.setItem(SIGNOUT_KEY, JSON.stringify(record));
   } catch {
     /* only a convenience */
   }
@@ -234,7 +241,7 @@ export async function signIn(): Promise<void> {
     if (hasToken() || loadSavedToken()) {
       drive.setStatus("signedIn");
     } else {
-      noteSignedOut(error instanceof Error ? error.message : "Sign-in failed.");
+      noteSignedOut(error instanceof Error ? error.message : "Sign-in failed.", true);
       drive.setStatus("signedOut");
     }
     drive.setError(error instanceof Error ? error.message : "Sign-in failed.");
@@ -269,7 +276,7 @@ export async function getAccessToken(): Promise<string> {
     return fresh;
   } catch (error) {
     // Without a click the browser may refuse the popup: the person has to reconnect by hand.
-    noteSignedOut(error instanceof Error ? error.message : "Google would not renew the sign-in.");
+    noteSignedOut(error instanceof Error ? error.message : "Google would not renew the sign-in.", true);
     useDrive.getState().setStatus("signedOut");
     armQuietReconnect();
     throw error;
