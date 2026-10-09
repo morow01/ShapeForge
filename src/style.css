@@ -5608,3 +5608,14 @@ button.stepper-btn:disabled {
 .tree-cell.tee::after { content: ""; position: absolute; left: 7px; top: 50%; width: 9px; border-top: 1px solid #cfd9e0; }
 .home-nav-main { gap: 4px; }
 .home-nav-main > .home-nav-icon { margin-right: 6px; }
+
+/* One teal for the # and the tag name, so a tag reads as a single thing. */
+.home-tagchip { color: #2f7f7d; background: #eaf5f4; border-color: #c2e0de; }
+.home-tagchip:hover { background: #dcefed; color: #256664; border-color: #9fd0cd; }
+.home-tagchip-icon, .tag-chip-icon { color: currentColor; opacity: 0.85; }
+.tag-chip { color: #2f7f7d; }
+.tag-chip.some { color: #2f7f7d; }
+.tag-chip.suggestion { color: #5b8f8d; }
+.tag-chip.all .tag-chip-icon { color: currentColor; }
+.home-nav-icon.tag { color: #2f7f7d; }
+.home-nav:hover .home-nav-icon.tag, .home-nav.on .home-nav-icon.tag { color: #2f7f7d; }

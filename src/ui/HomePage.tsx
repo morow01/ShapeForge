@@ -905,7 +905,10 @@ export function HomePage({
                           {(p.tags ?? []).length > 3 && <span className="home-tagmore">+{(p.tags ?? []).length - 3}</span>}
                         </span>
                       )}
-                      <span className={`home-tag ${where}`}>{where === "draft" ? "Not saved yet" : where === "drive" ? "Google Drive" : "This browser"}</span>
+                      {/* Drive is where designs normally live, so only the exceptions are labelled. */}
+                      {where !== "drive" && (
+                        <span className={`home-tag ${where}`}>{where === "draft" ? "Not saved yet" : "This browser"}</span>
+                      )}
                       <div className="home-actions">
                         <button className="home-act" onClick={() => startRenameDesign(p)} title="Rename" aria-label={`Rename ${p.name}`}>
                           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
