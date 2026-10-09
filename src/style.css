@@ -5799,3 +5799,21 @@ button.home-tagmore:hover { text-decoration: underline; }
 .tags-first { display: flex; flex-wrap: nowrap; gap: 4px; overflow: hidden; min-width: 0; }
 .home-row-tags .home-tagextra-inner .home-tagchip { white-space: nowrap; flex-shrink: 0; }
 @media (prefers-reduced-motion: reduce) { .home-tagextra { transition: none; } }
+
+/* Streamlined top bar: logo = Home, the design name gets the room, a small status icon. */
+.topbar-logo-btn { display: inline-flex; align-items: center; justify-content: center; width: 40px; height: 36px; min-height: 0; padding: 0; border: 1px solid transparent; border-radius: 10px; background: transparent; cursor: pointer; flex-shrink: 0; }
+.topbar-logo-btn:hover { background: #eef3f6; border-color: #d3dde4; }
+.topbar-logo-btn .brand-logo { height: 27px; }
+.project-title-container { margin-left: 6px; min-width: 0; flex: 0 1 auto; }
+.project-title-btn { background: transparent; border-color: transparent; max-width: min(46vw, 480px); font-size: 14px; font-weight: 650; }
+.project-title-btn:hover { background: #f1f5f9; border-color: #cbd5e1; }
+.project-title-edit-icon { opacity: 0; }
+.project-title-btn:hover .project-title-edit-icon, .project-title-btn:focus-visible .project-title-edit-icon { opacity: 1; }
+.status-btn { position: relative; display: inline-flex; align-items: center; gap: 6px; height: 30px; min-width: 30px; justify-content: center; padding: 0 7px; border: 1px solid transparent; border-radius: 8px; background: transparent; color: #5b6b78; font-size: 12.5px; cursor: pointer; flex-shrink: 0; }
+button.status-btn:hover { background: #eef3f6; color: #00807e; }
+span.status-btn { cursor: default; }
+.status-btn .status-dot { position: absolute; right: 3px; bottom: 4px; width: 8px; height: 8px; border-radius: 50%; background: #3b9d57; border: 1.5px solid #fff; }
+.status-btn.busy .status-dot { background: #e0a21b; animation: status-pulse 1s ease-in-out infinite; }
+.status-btn.bad { color: #8a4a00; background: #fdf0e6; border-color: #f1cba4; padding: 0 10px; }
+@keyframes status-pulse { 50% { opacity: 0.3; } }
+.file-menu-about { padding: 6px 12px 8px; font-size: 11.5px; color: #98a4ad; }

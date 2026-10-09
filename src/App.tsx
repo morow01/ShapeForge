@@ -54,7 +54,6 @@ import {
   ObjectsIcon,
   PencilIcon,
   PrimitiveShapeIcon,
-  HomeIcon,
   ProjectsIcon,
   RedoIcon,
   RotateToolIcon,
@@ -119,6 +118,7 @@ import type { EditSpec, ExportQuality, NodeSpec, PreviewBuild, ScenePart } from 
 import type { CameraMode, CollisionHighlightStyle, DuplicateResult, Scene, ToolMode, WireframeMode } from "./viewport/scene";
 import { cellColour, DEFAULT_CELL_DISPLAY, type CellDisplay } from "./viewport/cellColours";
 import { APP_NAME, APP_VERSION } from "./version";
+import { CloudIcon, MonitorIcon } from "./ui/NavIcons";
 import { FeedbackNotes } from "./ui/FeedbackNotes";
 
 /** Shown when Hollow is pressed with nothing selected; cleared as soon as a
@@ -4581,19 +4581,13 @@ export function App() {
       <header className="topbar">
         <div className="topbar-left">
           <button
-            className="topbar-btn topbar-home-btn"
+            className="topbar-logo-btn"
             onClick={openHome}
             title="All designs (Ctrl+O)"
             aria-label="All designs"
           >
-            <HomeIcon className="topbar-icon" />
-            <span>Designs</span>
-          </button>
-          <div className="brand">
             <img className="brand-logo" src={`${import.meta.env.BASE_URL}logo.svg`} alt="" width={24} height={26} draggable={false} />
-            <span className="brand-name">{APP_NAME}</span>
-            <span className="brand-version">v{APP_VERSION}</span>
-          </div>
+          </button>
 
           <div className="project-title-container">
             {isEditingTitle ? (
@@ -4640,15 +4634,17 @@ export function App() {
             </button>
           ) : currentLocation === "drive" ? (
             <button
-              className={`location-chip drive${driveError ? " bad" : ""}`}
+              className={`status-btn ${driveError ? "bad" : driveBusy ? "busy" : "ok"}`}
               onClick={() => void syncNow()}
-              title={driveError ?? "Saved to your Google Drive. Click to sync now."}
+              title={driveError ?? (driveBusy ? "Saving to your Google Drive…" : "Saved to your Google Drive. Click to sync now.")}
+              aria-label={driveError ? "Not synced with Google Drive" : driveBusy ? "Saving to Google Drive" : "Saved to Google Drive"}
             >
-              {driveBusy ? "Google Drive · Saving…" : driveError ? "Google Drive · Not synced" : "Google Drive"}
+              <CloudIcon size={17} />
+              {driveError ? <span>Not synced</span> : <span className="status-dot" aria-hidden="true" />}
             </button>
           ) : (
-            <span className="location-chip" title="Kept in this browser. Download a backup file from the File menu.">
-              This browser
+            <span className="status-btn browser" title="Kept in this browser only. Download a backup file from the File menu." aria-label="Kept in this browser">
+              <MonitorIcon size={16} />
             </span>
           )}
 
@@ -4732,6 +4728,8 @@ export function App() {
                   <span className="item-label">2D Blueprint & Cut List…</span>
                   <span className="item-key">Ctrl+P</span>
                 </button>
+                <hr />
+                <div className="file-menu-about">{APP_NAME} v{APP_VERSION}</div>
               </div>
             )}
           </div>
