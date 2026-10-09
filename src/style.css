@@ -5519,3 +5519,18 @@ button.stepper-btn:disabled {
 .home-bin-thumb { cursor: default; opacity: 0.8; }
 .home-bin-actions { display: flex; align-items: center; gap: 8px; opacity: 1; }
 .home-bin-actions .modal-btn { width: auto; }
+
+.version-dialog { max-width: 560px; max-height: 88vh; display: flex; flex-direction: column; }
+.version-save { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+.version-save .save-name { flex: 1; }
+.version-save .modal-btn { width: auto; white-space: nowrap; }
+.version-list { overflow-y: auto; border: 1px solid #e2e8f0; border-radius: 10px; min-height: 80px; max-height: 46vh; margin-bottom: 12px; }
+.version-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 12px; border-bottom: 1px solid #eef2f5; }
+.version-row:last-child { border-bottom: 0; }
+.version-text { display: flex; flex-direction: column; min-width: 0; font-size: 13px; }
+.version-text b { color: #1f2a33; }
+.version-text span { color: #6b7a86; font-size: 12px; }
+.version-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.version-actions .modal-btn { width: auto; padding: 4px 10px; font-size: 12px; }
+.version-delete { color: #b42318; }
+.version-empty { margin: 0; padding: 16px; font-size: 13px; color: #6b7a86; }

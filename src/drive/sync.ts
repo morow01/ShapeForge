@@ -15,7 +15,7 @@ import {
   writeFolderList,
 } from "../document/persist";
 import { getBlob, putBlob } from "../document/blobStore";
-import type { FolderMeta, ProjectMeta } from "../document/types";
+import type { FolderMeta, ProjectData, ProjectMeta } from "../document/types";
 import { DriveApi, DriveAuthError, DriveError, FOLDER_MIME } from "./api";
 import type { DriveFile } from "./api";
 import { getAccessToken, hasToken } from "./auth";
@@ -32,6 +32,13 @@ const ASSETS_KEY = "cad.drive.assetsId";
 const BLOBS_KEY = "cad.drive.blobs";
 const DIRTY_KEY = "cad.drive.dirty";
 const TRASH_KEY = "cad.drive.trash";
+const VERSIONS_KEY = "cad.drive.versionsId";
+const LAST_VERSION_KEY = "cad.drive.lastVersion";
+const LAST_PRUNE_KEY = "cad.drive.lastPrune";
+// A snapshot is taken at most this often while a design is being edited.
+const AUTO_VERSION_GAP_MS = 15 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const KEEP_VERSIONS_DAYS = 30;
 // Longer than the editor's own autosave delay, so the version sent is the one just saved.
 const PUSH_DELAY_MS = 3000;
 
@@ -85,6 +92,7 @@ function writeString(key: string, value: string | null): void {
 export function resetDriveCaches(): void {
   writeString(ROOT_KEY, null);
   writeString(ASSETS_KEY, null);
+  writeString(VERSIONS_KEY, null);
   writeJson(BLOBS_KEY, {});
 }
 
@@ -135,6 +143,10 @@ function setFolderDriveId(localId: string, driveId: string | undefined): void {
   );
 }
 
+// Folders being made right now. Two syncs asking for the same one share a single request,
+// otherwise Drive ends up with the folder twice.
+const makingFolder = new Map<string, Promise<string>>();
+
 /** The Drive folder matching a local folder, made (with its parents) if it does not exist yet. */
 async function driveFolderFor(localFolderId: string | null): Promise<string> {
   const { rootId } = await ensureRoot();
@@ -142,10 +154,20 @@ async function driveFolderFor(localFolderId: string | null): Promise<string> {
   const folder = listFolders().find((f) => f.id === localFolderId);
   if (!folder) return rootId;
   if (folder.driveId) return folder.driveId;
-  const parent = await driveFolderFor(folder.parentId);
-  const made = await driveApi().createFolder(folder.name, parent, "folder", { localId: folder.id });
-  setFolderDriveId(folder.id, made.id);
-  return made.id;
+  const running = makingFolder.get(folder.id);
+  if (running) return running;
+  const job = (async () => {
+    const parent = await driveFolderFor(folder.parentId);
+    const made = await driveApi().createFolder(folder.name, parent, "folder", { localId: folder.id });
+    setFolderDriveId(folder.id, made.id);
+    return made.id;
+  })();
+  makingFolder.set(folder.id, job);
+  try {
+    return await job;
+  } finally {
+    makingFolder.delete(folder.id);
+  }
 }
 
 // ---- sending ----
@@ -169,6 +191,19 @@ async function ensureBlobUploaded(blobId: string, assetsId: string): Promise<voi
 
 const designFileName = (name: string) => `${name.replace(/[\\/]/g, "-")}.shapeforge`;
 
+function designJson(project: ProjectData): string {
+  return JSON.stringify({
+    format: "shapeforge",
+    version: 1,
+    id: project.id,
+    name: project.name,
+    createdAt: project.createdAt,
+    exportedAt: Date.now(),
+    nodes: project.nodes,
+    camera: project.camera ?? null,
+  });
+}
+
 /** Sends one design (and any imported files it uses) to Drive, creating or replacing its file. */
 export async function pushProject(id: string, attempt = 0): Promise<void> {
   const project = loadProject(id);
@@ -187,16 +222,7 @@ export async function pushProject(id: string, attempt = 0): Promise<void> {
       name: designFileName(project.name),
       parentId,
       mimeType: "application/json",
-      body: JSON.stringify({
-        format: "shapeforge",
-        version: 1,
-        id: project.id,
-        name: project.name,
-        createdAt: project.createdAt,
-        exportedAt: Date.now(),
-        nodes: project.nodes,
-        camera: project.camera ?? null,
-      }),
+      body: designJson(project),
       kind: "design",
       properties: { localId: project.id },
       thumbnail: loadThumbnail(id),
@@ -218,6 +244,11 @@ export async function pushProject(id: string, attempt = 0): Promise<void> {
       delete m.remote;
     });
     clearDirty(id);
+    try {
+      await maybeAutoVersion(project);
+    } catch {
+      /* history is a bonus; a failure never blocks saving the design */
+    }
   } catch (error) {
     // Something we remembered is gone from Drive (deleted by hand): forget it and try once more.
     if (error instanceof DriveError && error.status === 404 && attempt === 0) {
@@ -242,6 +273,18 @@ async function refreshBlobMap(): Promise<Record<string, string>> {
   return map;
 }
 
+/** Makes sure every imported file a design uses is on this computer, downloading what is missing. */
+async function ensureBlobsLocal(nodes: ProjectData["nodes"]): Promise<void> {
+  const blobIds = new Set<string>();
+  collectImportBlobIds(nodes, blobIds);
+  let map = readJson<Record<string, string>>(BLOBS_KEY, {});
+  for (const blobId of blobIds) {
+    if (await getBlob(blobId)) continue;
+    if (!map[blobId]) map = await refreshBlobMap();
+    if (map[blobId]) await putBlob(blobId, await driveApi().downloadBytes(map[blobId]));
+  }
+}
+
 /** Downloads a design's contents (and any imported files it needs) from Drive into this browser. */
 export async function fetchProject(id: string): Promise<boolean> {
   const meta = listProjects().find((p) => p.id === id);
@@ -252,14 +295,7 @@ export async function fetchProject(id: string): Promise<boolean> {
   parsed.id = id;
   parsed.name = meta.name;
 
-  const blobIds = new Set<string>();
-  collectImportBlobIds(parsed.nodes, blobIds);
-  let map = readJson<Record<string, string>>(BLOBS_KEY, {});
-  for (const blobId of blobIds) {
-    if (await getBlob(blobId)) continue;
-    if (!map[blobId]) map = await refreshBlobMap();
-    if (map[blobId]) await putBlob(blobId, await driveApi().downloadBytes(map[blobId]));
-  }
+  await ensureBlobsLocal(parsed.nodes);
 
   saveProject(parsed);
   updateProjectMeta(id, (m) => {
@@ -317,6 +353,12 @@ export async function pullIndex(openProjectId?: string): Promise<void> {
       const lf = folders.find((f) => f.id === existingId)!;
       lf.name = df.name;
       lf.parentId = localParentOf(df);
+    } else if (df.appProperties?.localId && folders.some((f) => f.id === df.appProperties?.localId)) {
+      // A second Drive folder for a folder we already have (made by two syncs at once): the same
+      // folder, so its designs show up there instead of in a duplicate. The first one found is linked.
+      const same = folders.find((f) => f.id === df.appProperties?.localId)!;
+      if (!same.driveId) same.driveId = df.id;
+      localByDrive.set(df.id, same.id);
     } else {
       const wanted = df.appProperties?.localId;
       const created: FolderMeta = {
@@ -384,6 +426,126 @@ export async function pullIndex(openProjectId?: string): Promise<void> {
 }
 
 // ---- moves, renames and deletes ----
+
+// ---- version history ----
+
+export type DesignVersion = { id: string; at: number; label: string | null; manual: boolean; shapes: number | null };
+
+async function ensureVersionsFolder(): Promise<string> {
+  const cached = readString(VERSIONS_KEY);
+  if (cached) return cached;
+  const { rootId } = await ensureRoot();
+  const found = await driveApi().findVersionsFolder();
+  const id = found?.id ?? (await driveApi().createFolder("_versions", rootId, "versions")).id;
+  writeString(VERSIONS_KEY, id);
+  return id;
+}
+
+async function writeVersion(project: ProjectData, label: string | null, manual: boolean): Promise<void> {
+  const parentId = await ensureVersionsFolder();
+  const meta = listProjects().find((p) => p.id === project.id);
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  await driveApi().upload({
+    name: designFileName(`${project.name} ${stamp}`),
+    parentId,
+    mimeType: "application/json",
+    body: designJson(project),
+    kind: "version",
+    // Drive limits a property to about 120 characters, key included.
+    properties: {
+      localId: project.id,
+      manual: manual ? "1" : "0",
+      label: (label ?? "").slice(0, 60),
+      shapes: String(meta?.objectCount ?? project.nodes.length),
+    },
+  });
+  const last = readJson<Record<string, number>>(LAST_VERSION_KEY, {});
+  last[project.id] = Date.now();
+  writeJson(LAST_VERSION_KEY, last);
+}
+
+/** A snapshot of a design while it is being edited, at most one every quarter of an hour. */
+async function maybeAutoVersion(project: ProjectData): Promise<void> {
+  const last = readJson<Record<string, number>>(LAST_VERSION_KEY, {});
+  if (Date.now() - (last[project.id] ?? 0) < AUTO_VERSION_GAP_MS) return;
+  await writeVersion(project, null, false);
+  await pruneVersions(project.id);
+}
+
+/** Thins out old automatic snapshots: all of the last day, then one per day for a month. Named versions stay. */
+async function pruneVersions(localId: string): Promise<void> {
+  const pruned = readJson<Record<string, number>>(LAST_PRUNE_KEY, {});
+  if (Date.now() - (pruned[localId] ?? 0) < DAY_MS) return;
+  pruned[localId] = Date.now();
+  writeJson(LAST_PRUNE_KEY, pruned);
+  const now = Date.now();
+  const seenDays = new Set<string>();
+  for (const file of await driveApi().listVersions(localId)) {
+    if (file.appProperties?.manual === "1") continue;
+    const at = Date.parse(file.modifiedTime ?? "") || now;
+    const age = now - at;
+    if (age < DAY_MS) continue;
+    const day = new Date(at).toDateString();
+    if (age > KEEP_VERSIONS_DAYS * DAY_MS || seenDays.has(day)) await driveApi().trash(file.id);
+    else seenDays.add(day);
+  }
+}
+
+/** A named version the person asked for. It is kept until they remove it. */
+export async function saveVersion(id: string, label: string): Promise<boolean> {
+  const project = loadProject(id);
+  if (!project) return false;
+  await writeVersion(project, label.trim() || "Saved version", true);
+  return true;
+}
+
+export async function listDesignVersions(id: string): Promise<DesignVersion[]> {
+  const files = await driveApi().listVersions(id);
+  return files.map((f) => ({
+    id: f.id,
+    at: Date.parse(f.modifiedTime ?? "") || 0,
+    label: f.appProperties?.label || null,
+    manual: f.appProperties?.manual === "1",
+    shapes: f.appProperties?.shapes ? Number(f.appProperties.shapes) : null,
+  }));
+}
+
+export async function deleteVersion(versionFileId: string): Promise<void> {
+  await driveApi().trash(versionFileId);
+}
+
+async function loadVersionData(versionFileId: string, fallbackName: string): Promise<ProjectData | null> {
+  const parsed = parseProjectFile(await driveApi().downloadText(versionFileId), fallbackName);
+  if (!parsed) return null;
+  await ensureBlobsLocal(parsed.nodes);
+  return parsed;
+}
+
+/** Puts an older version back as the design. What it replaces is kept as a version first. */
+export async function restoreVersion(designId: string, versionFileId: string): Promise<boolean> {
+  const meta = listProjects().find((p) => p.id === designId);
+  if (!meta) return false;
+  const parsed = await loadVersionData(versionFileId, meta.name);
+  if (!parsed) return false;
+  const current = loadProject(designId);
+  if (current) await writeVersion(current, "Before restoring", true);
+  parsed.id = designId;
+  parsed.name = meta.name;
+  saveProject(parsed);
+  return true;
+}
+
+/** An older version as a new design of its own, leaving the current one untouched. */
+export async function versionAsCopy(designId: string, versionFileId: string): Promise<ProjectData | null> {
+  const meta = listProjects().find((p) => p.id === designId);
+  const parsed = await loadVersionData(versionFileId, meta?.name ?? "Design");
+  if (!parsed) return null;
+  parsed.id = `p-${Date.now()}`;
+  parsed.name = `${meta?.name ?? parsed.name} (older version)`;
+  parsed.createdAt = Date.now();
+  parsed.updatedAt = Date.now();
+  return parsed;
+}
 
 /** While signed in everything lives on Drive: a design kept only in this browser is adopted
  *  as soon as it has something in it. Empty drafts stay local so no empty files are made. */

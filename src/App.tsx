@@ -13,6 +13,7 @@ import { Inspector } from "./ui/Inspector";
 import { Tree } from "./ui/Tree";
 import { HomePage } from "./ui/HomePage";
 import { SaveDialog } from "./ui/SaveDialog";
+import { VersionHistoryDialog } from "./ui/VersionHistoryDialog";
 import { installDriveHooks, syncNow } from "./drive/sync";
 import { useDrive } from "./drive/state";
 import { armQuietReconnect, restoreSession } from "./drive/auth";
@@ -519,6 +520,7 @@ export function App() {
   const [pathPatternSource, setPathPatternSource] = useState<SceneNode | null>(null);
   const [viewportQuality, setViewportQuality] = useState<ViewportQuality>(readViewportQuality);
   const [exportModalOpen, setExportModalOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [newDesignPromptOpen, setNewDesignPromptOpen] = useState(false);
   const [fileMenuOpen, setFileMenuOpen] = useState(false);
   const fileMenuRef = useRef<HTMLDivElement>(null);
@@ -4699,6 +4701,15 @@ export function App() {
                   <span className="item-label">Save</span>
                   <span className="item-key">Ctrl+S</span>
                 </button>
+                {currentLocation === "drive" && (
+                  <button
+                    role="menuitem"
+                    onClick={() => { setFileMenuOpen(false); setHistoryOpen(true); }}
+                  >
+                    <SaveFileIcon className="topbar-icon" />
+                    <span className="item-label">Version history…</span>
+                  </button>
+                )}
                 <button
                   role="menuitem"
                   onClick={() => { setFileMenuOpen(false); exportCurrentProject(); }}
@@ -8245,6 +8256,7 @@ export function App() {
         onProjectLoadFailed={() => setFileOperation(null)}
       />
 
+      <VersionHistoryDialog open={historyOpen} onClose={() => setHistoryOpen(false)} />
       <SaveDialog
         open={saveDialogOpen}
         name={projectName}

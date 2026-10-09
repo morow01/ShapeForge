@@ -9,7 +9,10 @@
 export const FOLDER_MIME = "application/vnd.google-apps.folder";
 export const APP_TAG = { key: "shapeforge", value: "1" } as const;
 
-export type DriveKind = "root" | "assets" | "folder" | "design" | "blob";
+export type DriveKind = "root" | "assets" | "folder" | "design" | "blob" | "version" | "versions";
+
+/** Saved versions carry their own tag, so the regular listing of designs never has to page through them. */
+export const VERSION_TAG = { key: "shapeforgeVersion", value: "1" } as const;
 
 export type DriveFile = {
   id: string;
@@ -81,7 +84,41 @@ export class DriveApi {
   }
 
   private tag(kind: DriveKind, extra: Record<string, string> = {}): Record<string, string> {
-    return { [APP_TAG.key]: APP_TAG.value, kind, ...extra };
+    const tag = kind === "version" || kind === "versions" ? VERSION_TAG : APP_TAG;
+    return { [tag.key]: tag.value, kind, ...extra };
+  }
+
+  /** Saved versions of one design (by its local id), newest first. */
+  async listVersions(localId: string): Promise<DriveFile[]> {
+    const out: DriveFile[] = [];
+    let pageToken: string | undefined;
+    do {
+      const params = new URLSearchParams({
+        q: `appProperties has { key='${VERSION_TAG.key}' and value='${VERSION_TAG.value}' } and appProperties has { key='localId' and value='${localId.replace(/'/g, "")}' } and trashed = false`,
+        fields: `nextPageToken,files(${FIELDS})`,
+        orderBy: "modifiedTime desc",
+        pageSize: "200",
+        spaces: "drive",
+      });
+      if (pageToken) params.set("pageToken", pageToken);
+      const res = await this.request(`${API}?${params}`);
+      const data = (await res.json()) as { files?: DriveFile[]; nextPageToken?: string };
+      out.push(...(data.files ?? []));
+      pageToken = data.nextPageToken;
+    } while (pageToken);
+    return out;
+  }
+
+  /** The folder the saved versions are kept in, if it exists. */
+  async findVersionsFolder(): Promise<DriveFile | undefined> {
+    const params = new URLSearchParams({
+      q: `appProperties has { key='${VERSION_TAG.key}' and value='${VERSION_TAG.value}' } and appProperties has { key='kind' and value='versions' } and trashed = false`,
+      fields: `files(${FIELDS})`,
+      pageSize: "10",
+      spaces: "drive",
+    });
+    const res = await this.request(`${API}?${params}`);
+    return ((await res.json()) as { files?: DriveFile[] }).files?.[0];
   }
 
   /** Every file and folder ShapeForge has made, across all pages of results. */
@@ -104,7 +141,7 @@ export class DriveApi {
     return out;
   }
 
-  async createFolder(name: string, parentId: string | undefined, kind: "root" | "assets" | "folder", properties: Record<string, string> = {}): Promise<DriveFile> {
+  async createFolder(name: string, parentId: string | undefined, kind: "root" | "assets" | "folder" | "versions", properties: Record<string, string> = {}): Promise<DriveFile> {
     const res = await this.request(`${API}?fields=${FIELDS}`, {
       method: "POST",
       headers: { "Content-Type": "application/json; charset=UTF-8" },
