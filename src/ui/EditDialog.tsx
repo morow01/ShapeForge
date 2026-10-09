@@ -4,9 +4,6 @@ import { MAX_TAG_LENGTH, cleanTag, sameTag, uniqueTags } from "../document/tags"
 import type { ProjectMeta } from "../document/types";
 import { StarIcon, TagIcon } from "./NavIcons";
 
-/** Offered until the person has tags of their own, so there is something to click straight away. */
-const SAMPLE_TAGS = ["Idea", "Prototype", "Final", "Printed", "Client", "Needs fixing", "Archive"];
-
 type EditDialogProps = {
   /** The designs being edited; null keeps the dialog closed. */
   designs: ProjectMeta[] | null;
@@ -95,7 +92,6 @@ export function EditDialog({ designs, known, onClose }: EditDialogProps) {
   };
 
   const tagNames = Object.keys(marks).sort((a, b) => a.localeCompare(b));
-  const suggestions = SAMPLE_TAGS.filter((t) => !tagNames.some((n) => sameTag(n, t)));
 
   return (
     <div className="modal-backdrop" style={{ zIndex: 3000 }} onClick={onClose}>
@@ -127,7 +123,7 @@ export function EditDialog({ designs, known, onClose }: EditDialogProps) {
 
         <div className="save-label">Tags</div>
         <div className="tag-chips">
-          {tagNames.length === 0 && <span className="tag-hint">No tags yet. Type one below or pick a suggestion.</span>}
+          {tagNames.length === 0 && <span className="tag-hint">No tags yet. Type one below.</span>}
           {tagNames.map((t) => (
             <button
               key={t}
@@ -143,15 +139,6 @@ export function EditDialog({ designs, known, onClose }: EditDialogProps) {
             </button>
           ))}
         </div>
-        {suggestions.length > 0 && (
-          <div className="tag-chips">
-            {suggestions.map((t) => (
-              <button key={t} type="button" className="tag-chip suggestion" onClick={() => setMarks((m) => ({ ...m, [t]: "all" }))}>
-                + {t}
-              </button>
-            ))}
-          </div>
-        )}
         <input
           id="tag-new"
           className="save-name"

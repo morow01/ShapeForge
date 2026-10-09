@@ -34,7 +34,7 @@ import {
   collectFolderTree,
   binFolderTree,
 } from "./persist";
-import { sameTag, tagsFitDrive, uniqueTags } from "./tags";
+import { addToTagRegistry, sameTag, tagsFitDrive, uniqueTags } from "./tags";
 import {
   TRI_BY_ANGLES,
   applyTriangleAngle,
@@ -1071,6 +1071,7 @@ export const useDoc = create<DocState>()(
           });
           driveHooks.onProjectChanged?.(p.id);
         }
+        addToTagRegistry(add);
         set({ projects: listProjects() });
         return allFit;
       },

@@ -5,7 +5,7 @@ import { BinView } from "./BinView";
 import { VersionHistoryDialog } from "./VersionHistoryDialog";
 import { EditDialog } from "./EditDialog";
 import { BinIcon, ClockIcon, CloudIcon, DraftIcon, FolderIcon, GridIcon, MonitorIcon, StarIcon, TagIcon } from "./NavIcons";
-import { sameTag, uniqueTags } from "../document/tags";
+import { loadTagRegistry, removeFromTagRegistry, sameTag, uniqueTags } from "../document/tags";
 import type { FolderMeta, ProjectMeta } from "../document/types";
 import { APP_NAME, APP_VERSION } from "../version";
 import { useConfirm } from "./ConfirmDialog";
@@ -29,7 +29,7 @@ function timeAgo(timestamp: number): string {
 }
 
 /** What the main area is showing: a folder (null = the top level) or a flat list. */
-type View = { kind: "folder"; id: string | null } | { kind: "recent" } | { kind: "draft" } | { kind: "browser" } | { kind: "drive" } | { kind: "bin" } | { kind: "starred" } | { kind: "tag"; tag: string };
+type View = { kind: "folder"; id: string | null } | { kind: "recent" } | { kind: "draft" } | { kind: "browser" } | { kind: "drive" } | { kind: "bin" } | { kind: "starred" } | { kind: "tags"; tags: string[] };
 
 type HomePageProps = {
   open: boolean;
@@ -86,7 +86,7 @@ type NameDialogState = {
 type MenuState = {
   x: number;
   y: number;
-  target: { kind: "design"; project: ProjectMeta } | { kind: "folder"; folder: FolderMeta };
+  target: { kind: "design"; project: ProjectMeta } | { kind: "folder"; folder: FolderMeta } | { kind: "tag"; tag: string };
 } | null;
 
 /** A design being dragged to a folder: follows the pointer until it is let go. */
@@ -179,6 +179,7 @@ export function HomePage({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [historyFor, setHistoryFor] = useState<string | null>(null);
   const [tagging, setTagging] = useState<ProjectMeta[] | null>(null);
+  const [, setTagTick] = useState(0);
   const [sideWidth, setSideWidth] = useState(readSideWidth);
   const [sort, setSortState] = useState<SortState>(readSort);
   const setSort = (next: SortState) => {
@@ -311,7 +312,8 @@ export function HomePage({
   // A design known only from Drive's listing shows 0 shapes because it has not been fetched yet, not because it is empty.
   const binCount = countBin();
   const starredList = projects.filter((p) => p.starred);
-  const allTags = uniqueTags(projects.flatMap((p) => p.tags ?? [])).sort((a, b) => a.localeCompare(b));
+  // Tags in use plus the ones kept for later, so an unused tag is still there to pick.
+  const allTags = uniqueTags([...loadTagRegistry(), ...projects.flatMap((p) => p.tags ?? [])]).sort((a, b) => a.localeCompare(b));
   const tagCount = (tag: string) => projects.filter((p) => (p.tags ?? []).some((t) => sameTag(t, tag))).length;
   const empties = projects.filter((p) => p.objectCount === 0 && !p.remote && p.id !== currentProjectId);
 
@@ -331,8 +333,8 @@ export function HomePage({
     designs = [];
   } else if (view.kind === "starred") {
     designs = starredList;
-  } else if (view.kind === "tag") {
-    designs = projects.filter((p) => (p.tags ?? []).some((t) => sameTag(t, view.tag)));
+  } else if (view.kind === "tags") {
+    designs = projects.filter((p) => (p.tags ?? []).some((t) => view.tags.some((v) => sameTag(v, t))));
   } else {
     designs = viewFolderId === null ? projects : projects.filter((p) => p.folderId === viewFolderId);
     subfolders = folders.filter((f) => f.parentId === viewFolderId).sort((a, b) => a.name.localeCompare(b.name));
@@ -368,8 +370,8 @@ export function HomePage({
               ? "Bin"
               : view.kind === "starred"
                 ? "Starred"
-                : view.kind === "tag"
-                  ? `Tag: ${view.tag}`
+                : view.kind === "tags"
+                  ? `${view.tags.length === 1 ? "Tag" : "Tags"}: ${view.tags.join(", ")}`
                   : null;
 
   const handleOpen = async (p: ProjectMeta) => {
@@ -558,11 +560,38 @@ export function HomePage({
       ? "Nothing waiting to be saved."
       : view.kind === "starred"
         ? "Star a design to find it here quickly."
-        : view.kind === "tag"
-          ? "No designs have this tag any more."
+        : view.kind === "tags"
+          ? "No designs have this tag yet. Open a design's Edit to add it."
       : view.kind === "folder" && viewFolderId
         ? "This folder is empty. Create a design here, or drag one in."
         : "No designs yet. Create one to get started.";
+
+  /** Ticks or unticks a tag in the sidebar. With none ticked, everything shows again. */
+  const toggleTagFilter = (tag: string) => {
+    setSearch("");
+    setView((v) => {
+      const current = v.kind === "tags" ? v.tags : [];
+      const next = current.some((t) => sameTag(t, tag)) ? current.filter((t) => !sameTag(t, tag)) : [...current, tag];
+      return next.length ? { kind: "tags", tags: next } : { kind: "folder", id: null };
+    });
+  };
+
+  const handleDeleteTag = async (tag: string) => {
+    const users = projects.filter((p) => (p.tags ?? []).some((t) => sameTag(t, tag)));
+    const ok = await ask({
+      title: "Delete tag?",
+      message: users.length
+        ? `"${tag}" is taken off ${users.length} ${users.length === 1 ? "design" : "designs"}. The designs themselves are not touched.`
+        : `"${tag}" is removed from your list of tags.`,
+      confirmLabel: "Delete tag",
+      destructive: true,
+    });
+    if (!ok) return;
+    if (users.length) useDoc.getState().editTags(users.map((p) => p.id), [], [tag]);
+    removeFromTagRegistry(tag);
+    if (view.kind === "tags" && view.tags.some((t) => sameTag(t, tag))) toggleTagFilter(tag);
+    setTagTick((n) => n + 1);
+  };
 
   const navClass = (active: boolean, drop?: boolean) => `home-nav${active ? " on" : ""}${drop ? " drop" : ""}`;
   const atRoot = !searching && view.kind === "folder" && viewFolderId === null;
@@ -660,17 +689,29 @@ export function HomePage({
           ))}
 
           <div className="home-side-label">Tags</div>
-          {allTags.length === 0 && <p className="home-side-empty">Right-click a design and choose Tags</p>}
-          {allTags.map((tag) => (
-            <button
-              key={tag}
-              className={navClass(!searching && view.kind === "tag" && sameTag(view.tag, tag))}
-              onClick={() => { setSearch(""); setView({ kind: "tag", tag }); }}
-            >
-              <span className="home-nav-main"><TagIcon size={13} className="home-nav-icon tag" /><span className="home-nav-name">{tag}</span></span>
-              <span className="home-count">{tagCount(tag)}</span>
-            </button>
-          ))}
+          {allTags.length === 0 && <p className="home-side-empty">No tags yet. Edit a design to add some.</p>}
+          {allTags.map((tag) => {
+            const checked = !searching && view.kind === "tags" && view.tags.some((t) => sameTag(t, tag));
+            const count = tagCount(tag);
+            return (
+              <button
+                key={tag}
+                role="checkbox"
+                aria-checked={checked}
+                className={`${navClass(checked)}${count === 0 ? " unused" : ""}`}
+                onClick={() => toggleTagFilter(tag)}
+                onContextMenu={(e) => openMenu(e, { kind: "tag", tag })}
+                title={checked ? "Click to untick" : count === 0 ? "No designs use this tag yet" : "Click to show designs with this tag"}
+              >
+                <span className="home-nav-main">
+                  <span className={`tag-check${checked ? " on" : ""}`} aria-hidden="true">{checked ? "✓" : ""}</span>
+                  <TagIcon size={13} className="home-nav-icon tag" />
+                  <span className="home-nav-name">{tag}</span>
+                </span>
+                <span className="home-count">{count}</span>
+              </button>
+            );
+          })}
 
           <div className="home-side-label">Stored in</div>
           {(drafts.length > 0 || view.kind === "draft") && (
@@ -911,7 +952,7 @@ export function HomePage({
                       {(p.tags ?? []).length > 0 && (
                         <span className="home-tagrow">
                           {(p.tags ?? []).slice(0, 3).map((t) => (
-                            <button key={t} className="home-tagchip" onClick={() => { setSearch(""); setView({ kind: "tag", tag: t }); }} title={`Show everything tagged ${t}`}>
+                            <button key={t} className="home-tagchip" onClick={() => { setSearch(""); setView({ kind: "tags", tags: [t] }); }} title={`Show everything tagged ${t}`}>
                               <TagIcon size={9} className="home-tagchip-icon" />{t}
                             </button>
                           ))}
@@ -997,6 +1038,17 @@ export function HomePage({
                   {!many && <button role="menuitem" onClick={() => { setMenu(null); handleDownload(p); }}>Download backup file</button>}
                   <hr />
                   <button role="menuitem" className="danger-item" onClick={() => { setMenu(null); handleDeleteMany(group); }}>{many ? `Delete ${group.length} designs` : "Delete"}</button>
+                </>
+              );
+            })()
+          ) : menu.target.kind === "tag" ? (
+            (() => {
+              const tag = menu.target.tag;
+              return (
+                <>
+                  <button role="menuitem" onClick={() => { setMenu(null); toggleTagFilter(tag); }}>Show or hide designs with this tag</button>
+                  <hr />
+                  <button role="menuitem" className="danger-item" onClick={() => { setMenu(null); void handleDeleteTag(tag); }}>Delete tag…</button>
                 </>
               );
             })()

@@ -38,3 +38,36 @@ export function decodeTags(value: string | undefined): string[] {
   if (!value || !value.startsWith("t:")) return [];
   return value.slice(2).split(",").map((t) => t.trim()).filter(Boolean);
 }
+
+/** Offered from the start, so there is something to click straight away. They can be deleted like any other. */
+export const SAMPLE_TAGS = ["Idea", "Prototype", "Final", "Printed", "Client", "Needs fixing", "Archive"];
+
+const REGISTRY_KEY = "cad.tagList";
+
+/** Every tag the person has made or been offered, whether or not a design uses it now. */
+export function loadTagRegistry(): string[] {
+  try {
+    const raw = localStorage.getItem(REGISTRY_KEY);
+    if (raw === null) return [...SAMPLE_TAGS];
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((t): t is string => typeof t === "string") : [...SAMPLE_TAGS];
+  } catch {
+    return [...SAMPLE_TAGS];
+  }
+}
+
+function writeTagRegistry(list: string[]): void {
+  try {
+    localStorage.setItem(REGISTRY_KEY, JSON.stringify(list));
+  } catch {
+    /* tags used by designs still show; only the unused ones are forgotten */
+  }
+}
+
+export function addToTagRegistry(tags: string[]): void {
+  if (tags.length) writeTagRegistry(uniqueTags([...loadTagRegistry(), ...tags]));
+}
+
+export function removeFromTagRegistry(tag: string): void {
+  writeTagRegistry(loadTagRegistry().filter((t) => !sameTag(t, tag)));
+}

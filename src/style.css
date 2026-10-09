@@ -5634,3 +5634,12 @@ button.stepper-btn:disabled {
 .edit-star.on svg { fill: #d9962b; color: #d9962b; }
 
 .home-drive-why { font-size: 11.5px; line-height: 1.4; color: #8a97a1; }
+
+/* Tick boxes for filtering by tags; unused tags are paler. */
+.tag-check { flex-shrink: 0; width: 15px; height: 15px; border: 1.5px solid #b9c5cd; border-radius: 4px; background: #fff; color: #fff; font-size: 11px; line-height: 12px; text-align: center; font-weight: 700; }
+.home-nav:hover .tag-check { border-color: #00a7a5; }
+.tag-check.on { background: #00a7a5; border-color: #00a7a5; }
+.home-nav.unused .home-nav-name { color: #98a4ad; }
+.home-nav.unused .home-nav-icon.tag { opacity: 0.55; }
+.home-nav.unused .home-count { color: #b4bfc7; }
+.home-nav.on .home-nav-name { color: #00807e; }
