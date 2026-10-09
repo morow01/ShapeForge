@@ -5787,3 +5787,8 @@ button.stepper-btn:disabled {
 button.home-tagmore { border: 0; background: none; padding: 1px 4px; min-height: 0; width: auto; font-size: 11px; color: #00807e; cursor: pointer; align-self: center; white-space: nowrap; flex-shrink: 0; }
 button.home-tagmore:hover { text-decoration: underline; }
 .home-row-tags.open { flex-wrap: wrap; overflow: visible; }
+
+/* Hovering a design floats the whole list of its tags over it; nothing around it moves. */
+.home-tagpeek { position: fixed; z-index: 1500; display: flex; flex-wrap: wrap; gap: 4px; padding: 6px; background: #fff; border: 1px solid #cfe0e3; border-radius: 10px; box-shadow: 0 8px 22px rgba(15, 23, 42, 0.2); cursor: default; }
+.home-tagpeek .home-tagchip { white-space: nowrap; }
+.home-page.is-dragging .home-tagpeek { display: none; }

@@ -202,6 +202,14 @@ export function HomePage({
   const [historyFor, setHistoryFor] = useState<string | null>(null);
   const [tagging, setTagging] = useState<ProjectMeta[] | null>(null);
   const [, setTagTick] = useState(0);
+  // The full list of tags, floating over a design while the pointer is on it (nothing moves around it).
+  const [peek, setPeek] = useState<{ id: string; left: number; top: number; width: number } | null>(null);
+  useEffect(() => {
+    if (!peek) return;
+    const close = () => setPeek(null);
+    window.addEventListener("scroll", close, true);
+    return () => window.removeEventListener("scroll", close, true);
+  }, [peek]);
   // Designs whose full list of tags is showing (the rest show the first three and a "+N").
   const [tagsOpen, setTagsOpen] = useState<Set<string>>(new Set());
   const toggleTagsOpen = (id: string) =>
@@ -702,6 +710,28 @@ export function HomePage({
     setTagTick((n) => n + 1);
   };
 
+  const peekTags = (e: React.MouseEvent<HTMLElement>, p: ProjectMeta, anchorSelector: string) => {
+    if ((p.tags ?? []).length <= 3 || tagsOpen.has(p.id)) return;
+    const anchor = e.currentTarget.querySelector(anchorSelector) as HTMLElement | null;
+    if (!anchor) return;
+    const r = anchor.getBoundingClientRect();
+    setPeek({ id: p.id, left: r.left, top: r.top, width: r.width });
+  };
+
+  const tagPeek = (p: ProjectMeta, minWidth: number) =>
+    peek?.id === p.id ? (
+      <div
+        className="home-tagpeek"
+        style={{ left: Math.max(8, peek.left - 6), top: Math.max(8, peek.top - 6), width: Math.max(peek.width + 12, minWidth) }}
+      >
+        {(p.tags ?? []).map((t) => (
+          <button key={t} className="home-tagchip" onClick={() => { setPeek(null); setSearch(""); setView({ kind: "tags", tags: [t] }); }} title={`Show everything tagged ${t}`}>
+            <TagIcon size={9} className="home-tagchip-icon" />{t}
+          </button>
+        ))}
+      </div>
+    ) : null;
+
   const addTag = (tag: string) => {
     addToTagRegistry([tag]);
     setTagTick((n) => n + 1);
@@ -1085,7 +1115,10 @@ export function HomePage({
                     onPointerDown={(e) => beginPress(e, p, thumb)}
                     onContextMenu={(e) => openMenu(e, { kind: "design", project: p })}
                     onDoubleClick={(e) => { if (!(e.target as Element).closest("button")) handleOpen(p); }}
+                    onMouseEnter={(e) => peekTags(e, p, ".home-row-tags")}
+                    onMouseLeave={() => setPeek((cur) => (cur?.id === p.id ? null : cur))}
                   >
+                    {tagPeek(p, 260)}
                     <button
                       className={`home-check home-row-check${selected.has(p.id) ? " on" : ""}`}
                       role="checkbox"
@@ -1150,7 +1183,10 @@ export function HomePage({
                     {...(drag?.tag && !(p.tags ?? []).some((t) => sameTag(t, drag.tag!)) ? { "data-drop-design": p.id } : {})}
                     onPointerDown={(e) => beginPress(e, p, thumb)}
                     onContextMenu={(e) => openMenu(e, { kind: "design", project: p })}
+                    onMouseEnter={(e) => peekTags(e, p, ".home-tagrow")}
+                    onMouseLeave={() => setPeek((cur) => (cur?.id === p.id ? null : cur))}
                   >
+                    {tagPeek(p, 200)}
                     <button
                       className={`home-check${selected.has(p.id) ? " on" : ""}`}
                       role="checkbox"
