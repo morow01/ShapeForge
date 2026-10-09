@@ -18,7 +18,7 @@ import {
 } from "../document/persist";
 import { getBlob, putBlob } from "../document/blobStore";
 import type { FolderMeta, ProjectData, ProjectMeta } from "../document/types";
-import { DriveApi, DriveAuthError, DriveError, FOLDER_MIME } from "./api";
+import { DriveApi, DriveAuthError, DriveError, DriveScopeError, FOLDER_MIME } from "./api";
 import type { DriveFile } from "./api";
 import { getAccessToken, hasToken, signedOutByGoogle } from "./auth";
 import { APP_FOLDER_NAME, ASSETS_FOLDER_NAME } from "./config";
@@ -125,18 +125,58 @@ export const isDirty = (id: string): boolean => dirtySet().has(id);
 // ---- Drive's folder structure ----
 
 async function ensureRoot(): Promise<{ rootId: string; assetsId: string }> {
-  let rootId = readString(ROOT_KEY);
-  let assetsId = readString(ASSETS_KEY);
+  const rootId = readString(ROOT_KEY);
+  const assetsId = readString(ASSETS_KEY);
   if (rootId && assetsId) return { rootId, assetsId };
+  // Several syncs can start together on a first sign-in: they share one lookup-or-create, or each would make its own folder.
+  if (!rootJob) {
+    rootJob = (async () => {
+      const files = await driveApi().listAll();
+      await consolidateRoots(files);
+      const root = files.find((f) => f.appProperties?.kind === "root");
+      const newRootId = root?.id ?? (await driveApi().createFolder(APP_FOLDER_NAME, undefined, "root")).id;
+      const assets = files.find((f) => f.appProperties?.kind === "assets" && (f.parents ?? []).includes(newRootId));
+      const newAssetsId = assets?.id ?? (await driveApi().createFolder(ASSETS_FOLDER_NAME, newRootId, "assets")).id;
+      writeString(ROOT_KEY, newRootId);
+      writeString(ASSETS_KEY, newAssetsId);
+      return { rootId: newRootId, assetsId: newAssetsId };
+    })().finally(() => {
+      rootJob = null;
+    });
+  }
+  return rootJob;
+}
 
-  const files = await driveApi().listAll();
-  const root = files.find((f) => f.appProperties?.kind === "root");
-  rootId = root?.id ?? (await driveApi().createFolder(APP_FOLDER_NAME, undefined, "root")).id;
-  const assets = files.find((f) => f.appProperties?.kind === "assets" && (f.parents ?? []).includes(rootId!));
-  assetsId = assets?.id ?? (await driveApi().createFolder(ASSETS_FOLDER_NAME, rootId, "assets")).id;
-  writeString(ROOT_KEY, rootId);
-  writeString(ASSETS_KEY, assetsId);
-  return { rootId, assetsId };
+let rootJob: Promise<{ rootId: string; assetsId: string }> | null = null;
+
+/**
+ * Two top folders (or two _files folders under one) from syncs that raced: keeps the one already in use, else the
+ * one with the most inside, moves what is in the others across, and trashes the emptied ones. Edits `files` to match.
+ */
+async function consolidateRoots(files: DriveFile[]): Promise<void> {
+  const consolidate = async (group: DriveFile[], preferId: string | null) => {
+    if (group.length < 2) return;
+    const childCount = (f: DriveFile) => files.filter((x) => (x.parents ?? []).includes(f.id)).length;
+    const keep =
+      group.find((f) => f.id === preferId) ?? [...group].sort((a, b) => childCount(b) - childCount(a))[0];
+    for (const extra of group) {
+      if (extra.id === keep.id) continue;
+      for (const child of files.filter((x) => (x.parents ?? []).includes(extra.id))) {
+        await driveApi().updateMetadata(child.id, { addParent: keep.id, removeParent: extra.id });
+        child.parents = (child.parents ?? []).map((p) => (p === extra.id ? keep.id : p));
+      }
+      await trashOnDrive(extra.id);
+      files.splice(files.indexOf(extra), 1);
+    }
+  };
+  await consolidate(files.filter((f) => f.mimeType === FOLDER_MIME && f.appProperties?.kind === "root"), readString(ROOT_KEY));
+  const rootNow = files.find((f) => f.mimeType === FOLDER_MIME && f.appProperties?.kind === "root");
+  if (rootNow) {
+    await consolidate(
+      files.filter((f) => f.mimeType === FOLDER_MIME && f.appProperties?.kind === "assets" && (f.parents ?? []).includes(rootNow.id)),
+      readString(ASSETS_KEY),
+    );
+  }
 }
 
 function setFolderDriveId(localId: string, driveId: string | undefined): void {
@@ -337,6 +377,7 @@ function newFolderId(): string {
 export async function pullIndex(openProjectId?: string): Promise<string | null> {
   let staleOpen: string | null = null;
   const files = await driveApi().listAll();
+  await consolidateRoots(files);
   const root = files.find((f) => f.appProperties?.kind === "root");
   const assets = files.find((f) => f.appProperties?.kind === "assets");
   if (root) writeString(ROOT_KEY, root.id);
@@ -573,14 +614,22 @@ function thumbSig(dataUrl: string): string {
   return `${dataUrl.length}:${(h >>> 0).toString(36)}`;
 }
 
+let thumbsJob: Promise<string> | null = null;
 async function ensureThumbsFolder(): Promise<string> {
   const cached = readString(THUMBS_KEY);
   if (cached) return cached;
-  const { rootId } = await ensureRoot();
-  const found = await driveApi().findVersionsFolder("thumbs");
-  const id = found?.id ?? (await driveApi().createFolder("_thumbnails", rootId, "thumbs")).id;
-  writeString(THUMBS_KEY, id);
-  return id;
+  if (!thumbsJob) {
+    thumbsJob = (async () => {
+      const { rootId } = await ensureRoot();
+      const found = await driveApi().findVersionsFolder("thumbs");
+      const id = found?.id ?? (await driveApi().createFolder("_thumbnails", rootId, "thumbs")).id;
+      writeString(THUMBS_KEY, id);
+      return id;
+    })().finally(() => {
+      thumbsJob = null;
+    });
+  }
+  return thumbsJob;
 }
 
 async function refreshThumbMap(): Promise<Record<string, string>> {
@@ -750,14 +799,22 @@ export async function syncNotesWithDrive(
 
 export type DesignVersion = { id: string; at: number; label: string | null; manual: boolean; shapes: number | null };
 
+let versionsJob: Promise<string> | null = null;
 async function ensureVersionsFolder(): Promise<string> {
   const cached = readString(VERSIONS_KEY);
   if (cached) return cached;
-  const { rootId } = await ensureRoot();
-  const found = await driveApi().findVersionsFolder();
-  const id = found?.id ?? (await driveApi().createFolder("_versions", rootId, "versions")).id;
-  writeString(VERSIONS_KEY, id);
-  return id;
+  if (!versionsJob) {
+    versionsJob = (async () => {
+      const { rootId } = await ensureRoot();
+      const found = await driveApi().findVersionsFolder();
+      const id = found?.id ?? (await driveApi().createFolder("_versions", rootId, "versions")).id;
+      writeString(VERSIONS_KEY, id);
+      return id;
+    })().finally(() => {
+      versionsJob = null;
+    });
+  }
+  return versionsJob;
 }
 
 async function writeVersion(project: ProjectData, label: string | null, manual: boolean): Promise<void> {
@@ -937,7 +994,8 @@ export async function runSync<T>(job: () => Promise<T>): Promise<T | undefined> 
     return result;
   } catch (error) {
     if (error instanceof DriveAuthError) {
-      signedOutByGoogle();
+      if (error instanceof DriveScopeError) signedOutByGoogle(error.message, true);
+      else signedOutByGoogle();
       useDrive.getState().setStatus("signedOut");
     }
     useDrive.getState().setError(

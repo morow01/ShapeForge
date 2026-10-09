@@ -22,6 +22,20 @@ export function getClientId(): string {
   return ((import.meta.env.VITE_GOOGLE_CLIENT_ID as string | undefined) ?? "").trim();
 }
 
+/** True when the build already carries ShapeForge's own sign-in ID, so a visitor never has to set anything up. */
+export function hasBuiltInClientId(): boolean {
+  return ((import.meta.env.VITE_GOOGLE_CLIENT_ID as string | undefined) ?? "").trim().length > 0;
+}
+
+/** True when an ID was pasted into this browser, which replaces the built-in one. */
+export function hasClientIdOverride(): boolean {
+  try {
+    return !!localStorage.getItem(CLIENT_ID_KEY)?.trim();
+  } catch {
+    return false;
+  }
+}
+
 export function setClientId(value: string): void {
   try {
     const trimmed = value.trim();
