@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useDoc } from "../document/store";
-import { exportProjectFile, hasProjectContents, loadProject, loadThumbnail, locationOf } from "../document/persist";
+import { exportProjectFile, hasProjectContents, listBin, loadProject, loadThumbnail, locationOf } from "../document/persist";
+import { BinView } from "./BinView";
 import type { FolderMeta, ProjectMeta } from "../document/types";
 import { APP_NAME } from "../version";
 import { useConfirm } from "./ConfirmDialog";
@@ -24,7 +25,7 @@ function timeAgo(timestamp: number): string {
 }
 
 /** What the main area is showing: a folder (null = the top level) or a flat list. */
-type View = { kind: "folder"; id: string | null } | { kind: "recent" } | { kind: "draft" } | { kind: "browser" } | { kind: "drive" };
+type View = { kind: "folder"; id: string | null } | { kind: "recent" } | { kind: "draft" } | { kind: "browser" } | { kind: "drive" } | { kind: "bin" };
 
 type HomePageProps = {
   open: boolean;
@@ -221,6 +222,7 @@ export function HomePage({
   const kept = projects.filter((p) => locationOf(p) === "browser");
   const onDrive = projects.filter((p) => locationOf(p) === "drive");
   // A design known only from Drive's listing shows 0 shapes because it has not been fetched yet, not because it is empty.
+  const binCount = listBin().length;
   const empties = projects.filter((p) => p.objectCount === 0 && !p.remote && p.id !== currentProjectId);
 
   let designs: ProjectMeta[];
@@ -235,6 +237,8 @@ export function HomePage({
     designs = kept;
   } else if (view.kind === "drive") {
     designs = onDrive;
+  } else if (view.kind === "bin") {
+    designs = [];
   } else {
     designs = projects.filter((p) => (p.folderId ?? null) === viewFolderId);
     subfolders = folders.filter((f) => f.parentId === viewFolderId).sort((a, b) => a.name.localeCompare(b.name));
@@ -264,7 +268,9 @@ export function HomePage({
           ? "This browser"
           : view.kind === "drive"
             ? "Google Drive"
-            : null;
+            : view.kind === "bin"
+              ? "Bin"
+              : null;
 
   const handleOpen = async (p: ProjectMeta) => {
     if (suppressClickRef.current) return;
@@ -313,7 +319,7 @@ export function HomePage({
   const handleDelete = async (p: ProjectMeta) => {
     const ok = await ask({
       title: "Delete design?",
-      message: `"${p.name}" will be deleted. This cannot be undone.`,
+      message: `"${p.name}" moves to the Bin and is kept for 30 days.`,
       confirmLabel: "Delete",
       destructive: true,
     });
@@ -419,7 +425,7 @@ export function HomePage({
     }
     const ok = await ask({
       title: `Delete ${group.length} designs?`,
-      message: "They will be deleted. This cannot be undone.",
+      message: "They move to the Bin and are kept for 30 days.",
       confirmLabel: `Delete ${group.length} designs`,
       destructive: true,
     });
@@ -508,7 +514,11 @@ export function HomePage({
 
           <div className="home-side-head">
             <span>Folders</span>
-            <button className="home-side-add" onClick={() => startNewFolder(null)} title="New folder" aria-label="New folder">+</button>
+            <button className="home-side-add" onClick={() => startNewFolder(null)} title="New folder" aria-label="New folder">
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+                <path d="M7 1.5v11M1.5 7h11" />
+              </svg>
+            </button>
           </div>
           {folders.length === 0 && <p className="home-side-empty">No folders yet</p>}
           {folderTree(folders).map(({ folder, depth }) => (
@@ -564,6 +574,10 @@ export function HomePage({
               <button className="home-link" onClick={() => setSetupOpen(true)}>Change client ID</button>
             </div>
           )}
+          <button className={navClass(!searching && view.kind === "bin")} onClick={() => { setSearch(""); setView({ kind: "bin" }); }}>
+            <span>Bin</span>
+            <span className="home-count">{binCount}</span>
+          </button>
           {empties.length > 0 && (
             <button className="home-clean" onClick={handleClean} title="Removes designs that have no shapes in them">
               Clear {empties.length} empty {empties.length === 1 ? "design" : "designs"}
@@ -626,7 +640,8 @@ export function HomePage({
             </div>
           )}
 
-          {designs.length === 0 && subfolders.length === 0 && <div className="home-empty">{emptyText}</div>}
+          {!searching && view.kind === "bin" && <BinView ask={ask} />}
+          {!(view.kind === "bin" && !searching) && designs.length === 0 && subfolders.length === 0 && <div className="home-empty">{emptyText}</div>}
 
           {selectedDesigns.length > 0 && (
             <div className="home-selbar" role="toolbar" aria-label="Selected designs">

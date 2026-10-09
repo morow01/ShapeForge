@@ -555,6 +555,119 @@ export function saveProject(project: ProjectData): boolean {
   }
 }
 
+/* ---- Bin: deleted designs wait here for a while before they are gone for good ---- */
+
+const BIN_INDEX_KEY = "cad.bin";
+const BIN_DATA_PREFIX = "cad.bin.data.";
+const BIN_THUMB_PREFIX = "cad.bin.thumb.";
+export const BIN_DAYS = 30;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+export type BinEntry = { meta: ProjectMeta; deletedAt: number };
+
+function readBin(): BinEntry[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(BIN_INDEX_KEY) ?? "[]") as BinEntry[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeBin(list: BinEntry[]): void {
+  localStorage.setItem(BIN_INDEX_KEY, JSON.stringify(list));
+}
+
+function dropBinData(id: string): void {
+  localStorage.removeItem(BIN_DATA_PREFIX + id);
+  localStorage.removeItem(BIN_THUMB_PREFIX + id);
+}
+
+/** Deleted designs, newest first. Anything older than the keep time is cleared out here. */
+export function listBin(): BinEntry[] {
+  const list = readBin();
+  const now = Date.now();
+  const live = list.filter((e) => now - e.deletedAt < BIN_DAYS * DAY_MS);
+  if (live.length !== list.length) {
+    try {
+      for (const e of list) if (!live.includes(e)) dropBinData(e.meta.id);
+      writeBin(live);
+    } catch {
+      /* it is tidied up next time */
+    }
+  }
+  return live.sort((a, b) => b.deletedAt - a.deletedAt);
+}
+
+/** Days left before a binned design is cleared. */
+export function binDaysLeft(entry: BinEntry): number {
+  return Math.max(0, Math.ceil(BIN_DAYS - (Date.now() - entry.deletedAt) / DAY_MS));
+}
+
+/** Copies a design into the Bin just before it is deleted. Empty designs are not worth keeping. */
+export function moveToBin(id: string): boolean {
+  try {
+    const rawIndex = localStorage.getItem(INDEX_KEY);
+    const meta = rawIndex ? (JSON.parse(rawIndex) as ProjectMeta[]).find((p) => p.id === id) : undefined;
+    const data = localStorage.getItem(PROJECT_PREFIX + id);
+    if (!meta || meta.remote || meta.objectCount === 0 || !data) return false;
+    localStorage.setItem(BIN_DATA_PREFIX + id, data);
+    const thumb = localStorage.getItem(THUMB_PREFIX + id);
+    if (thumb) localStorage.setItem(BIN_THUMB_PREFIX + id, thumb);
+    writeBin([...readBin().filter((e) => e.meta.id !== id), { meta: { ...meta }, deletedAt: Date.now() }]);
+    return true;
+  } catch {
+    dropBinData(id);
+    return false;
+  }
+}
+
+export function loadBinThumbnail(id: string): string | null {
+  try {
+    return localStorage.getItem(BIN_THUMB_PREFIX + id);
+  } catch {
+    return null;
+  }
+}
+
+/** Puts a binned design back. It is sent to Drive as a new file if Drive is connected. */
+export function restoreFromBin(id: string): boolean {
+  try {
+    const list = readBin();
+    const entry = list.find((e) => e.meta.id === id);
+    const data = localStorage.getItem(BIN_DATA_PREFIX + id);
+    if (!entry || !data) return false;
+    localStorage.setItem(PROJECT_PREFIX + id, data);
+    const thumb = localStorage.getItem(BIN_THUMB_PREFIX + id);
+    if (thumb) localStorage.setItem(THUMB_PREFIX + id, thumb);
+    const meta: ProjectMeta = { ...entry.meta, updatedAt: Date.now() };
+    delete meta.driveId;
+    delete meta.driveModified;
+    delete meta.remote;
+    if (meta.folderId && !listFolders().some((f) => f.id === meta.folderId)) delete meta.folderId;
+    const rawIndex = localStorage.getItem(INDEX_KEY);
+    const index = (rawIndex ? (JSON.parse(rawIndex) as ProjectMeta[]) : []).filter((p) => p.id !== id);
+    index.push(meta);
+    localStorage.setItem(INDEX_KEY, JSON.stringify(index));
+    dropBinData(id);
+    writeBin(list.filter((e) => e.meta.id !== id));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Removes designs from the Bin for good. */
+export function deleteFromBin(ids: string[]): void {
+  try {
+    const gone = new Set(ids);
+    for (const id of gone) dropBinData(id);
+    writeBin(readBin().filter((e) => !gone.has(e.meta.id)));
+  } catch {
+    /* nothing more to do */
+  }
+}
+
 export function deleteProjectStorage(id: string): boolean {
   try {
     localStorage.removeItem(PROJECT_PREFIX + id);

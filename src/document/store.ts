@@ -29,6 +29,7 @@ import {
   setActiveProjectId,
   setProjectFolder,
   setProjectLocation,
+  moveToBin,
 } from "./persist";
 import {
   TRI_BY_ANGLES,
@@ -965,6 +966,7 @@ export const useDoc = create<DocState>()(
         flushSave();
         const s = get();
         const deletedMeta = s.projects.find((p) => p.id === id);
+        moveToBin(id);
         deleteProjectStorage(id);
         if (deletedMeta) driveHooks.onProjectDeleted?.(deletedMeta);
         const remaining = listProjects();

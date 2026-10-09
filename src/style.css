@@ -5510,3 +5510,12 @@ button.stepper-btn:disabled {
 
 .drive-steps ul { margin: 4px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 3px; }
 .drive-note { margin: 0; padding: 8px 10px; border-radius: 8px; background: #f3f7f9; font-size: 12.5px; line-height: 1.55; color: #4a5a66; }
+
+.home-side-add { display: inline-flex; align-items: center; justify-content: center; }
+.home-side-add svg { display: block; }
+
+.home-bin-note { margin: 0 0 12px; font-size: 13px; color: #52616c; display: flex; align-items: center; gap: 14px; }
+.home-bin-empty { font-size: 13px; color: #b42318; }
+.home-bin-thumb { cursor: default; opacity: 0.8; }
+.home-bin-actions { display: flex; align-items: center; gap: 8px; opacity: 1; }
+.home-bin-actions .modal-btn { width: auto; }
