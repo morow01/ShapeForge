@@ -2667,7 +2667,7 @@ function shellSolid(solid: Shape3D, op: ShellOp): Shape3D {
  * side. This intentionally remains an OCCT solid so later face edits continue
  * to work. */
 function hollowEditedBox(solid: Shape3D, op: ShellOp): Shape3D | null {
-  const [min, max] = solid.boundingBox.bounds;
+  const [min, max] = getTightSolidBounds(solid);
   const bboxVol = (max[0] - min[0]) * (max[1] - min[1]) * (max[2] - min[2]);
   try {
     if (measureVolume(solid) < 0.90 * bboxVol) return null;
@@ -2730,11 +2730,206 @@ function isCylinderBased(spec: NodeSpec): boolean {
   return false;
 }
 
+function isHemisphereBased(spec: NodeSpec): boolean {
+  if (spec.type === "object") return spec.kind === "hemisphere";
+  if (spec.type === "edit") return isHemisphereBased(spec.base);
+  return false;
+}
+
+function isParaboloidBased(spec: NodeSpec): ObjectSpec | null {
+  if (spec.type === "object") return spec.kind === "paraboloid" ? spec : null;
+  if (spec.type === "edit") return isParaboloidBased(spec.base);
+  return null;
+}
+
+/** Hollows a plain Paraboloid with an exact inner surface instead of the mesh
+ * kernel. The outer surface is a revolved polyline, so the cavity is the same
+ * polyline offset inward by the wall (each corner moved along its mitre), revolved
+ * and cut. That keeps a true even wall and a regular band-by-band surface. Only the
+ * plain cup (no bottom corner radius) opened through its flat base is handled. */
+function hollowEditedParaboloid(solid: Shape3D, op: ShellOp, spec: ObjectSpec): Shape3D | null {
+  const p = spec.params;
+  const R = Math.max(p.radius ?? 10, 0.1);
+  const h = Math.max(p.height ?? 20, 0.1);
+  const steps = Math.max(4, Math.min(64, Math.round(p.surfaceSteps ?? 32)));
+  if ((p.bottomFillet ?? 0) > 0) return null;
+  const t = Math.max(0.01, op.thickness);
+  const bottom = op.bottomThickness ?? t;
+  if (Math.abs(bottom - t) > 1e-6) return null;
+
+  // The outer profile, base corner to apex.
+  const P: [number, number][] = [[R, 0]];
+  for (let i = 1; i <= steps; i++) {
+    const r = R * (1 - i / steps);
+    P.push([r, h * (1 - (r / R) ** 2)]);
+  }
+
+  // Only trust it when the solid still is that paraboloid (not push/pulled or resized).
+  let volume = 0;
+  for (let i = 0; i < steps; i++) {
+    const [r0, z0] = P[i];
+    const [r1, z1] = P[i + 1];
+    volume += Math.PI * (r0 * r0 + r0 * r1 + r1 * r1) / 3 * (z1 - z0);
+  }
+  const [lo, hi] = getTightSolidBounds(solid);
+  if (Math.abs(hi[2] - lo[2] - h) > 0.01 * h || Math.abs(hi[0] - lo[0] - 2 * R) > 0.01 * R) return null;
+  try {
+    if (Math.abs(measureVolume(solid) - volume) > 0.01 * volume) return null;
+  } catch { return null; }
+  // The opening must be the flat base.
+  if (op.normal ? op.normal[2] > -0.5 : !op.points.length || Math.abs(op.points[0][2] - lo[2]) > h * 0.1) return null;
+
+  // Inward unit normal of each segment (towards the axis and down).
+  const inward = (a: [number, number], b: [number, number]): [number, number] => {
+    const dr = b[0] - a[0];
+    const dz = b[1] - a[1];
+    const len = Math.hypot(dr, dz);
+    return [-dz / len, dr / len];
+  };
+  const normals = Array.from({ length: steps }, (_, i) => inward(P[i], P[i + 1]));
+  const Q: [number, number][] = P.map(([r, z], k) => {
+    if (k === 0) return [r + t * normals[0][0], z + t * normals[0][1]];
+    if (k === steps) {
+      // At the apex the neighbour is the mirror image across the axis.
+      return [0, z + t / normals[steps - 1][1]];
+    }
+    const [n1x, n1y] = normals[k - 1];
+    const [n2x, n2y] = normals[k];
+    const k2 = 1 + n1x * n2x + n1y * n2y;
+    return [r + (t * (n1x + n2x)) / k2, z + (t * (n1y + n2y)) / k2];
+  });
+  if (Q.some(([r], k) => (k < steps && r <= 0.02)) || Q[steps][1] <= 0.05) return null;
+  for (let k = 1; k <= steps; k++) if (Q[k][1] <= Q[k - 1][1] - 1e-6) return null;
+
+  // Run the first wall segment down below the base so the cut opens cleanly.
+  const overlap = Math.max(0.1, t * 0.1);
+  const dir: [number, number] = [Q[1][0] - Q[0][0], Q[1][1] - Q[0][1]];
+  const run = (Q[0][1] + overlap) / dir[1];
+  const E: [number, number] = [Q[0][0] - dir[0] * run, -overlap];
+  if (E[0] <= 0.02) return null;
+  let pen = draw([0, -overlap]).lineTo(E).lineTo(Q[0]);
+  for (let k = 1; k <= steps; k++) pen = pen.lineTo(Q[k][0] <= 1e-7 ? [0, Q[k][1]] : Q[k]);
+  const cutter = pen.close().sketchOnPlane("XZ").revolve([0, 0, 1]) as Shape3D;
+  const moved = cutter.translate([(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, lo[2]]) as Shape3D;
+  return solid.cut(moved) as Shape3D;
+}
+
+/** Hollows a Dome (hemisphere) by cutting a smaller concentric dome, so the
+ * inside has the same regular latitude/longitude facets as the outside instead
+ * of the irregular triangles an offset shell produces. Only handles the plain
+ * dome opened through its flat face; anything else returns null and falls
+ * through to the generic shell. */
+function hollowEditedHemisphere(solid: Shape3D, op: ShellOp): Shape3D | null {
+  const [min, max] = getTightSolidBounds(solid);
+  const r = max[2] - min[2];
+  const width = max[0] - min[0];
+  const depth = max[1] - min[1];
+  if (r <= 0.01 || Math.abs(width - 2 * r) > r * 0.02 || Math.abs(depth - 2 * r) > r * 0.02) return null;
+  try {
+    if (Math.abs(measureVolume(solid) - (2 / 3) * Math.PI * r ** 3) > 0.03 * (2 / 3) * Math.PI * r ** 3) return null;
+  } catch { return null; }
+  // The flat face is at the bottom; the opening must be that face.
+  if (op.normal ? op.normal[2] > -0.5 : !op.points.length || Math.abs(op.points[0][2] - min[2]) > r * 0.1) return null;
+  const t = Math.max(0.01, op.thickness);
+  const ri = r - t;
+  if (ri <= 0.05) return null;
+  const overlap = Math.max(0.1, t * 0.1);
+  const bottom = op.bottomThickness ?? t;
+  let half = makeSphere(ri).cut(makeBaseBox(ri * 4, ri * 4, ri * 2).translate([0, 0, -ri * 2])) as Shape3D;
+  let cutter: Shape3D;
+  if (bottom <= 0) {
+    // Bottom 0: the cavity runs out through the apex too. As in the mesh route,
+    // the hole is the dome's cross-section one wall down from the apex, inset by the wall.
+    const holeR = Math.sqrt(Math.max(0, 2 * r * t - t * t)) - t;
+    cutter = holeR > 0.05
+      ? half.fuse(makeCylinder(holeR, r + 2 * overlap).translate([0, 0, 0]) as Shape3D) as Shape3D
+      : half;
+  } else if (bottom < t) {
+    // A floor thinner than the wall: overlap a copy of the cavity raised by the difference.
+    cutter = half.fuse(half.clone().translate([0, 0, t - bottom]) as Shape3D) as Shape3D;
+  } else {
+    // A floor thicker than the wall: flatten the top of the cavity.
+    if (r - bottom <= 0.05) return null;
+    if (bottom > t) half = half.cut(makeBaseBox(ri * 4, ri * 4, r * 2).translate([0, 0, r - bottom + r])) as Shape3D;
+    cutter = half;
+  }
+  const plug = makeCylinder(ri, overlap).translate([0, 0, -overlap]) as Shape3D;
+  cutter = cutter.fuse(plug) as Shape3D;
+  cutter = cutter.translate([(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, min[2]]) as Shape3D;
+  return solid.cut(cutter) as Shape3D;
+}
+
+/** True for a box- or cylinder-based solid whose edges have been rounded, i.e. it
+ * holds less volume than the plain prism around it. */
+function isRoundedPrism(solid: Shape3D, base: NodeSpec): boolean {
+  const box = isBoxBased(base);
+  if (!box && !isCylinderBased(base)) return false;
+  try {
+    const [lo, hi] = getTightSolidBounds(solid);
+    const ideal = (hi[0] - lo[0]) * (hi[1] - lo[1]) * (hi[2] - lo[2]) * (box ? 1 : Math.PI / 4);
+    return measureVolume(solid) < ideal * 0.9995;
+  } catch {
+    return false;
+  }
+}
+
+/** A hollowed B-rep can pass the validity checks and still be nonsense (OCCT's
+ * offset on some surfaces returns a "valid" solid with a garbage or negative
+ * volume). Measured before the hollow, the guard accepts only a result that is
+ * finite, positive, strictly smaller than the original, and no bigger than it. */
+function makeHollowGuard(solid: Shape3D): (candidate: Shape3D) => boolean {
+  let before = NaN;
+  let lo: Vec3 = [0, 0, 0];
+  let hi: Vec3 = [0, 0, 0];
+  try {
+    before = measureVolume(solid);
+    [lo, hi] = getTightSolidBounds(solid);
+  } catch { /* cannot judge: let the other checks decide */ }
+  return (candidate) => {
+    if (!Number.isFinite(before) || before <= 0) return true;
+    try {
+      const volume = measureVolume(candidate);
+      if (!Number.isFinite(volume) || volume <= 0 || volume >= before * 0.999) return false;
+      const [clo, chi] = getTightSolidBounds(candidate);
+      return [0, 1, 2].every((i) => clo[i] >= lo[i] - 0.5 && chi[i] <= hi[i] + 0.5);
+    } catch {
+      return false;
+    }
+  };
+}
+
+/** The Hollow tool always sends a Bottom thickness, even when it is the same as
+ * the wall. Only a different floor, an opening inset or a rim genuinely needs the
+ * mesh kernel; a plain uniform wall on a real (B-rep) solid is better done as an
+ * exact OCCT offset, which keeps true curved faces and so tessellates cleanly. */
+function needsMeshHollow(solid: AnySolid, op: ShellOp): boolean {
+  if (isMesh(solid) || op.openingInset !== undefined || op.rim) return true;
+  return op.bottomThickness !== undefined && Math.abs(op.bottomThickness - op.thickness) > 1e-6;
+}
+
+/** The Hollow tool always sends a Bottom thickness, which would force the mesh
+ * kernel. When it equals the wall (and there is no rim or inset) a Dome can use
+ * the exact concentric cut instead; null means "use the normal route". */
+function plainDomeHollow(solid: AnySolid, op: ShellOp, base: NodeSpec): Shape3D | null {
+  const guard = isMesh(solid) ? null : makeHollowGuard(solid as Shape3D);
+  if (isMesh(solid) || op.rim || op.openingInset !== undefined) return null;
+  const parabola = isParaboloidBased(base);
+  if (!isHemisphereBased(base) && !parabola) return null;
+  try {
+    const candidate = parabola
+      ? hollowEditedParaboloid(solid as Shape3D, op, parabola)
+      : hollowEditedHemisphere(solid as Shape3D, op);
+    return candidate && isOcctValid(candidate) && !tessellatesEmpty(candidate) && isWatertight(candidate) && (!guard || guard(candidate)) ? candidate : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Reliable fallback for Cylinder (including cylinders with rounded top/bottom corners)
  * when OCCT's offset shell fails on multi-patch lofted fillets. Creates an inner
  * cylindrical cavity leaving `thickness` on the wall and closed floor/ceiling. */
 function hollowEditedCylinder(solid: Shape3D, op: ShellOp, baseNode?: NodeSpec): Shape3D | null {
-  const [min, max] = solid.boundingBox.bounds;
+  const [min, max] = getTightSolidBounds(solid);
   const t = Math.max(0.01, op.thickness);
 
   const xCenter = (min[0] + max[0]) / 2;
@@ -4760,7 +4955,9 @@ async function replayEdit(
       continue;
     }
     if (op.kind === "shell") {
-      if (isMesh(solid) || op.bottomThickness !== undefined || op.openingInset !== undefined || op.rim) {
+      const domeHollow = plainDomeHollow(solid, op, spec.base);
+      if (domeHollow) { solid = domeHollow; continue; }
+      if (needsMeshHollow(solid, op)) {
         let reason: string | null = null;
         const candidate = hollowMesh(isMesh(solid) ? solid : solid.meshShape(FALLBACK_MESH_QUALITY), op, (why) => { reason = why; });
         if (candidate) {
@@ -4781,28 +4978,51 @@ async function replayEdit(
       }
       let hollow: AnySolid | null = null;
       const bRepSolid = solid as Shape3D;
+      const guard = makeHollowGuard(bRepSolid);
       // Rounded boxes are a common container workflow, but OCCT can accept
       // their offset shell and only fail later while producing the display
       // mesh. Use the bounded cavity first for every box-based edit: it is a
       // simple, deterministic subtraction and preserves the outer rounded
       // solid exactly. Generic shapes still use the true offset shell below.
-      if (isBoxBased(spec.base)) {
-        try {
-          const candidate = hollowEditedBox(bRepSolid, op);
-          if (candidate && isOcctValid(candidate) && !tessellatesEmpty(candidate) && isWatertight(candidate)) hollow = candidate;
-        } catch { /* Keep the original shape if even the bounded cavity fails. */ }
-      }
-      if (isCylinderBased(spec.base)) {
-        try {
-          const candidate = hollowEditedCylinder(bRepSolid, op, spec.base);
-          if (candidate && isOcctValid(candidate) && !tessellatesEmpty(candidate) && isWatertight(candidate)) hollow = candidate;
-        } catch { /* Fall back to shellSolid */ }
-      }
-      for (let attempt = 0; attempt < 3 && !hollow; attempt++) {
-        try {
-          const candidate = shellSolid(bRepSolid, op);
-          if (isOcctValid(candidate) && !tessellatesEmpty(candidate) && isWatertight(candidate)) hollow = candidate;
-        } catch { /* OCCT occasionally needs a clean retry for offset surfaces. */ }
+      const accept = (candidate: Shape3D | null): candidate is Shape3D =>
+        !!candidate && isOcctValid(candidate) && !tessellatesEmpty(candidate) && isWatertight(candidate) && guard(candidate);
+      const tryCutters = () => {
+        if (isBoxBased(spec.base)) {
+          try {
+            const candidate = hollowEditedBox(bRepSolid, op);
+            if (accept(candidate)) hollow = candidate;
+          } catch { /* Keep the original shape if even the bounded cavity fails. */ }
+        }
+        if (isHemisphereBased(spec.base)) {
+          try {
+            const candidate = hollowEditedHemisphere(bRepSolid, op);
+            if (accept(candidate)) hollow = candidate;
+          } catch { /* Fall back to shellSolid */ }
+        }
+        if (isCylinderBased(spec.base)) {
+          try {
+            const candidate = hollowEditedCylinder(bRepSolid, op, spec.base);
+            if (accept(candidate)) hollow = candidate;
+          } catch { /* Fall back to shellSolid */ }
+        }
+      };
+      const tryShell = () => {
+        for (let attempt = 0; attempt < 3 && !hollow; attempt++) {
+          try {
+            const candidate = shellSolid(bRepSolid, op);
+            if (accept(candidate)) hollow = candidate;
+          } catch { /* OCCT occasionally needs a clean retry for offset surfaces. */ }
+        }
+      };
+      // A box or cylinder with rounded edges: the true offset keeps the wall an
+      // even thickness round the curves, where the bounded cavity leaves the
+      // corners thin. A plain prism is exact either way, so the cheap cavity goes first.
+      if (isRoundedPrism(bRepSolid, spec.base)) {
+        tryShell();
+        if (!hollow) tryCutters();
+      } else {
+        tryCutters();
+        if (!hollow) tryShell();
       }
       if (!hollow && op.points.length) {
         try {
@@ -5005,7 +5225,13 @@ export async function survivingOps(
       continue;
     }
     if (op.kind === "shell") {
-      if (isMesh(solid) || op.bottomThickness !== undefined || op.openingInset !== undefined) {
+      const domeHollow = plainDomeHollow(solid, op, spec.base);
+      if (domeHollow) {
+        solid = domeHollow;
+        kept.push(op);
+        continue;
+      }
+      if (needsMeshHollow(solid, op)) {
         const candidate = hollowMesh(isMesh(solid) ? solid : solid.meshShape(FALLBACK_MESH_QUALITY), op);
         if (candidate) {
           solid = candidate;
@@ -5014,10 +5240,16 @@ export async function survivingOps(
         continue;
       }
       const bRepSolid = solid as Shape3D;
+      const guard = makeHollowGuard(bRepSolid);
       const candidate = op.points.length ? settled(() => {
-        if (isBoxBased(spec.base)) return hollowEditedBox(bRepSolid, op) ?? shellSolid(bRepSolid, op);
-        if (isCylinderBased(spec.base)) return hollowEditedCylinder(bRepSolid, op, spec.base) ?? shellSolid(bRepSolid, op);
-        return shellSolid(bRepSolid, op);
+        const cutter = () => isBoxBased(spec.base) ? hollowEditedBox(bRepSolid, op)
+          : isHemisphereBased(spec.base) ? hollowEditedHemisphere(bRepSolid, op)
+          : isCylinderBased(spec.base) ? hollowEditedCylinder(bRepSolid, op, spec.base)
+          : null;
+        const made = isRoundedPrism(bRepSolid, spec.base)
+          ? (() => { try { const c = shellSolid(bRepSolid, op); if (c && guard(c)) return c; } catch { /* use the cavity */ } return cutter(); })()
+          : (cutter() ?? shellSolid(bRepSolid, op));
+        return made && guard(made) ? made : null;
       }) : null;
       if (candidate) {
         solid = candidate;
