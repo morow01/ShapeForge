@@ -5434,3 +5434,14 @@ button.stepper-btn:disabled {
 .modal-btn.destructive { background: #d92d20; border-color: #d92d20; color: #fff; }
 .modal-btn.destructive:hover { background: #b42318; border-color: #b42318; }
 .save-buttons .modal-btn:focus-visible { outline: 2px solid #00a7a5; outline-offset: 2px; }
+/* While dragging, a target shows exactly one outline: dashed when it could take the design,
+   solid when the pointer is over it. Its own border and the old glow ring are switched off. */
+.home-page.is-dragging .home-folder[data-drop] { border-color: transparent; }
+.home-page.is-dragging .home-folder.drop,
+.home-page.is-dragging .home-nav.drop {
+  outline: 2px solid #00a7a5;
+  outline-offset: -2px;
+  box-shadow: none;
+  border-color: transparent;
+  background-color: #d7f1f0;
+}

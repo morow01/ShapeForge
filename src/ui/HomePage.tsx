@@ -387,8 +387,13 @@ export function HomePage({
     setSelected(new Set());
   };
 
-  /** Marks an element as somewhere a design can be dropped (null = the top level). */
-  const dropProps = (folderId: string | null) => ({ "data-drop": folderId ?? "root" });
+  /** Marks an element as somewhere a design can be dropped (null = the top level). While
+   *  dragging, a place every dragged design is already in is left unmarked: dropping there
+   *  would change nothing, so it should not look like a target. */
+  const dropProps = (folderId: string | null): { "data-drop"?: string } => {
+    if (drag && drag.ids.every((id) => (projects.find((p) => p.id === id)?.folderId ?? null) === folderId)) return {};
+    return { "data-drop": folderId ?? "root" };
+  };
 
   const beginPress = (e: React.PointerEvent, p: ProjectMeta, thumb: string | null) => {
     if (e.button !== 0 || e.pointerType === "touch") return;
