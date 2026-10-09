@@ -5788,7 +5788,13 @@ button.home-tagmore { border: 0; background: none; padding: 1px 4px; min-height:
 button.home-tagmore:hover { text-decoration: underline; }
 .home-row-tags.open { flex-wrap: wrap; overflow: visible; }
 
-/* Hovering a design floats the whole list of its tags over it; nothing around it moves. */
-.home-tagpeek { position: fixed; z-index: 1500; display: flex; flex-wrap: wrap; gap: 4px; padding: 6px; background: #fff; border: 1px solid #cfe0e3; border-radius: 10px; box-shadow: 0 8px 22px rgba(15, 23, 42, 0.2); cursor: default; }
-.home-tagpeek .home-tagchip { white-space: nowrap; }
-.home-page.is-dragging .home-tagpeek { display: none; }
+
+/* Past the third tag, chips fold away. Hovering the design (or clicking +N) unfolds the whole list in place. */
+.home-tagchip.extra { display: none; }
+.home-card:hover .home-tagrow .home-tagchip.extra,
+.home-tagrow.open .home-tagchip.extra,
+.home-row:hover .home-row-tags .home-tagchip.extra,
+.home-row-tags.open .home-tagchip.extra { display: inline-flex; }
+.home-card:hover .home-tagrow:not(.open) .home-tagmore { display: none; }
+.home-row:hover .home-row-tags:not(.open) .home-tagmore { display: none; }
+.home-row:hover .home-row-tags { flex-wrap: wrap; overflow: visible; }
