@@ -110,6 +110,19 @@ export class DriveApi {
     return out;
   }
 
+  /** Drive's file for a design by its local id, newest first, so a design is never uploaded twice. */
+  async findDesigns(localId: string): Promise<DriveFile[]> {
+    const params = new URLSearchParams({
+      q: `appProperties has { key='${APP_TAG.key}' and value='${APP_TAG.value}' } and appProperties has { key='kind' and value='design' } and appProperties has { key='localId' and value='${localId.replace(/'/g, "")}' } and trashed = false`,
+      fields: `files(${FIELDS})`,
+      orderBy: "modifiedTime desc",
+      pageSize: "10",
+      spaces: "drive",
+    });
+    const res = await this.request(`${API}?${params}`);
+    return ((await res.json()) as { files?: DriveFile[] }).files ?? [];
+  }
+
   /** The one file of a given kind ShapeForge keeps (the feedback notes), if it exists. */
   async findByKind(kind: DriveKind): Promise<DriveFile | undefined> {
     const params = new URLSearchParams({

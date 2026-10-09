@@ -225,8 +225,11 @@ export async function pushProject(id: string, attempt = 0): Promise<void> {
     for (const blobId of blobIds) await ensureBlobUploaded(blobId, assetsId);
 
     const parentId = await driveFolderFor(meta?.folderId ?? null);
+    // A design not linked to a Drive file may still have one (made on another computer): use it, never add a second.
+    let fileId = meta?.driveId;
+    if (!fileId) fileId = (await driveApi().findDesigns(project.id))[0]?.id;
     const file = await driveApi().upload({
-      fileId: meta?.driveId,
+      fileId,
       name: designFileName(project.name),
       parentId,
       mimeType: "application/json",
@@ -297,6 +300,8 @@ async function ensureBlobsLocal(nodes: ProjectData["nodes"]): Promise<void> {
 export async function fetchProject(id: string): Promise<boolean> {
   const meta = listProjects().find((p) => p.id === id);
   if (!meta?.driveId) return false;
+  // Read the file's version first: if it changes while downloading, the next sync simply fetches it again.
+  const info = await driveApi().getFile(meta.driveId);
   const text = await driveApi().downloadText(meta.driveId);
   const parsed = parseProjectFile(text, meta.name);
   if (!parsed) return false;
@@ -309,6 +314,7 @@ export async function fetchProject(id: string): Promise<boolean> {
   updateProjectMeta(id, (m) => {
     delete m.remote;
     m.location = "drive";
+    m.driveModified = info.modifiedTime;
   });
   return true;
 }
@@ -322,7 +328,8 @@ function newFolderId(): string {
  * here (a design's contents are only fetched when it is first opened), and ones that were removed
  * from Drive lose their link. Designs waiting to be sent are never overwritten.
  */
-export async function pullIndex(openProjectId?: string): Promise<void> {
+export async function pullIndex(openProjectId?: string): Promise<string | null> {
+  let staleOpen: string | null = null;
   const files = await driveApi().listAll();
   const root = files.find((f) => f.appProperties?.kind === "root");
   const assets = files.find((f) => f.appProperties?.kind === "assets");
@@ -385,7 +392,29 @@ export async function pullIndex(openProjectId?: string): Promise<void> {
   writeFolderList(folders);
 
   // Designs.
-  const driveDesigns = files.filter((f) => f.appProperties?.kind === "design");
+  const allDesignFiles = files.filter((f) => f.appProperties?.kind === "design");
+  const newestFor = new Map<string, DriveFile>();
+  const duplicates: DriveFile[] = [];
+  for (const d of allDesignFiles) {
+    const localId = d.appProperties?.localId;
+    if (!localId) continue;
+    const current = newestFor.get(localId);
+    if (!current) {
+      newestFor.set(localId, d);
+    } else if ((d.modifiedTime ?? "") > (current.modifiedTime ?? "")) {
+      newestFor.set(localId, d);
+      duplicates.push(current);
+    } else {
+      duplicates.push(d);
+    }
+  }
+  if (duplicates.length) {
+    const waiting = new Set(readJson<string[]>(TRASH_KEY, []));
+    for (const f of duplicates) waiting.add(f.id);
+    writeJson(TRASH_KEY, [...waiting]);
+  }
+  const duplicateIds = new Set(duplicates.map((f) => f.id));
+  const driveDesigns = allDesignFiles.filter((f) => !duplicateIds.has(f.id));
   const seen = new Set<string>();
   const metas = listProjects();
   for (const d of driveDesigns) {
@@ -429,8 +458,9 @@ export async function pullIndex(openProjectId?: string): Promise<void> {
         }
         // Changed on Drive since we last sent or fetched it: fetch again the next time it is opened,
         // unless it is open right now (replacing it under the editor would lose unsaved work).
-        if (m.driveModified && m.driveModified !== d.modifiedTime && m.id !== openProjectId) {
-          m.remote = true;
+        if (m.driveModified && m.driveModified !== d.modifiedTime) {
+          if (m.id !== openProjectId) m.remote = true;
+          else staleOpen = m.id; // refreshed by refreshOpenDesign once it is safe
         }
       });
     }
@@ -442,6 +472,33 @@ export async function pullIndex(openProjectId?: string): Promise<void> {
     if (!m.driveId || seen.has(m.id)) continue;
     if (!hasProjectContents(m.id) || m.remote) deleteProjectStorage(m.id);
     else updateProjectMeta(m.id, (x) => { delete x.driveId; });
+  }
+  return staleOpen;
+}
+
+// ---- keeping the open design current ----
+
+/** When the open design last changed on this computer, and whether the editor is being updated from Drive right now. */
+let lastLocalEdit = 0;
+let applyingRemote = false;
+const QUIET_BEFORE_REFRESH_MS = 5000;
+
+/**
+ * The open design was changed on another computer. Replaces what is on screen with Drive's copy, but only when
+ * that cannot lose work: nothing waiting to be sent and no typing in the last few seconds. Otherwise the next
+ * sync tries again.
+ */
+async function refreshOpenDesign(id: string): Promise<void> {
+  if (isDirty(id) || Date.now() - lastLocalEdit < QUIET_BEFORE_REFRESH_MS) return;
+  if (useDoc.getState().currentProjectId !== id) return;
+  if (!(await fetchProject(id))) return;
+  // The person may have started editing while the file downloaded.
+  if (isDirty(id) || Date.now() - lastLocalEdit < QUIET_BEFORE_REFRESH_MS) return;
+  applyingRemote = true;
+  try {
+    useDoc.getState().openProject(id);
+  } finally {
+    applyingRemote = false;
   }
 }
 
@@ -841,7 +898,8 @@ export async function syncNow(): Promise<void> {
     await flushPending();
     // Folders made before Drive was connected (or still empty) get their Drive twin too.
     for (const f of listFolders()) if (!f.driveId) await driveFolderFor(f.id);
-    await pullIndex(useDoc.getState().currentProjectId);
+    const staleOpen = await pullIndex(useDoc.getState().currentProjectId);
+    if (staleOpen) await refreshOpenDesign(staleOpen);
     try {
       await syncThumbnails();
     } catch (error) {
@@ -920,6 +978,8 @@ export function installDriveHooks(): void {
   // the open design's id too, so only a change within the same design counts.
   useDoc.subscribe((state, previous) => {
     if (state.nodes === previous.nodes || state.currentProjectId !== previous.currentProjectId) return;
+    if (applyingRemote) return; // it came from Drive, so there is nothing to send back
+    lastLocalEdit = Date.now();
     // The editor's own save lands a moment after the edit, so give it time before adopting.
     const id = state.currentProjectId;
     window.setTimeout(() => {
