@@ -275,7 +275,7 @@ export function HomePage({
     }
   };
   const toggleStar = useDoc((s) => s.toggleStar);
-  const { ask, dialog: confirmDialog } = useConfirm();
+  const { ask, askChoice, dialog: confirmDialog } = useConfirm();
   const driveConfigured = useDrive((s) => s.configured);
   const driveStatus = useDrive((s) => s.status);
   const driveEmail = useDrive((s) => s.email);
@@ -576,17 +576,32 @@ export function HomePage({
   const handleDeleteFolder = async (f: FolderMeta) => {
     const tree = collectFolderTree(f.id);
     const designCount = projects.filter((p) => p.folderId && tree.includes(p.folderId)).length;
-    const note = designCount
-      ? `The ${designCount} ${designCount === 1 ? "design" : "designs"} inside go with it.`
-      : "It is empty.";
-    const ok = await ask({
-      title: "Delete folder?",
-      message: `"${f.name}" moves to the Bin and is kept for 30 days. ${note}`,
-      confirmLabel: "Delete folder",
-      destructive: true,
-    });
-    if (!ok) return;
-    deleteFolder(f.id);
+    const hasSubfolders = folders.some((x) => x.parentId === f.id);
+    const word = `${designCount} ${designCount === 1 ? "design" : "designs"}`;
+    let withDesigns = true;
+    if (designCount || hasSubfolders) {
+      const choice = await askChoice({
+        title: "Delete folder?",
+        message: `What should happen to what is inside "${f.name}"?`,
+        confirmLabel: "Delete folder",
+        destructive: true,
+        choices: [
+          { id: "keep", label: "Delete the folder only", hint: "Its designs and folders move up one level." },
+          { id: "all", label: `Delete the folder and everything inside`, hint: `The ${word} go to the Bin for 30 days, together with the folder.` },
+        ],
+      });
+      if (!choice) return;
+      withDesigns = choice === "all";
+    } else {
+      const ok = await ask({
+        title: "Delete folder?",
+        message: `"${f.name}" is empty. It moves to the Bin and is kept for 30 days.`,
+        confirmLabel: "Delete folder",
+        destructive: true,
+      });
+      if (!ok) return;
+    }
+    deleteFolder(f.id, withDesigns);
     if (viewFolderId === f.id) setView({ kind: "folder", id: f.parentId });
   };
 
