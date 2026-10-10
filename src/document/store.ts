@@ -746,7 +746,8 @@ interface DocState {
   createFolder: (name: string, parentId: string | null) => string;
   renameFolder: (id: string, name: string) => void;
   /** Deletes the folder only; its designs and folders move up one level. */
-  deleteFolder: (id: string) => void;
+  /** withDesigns false removes only the folder; its designs and subfolders move up one level. */
+  deleteFolder: (id: string, withDesigns?: boolean) => void;
   /** Puts a folder inside another (null = top level). False if that is not allowed. */
   moveFolder: (id: string, parentId: string | null) => boolean;
   moveProjectToFolder: (projectId: string, folderId: string | null) => void;
@@ -1032,11 +1033,19 @@ export const useDoc = create<DocState>()(
         return true;
       },
 
-      deleteFolder: (id) => {
+      deleteFolder: (id, withDesigns = true) => {
         flushSave();
         const before = get();
         const folder = before.folders.find((f) => f.id === id);
         if (!folder) return;
+        if (!withDesigns) {
+          const designIds = before.projects.filter((p) => p.folderId === id).map((p) => p.id);
+          const subfolderIds = before.folders.filter((f) => f.parentId === id).map((f) => f.id);
+          deleteFolderEntry(id);
+          set({ folders: listFolders(), projects: listProjects() });
+          driveHooks.onFolderDeleted?.({ folder, designIds, subfolderIds });
+          return;
+        }
         // The folder and everything inside it go to the Bin together, and come back together.
         const at = Date.now();
         const tree = collectFolderTree(id);

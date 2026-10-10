@@ -24,6 +24,9 @@ type BinViewProps = {
 /** Deleted designs, kept for a while so a slip can be undone. */
 export function BinView({ ask }: BinViewProps) {
   const [, setTick] = useState(0);
+  // Which deleted folder is open, and which folder inside it. Nothing here can be edited, only looked at.
+  const [openRoot, setOpenRoot] = useState<string | null>(null);
+  const [innerId, setInnerId] = useState<string | null>(null);
   // A design that went in with a folder is shown with that folder, not on its own.
   const entries = listBin().filter((e) => !e.viaFolder);
   const folderEntries = listBinFolders();
@@ -91,6 +94,82 @@ export function BinView({ ask }: BinViewProps) {
     }
   };
 
+  const openEntry = openRoot ? folderEntries.find((e) => e.id === openRoot) : undefined;
+  if (openRoot && !openEntry) {
+    setOpenRoot(null);
+    setInnerId(null);
+  }
+  if (openEntry) {
+    const current = innerId ?? openEntry.id;
+    const subfolders = openEntry.folders.filter((f) => f.parentId === current);
+    const designs = listBin().filter((e) => e.viaFolder === openEntry.id && (e.meta.folderId ?? null) === current);
+    const trail: { id: string; name: string }[] = [];
+    for (let at: string | null = current; at; ) {
+      const f = openEntry.folders.find((x) => x.id === at);
+      if (!f) break;
+      trail.unshift({ id: f.id, name: f.name });
+      at = f.id === openEntry.id ? null : f.parentId;
+    }
+    return (
+      <>
+        <p className="home-bin-note">
+          This folder is in the Bin, so you can look but not change anything. Restore it to work on it again.
+        </p>
+        <div className="home-bin-crumbs">
+          <button className="home-link" onClick={() => { setOpenRoot(null); setInnerId(null); }}>Bin</button>
+          {trail.map((t, i) => (
+            <span key={t.id}>
+              <span aria-hidden="true">› </span>
+              {i === trail.length - 1 ? <strong>{t.name}</strong> : <button className="home-link" onClick={() => setInnerId(t.id === openEntry.id ? null : t.id)}>{t.name}</button>}
+            </span>
+          ))}
+          <button className="modal-btn" onClick={() => { restoreFolder(openEntry.id); setOpenRoot(null); setInnerId(null); }}>Restore folder</button>
+        </div>
+        {subfolders.length + designs.length === 0 ? (
+          <div className="home-empty">This folder is empty.</div>
+        ) : (
+          <div className="home-grid">
+            {subfolders.map((f) => (
+              <div key={f.id} className="home-card bin-folder">
+                <div className="home-thumb home-bin-thumb" onClick={() => setInnerId(f.id)}>
+                  <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round">
+                    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                  </svg>
+                </div>
+                <div className="home-cap">
+                  <span className="home-name" title={f.name} onClick={() => setInnerId(f.id)}>{f.name}</span>
+                  <span className="home-meta">Folder</span>
+                </div>
+              </div>
+            ))}
+            {designs.map((entry) => {
+              const p = entry.meta;
+              const thumb = loadBinThumbnail(p.id);
+              return (
+                <div key={p.id} className="home-card">
+                  <div className="home-thumb home-bin-thumb" aria-hidden="true">
+                    {thumb ? (
+                      <img src={thumb} alt="" draggable={false} />
+                    ) : (
+                      <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round">
+                        <path d="M12 3 4 7.5v9L12 21l8-4.5v-9z" />
+                        <path d="M4 7.5 12 12l8-4.5M12 12v9" />
+                      </svg>
+                    )}
+                  </div>
+                  <div className="home-cap">
+                    <span className="home-name" title={p.name}>{p.name}</span>
+                    <span className="home-meta">Design</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </>
+    );
+  }
+
   return (
     <>
       <p className="home-bin-note">
@@ -108,14 +187,14 @@ export function BinView({ ask }: BinViewProps) {
             const count = binFolderDesignCount(entry.id);
             const left = binDaysLeft(entry);
             return (
-              <div key={entry.id} className="home-card">
-                <div className="home-thumb home-bin-thumb" aria-hidden="true">
+              <div key={entry.id} className="home-card bin-folder">
+                <div className="home-thumb home-bin-thumb" onClick={() => { setOpenRoot(entry.id); setInnerId(null); }} title="Open to look inside">
                   <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round">
                     <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
                   </svg>
                 </div>
                 <div className="home-cap">
-                  <span className="home-name" title={root?.name}>{root?.name ?? "Folder"}</span>
+                  <span className="home-name" title={root?.name} onClick={() => { setOpenRoot(entry.id); setInnerId(null); }}>{root?.name ?? "Folder"}</span>
                   <span className="home-meta">
                     Folder · {count} {count === 1 ? "design" : "designs"} · {left} {left === 1 ? "day" : "days"} left
                   </span>
