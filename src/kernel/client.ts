@@ -7,7 +7,8 @@ import type { Vec3 } from "../document/types";
 function spawnWorker() {
   const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
   const raw = Comlink.wrap<KernelAPI>(worker);
-  return { worker, raw };
+  // used: has this worker built a scene yet. A brand-new one has not.
+  return { worker, raw, used: false };
 }
 
 // Interactive scene edits must never queue behind an expensive merged result
@@ -375,18 +376,46 @@ async function buildSceneInRounds(
   }
 }
 
+/**
+ * Objects that still failed with the "could not be rebuilt reliably" error on a brand-new worker, each with
+ * the exact spec that failed. That failure is then a fact about the object, not about a worn-out worker, so
+ * trying it again on yet another fresh worker cannot help; it only doubles the wait. On one real design a
+ * single such object made every open build the whole scene twice (about 27s each) and every later edit
+ * throw the warm worker away and start cold.
+ */
+const hopeless = new Map<string, string>();
+
 function buildSceneWithFreshWorkerRetry(
   specs: NodeSpec[],
   onRound?: (build: SceneBuild) => void,
 ): Promise<SceneBuild> {
-  const attempt = () => buildSceneInRounds(specs, onRound);
+  const wasFresh = !sceneCurrent.used;
+  const attempt = () => {
+    sceneCurrent.used = true;
+    return buildSceneInRounds(specs, onRound);
+  };
+  const retryableIds = (build: SceneBuild) =>
+    build.errors.filter((e) => e.message.startsWith(RETRYABLE_MESH_ERROR)).map((e) => e.id);
+  const signature = (id: string) => JSON.stringify(specs.find((spec) => spec.id === id) ?? null);
   return attempt().then((first) => {
-    const retryableCount = (build: SceneBuild) =>
-      build.errors.filter((e) => e.message.startsWith(RETRYABLE_MESH_ERROR)).length;
-    if (retryableCount(first) === 0) return first;
+    const failed = retryableIds(first);
+    if (failed.length === 0) return first;
+    // A worker that had never built anything has nothing to blame: the failure belongs to the object.
+    if (wasFresh) {
+      for (const id of failed) hopeless.set(id, signature(id));
+      return first;
+    }
+    if (failed.every((id) => hopeless.get(id) === signature(id))) return first;
     sceneCurrent.worker.terminate();
     sceneCurrent = spawnWorker();
-    return attempt().then((retried) => (retryableCount(retried) <= retryableCount(first) ? retried : first));
+    return attempt().then((retried) => {
+      const still = new Set(retryableIds(retried));
+      for (const id of failed) {
+        if (still.has(id)) hopeless.set(id, signature(id));
+        else hopeless.delete(id);
+      }
+      return still.size <= failed.length ? retried : first;
+    });
   });
 }
 
