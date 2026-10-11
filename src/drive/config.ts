@@ -46,6 +46,17 @@ export function setClientId(value: string): void {
   }
 }
 
+/**
+ * Address of ShapeForge's sign-in helper (a small Cloudflare Worker, see /worker). With it, Google's
+ * one-hour sign-in is renewed quietly in the background; without it the app asks again each hour.
+ */
+const DEFAULT_AUTH_WORKER_URL = "https://shapeforge-auth.shapeforge-auth-worker.workers.dev";
+
+export function getAuthWorkerUrl(): string {
+  const set = import.meta.env.VITE_AUTH_WORKER_URL as string | undefined;
+  return (set === undefined || set.trim() === "" ? DEFAULT_AUTH_WORKER_URL : set.trim()).replace(/\/+$/, "");
+}
+
 export function driveConfigured(): boolean {
   return getClientId().length > 0;
 }

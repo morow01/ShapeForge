@@ -1,0 +1,11 @@
+name = "shapeforge-auth"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+[vars]
+GOOGLE_CLIENT_ID = "745268397695-5gau81l8m210fnvrgn146s2t8k8uttdp.apps.googleusercontent.com"
+ALLOWED_ORIGINS = "https://morow01.github.io,http://localhost:5173,http://127.0.0.1:5173"
+
+# Secrets (never written here), set once with `npx wrangler secret put <NAME>`:
+#   GOOGLE_CLIENT_SECRET  the client secret from Google Cloud, Clients page
+#   SEAL_KEY              32 random bytes, base64 (see worker/README.md)
