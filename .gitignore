@@ -27,3 +27,6 @@ release
 *.sln
 *.sw?
 *.shapeforge
+
+# Local reference copies of other projects (large, not ours)
+reference/
