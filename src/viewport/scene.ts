@@ -1395,6 +1395,9 @@ export class Scene {
    *  keep its pixels between frames, so a frame is drawn and read in the same call.
    *  The view cube is left out of the picture. */
   captureThumbnail(width = 480, height = 320): string | null {
+    // Nothing drawn yet (a design still building, or one whose objects are all set aside): a picture of the
+    // empty plate would replace a good one, on this computer and, through sync, on every other.
+    if (![...this.parts.values()].some((view) => view.group.visible)) return null;
     const cubeWasVisible = this.navCubeVisible;
     // Frame the whole model for the picture, then put the camera back exactly as it was.
     const savedPosition = this.camera.position.clone();
