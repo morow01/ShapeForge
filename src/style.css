@@ -5862,3 +5862,11 @@ span.status-btn { cursor: default; }
 .home-nav:hover .home-nav-check, .home-nav-check.on { opacity: 1; }
 .home-nav-check.on { background: #00a7a5; border-color: #00a7a5; }
 .home-nav:hover .nav-icon-slot .home-nav-icon, .nav-icon-slot:has(.home-nav-check.on) .home-nav-icon { opacity: 0; }
+
+.sync-check { max-width: 560px; }
+.sync-check-list { list-style: none; margin: 12px 0 6px; padding: 0; display: flex; flex-direction: column; gap: 8px; max-height: 45vh; overflow: auto; }
+.sync-check-list li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 11px; border: 1px solid #d5dde3; border-radius: 8px; }
+.sync-check-list li.driveNewer, .sync-check-list li.thisNewer { border-color: #f1dca4; background: #fffaf0; }
+.sync-check-list li.differs, .sync-check-list li.notOnDrive { border-color: #efb6bb; background: #fff7f8; }
+.sync-check-name { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sync-check-name small { font-size: 12px; color: #6a7a86; line-height: 1.4; }

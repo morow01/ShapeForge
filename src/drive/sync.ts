@@ -1028,6 +1028,84 @@ export async function flushPending(): Promise<void> {
   for (const id of dirtySet()) await pushProject(id);
 }
 
+// ---- checking that this computer and Drive agree ----
+
+export type SyncCheckState = "same" | "driveNewer" | "thisNewer" | "differs" | "driveOnly" | "notOnDrive";
+export type SyncCheckRow = { id: string; name: string; state: SyncCheckState; note: string; open: boolean };
+
+/** Two copies of a design are the same when only default values are spelled differently (a missing "hidden" is "hidden: false"). */
+function withoutDefaults(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutDefaults);
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value as object).sort()) {
+      const v = (value as Record<string, unknown>)[key];
+      if (v === undefined) continue;
+      if ((key === "hidden" || key === "collapsed") && v === false) continue;
+      out[key] = withoutDefaults(v);
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
+ * Compares every design here with its file on Drive and says which side is ahead. Reads only: nothing is
+ * changed. A design is "newer here" when it has changes waiting to be sent, and "newer on Drive" when Drive's
+ * file changed since this computer last sent or fetched it.
+ */
+export async function checkSync(): Promise<SyncCheckRow[]> {
+  const files = await driveApi().listAll();
+  const onDrive = new Map(files.map((f) => [f.id, f]));
+  const openId = useDoc.getState().currentProjectId;
+  const rows: SyncCheckRow[] = [];
+  for (const p of listProjects()) {
+    const open = p.id === openId;
+    const row = (state: SyncCheckState, note: string): SyncCheckRow => ({ id: p.id, name: p.name, state, note, open });
+    if (!p.driveId) {
+      if (hasProjectContents(p.id)) rows.push(row("notOnDrive", "Only on this computer; not saved to Drive."));
+      continue;
+    }
+    const file = onDrive.get(p.driveId);
+    if (!file) {
+      rows.push(row("notOnDrive", "Drive no longer has this design."));
+      continue;
+    }
+    if (!hasProjectContents(p.id)) {
+      rows.push(row("driveOnly", "On Drive only; it downloads when you open it."));
+      continue;
+    }
+    if (p.remote) {
+      // Drive changed since this computer last had it; the old copy here is kept until it is opened or updated.
+      rows.push(row("driveNewer", "Changed on another computer; this copy is older and refreshes when opened."));
+      continue;
+    }
+    const local = loadProject(p.id);
+    const remote = parseProjectFile(await driveApi().downloadText(file.id), p.name);
+    if (!local || !remote) {
+      rows.push(row("differs", "Could not read one of the copies."));
+      continue;
+    }
+    if (JSON.stringify(withoutDefaults(local.nodes)) === JSON.stringify(withoutDefaults(remote.nodes))) {
+      rows.push(row("same", ""));
+      continue;
+    }
+    const waiting = isDirty(p.id);
+    const driveChanged = !!p.driveModified && file.modifiedTime !== p.driveModified;
+    if (waiting && !driveChanged) rows.push(row("thisNewer", "This computer has changes that have not been sent yet."));
+    else if (driveChanged && !waiting) rows.push(row("driveNewer", "Changed on another computer; this copy is older."));
+    else if (waiting && driveChanged) rows.push(row("differs", "Changed in both places since they last matched."));
+    else rows.push(row("differs", "The two copies differ."));
+  }
+  return rows;
+}
+
+/** The safe fix for one row of the check: bring in Drive's newer copy, or send this computer's newer one. */
+export async function fixSyncRow(row: SyncCheckRow): Promise<void> {
+  if (row.state === "driveNewer" && !row.open) await fetchProject(row.id);
+  else if (row.state === "thisNewer") await pushProject(row.id);
+}
+
 /** Runs a Drive job, keeping the connection state and the last error up to date. */
 export async function runSync<T>(job: () => Promise<T>): Promise<T | undefined> {
   const drive = useDrive.getState();

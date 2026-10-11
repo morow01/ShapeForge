@@ -17,6 +17,7 @@ import { connectDrive } from "../drive/actions";
 import { lastSignOut, signOut, wasConnected } from "../drive/auth";
 import { hasBuiltInClientId, hasClientIdOverride } from "../drive/config";
 import { fetchProject, runSync, syncNow } from "../drive/sync";
+import { SyncCheckDialog } from "./SyncCheckDialog";
 import { useDrive } from "../drive/state";
 import { FolderOpenIcon, PlusIcon } from "./icons";
 
@@ -214,6 +215,7 @@ export function HomePage({
   };
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [selectedFolders, setSelectedFolders] = useState<Set<string>>(new Set());
+  const [checkingSync, setCheckingSync] = useState(false);
   const [historyFor, setHistoryFor] = useState<string | null>(null);
   const [tagging, setTagging] = useState<ProjectMeta[] | null>(null);
   const [, setTagTick] = useState(0);
@@ -998,6 +1000,7 @@ export function HomePage({
                 {driveError && <span className="home-drive-error">{driveError}</span>}
                 <div className="home-drive-actions">
                   <button className="home-link" onClick={() => void syncNow()} disabled={driveBusy}>Sync now</button>
+                  <button className="home-link" onClick={() => setCheckingSync(true)} disabled={driveBusy} title="Compare every design with Google Drive">Check sync</button>
                   <button className="home-link" onClick={() => signOut()}>Sign out</button>
                 </div>
               </div>
@@ -1391,6 +1394,8 @@ export function HomePage({
           )}
         </main>
       </div>
+
+      {checkingSync && <SyncCheckDialog onClose={() => setCheckingSync(false)} />}
 
       {nameDialog && (
         <div className="modal-backdrop" onClick={() => setNameDialog(null)}>
