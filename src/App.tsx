@@ -266,6 +266,13 @@ function pruneSkipped(list: SceneNode[], skippedIds: Set<string>): SceneNode[] {
   const out: SceneNode[] = [];
   for (const n of list) {
     if (skippedIds.has(n.id)) continue;
+    // An edit (chamfer, fillet…) wraps its base shape: a skipped node buried in that base has to come out
+    // too, or the edit keeps resending the exact node that was set aside.
+    if (n.type === "edit") {
+      const base = pruneSkipped([n.base], skippedIds)[0] as typeof n.base | undefined;
+      if (base) out.push(base === n.base ? n : { ...n, base });
+      continue;
+    }
     if (isGroup(n)) {
       const children = pruneSkipped(n.children, skippedIds);
       if (!children.length) continue;
