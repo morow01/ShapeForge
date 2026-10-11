@@ -3,6 +3,7 @@ import {
   addRemoteProject,
   collectImportBlobIds,
   deleteProjectStorage,
+  moveToBin,
   hasProjectContents,
   listFolders,
   listProjects,
@@ -35,6 +36,14 @@ const ASSETS_KEY = "cad.drive.assetsId";
 const BLOBS_KEY = "cad.drive.blobs";
 const DIRTY_KEY = "cad.drive.dirty";
 const TRASH_KEY = "cad.drive.trash";
+/**
+ * Folders deleted here whose Drive copy has not been trashed yet, with what has to be moved out of them first
+ * (their designs and subfolders move up when only the folder is deleted). Kept on disk and retried until Drive
+ * accepts it, like a deleted design: a one-shot attempt that was lost (not connected at that moment, the sign-in
+ * had just expired, Drive hiccuped) left the folder in Drive, and the next sync brought it back.
+ */
+const FOLDER_TRASH_KEY = "cad.drive.trashFolders";
+type PendingFolderTrash = { driveId: string; designIds: string[]; subfolderIds: string[] };
 const VERSIONS_KEY = "cad.drive.versionsId";
 const THUMBS_KEY = "cad.drive.thumbsId";
 const THUMB_FILES_KEY = "cad.drive.thumbFiles";
@@ -394,7 +403,11 @@ export async function pullIndex(openProjectId?: string): Promise<string | null> 
   writeJson(BLOBS_KEY, blobMap);
 
   // Folders, parents before children.
-  const allDriveFolders = files.filter((f) => f.mimeType === FOLDER_MIME && f.appProperties?.kind === "folder");
+  // A folder deleted here that Drive has not been told about yet must not be brought back by this very pull.
+  const waitingFolders = new Set(readJson<PendingFolderTrash[]>(FOLDER_TRASH_KEY, []).map((j) => j.driveId));
+  const allDriveFolders = files.filter(
+    (f) => f.mimeType === FOLDER_MIME && f.appProperties?.kind === "folder" && !waitingFolders.has(f.id),
+  );
   // Two Drive folders for one local folder: keep the linked (else newest) one, move anything inside across, trash the rest.
   const linkedDriveIds = new Map(listFolders().map((f) => [f.id, f.driveId]));
   const keepFolder = new Map<string, DriveFile>();
@@ -571,12 +584,20 @@ export async function pullIndex(openProjectId?: string): Promise<string | null> 
     }
   }
 
-  // A design that Drive no longer lists was removed elsewhere. One with nothing here to lose goes
-  // away; one with contents just loses its link and will be sent again the next time it is saved.
+  // A design that Drive no longer lists was removed on another computer. One with nothing here to lose goes
+  // away. One with contents follows the deletion too, through the Bin so it can still be brought back, as long
+  // as nothing in it is waiting to be sent and it is not the one open right now. Otherwise it only loses its
+  // link (and is sent again the next time it is saved), so this never throws away work that exists nowhere else.
   for (const m of metas) {
     if (!m.driveId || seen.has(m.id)) continue;
-    if (!hasProjectContents(m.id) || m.remote) deleteProjectStorage(m.id);
-    else updateProjectMeta(m.id, (x) => { delete x.driveId; });
+    if (!hasProjectContents(m.id) || m.remote) {
+      deleteProjectStorage(m.id);
+    } else if (!isDirty(m.id) && m.id !== openProjectId) {
+      moveToBin(m.id);
+      deleteProjectStorage(m.id);
+    } else {
+      updateProjectMeta(m.id, (x) => { delete x.driveId; });
+    }
   }
   return staleOpen;
 }
@@ -986,6 +1007,24 @@ export async function flushPending(): Promise<void> {
       }
     }
   }
+  const folderJobs = readJson<PendingFolderTrash[]>(FOLDER_TRASH_KEY, []);
+  if (folderJobs.length) {
+    writeJson(FOLDER_TRASH_KEY, []);
+    for (let i = 0; i < folderJobs.length; i++) {
+      const job = folderJobs[i];
+      try {
+        for (const id of job.designIds) {
+          const meta = listProjects().find((p) => p.id === id);
+          if (meta?.driveId) await pushProject(id);
+        }
+        for (const id of job.subfolderIds) await moveFolderOnDrive(id);
+        await trashOnDrive(job.driveId);
+      } catch (error) {
+        writeJson(FOLDER_TRASH_KEY, [...folderJobs.slice(i), ...readJson<PendingFolderTrash[]>(FOLDER_TRASH_KEY, [])]);
+        throw error;
+      }
+    }
+  }
   for (const id of dirtySet()) await pushProject(id);
 }
 
@@ -1121,14 +1160,11 @@ export function installDriveHooks(): void {
   };
   driveHooks.onFolderDeleted = ({ folder, designIds, subfolderIds }) => {
     if (!folder.driveId) return;
-    void runSync(async () => {
-      for (const id of designIds) {
-        const meta = listProjects().find((p) => p.id === id);
-        if (meta?.driveId) await pushProject(id);
-      }
-      for (const id of subfolderIds) await moveFolderOnDrive(id);
-      await trashOnDrive(folder.driveId!);
-    });
+    writeJson(FOLDER_TRASH_KEY, [
+      ...readJson<PendingFolderTrash[]>(FOLDER_TRASH_KEY, []),
+      { driveId: folder.driveId, designIds, subfolderIds },
+    ]);
+    void runSync(flushPending);
   };
 
   // Every edit to a design that lives on Drive is sent a moment later. Opening a design changes

@@ -5834,7 +5834,8 @@ span.status-btn { cursor: default; }
 
 .home-tag.missing { background: #fdecea; color: #a32d2d; border-color: #f2b8b5; }
 
-.canvas-error-btn { margin-left: 10px; padding: 3px 10px; border: 1px solid #c4535d; border-radius: 6px; background: #fff; color: #a7353e; font-size: 12px; font-weight: 600; cursor: pointer; }
+.canvas-error-actions { display: flex; justify-content: flex-end; margin-top: 10px; }
+.canvas-error-btn { padding: 3px 10px; border: 1px solid #c4535d; border-radius: 6px; background: #fff; color: #a7353e; font-size: 12px; font-weight: 600; cursor: pointer; }
 .canvas-error-btn:hover { background: #fff3f4; }
 .missing-files { max-width: 520px; }
 .missing-files-list { list-style: none; margin: 14px 0 6px; padding: 0; display: flex; flex-direction: column; gap: 8px; }
@@ -5850,3 +5851,14 @@ span.status-btn { cursor: default; }
 .missing-files-delete { margin: 6px 0 0; font-size: 12.5px; color: #a7353e; text-align: left; }
 .missing-files-confirm { margin-top: 10px; padding: 10px 12px; border: 1px solid #efb6bb; border-radius: 8px; background: #fff5f6; }
 .missing-files-confirm p { margin: 0 0 8px; font-size: 13px; line-height: 1.45; color: #5a2a30; }
+
+/* The tick box floats over the card's corner, so it never pushes the folder name along. */
+.home-folder { position: relative; }
+.home-folder-check { top: -7px; left: -7px; width: 20px; height: 20px; font-size: 13px; border-radius: 6px; background: #fff; }
+.home-folder:hover .home-folder-check, .home-folder:focus-within .home-folder-check, .home-folder-check.on, .home-folders.has-selection .home-folder-check { opacity: 1; }
+/* In the sidebar the tick box takes the place of the folder icon while hovered or ticked. */
+.nav-icon-slot { position: relative; display: inline-flex; flex: 0 0 auto; width: 18px; height: 18px; align-items: center; justify-content: center; }
+.home-nav-check { position: absolute; inset: -1px; display: flex; align-items: center; justify-content: center; border: 1.5px solid #9aa9b3; border-radius: 5px; background: #fff; color: #fff; font-size: 12px; line-height: 1; opacity: 0; cursor: pointer; }
+.home-nav:hover .home-nav-check, .home-nav-check.on { opacity: 1; }
+.home-nav-check.on { background: #00a7a5; border-color: #00a7a5; }
+.home-nav:hover .nav-icon-slot .home-nav-icon, .nav-icon-slot:has(.home-nav-check.on) .home-nav-icon { opacity: 0; }

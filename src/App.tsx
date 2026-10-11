@@ -5735,7 +5735,9 @@ export function App() {
             <div className="canvas-error" role="alert">
               {error ?? editNotice}
               {missingFileList.length > 0 && (
-                <button className="canvas-error-btn" onClick={() => setLocateOpen(true)}>Locate files…</button>
+                <div className="canvas-error-actions">
+                  <button className="canvas-error-btn" onClick={() => setLocateOpen(true)}>Locate files…</button>
+                </div>
               )}
             </div>
           )}
