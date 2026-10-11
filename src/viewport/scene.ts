@@ -604,6 +604,23 @@ function materialAt(material: THREE.Material | THREE.Material[], index: number):
   return Array.isArray(material) ? material[index] : material;
 }
 
+/** A part made of this many separate faces or edges is drawn with one material, not a list of three.
+ *  three.js draws one call per geometry group when the material is a list, and a revolved or lofted
+ *  curve can come out of the kernel as tens of thousands of tiny faces: measured on a scene of five
+ *  revolved bowls, about 91,000 draw calls every frame, which made orbiting crawl. One material draws the
+ *  whole part in one call. The groups stay on the geometry, so picking a face still works; only the
+ *  per-face hover/selection colour is given up on parts this fragmented. */
+const MANY_GROUPS = 400;
+
+function drawHeavyPartsInOneCall(mesh: THREE.Mesh, wire: THREE.LineSegments) {
+  if (Array.isArray(mesh.material) && (mesh.geometry as THREE.BufferGeometry).groups.length > MANY_GROUPS) {
+    mesh.material = mesh.material[0];
+  }
+  if (Array.isArray(wire.material) && (wire.geometry as THREE.BufferGeometry).groups.length > MANY_GROUPS) {
+    wire.material = wire.material[0];
+  }
+}
+
 const simplifyModifier = new SimplifyModifier();
 /** Below this the part is already cheap enough that decimating it would only
  *  visibly round it off for no real GPU saving. */
@@ -2798,6 +2815,7 @@ export class Scene {
     const occluder = this.makeOccluder(geom[0].faces);
     group.add(m, wire, occluder);
     this.scene.add(group);
+    drawHeavyPartsInOneCall(m, wire);
     const view: PartView = { group, mesh: m, wire, occluder, geom, pivot, isHole, faces, displayMesh: null, ...remembered };
     this.applyDraftGeometry(view);
     return view;
@@ -3779,6 +3797,7 @@ export class Scene {
         view.mesh.visible = view.displayMesh === null || this.displayQuality !== "draft";
         if (view.displayMesh) view.displayMesh.visible = this.displayQuality === "draft";
       }
+      drawHeavyPartsInOneCall(view.mesh, view.wire);
     }
     this.applyCutDiscardClipping();
     for (const [id, groupObj] of this.assemblyGroups) {
@@ -3813,6 +3832,7 @@ export class Scene {
         this.resultView.wire.visible = true;
         this.resultView.occluder.visible = false;
       }
+      drawHeavyPartsInOneCall(this.resultView.mesh, this.resultView.wire);
     }
     this.restoreSelectedFaceHighlight();
     this.updateResizeOverlay();
