@@ -154,6 +154,18 @@ function readSideWidth(): number {
  * the editor rather than replacing it, so the editor stays loaded behind it and
  * "back to the editor" is instant.
  */
+/** Shown on a design that uses imported files this computer does not have. */
+function MissingFilesTag({ count, row }: { count: number; row?: boolean }) {
+  return (
+    <span
+      className={`home-tag missing${row ? " home-row-tag" : ""}`}
+      title={`This design uses ${count} imported ${count === 1 ? "file" : "files"} that ${count === 1 ? "is" : "are"} not on this computer. The objects that need ${count === 1 ? "it" : "them"} are left out. Re-import ${count === 1 ? "it" : "them"}, or open the design on the computer that has ${count === 1 ? "it" : "them"}.`}
+    >
+      {count} {count === 1 ? "file" : "files"} missing
+    </span>
+  );
+}
+
 export function HomePage({
   open,
   onClose,
@@ -1125,6 +1137,7 @@ export function HomePage({
                     <button className="home-row-name" onClick={() => handleOpen(p)} title={p.name}>
                       <span>{p.name}</span>
                       {where !== "drive" && <span className={`home-tag ${where} home-row-tag`}>{where === "draft" ? "Not saved yet" : "This browser"}</span>}
+                      {(p.missingFiles ?? 0) > 0 && <MissingFilesTag count={p.missingFiles!} row />}
                     </button>
                     <span className="col-folder home-row-muted" title={folderName ?? ""}>{folderName ?? "—"}</span>
                     <span className={`col-tags home-row-tags${tagsOpen.has(p.id) ? " open" : ""}`}>
@@ -1275,6 +1288,7 @@ export function HomePage({
                       {where !== "drive" && (
                         <span className={`home-tag ${where}`}>{where === "draft" ? "Not saved yet" : "This browser"}</span>
                       )}
+                      {(p.missingFiles ?? 0) > 0 && <MissingFilesTag count={p.missingFiles!} />}
                     </div>
                   </div>
                 );

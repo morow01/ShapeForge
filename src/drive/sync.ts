@@ -226,11 +226,12 @@ async function driveFolderFor(localFolderId: string | null): Promise<string> {
 
 // ---- sending ----
 
-async function ensureBlobUploaded(blobId: string, assetsId: string): Promise<void> {
+/** True when the file is in Drive afterwards. False when this computer does not have it, so it could not be sent. */
+async function ensureBlobUploaded(blobId: string, assetsId: string): Promise<boolean> {
   const known = readJson<Record<string, string>>(BLOBS_KEY, {});
-  if (known[blobId]) return;
+  if (known[blobId]) return true;
   const bytes = await getBlob(blobId);
-  if (!bytes) return;
+  if (!bytes) return false;
   const file = await driveApi().upload({
     name: blobId,
     parentId: assetsId,
@@ -241,6 +242,7 @@ async function ensureBlobUploaded(blobId: string, assetsId: string): Promise<voi
   });
   known[blobId] = file.id;
   writeJson(BLOBS_KEY, known);
+  return true;
 }
 
 const designFileName = (name: string) => `${name.replace(/[\\/]/g, "-")}.shapeforge`;
@@ -268,7 +270,11 @@ export async function pushProject(id: string, attempt = 0): Promise<void> {
     const { assetsId } = await ensureRoot();
     const blobIds = new Set<string>();
     collectImportBlobIds(project.nodes, blobIds);
-    for (const blobId of blobIds) await ensureBlobUploaded(blobId, assetsId);
+    let notSent = 0;
+    for (const blobId of blobIds) if (!(await ensureBlobUploaded(blobId, assetsId))) notSent++;
+    // A design that points at files nobody can send still goes up (its shapes are worth keeping), but it
+    // is marked, so it is not mistaken for a complete copy.
+    if (notSent) updateProjectMeta(id, (m) => { m.missingFiles = Math.max(m.missingFiles ?? 0, notSent); });
 
     const parentId = await driveFolderFor(meta?.folderId ?? null);
     // A design not linked to a Drive file may still have one (made on another computer): use it, never add a second.

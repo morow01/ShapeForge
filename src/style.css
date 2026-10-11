@@ -5831,3 +5831,5 @@ span.status-btn { cursor: default; }
 .home-bin-crumbs .home-link { font-size: 14px; }
 .home-bin-crumbs .modal-btn { margin-left: auto; }
 .home-card.bin-folder .home-thumb, .home-card.bin-folder .home-name { cursor: pointer; }
+
+.home-tag.missing { background: #fdecea; color: #a32d2d; border-color: #f2b8b5; }
