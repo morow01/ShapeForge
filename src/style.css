@@ -5846,3 +5846,7 @@ span.status-btn { cursor: default; }
 .missing-files-name small.warn { color: #9a6200; }
 .missing-files-pick { cursor: pointer; white-space: nowrap; }
 .missing-files-note { margin: 4px 0 0; font-size: 12.5px; color: #8a5a00; }
+
+.missing-files-delete { margin: 6px 0 0; font-size: 12.5px; color: #a7353e; text-align: left; }
+.missing-files-confirm { margin-top: 10px; padding: 10px 12px; border: 1px solid #efb6bb; border-radius: 8px; background: #fff5f6; }
+.missing-files-confirm p { margin: 0 0 8px; font-size: 13px; line-height: 1.45; color: #5a2a30; }

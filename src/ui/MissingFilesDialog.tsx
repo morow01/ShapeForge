@@ -12,6 +12,10 @@ export type MissingFile = {
 
 type Props = {
   files: MissingFile[];
+  /** How many objects in the design need a missing file. */
+  objectCount: number;
+  /** Deletes those objects from the design. */
+  onDeleteObjects: () => void;
   onClose: () => void;
   /** Called after a file has been stored, so the design can rebuild with it. */
   onRelinked: () => void;
@@ -25,13 +29,14 @@ const stem = (name: string) => name.trim().toLowerCase();
  * that arrived through Drive without them). A chosen file is stored under the exact id the design already
  * uses, so every object that needs it reconnects in place and nothing has to be placed again.
  */
-export function MissingFilesDialog({ files: filesNow, onClose, onRelinked }: Props) {
+export function MissingFilesDialog({ files: filesNow, objectCount, onDeleteObjects, onClose, onRelinked }: Props) {
   // The list the dialog opened with. The design stops reporting a file the moment it is linked, so without
   // this the row would vanish instead of showing the tick.
   const [files] = useState(filesNow);
   const [linked, setLinked] = useState<Record<string, number>>({});
   const [message, setMessage] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const pickAll = useRef<HTMLInputElement>(null);
 
   const store = async (entry: MissingFile, file: File): Promise<boolean> => {
@@ -132,6 +137,31 @@ export function MissingFilesDialog({ files: filesNow, onClose, onRelinked }: Pro
           })}
         </ul>
         {message && <p className="missing-files-note">{message}</p>}
+        {left > 0 && !confirmDelete && (
+          <button className="home-link missing-files-delete" onClick={() => setConfirmDelete(true)}>
+            No longer need them? Delete the objects that use these files…
+          </button>
+        )}
+        {left > 0 && confirmDelete && (
+          <div className="missing-files-confirm" role="alert">
+            <p>
+              Delete the <strong>{objectCount}</strong> {objectCount === 1 ? "object" : "objects"} that need the missing{" "}
+              {left === 1 ? "file" : "files"}? The rest of the design stays as it is. You can bring them back with Undo.
+            </p>
+            <div className="save-buttons">
+              <button className="modal-btn" onClick={() => setConfirmDelete(false)}>Keep them</button>
+              <button
+                className="modal-btn destructive"
+                onClick={() => {
+                  onDeleteObjects();
+                  onClose();
+                }}
+              >
+                Delete {objectCount} {objectCount === 1 ? "object" : "objects"}
+              </button>
+            </div>
+          </div>
+        )}
         <div className="save-buttons">
           {left > 1 && (
             <>

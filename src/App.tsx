@@ -8356,6 +8356,11 @@ export function App() {
       {locateOpen && (
         <MissingFilesDialog
           files={missingFileList}
+          objectCount={missingFileIds?.size ?? 0}
+          onDeleteObjects={() => {
+            useDoc.getState().removeNodesDeep([...(missingFileIds ?? [])]);
+            setFilesNonce((n) => n + 1);
+          }}
           onClose={() => setLocateOpen(false)}
           onRelinked={() => {
             setFilesNonce((n) => n + 1);

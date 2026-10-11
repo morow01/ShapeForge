@@ -3,7 +3,7 @@ import { useStore } from "zustand";
 import { temporal } from "zundo";
 import type { TemporalState } from "zundo";
 import { DEFAULT_OBJECT_COLOR, PRIMITIVES, TINKERCAD_COLORS, isGroup } from "./types";
-import { extractNodes, findAssemblyOwner, findNode, firstRootIndex, resolveNodeColor, updateNode, walk } from "./tree";
+import { extractNodes, findAssemblyOwner, findNode, firstRootIndex, removeNodesDeep as removeNodesDeepInTree, resolveNodeColor, updateNode, walk } from "./tree";
 import { bakeScale } from "./bake";
 import {
   applyMatrix,
@@ -786,6 +786,8 @@ interface DocState {
   /** Replace the underlying mesh blob for an imported STL (e.g. after simplification). */
   replaceImportBlob: (id: string, blobId: string, byteSize: number) => void;
   removeSelected: () => void;
+  /** Deletes these nodes wherever they are (see removeNodesDeep). Goes through undo like any edit. */
+  removeNodesDeep: (ids: string[]) => void;
   select: (id: string | null, additive?: boolean) => void;
   selectMany: (ids: string[], additive?: boolean) => void;
   setParam: (id: string, key: string, value: number) => void;
@@ -1241,6 +1243,15 @@ export const useDoc = create<DocState>()(
           nodes: extractNodes(s.nodes, new Set(s.selectedIds)).remaining,
           selectedIds: [],
         })),
+
+      removeNodesDeep: (ids) =>
+        set((s) => {
+          const gone = new Set(ids);
+          return {
+            nodes: removeNodesDeepInTree(s.nodes, gone),
+            selectedIds: s.selectedIds.filter((id) => !gone.has(id)),
+          };
+        }),
 
       select: (id, additive = false) =>
         set((s) => {
