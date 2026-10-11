@@ -1405,8 +1405,25 @@ export class Scene {
     const savedFrustum = this.camera instanceof THREE.OrthographicCamera
       ? { left: this.camera.left, right: this.camera.right, top: this.camera.top, bottom: this.camera.bottom }
       : null;
+    const savedAspect = this.camera instanceof THREE.PerspectiveCamera ? this.camera.aspect : null;
+    const savedPixelRatio = this.renderer.getPixelRatio();
     try {
       this.navCubeVisible = false;
+      // Draw the picture at the card's own shape (3:2), whatever shape the editor window is. Taking it from the
+      // window's own canvas gave a tall picture in a tall window, framed for that window and then cut down to
+      // the card: far too zoomed in, and different on every computer.
+      const shapeAspect = width / height;
+      this.renderer.setPixelRatio(1);
+      this.renderer.setSize(width * 2, height * 2, false);
+      this.aspectOverride = shapeAspect;
+      if (this.camera instanceof THREE.PerspectiveCamera) {
+        this.camera.aspect = shapeAspect;
+      } else {
+        const halfH = (this.camera.top - this.camera.bottom) / 2;
+        this.camera.left = -halfH * shapeAspect;
+        this.camera.right = halfH * shapeAspect;
+      }
+      this.camera.updateProjectionMatrix();
       const visibleIds = [...this.parts.entries()].filter(([, view]) => view.group.visible).map(([id]) => id);
       if (visibleIds.length) this.zoomToFit(visibleIds, true);
       this.renderFrame();
@@ -1449,6 +1466,13 @@ export class Scene {
     } catch {
       return null;
     } finally {
+      this.aspectOverride = null;
+      this.renderer.setPixelRatio(savedPixelRatio);
+      this.renderer.setSize(this.host.clientWidth, this.host.clientHeight);
+      if (savedAspect !== null && this.camera instanceof THREE.PerspectiveCamera) {
+        this.camera.aspect = savedAspect;
+        this.camera.updateProjectionMatrix();
+      }
       this.navCubeVisible = cubeWasVisible;
       this.camera.position.copy(savedPosition);
       this.controls.target.copy(savedTarget);
@@ -2202,7 +2226,11 @@ export class Scene {
     return cam;
   }
 
+  /** Set while a thumbnail is drawn, so "fit to view" frames the picture's own shape, not the editor window's. */
+  private aspectOverride: number | null = null;
+
   private aspect(): number {
+    if (this.aspectOverride) return this.aspectOverride;
     return this.host.clientWidth / Math.max(1, this.host.clientHeight);
   }
 

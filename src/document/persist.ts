@@ -494,12 +494,36 @@ export function deleteFolderEntry(id: string): void {
 /** Set by the Drive code, so a new preview picture can be sent along with the design. */
 export const thumbnailHooks: { onSaved?: (id: string) => void } = {};
 
-export function saveThumbnail(id: string, dataUrl: string): void {
+/** When each picture was drawn. Sync keeps the newest one everywhere, so every picture carries its time. */
+const THUMB_AT_PREFIX = "cad.thumbAt.";
+
+/** `at` is when the picture was drawn: now for one made here, Drive's recorded time for one fetched from Drive. */
+export function saveThumbnail(id: string, dataUrl: string, at: number = Date.now()): void {
   try {
     localStorage.setItem(THUMB_PREFIX + id, dataUrl);
+    localStorage.setItem(THUMB_AT_PREFIX + id, String(at));
     thumbnailHooks.onSaved?.(id);
   } catch {
     /* a thumbnail is never worth failing for */
+  }
+}
+
+/** When this design's picture was drawn; 0 for one made before pictures were dated, or none at all. */
+export function thumbnailStamp(id: string): number {
+  try {
+    const value = Number(localStorage.getItem(THUMB_AT_PREFIX + id));
+    return Number.isFinite(value) ? value : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Dates a picture that already exists, without changing it. */
+export function stampThumbnail(id: string, at: number): void {
+  try {
+    localStorage.setItem(THUMB_AT_PREFIX + id, String(at));
+  } catch {
+    /* it just stays undated */
   }
 }
 
@@ -799,6 +823,7 @@ export function deleteProjectStorage(id: string): boolean {
   try {
     localStorage.removeItem(PROJECT_PREFIX + id);
     localStorage.removeItem(THUMB_PREFIX + id);
+    localStorage.removeItem(THUMB_AT_PREFIX + id);
     const raw = localStorage.getItem(INDEX_KEY);
     if (raw) {
       const list = (JSON.parse(raw) as ProjectMeta[]).filter((p) => p.id !== id);

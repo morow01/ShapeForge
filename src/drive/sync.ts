@@ -13,7 +13,9 @@ import {
   saveProject,
   saveThumbnail,
   setProjectLocation,
+  stampThumbnail,
   thumbnailHooks,
+  thumbnailStamp,
   updateProjectMeta,
   writeFolderList,
 } from "../document/persist";
@@ -25,6 +27,7 @@ import { getAccessToken, hasToken, signedOutByGoogle } from "./auth";
 import { APP_FOLDER_NAME, ASSETS_FOLDER_NAME } from "./config";
 import { useDrive } from "./state";
 import { createSerialRunner } from "./serial";
+import { thumbnailAction } from "./thumbRules";
 import { decodeTags, encodeTags } from "../document/tags";
 
 /* Keeps the designs and folders in this browser matched to the ShapeForge folder in Google Drive.
@@ -119,7 +122,12 @@ export function resetDriveCaches(): void {
 const dirtySet = (): Set<string> => new Set(readJson<string[]>(DIRTY_KEY, []));
 const saveDirty = (set: Set<string>) => writeJson(DIRTY_KEY, [...set]);
 
+/** Counts every change marked on a design, so a send can tell whether it changed again while it was uploading. */
+const changeCount = new Map<string, number>();
+const changesOf = (id: string): number => changeCount.get(id) ?? 0;
+
 export function markDirty(id: string): void {
+  changeCount.set(id, changesOf(id) + 1);
   const set = dirtySet();
   set.add(id);
   saveDirty(set);
@@ -272,6 +280,7 @@ function designJson(project: ProjectData): string {
 
 /** Sends one design (and any imported files it uses) to Drive, creating or replacing its file. */
 export async function pushProject(id: string, attempt = 0): Promise<void> {
+  const changesAtStart = changesOf(id);
   const project = loadProject(id);
   if (!project) return;
   const meta = listProjects().find((p) => p.id === id);
@@ -316,7 +325,10 @@ export async function pushProject(id: string, attempt = 0): Promise<void> {
       m.driveModified = file.modifiedTime;
       delete m.remote;
     });
-    clearDirty(id);
+    // Changed again (renamed, edited) while this was uploading: what Drive now holds is already out of date, so the
+    // design stays marked and the send already queued for that change goes out. Clearing it here would let the
+    // next sync take Drive's older name and contents over the newer ones.
+    if (changesOf(id) === changesAtStart) clearDirty(id);
     try {
       await maybeAutoVersion(project);
     } catch {
@@ -635,13 +647,6 @@ async function refreshOpenDesign(id: string): Promise<void> {
 /* A design's preview picture is made on the computer that drew it, so each one is also kept as its own small
    file in a hidden Drive folder. A computer that has never opened a design fetches just the pictures it lacks. */
 
-/** A cheap fingerprint of a picture, to tell whether it changed since it was last sent. */
-function thumbSig(dataUrl: string): string {
-  let h = 5381;
-  for (let i = 0; i < dataUrl.length; i += 7) h = ((h << 5) + h + dataUrl.charCodeAt(i)) | 0;
-  return `${dataUrl.length}:${(h >>> 0).toString(36)}`;
-}
-
 /** Sets one entry of a small list kept in storage, reading the list fresh so a stale copy never overwrites another job's entry. */
 function setEntry(key: string, id: string, value: string | undefined): void {
   const map = readJson<Record<string, string>>(key, {});
@@ -678,13 +683,17 @@ async function refreshThumbMap(): Promise<Record<string, string>> {
   return map;
 }
 
-/** Sends a design's preview picture to Drive, unless Drive already has this exact picture. */
+/** Sends a design's preview picture to Drive, unless Drive already has this very picture (same drawn-at time). */
 export async function pushThumbnail(id: string, attempt = 0): Promise<void> {
   const thumb = loadThumbnail(id);
   if (!thumb) return;
-  const sig = thumbSig(thumb);
-  const sigs = readJson<Record<string, string>>(THUMB_SIGS_KEY, {});
-  if (sigs[id] === sig) return;
+  // A picture with no time (made before pictures were dated) is dated now: it is only sent when Drive has none.
+  let at = thumbnailStamp(id);
+  if (!at) {
+    at = Date.now();
+    stampThumbnail(id, at);
+  }
+  if (readJson<Record<string, string>>(THUMB_SIGS_KEY, {})[id] === String(at)) return;
   const parentId = await ensureThumbsFolder();
   let files = readJson<Record<string, string>>(THUMB_FILES_KEY, {});
   if (!files[id]) files = await refreshThumbMap();
@@ -696,50 +705,55 @@ export async function pushThumbnail(id: string, attempt = 0): Promise<void> {
       mimeType: "text/plain",
       body: thumb,
       kind: "thumb",
-      properties: { localId: id, sig },
+      properties: { localId: id, at: String(at) },
     });
     setEntry(THUMB_FILES_KEY, id, file.id);
-    setEntry(THUMB_SIGS_KEY, id, sig);
+    setEntry(THUMB_SIGS_KEY, id, String(at));
   } catch (error) {
     // The remembered file is gone from Drive: forget it and send a fresh one.
     if (error instanceof DriveError && error.status === 404 && attempt === 0) {
-      delete files[id];
-      writeJson(THUMB_FILES_KEY, files);
+      setEntry(THUMB_FILES_KEY, id, undefined);
       return pushThumbnail(id, 1);
     }
     throw error;
   }
 }
 
-/** Fetches the pictures this computer lacks, and sends the ones Drive lacks. */
+/**
+ * Brings the preview pictures level with Drive's by one rule: the newest picture wins (see thumbnailAction).
+ * Newer on Drive: fetched. Newer here, or Drive has none: sent.
+ */
 async function syncThumbnails(): Promise<void> {
   const remote = await driveApi().listAuxByKind("thumb");
   const files: Record<string, string> = {};
   for (const f of remote) if (f.appProperties?.localId) files[f.appProperties.localId] = f.id;
   writeJson(THUMB_FILES_KEY, files);
 
-  const sigs = readJson<Record<string, string>>(THUMB_SIGS_KEY, {});
   const projects = listProjects();
+  const remoteAt = new Map<string, number>();
   let fetched = 0;
   for (const f of remote) {
     const id = f.appProperties?.localId;
     if (!id || !projects.some((p) => p.id === id)) continue;
-    const remoteSig = f.appProperties?.sig ?? "";
-    const local = loadThumbnail(id);
-    // Missing here, or changed on another computer while this one's has not changed since it was last sent.
-    const needed = !local || (!!remoteSig && remoteSig !== sigs[id] && thumbSig(local) === sigs[id]);
-    if (!needed) continue;
+    const at = Number(f.appProperties?.at) || Date.parse(f.modifiedTime ?? "") || 0;
+    remoteAt.set(id, at);
+    const hasLocal = !!loadThumbnail(id);
+    if (thumbnailAction({ has: hasLocal, at: hasLocal ? thumbnailStamp(id) : 0 }, { has: true, at }) !== "pull") continue;
     if (fetched++ >= 40) break;
     const text = await driveApi().downloadText(f.id);
     if (!text.startsWith("data:image")) continue;
-    setEntry(THUMB_SIGS_KEY, id, thumbSig(text));
-    saveThumbnail(id, text);
+    // Recorded as "already on Drive" before it is saved, so saving it does not send it straight back.
+    setEntry(THUMB_SIGS_KEY, id, String(at));
+    saveThumbnail(id, text, at);
   }
 
-  // Pictures made here that Drive has never had (designs saved before this existed).
+  // Pictures made here that are newer than Drive's, or that Drive has never had.
   let sent = 0;
   for (const p of projects) {
-    if (p.location !== "drive" || p.remote || files[p.id] || !loadThumbnail(p.id)) continue;
+    if (p.location !== "drive" || p.remote || !loadThumbnail(p.id)) continue;
+    const there = remoteAt.get(p.id);
+    const action = thumbnailAction({ has: true, at: thumbnailStamp(p.id) }, { has: there !== undefined, at: there ?? 0 });
+    if (action !== "push") continue;
     if (sent++ >= 25) break;
     await pushThumbnail(p.id);
   }
