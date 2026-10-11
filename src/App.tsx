@@ -14,6 +14,8 @@ import { Tree } from "./ui/Tree";
 import { HomePage } from "./ui/HomePage";
 import { SaveDialog } from "./ui/SaveDialog";
 import { VersionHistoryDialog } from "./ui/VersionHistoryDialog";
+import { MissingFilesDialog } from "./ui/MissingFilesDialog";
+import type { MissingFile } from "./ui/MissingFilesDialog";
 import { installDriveHooks, startAutoSync, syncNow } from "./drive/sync";
 import { useDrive } from "./drive/state";
 import { armQuietReconnect, restoreSession } from "./drive/auth";
@@ -101,6 +103,7 @@ import {
   beginHistoryBatch,
   copySelected,
   cutSelected,
+  driveHooks,
   getEffectiveDefaults,
   endHistoryBatch,
   pasteClipboard,
@@ -2487,6 +2490,9 @@ export function App() {
   // empty. They are set aside up front instead, so everything else builds at once.
   // null = not checked yet, so the first build waits for the answer.
   const [missingFileIds, setMissingFileIds] = useState<Set<string> | null>(null);
+  // Bumped after a file is chosen in the Locate dialog, to look at storage again.
+  const [filesNonce, setFilesNonce] = useState(0);
+  const [locateOpen, setLocateOpen] = useState(false);
   const importFilesKey = useMemo(() => {
     const found: string[] = [];
     const walk = (list: SceneNode[]) => {
@@ -2525,7 +2531,25 @@ export function App() {
     return () => {
       stale = true;
     };
-  }, [importFilesKey]);
+  }, [importFilesKey, filesNonce]);
+  const missingFileList = useMemo<MissingFile[]>(() => {
+    if (!missingFileIds?.size) return [];
+    const byBlob = new Map<string, MissingFile>();
+    const walk = (list: SceneNode[]) => {
+      for (const n of list) {
+        if (n.type === "import") {
+          if (!missingFileIds.has(n.id)) continue;
+          const known = byBlob.get(n.blobId);
+          if (known) known.uses++;
+          else byBlob.set(n.blobId, { blobId: n.blobId, fileName: n.fileName, byteSize: n.byteSize, uses: 1 });
+        } else if (n.type === "group") walk(n.children);
+        else if (n.type === "build") walk(n.sources);
+        else if (n.type === "edit") walk([n.base]);
+      }
+    };
+    walk(nodes);
+    return [...byBlob.values()];
+  }, [nodes, missingFileIds]);
   const allSkipped = useMemo(() => {
     if (!missingFileIds?.size) return skippedIds;
     const all = new Set(skippedIds);
@@ -5699,7 +5723,12 @@ export function App() {
             </div>
           )}
           {(error || editNotice) && (
-            <div className="canvas-error" role="alert">{error ?? editNotice}</div>
+            <div className="canvas-error" role="alert">
+              {error ?? editNotice}
+              {missingFileList.length > 0 && (
+                <button className="canvas-error-btn" onClick={() => setLocateOpen(true)}>Locate files…</button>
+              )}
+            </div>
           )}
           {/* Only while a FILE is opening. During an ordinary edit this read
               as a warning about a file the user was not opening. */}
@@ -8324,6 +8353,17 @@ export function App() {
       />
 
       <VersionHistoryDialog open={historyOpen} projectId={currentProjectId} onClose={() => setHistoryOpen(false)} />
+      {locateOpen && (
+        <MissingFilesDialog
+          files={missingFileList}
+          onClose={() => setLocateOpen(false)}
+          onRelinked={() => {
+            setFilesNonce((n) => n + 1);
+            // The design now has files Drive may not: queue it so they are uploaded too.
+            driveHooks.onProjectChanged?.(useDoc.getState().currentProjectId);
+          }}
+        />
+      )}
       <SaveDialog
         open={saveDialogOpen}
         name={projectName}
