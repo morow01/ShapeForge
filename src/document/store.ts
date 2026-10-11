@@ -757,6 +757,8 @@ interface DocState {
   moveProjectsToLocation: (ids: string[], location: ProjectLocation) => void;
   /** Stars every design given, or removes the star when they all have one already. */
   toggleStar: (ids: string[]) => void;
+  /** Records how many imported files a design is missing, so its card on the Home page can say so. */
+  setMissingFiles: (id: string, count: number) => void;
   /** Adds and removes tags on several designs at once. False if a design could not hold them all. */
   editTags: (ids: string[], add: string[], remove: string[]) => boolean;
   exportCurrentProject: () => Promise<void>;
@@ -1061,6 +1063,15 @@ export const useDoc = create<DocState>()(
         setProjectFolder(projectId, folderId);
         set({ projects: listProjects() });
         driveHooks.onProjectChanged?.(projectId);
+      },
+
+      setMissingFiles: (id, count) => {
+        if ((listProjects().find((p) => p.id === id)?.missingFiles ?? 0) === count) return;
+        updateProjectMeta(id, (m) => {
+          if (count > 0) m.missingFiles = count;
+          else delete m.missingFiles;
+        });
+        set({ projects: listProjects() });
       },
 
       toggleStar: (ids) => {

@@ -2507,6 +2507,7 @@ export function App() {
       .then((gone) => {
         if (stale) return;
         const lost = entries.filter((e) => gone.includes(e[1]));
+        useDoc.getState().setMissingFiles(useDoc.getState().currentProjectId, gone.length);
         setMissingFileIds((prev) => {
           const next = new Set(lost.map((e) => e[0]));
           return prev && prev.size === next.size && [...next].every((x) => prev.has(x)) ? prev : next;

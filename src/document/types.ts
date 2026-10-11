@@ -1874,6 +1874,9 @@ export interface ProjectMeta {
   /** Short labels the person added, for finding designs across folders. */
   tags?: string[];
   starred?: boolean;
+  /** How many imported files this design uses that are not on this computer (or never reached Drive).
+   *  Set when that is discovered, so the Home page can warn before anyone opens it. */
+  missingFiles?: number;
 }
 
 export interface ProjectData {
