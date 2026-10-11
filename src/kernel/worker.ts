@@ -131,10 +131,20 @@ const EXPORT_PRESETS: Record<ExportQuality, MeshQuality> = {
  *  the middle setting rather than whatever an export happens to ask for. */
 const EXPORT_QUALITY: MeshQuality = EXPORT_PRESETS.standard;
 
+/** Neighbouring triangles that bend away from each other by less than this belong to one smooth surface. */
+const SMOOTH_PATCH_DEGREES = 20;
+/** Only pieces smaller than this share of the whole surface join a smooth patch, so a big flat face
+ *  next to a gentle curve stays its own face. A thin strip of a curved surface is tiny by area however
+ *  many triangles it holds. */
+const SMOOTH_PATCH_MAX_AREA_SHARE = 0.02;
+
 /**
  * Converts a MeshShape into CAD-style meshed faces and sharp feature edges.
  * Segments connected coplanar triangles into individual faceGroups so that each
  * planar face can be independently hovered, selected, and pushed/pulled.
+ * On a curved surface no two triangles are coplanar, so the flat pieces are then joined into one
+ * smooth patch wherever they bend gently into each other (a revolved bowl is one face, not 18,000),
+ * which is what a CAD kernel would report and what keeps the draw call count sane.
  * Extracts sharp dihedral edges so the wireframe and edge mode can select and chamfer edges.
  */
 function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdges } {
@@ -156,6 +166,8 @@ function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdg
   // Calculate face normals and plane offsets for every triangle
   const triNormals = new Float32Array(numTris * 3);
   const triPlanes = new Float32Array(numTris);
+  const triAreas = new Float32Array(numTris);
+  let totalArea = 0;
 
   for (let t = 0; t < numTris; t++) {
     const i0 = raw.triangles[t * 3] * 3;
@@ -179,6 +191,8 @@ function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdg
     triNormals[t * 3 + 1] = ny;
     triNormals[t * 3 + 2] = nz;
     triPlanes[t] = nx * ax + ny * ay + nz * az;
+    triAreas[t] = len / 2;
+    totalArea += len / 2;
   }
 
   // Build spatial vertex map so coincident vertices across seams/disconnected buffers share edges
@@ -271,6 +285,50 @@ function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdg
     groupedTriangles.push(group);
   }
 
+  // Join the small pieces of a curved surface into smooth patches.
+  const triGroup = new Int32Array(numTris);
+  for (let g = 0; g < groupedTriangles.length; g++) for (const t of groupedTriangles[g]) triGroup[t] = g;
+  const parent = Int32Array.from({ length: groupedTriangles.length }, (_, i) => i);
+  const find = (x: number): number => {
+    while (parent[x] !== x) {
+      parent[x] = parent[parent[x]];
+      x = parent[x];
+    }
+    return x;
+  };
+  const groupArea = groupedTriangles.map((tris) => tris.reduce((sum, t) => sum + triAreas[t], 0));
+  const maxPatchPiece = totalArea * SMOOTH_PATCH_MAX_AREA_SHARE;
+  const smoothDot = Math.cos((SMOOTH_PATCH_DEGREES * Math.PI) / 180);
+  for (const tris of edgeToTris.values()) {
+    if (tris.length !== 2) continue;
+    const gA = triGroup[tris[0]];
+    const gB = triGroup[tris[1]];
+    if (gA === gB) continue;
+    if (groupArea[gA] > maxPatchPiece || groupArea[gB] > maxPatchPiece) continue;
+    const a = tris[0] * 3;
+    const b = tris[1] * 3;
+    const dot = triNormals[a] * triNormals[b] + triNormals[a + 1] * triNormals[b + 1] + triNormals[a + 2] * triNormals[b + 2];
+    if (dot < smoothDot) continue;
+    const rA = find(gA);
+    const rB = find(gB);
+    if (rA !== rB) parent[Math.max(rA, rB)] = Math.min(rA, rB);
+  }
+  const mergedGroups: number[][] = [];
+  const rootToMerged = new Map<number, number>();
+  for (let g = 0; g < groupedTriangles.length; g++) {
+    const root = find(g);
+    let at = rootToMerged.get(root);
+    if (at === undefined) {
+      at = mergedGroups.length;
+      rootToMerged.set(root, at);
+      mergedGroups.push([]);
+    }
+    for (const t of groupedTriangles[g]) mergedGroups[at].push(t);
+  }
+  groupedTriangles.length = 0;
+  groupedTriangles.push(...mergedGroups);
+  for (let g = 0; g < groupedTriangles.length; g++) for (const t of groupedTriangles[g]) triGroup[t] = g;
+
   // Reorder triangles so each faceGroup has contiguous triangles
   const reorderedTriangles = new Uint32Array(raw.triangles.length);
   const faceGroups: { start: number; count: number; faceId: number }[] = [];
@@ -305,8 +363,9 @@ function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdg
                   triNormals[tA * 3 + 1] * triNormals[tB * 3 + 1] +
                   triNormals[tA * 3 + 2] * triNormals[tB * 3 + 2];
       // Dihedral angle > 2.5 deg (dot < 0.999) represents visible feature creases/facets,
-      // while filtering out flat coplanar diagonals
-      if (dot < 0.999) {
+      // while filtering out flat coplanar diagonals. An edge inside one smooth patch is only a facet
+      // of the tessellation, not a feature, so only the borders between patches count.
+      if (dot < 0.999 && triGroup[tA] !== triGroup[tB]) {
         isSharp = true;
       }
     }
