@@ -1,4 +1,4 @@
-import { DRIVE_SCOPES, getClientId } from "./config";
+import { DRIVE_SCOPES, getAuthWorkerUrl, getClientId } from "./config";
 import { useDrive } from "./state";
 
 /* Sign-in uses Google's token flow: a popup asks for permission once, and the app then holds a
@@ -7,9 +7,18 @@ import { useDrive } from "./state";
 
 type TokenResponse = { access_token?: string; expires_in?: number | string; error?: string; error_description?: string };
 type TokenClient = { requestAccessToken: (options?: { prompt?: string }) => void };
+type CodeResponse = { code?: string; error?: string; error_description?: string };
+type CodeClient = { requestCode: () => void };
 type GoogleApi = {
   accounts: {
     oauth2: {
+      initCodeClient: (config: {
+        client_id: string;
+        scope: string;
+        ux_mode: "popup";
+        callback: (response: CodeResponse) => void;
+        error_callback?: (error: { type?: string; message?: string }) => void;
+      }) => CodeClient;
       initTokenClient: (config: {
         client_id: string;
         scope: string;
@@ -103,7 +112,136 @@ function ensureClient(): TokenClient {
   return client;
 }
 
+/* With the helper configured, signing in uses Google's "code" flow: the popup returns a one-time code, the
+   helper swaps it for an access token plus a sealed renewal key, and the key is kept here. When the hour is
+   up the helper trades the key for a fresh token, with no popup and no click. */
+const SEALED_KEY = "cad.driveSealed";
+
+function readSealed(): string | null {
+  try {
+    return localStorage.getItem(SEALED_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function writeSealed(value: string | null) {
+  try {
+    if (value) localStorage.setItem(SEALED_KEY, value);
+    else localStorage.removeItem(SEALED_KEY);
+  } catch {
+    /* the next hour will ask again */
+  }
+}
+
+type WorkerReply = { access_token?: string; expires_in?: number | string; scope?: string; sealed?: string | null; error?: string; error_description?: string };
+
+async function callWorker(path: string, body: Record<string, string>): Promise<{ status: number; data: WorkerReply }> {
+  const res = await fetch(getAuthWorkerUrl() + path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  let data: WorkerReply = {};
+  try {
+    data = (await res.json()) as WorkerReply;
+  } catch {
+    /* not JSON */
+  }
+  return { status: res.status, data };
+}
+
+function acceptToken(data: WorkerReply) {
+  token = {
+    value: data.access_token!,
+    expiresAt: Date.now() + (Number(data.expires_in) || 3600) * 1000 - 60_000,
+  };
+  rememberToken();
+  watchExpiry();
+}
+
+let codeClient: CodeClient | null = null;
+let codeClientFor = "";
+let codePending: { resolve: (code: string) => void; reject: (error: Error) => void } | null = null;
+
+function ensureCodeClient(): CodeClient {
+  const id = getClientId();
+  if (codeClient && codeClientFor === id) return codeClient;
+  codeClientFor = id;
+  codeClient = google()!.accounts.oauth2.initCodeClient({
+    client_id: id,
+    scope: DRIVE_SCOPES,
+    ux_mode: "popup",
+    callback: (response) => {
+      const waiting = codePending;
+      codePending = null;
+      if (response.error || !response.code) waiting?.reject(new Error(response.error_description || response.error || "Sign-in failed."));
+      else waiting?.resolve(response.code);
+    },
+    error_callback: (error) => {
+      const waiting = codePending;
+      codePending = null;
+      waiting?.reject(
+        new Error(
+          error?.type === "popup_closed"
+            ? "Sign-in was cancelled."
+            : error?.type === "popup_failed_to_open"
+              ? "The Google sign-in window was blocked. Allow pop-ups for this site, then click Connect."
+              : error?.message || "Sign-in failed.",
+        ),
+      );
+    },
+  });
+  return codeClient;
+}
+
+async function requestTokenViaWorker(): Promise<string> {
+  await loadGoogleScript();
+  const c = ensureCodeClient();
+  const code = await new Promise<string>((resolve, reject) => {
+    codePending = { resolve, reject };
+    c.requestCode();
+  });
+  const { status, data } = await callWorker("/exchange", { code });
+  if (status !== 200 || !data.access_token) throw new Error(data.error_description || data.error || "The sign-in helper could not finish signing in.");
+  if (data.scope && !data.scope.includes(DRIVE_FILE_SCOPE)) {
+    throw new Error("The Drive permission wasn't ticked. Sign out, connect again, and tick the Google Drive box before clicking Continue.");
+  }
+  writeSealed(data.sealed ?? null);
+  acceptToken(data);
+  return data.access_token;
+}
+
+/** A new access token from the sealed renewal key, with no popup. Null when there is no key or Google no longer honours it. */
+let renewing: Promise<boolean> | null = null;
+export function renewQuietly(): Promise<boolean> {
+  const sealed = readSealed();
+  if (!sealed || !getAuthWorkerUrl()) return Promise.resolve(false);
+  if (!renewing) {
+    renewing = (async () => {
+      try {
+        const { status, data } = await callWorker("/refresh", { sealed });
+        if (status === 200 && data.access_token) {
+          acceptToken(data);
+          return true;
+        }
+        // Google no longer honours the key (revoked, or the account changed): a real sign-in is needed.
+        if (status === 401) writeSealed(null);
+      } catch {
+        /* the helper could not be reached: try again later, or fall back to the popup */
+      }
+      return false;
+    })().finally(() => {
+      renewing = null;
+    });
+  }
+  return renewing;
+}
+
 async function requestToken(prompt: "" | "consent"): Promise<string> {
+  // Google only hands out a renewal key at the moment of first agreeing, so a device that signed in before
+  // the helper existed needs one Sign out and Connect to get one.
+  if (getAuthWorkerUrl()) return requestTokenViaWorker();
   await loadGoogleScript();
   const c = ensureClient();
   return new Promise<string>((resolve, reject) => {
@@ -136,9 +274,12 @@ function watchExpiry() {
   expiryTimer = setTimeout(() => {
     if (token && Date.now() < token.expiresAt) return watchExpiry();
     token = null;
-    noteSignedOut("Google's one-hour sign-in ran out.");
-    useDrive.getState().setStatus("signedOut");
-    armQuietReconnect();
+    void renewQuietly().then((renewed) => {
+      if (renewed) return;
+      noteSignedOut("Google's one-hour sign-in ran out.");
+      useDrive.getState().setStatus("signedOut");
+      armQuietReconnect();
+    });
   }, Math.max(1000, token.expiresAt - Date.now() + 500));
 }
 
@@ -204,6 +345,18 @@ export function restoreSession(): void {
       | null;
     if (loadSavedToken()) {
       useDrive.getState().setStatus("signedIn", saved?.email ?? null);
+    } else if (wasConnected() && readSealed() && getAuthWorkerUrl()) {
+      // The hour is up, but the sealed key can still get a new one without asking.
+      useDrive.getState().setStatus("connecting");
+      void renewQuietly().then((renewed) => {
+        if (renewed) {
+          useDrive.getState().setStatus("signedIn", saved?.email ?? null);
+        } else {
+          noteSignedOut("The saved Google sign-in had run out and could not be renewed.");
+          useDrive.getState().setStatus("signedOut");
+          armQuietReconnect();
+        }
+      });
     } else {
       localStorage.removeItem(TOKEN_KEY);
       if (wasConnected() && saved) noteSignedOut("The saved Google sign-in had run out by the time ShapeForge opened.");
@@ -261,6 +414,9 @@ export async function signIn(): Promise<void> {
 }
 
 export function signOut(): void {
+  const sealed = readSealed();
+  if (sealed && getAuthWorkerUrl()) void callWorker("/revoke", { sealed }).catch(() => {});
+  writeSealed(null);
   if (token) google()?.accounts.oauth2.revoke(token.value, () => {});
   token = null;
   try {
@@ -280,6 +436,10 @@ export async function getAccessToken(): Promise<string> {
   if (loadSavedToken() && token) {
     useDrive.getState().setStatus("signedIn");
     return (token as { value: string }).value;
+  }
+  if (await renewQuietly()) {
+    useDrive.getState().setStatus("signedIn");
+    return (token as unknown as { value: string }).value;
   }
   try {
     const fresh = await requestToken("");
@@ -311,6 +471,7 @@ export function armQuietReconnect(): void {
 /** Used when Drive itself says the sign-in was refused. */
 export function signedOutByGoogle(reason?: string, askAgain = false): void {
   token = null;
+  writeSealed(null);
   try {
     localStorage.removeItem(TOKEN_KEY);
     // Without the "connected" mark the next Connect shows Google's full permission screen again.
