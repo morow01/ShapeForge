@@ -110,7 +110,7 @@ import {
 import { MAX_BUILD_SOURCES, PRIMITIVES, PRIMITIVE_CATEGORIES, SKETCH_CURVE_SEGMENTS, isGroup } from "./document/types";
 import { findAssemblyOwner, findNode, parentOf, resolveNodeTransparent, resolveNodeColor, updateNode, walk } from "./document/tree";
 import { bakeScale } from "./document/bake";
-import { putBlob } from "./document/blobStore";
+import { missingBlobs, putBlob } from "./document/blobStore";
 import { loadCameraState, loadThumbnail, locationOf, saveThumbnail } from "./document/persist";
 import type { EditOp, GroupNode, ImportNode, PrimitiveKind, SceneNode, ShellOp, HollowRim, ResizeFaceOp, SketchData, Vec3 } from "./document/types";
 import { RETRYABLE_MESH_ERROR } from "./kernel/types";
@@ -2474,11 +2474,62 @@ export function App() {
     };
   }, [nodes, textFonts]);
 
+  // Imported files a design points at but this computer does not have (the design arrived without
+  // them, or site data was cleared). Building such a node can only fail, and a group holding one
+  // fails as a whole after several retries, so a design with many of them spent minutes ending up
+  // empty. They are set aside up front instead, so everything else builds at once.
+  // null = not checked yet, so the first build waits for the answer.
+  const [missingFileIds, setMissingFileIds] = useState<Set<string> | null>(null);
+  const importFilesKey = useMemo(() => {
+    const found: string[] = [];
+    const walk = (list: SceneNode[]) => {
+      for (const n of list) {
+        if (n.type === "import") found.push(`${n.id}|${n.blobId}|${n.fileName}`);
+        else if (n.type === "group") walk(n.children);
+        else if (n.type === "build") walk(n.sources);
+        else if (n.type === "edit") walk([n.base]);
+      }
+    };
+    walk(nodes);
+    return found.join("\n");
+  }, [nodes]);
+  useEffect(() => {
+    let stale = false;
+    const entries = importFilesKey ? importFilesKey.split("\n").map((l) => l.split("|")) : [];
+    void missingBlobs([...new Set(entries.map((e) => e[1]))])
+      .then((gone) => {
+        if (stale) return;
+        const lost = entries.filter((e) => gone.includes(e[1]));
+        setMissingFileIds((prev) => {
+          const next = new Set(lost.map((e) => e[0]));
+          return prev && prev.size === next.size && [...next].every((x) => prev.has(x)) ? prev : next;
+        });
+        setInvalid((prev) => {
+          const next = { ...prev };
+          for (const k of Object.keys(next)) if (next[k].startsWith("The imported file \"") && !lost.some((e) => e[0] === k)) delete next[k];
+          for (const e of lost) next[e[0]] = "The imported file \"" + e[2] + "\" is not on this computer. Re-import it, or open the design on the computer that has it.";
+          return next;
+        });
+      })
+      .catch(() => {
+        if (!stale) setMissingFileIds((prev) => prev ?? new Set());
+      });
+    return () => {
+      stale = true;
+    };
+  }, [importFilesKey]);
+  const allSkipped = useMemo(() => {
+    if (!missingFileIds?.size) return skippedIds;
+    const all = new Set(skippedIds);
+    for (const id of missingFileIds) all.add(id);
+    return all;
+  }, [skippedIds, missingFileIds]);
+
   // Nodes actually sent to the kernel — skippedIds excludes anything a
   // watchdog timeout already blamed, so it is not retried into another hang.
   const buildableNodes = useMemo(
-    () => pruneSkipped(nodes, skippedIds),
-    [nodes, skippedIds],
+    () => pruneSkipped(nodes, allSkipped),
+    [nodes, allSkipped],
   );
 
   // Rebuild only when geometry-defining data changes. Dragging a top-level node
@@ -2517,7 +2568,7 @@ export function App() {
     exportSceneRevisionRef.current += 1;
     setReadyExportUrl(null);
     setExportReadyNoticeOpen(false);
-  }, [nodes, skippedIds, exportQuality]);
+  }, [nodes, allSkipped, exportQuality]);
   useEffect(() => () => {
     if (readyExportUrl) URL.revokeObjectURL(readyExportUrl);
   }, [readyExportUrl]);
@@ -2576,16 +2627,21 @@ export function App() {
       meshRecoveryRef.current = { shapeKey, attempts: 0 };
       autoSkipRef.current = { shapeKey, count: 0 };
     }
-    const specs = flattenSpecs(pruneSkipped(useDoc.getState().nodes, skippedIds));
+    // Wait until we know which imported files exist, so a missing one is never sent to the kernel.
+    if (missingFileIds === null) return;
+    const specs = flattenSpecs(pruneSkipped(useDoc.getState().nodes, allSkipped));
     if (!specs.length) {
       // Skipping is the only reason a non-empty design has nothing to build.
       // Blanking the viewport here and reporting "Ready" is how a scene that
       // merely failed to build reads as a scene that was lost: the objects are
       // all still in the document, and the tree still lists them.
-      if (skippedIds.size) {
+      if (allSkipped.size) {
         setError(
-          `Every object was set aside after taking too long to build. Nothing has been deleted — ` +
-          `all ${useDoc.getState().nodes.length} objects are still in your design. Reload to try again.`,
+          missingFileIds.size
+            ? `Every object needs an imported file this computer does not have. Nothing has been deleted — ` +
+              `re-import the files, or open the design on the computer that has them.`
+            : `Every object was set aside after taking too long to build. Nothing has been deleted — ` +
+              `all ${useDoc.getState().nodes.length} objects are still in your design. Reload to try again.`,
         );
         return;
       }
@@ -2617,7 +2673,7 @@ export function App() {
           setInvalid((prev) => ({
             // Keep any skipped-node warnings already showing — this build
             // never even sent them, so it has no opinion on them.
-            ...Object.fromEntries([...skippedIds].map((sid) => [sid, prev[sid]])),
+            ...Object.fromEntries([...allSkipped].map((sid) => [sid, prev[sid]])),
             ...Object.fromEntries(visibleErrors.map((e) => [e.id, e.message])),
           }));
           // A scene that ran out of rounds has real geometry on screen but is
@@ -2628,7 +2684,11 @@ export function App() {
               ? `Showing ${res.parts.length} of ${res.parts.length + res.pending.length} objects — the rest ` +
                 `were still building when time ran out. Nothing has been deleted. Imported meshes used as ` +
                 `holes are the usual cause; hiding one and reloading will get the rest on screen.`
-              : null,
+              : missingFileIds.size
+                ? `${missingFileIds.size} imported ${missingFileIds.size === 1 ? "file is" : "files are"} not on this computer, so ` +
+                  `${missingFileIds.size === 1 ? "it is" : "they are"} left out (marked in red in the list). Nothing has been deleted. ` +
+                  `Re-import ${missingFileIds.size === 1 ? "it" : "them"}, or open the design on the computer that has ${missingFileIds.size === 1 ? "it" : "them"}.`
+                : null,
           );
 
           if (retryMeshBuild) {
@@ -2690,7 +2750,7 @@ export function App() {
         });
     }, 32);
     return () => clearTimeout(t);
-  }, [shapeKey, skippedIds, meshRecoveryNonce]);
+  }, [shapeKey, allSkipped, missingFileIds, meshRecoveryNonce]);
 
 
   useEffect(() => {
@@ -3328,7 +3388,7 @@ export function App() {
         exportNodes = docNodes.filter((n) => !n.hidden);
       }
 
-      let currentNodes = pruneSkipped(exportNodes, skippedIds);
+      let currentNodes = pruneSkipped(exportNodes, allSkipped);
       if (currentNodes.length === 0) {
         setExporting(false);
         setError("No shapes available to export.");

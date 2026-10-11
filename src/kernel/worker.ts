@@ -91,6 +91,13 @@ function init(): Promise<void> {
   return Promise.all([initOC(), initManifold()]).then(() => undefined);
 }
 
+/** 0 = ordinary, 1 = holds an edit with no operations, 2 = holds chamfers, fillets or other edits that can wedge the engine. */
+function buildRisk(spec: NodeSpec): number {
+  if (spec.type === "edit") return spec.ops.length ? 2 : 1;
+  if (spec.type === "group") return spec.children.reduce((worst, child) => Math.max(worst, buildRisk(child)), 0);
+  return 0;
+}
+
 interface MeshQuality {
   tolerance: number;
   angularTolerance: number;
@@ -1300,7 +1307,22 @@ const api = {
      *  WHICH node is expensive is the difference between fixing it and
      *  guessing. */
     const spent = new Map<string, number>();
-    for (const spec of specs) {
+    // Build the objects least likely to hang the engine first. A chamfered or filleted combination of
+    // holes can wedge OpenCascade for minutes, and everything queued behind it waits: on one real design
+    // a single such object kept 58 ordinary ones off the screen until the watchdog killed the worker.
+    // Ordinary objects now appear within seconds and the risky ones come last, so a wedge costs only itself.
+    const order = specs
+      .map((spec, index) => ({ spec, index }))
+      .sort((a, b) => buildRisk(a.spec) - buildRisk(b.spec) || a.index - b.index);
+    // Real builds done in this call. A risky object may only start once something has been built and
+    // handed back first, so the objects before it are on screen while it works. At least one build per
+    // round, so every round makes progress.
+    let builtThisRound = 0;
+    for (const { spec } of order) {
+      if (budgetMs !== undefined && builtThisRound > 0 && buildRisk(spec) > 0) {
+        pending.push(spec.id);
+        continue;
+      }
       // Stop at a node boundary once the round's budget is gone, but only
       // after something has been built: a first node slower than the whole
       // budget must still be attempted, or a scene containing one would make
@@ -1631,7 +1653,14 @@ const api = {
       // Only reached by nodes that actually rebuilt; a cache hit `continue`s
       // above and costs nothing worth reporting.
       spent.set(spec.id, performance.now() - specStartedAt);
+      // Only a build that produced a fresh result counts: an object that fails is retried every round,
+      // and counting it would stop the risky objects from ever getting their turn.
+      if (meshCache.get(spec.id)?.key === key) builtThisRound++;
     }
+
+    // The loop ran in risk order; hand the parts back in the order they were asked for.
+    const askedOrder = new Map(specs.map((spec, index) => [spec.id, index]));
+    parts.sort((a, b) => (askedOrder.get(a.id) ?? 0) - (askedOrder.get(b.id) ?? 0));
 
     // A slow build is the one failure here that snowballs, so name the nodes
     // that ate the time instead of leaving a silent multi-second freeze.
