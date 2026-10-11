@@ -24,6 +24,7 @@ import type { DriveFile } from "./api";
 import { getAccessToken, hasToken, signedOutByGoogle } from "./auth";
 import { APP_FOLDER_NAME, ASSETS_FOLDER_NAME } from "./config";
 import { useDrive } from "./state";
+import { createSerialRunner } from "./serial";
 import { decodeTags, encodeTags } from "../document/tags";
 
 /* Keeps the designs and folders in this browser matched to the ShapeForge folder in Google Drive.
@@ -641,6 +642,14 @@ function thumbSig(dataUrl: string): string {
   return `${dataUrl.length}:${(h >>> 0).toString(36)}`;
 }
 
+/** Sets one entry of a small list kept in storage, reading the list fresh so a stale copy never overwrites another job's entry. */
+function setEntry(key: string, id: string, value: string | undefined): void {
+  const map = readJson<Record<string, string>>(key, {});
+  if (value === undefined) delete map[id];
+  else map[id] = value;
+  writeJson(key, map);
+}
+
 let thumbsJob: Promise<string> | null = null;
 async function ensureThumbsFolder(): Promise<string> {
   const cached = readString(THUMBS_KEY);
@@ -689,10 +698,8 @@ export async function pushThumbnail(id: string, attempt = 0): Promise<void> {
       kind: "thumb",
       properties: { localId: id, sig },
     });
-    files[id] = file.id;
-    writeJson(THUMB_FILES_KEY, files);
-    sigs[id] = sig;
-    writeJson(THUMB_SIGS_KEY, sigs);
+    setEntry(THUMB_FILES_KEY, id, file.id);
+    setEntry(THUMB_SIGS_KEY, id, sig);
   } catch (error) {
     // The remembered file is gone from Drive: forget it and send a fresh one.
     if (error instanceof DriveError && error.status === 404 && attempt === 0) {
@@ -725,8 +732,7 @@ async function syncThumbnails(): Promise<void> {
     if (fetched++ >= 40) break;
     const text = await driveApi().downloadText(f.id);
     if (!text.startsWith("data:image")) continue;
-    sigs[id] = thumbSig(text);
-    writeJson(THUMB_SIGS_KEY, sigs);
+    setEntry(THUMB_SIGS_KEY, id, thumbSig(text));
     saveThumbnail(id, text);
   }
 
@@ -1107,32 +1113,49 @@ export async function fixSyncRow(row: SyncCheckRow): Promise<void> {
 }
 
 /** Runs a Drive job, keeping the connection state and the last error up to date. */
+const runOneAtATime = createSerialRunner();
+let jobsWaiting = 0;
+
 export async function runSync<T>(job: () => Promise<T>): Promise<T | undefined> {
   const drive = useDrive.getState();
   if (drive.status !== "signedIn" && !hasToken()) return undefined;
+  jobsWaiting++;
   drive.setBusy(true);
   try {
-    const result = await job();
-    useDrive.getState().markSynced();
-    return result;
-  } catch (error) {
-    if (error instanceof DriveAuthError) {
-      if (error instanceof DriveScopeError) signedOutByGoogle(error.message, true);
-      else signedOutByGoogle();
-      useDrive.getState().setStatus("signedOut");
-    }
-    useDrive.getState().setError(
-      error instanceof Error && error.message ? error.message : "Couldn't reach Google Drive. Your changes will be sent next time.",
-    );
-    return undefined;
+    // One job at a time: see createSerialRunner for what overlapping jobs used to do.
+    return await runOneAtATime(async (): Promise<T | undefined> => {
+      try {
+        const result = await job();
+        useDrive.getState().markSynced();
+        return result;
+      } catch (error) {
+        if (error instanceof DriveAuthError) {
+          if (error instanceof DriveScopeError) signedOutByGoogle(error.message, true);
+          else signedOutByGoogle();
+          useDrive.getState().setStatus("signedOut");
+        }
+        useDrive.getState().setError(
+          error instanceof Error && error.message ? error.message : "Couldn't reach Google Drive. Your changes will be sent next time.",
+        );
+        return undefined;
+      }
+    });
   } finally {
-    useDrive.getState().setBusy(false);
+    jobsWaiting--;
+    if (jobsWaiting === 0) useDrive.getState().setBusy(false);
   }
 }
 
+let fullSyncWaiting = false;
+
 /** Reads Drive's current state, sends anything waiting, and refreshes what the Home page shows. */
 export async function syncNow(): Promise<void> {
+  // The minute check, a tab coming back into view and the button can all ask at nearly the same moment;
+  // one full sync waiting its turn covers every one of them.
+  if (fullSyncWaiting) return;
+  fullSyncWaiting = true;
   await runSync(async () => {
+    fullSyncWaiting = false;
     adoptAllIntoDrive();
     await flushPending();
     // Folders made before Drive was connected (or still empty) get their Drive twin too.
