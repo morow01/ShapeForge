@@ -1,6 +1,6 @@
 import { PRIMITIVES } from "./types";
 import { parseSketch } from "../sketch/geometry";
-import { getBlob, putBlob } from "./blobStore";
+import { getBlob, missingBlobs, putBlob } from "./blobStore";
 import type {
   BooleanOp,
   CameraMode,
@@ -875,6 +875,22 @@ export function saveCameraState(state: StoredCamera): boolean {
   } catch {
     return false;
   }
+}
+
+/** The imported files a design points at that are not in this browser's storage, by the names the design recorded. */
+export async function missingImportFiles(nodes: SceneNode[]): Promise<{ blobId: string; fileName: string }[]> {
+  const names = new Map<string, string>();
+  const walk = (list: SceneNode[]) => {
+    for (const n of list) {
+      if (n.type === "import") names.set(n.blobId, n.fileName);
+      else if (n.type === "group") walk(n.children);
+      else if (n.type === "build") walk(n.sources);
+      else if (n.type === "edit") walk([n.base]);
+    }
+  };
+  walk(nodes);
+  const gone = await missingBlobs([...names.keys()]);
+  return gone.map((blobId) => ({ blobId, fileName: names.get(blobId) ?? blobId }));
 }
 
 export function collectImportBlobIds(nodes: SceneNode[], ids: Set<string>) {

@@ -11,6 +11,7 @@ import { TagManager } from "./TagManager";
 import type { FolderMeta, ProjectMeta } from "../document/types";
 import { APP_NAME, APP_VERSION } from "../version";
 import { useConfirm } from "./ConfirmDialog";
+import { confirmExportWithMissingFiles } from "./exportWarning";
 import { DriveSetupDialog } from "./DriveSetupDialog";
 import { connectDrive } from "../drive/actions";
 import { lastSignOut, signOut, wasConnected } from "../drive/auth";
@@ -513,7 +514,7 @@ export function HomePage({
 
   const handleDownload = async (p: ProjectMeta) => {
     const full = loadProject(p.id);
-    if (full) await exportProjectFile(full);
+    if (full && (await confirmExportWithMissingFiles(ask, full.nodes))) await exportProjectFile(full);
   };
 
   const handleDelete = async (p: ProjectMeta) => {

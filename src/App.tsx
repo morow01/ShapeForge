@@ -15,6 +15,8 @@ import { HomePage } from "./ui/HomePage";
 import { SaveDialog } from "./ui/SaveDialog";
 import { VersionHistoryDialog } from "./ui/VersionHistoryDialog";
 import { MissingFilesDialog } from "./ui/MissingFilesDialog";
+import { useConfirm } from "./ui/ConfirmDialog";
+import { confirmExportWithMissingFiles } from "./ui/exportWarning";
 import type { MissingFile } from "./ui/MissingFilesDialog";
 import { installDriveHooks, startAutoSync, syncNow } from "./drive/sync";
 import { useDrive } from "./drive/state";
@@ -2493,6 +2495,13 @@ export function App() {
   // Bumped after a file is chosen in the Locate dialog, to look at storage again.
   const [filesNonce, setFilesNonce] = useState(0);
   const [locateOpen, setLocateOpen] = useState(false);
+  const { ask: askConfirm, dialog: confirmDialog } = useConfirm();
+  /** Writes the backup file, first warning if imported files it cannot include are missing. False when cancelled. */
+  const exportBackup = async (): Promise<boolean> => {
+    if (!(await confirmExportWithMissingFiles(askConfirm, useDoc.getState().nodes))) return false;
+    await exportCurrentProject();
+    return true;
+  };
   const importFilesKey = useMemo(() => {
     const found: string[] = [];
     const walk = (list: SceneNode[]) => {
@@ -4801,7 +4810,7 @@ export function App() {
                 )}
                 <button
                   role="menuitem"
-                  onClick={() => { setFileMenuOpen(false); exportCurrentProject(); }}
+                  onClick={() => { setFileMenuOpen(false); void exportBackup(); }}
                 >
                   <ExportIcon className="topbar-icon" />
                   <span className="item-label">Download backup file</span>
@@ -8353,6 +8362,7 @@ export function App() {
       />
 
       <VersionHistoryDialog open={historyOpen} projectId={currentProjectId} onClose={() => setHistoryOpen(false)} />
+      {confirmDialog}
       {locateOpen && (
         <MissingFilesDialog
           files={missingFileList}
@@ -8418,7 +8428,7 @@ export function App() {
         open={newDesignPromptOpen}
         projectName={projectName}
         objectCount={nodes.length}
-        onSaveFirst={() => { exportCurrentProject(); createNewDesign(); }}
+        onSaveFirst={() => { void exportBackup().then((done) => { if (done) createNewDesign(); }); }}
         onContinue={createNewDesign}
         onClose={() => setNewDesignPromptOpen(false)}
       />
