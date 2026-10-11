@@ -102,6 +102,35 @@ export function extractNodes(
   return { remaining: prune(nodes), removed };
 }
 
+/**
+ * Removes the given ids from anywhere in the tree, including inside an edit's base shape, and takes out any
+ * group or edit left with nothing in it. (extractNodes stops at edits and keeps emptied groups, which is right
+ * for cut and paste but not for clearing out objects whose imported files are gone.) Shape Builder results
+ * are left alone: removing one of their sources would change which regions they keep.
+ */
+export function removeNodesDeep(nodes: SceneNode[], ids: Set<string>): SceneNode[] {
+  const prune = (list: SceneNode[]): SceneNode[] => {
+    const out: SceneNode[] = [];
+    for (const n of list) {
+      if (ids.has(n.id)) continue;
+      if (isGroup(n)) {
+        const children = prune(n.children);
+        if (n.children.length > 0 && children.length === 0) continue;
+        const unchanged = children.length === n.children.length && children.every((c, i) => c === n.children[i]);
+        out.push(unchanged ? n : { ...n, children });
+      } else if (n.type === "edit") {
+        const base = prune([n.base])[0] as typeof n.base | undefined;
+        if (!base) continue;
+        out.push(base === n.base ? n : { ...n, base });
+      } else {
+        out.push(n);
+      }
+    }
+    return out;
+  };
+  return prune(nodes);
+}
+
 /** The parent list containing `id`, or the roots when it is top level. */
 export function parentOf(nodes: SceneNode[], id: string): SceneNode | null {
   for (const n of walk(nodes)) {
