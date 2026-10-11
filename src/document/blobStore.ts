@@ -45,6 +45,30 @@ export async function getBlob(id: string): Promise<ArrayBuffer | null> {
   }
 }
 
+/** Which of these files are NOT in storage. Checks existence only, so it never reads a multi-megabyte STL. */
+export async function missingBlobs(ids: string[]): Promise<string[]> {
+  if (!ids.length) return [];
+  const db = await openDb();
+  try {
+    return await new Promise<string[]>((resolve, reject) => {
+      const tx = db.transaction(STORE, "readonly");
+      const store = tx.objectStore(STORE);
+      const missing: string[] = [];
+      let left = ids.length;
+      for (const id of ids) {
+        const req = store.count(IDBKeyRange.only(id));
+        req.onsuccess = () => {
+          if (!req.result) missing.push(id);
+          if (--left === 0) resolve(missing);
+        };
+        req.onerror = () => reject(req.error);
+      }
+    });
+  } finally {
+    db.close();
+  }
+}
+
 export async function deleteBlob(id: string): Promise<void> {
   const db = await openDb();
   try {
