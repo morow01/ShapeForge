@@ -57,7 +57,8 @@ function startLocalServer() {
       fs.readFile(file, (err, data) => {
         if (err) { res.writeHead(404); res.end(); return; }
         res.writeHead(200, { 'Content-Type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream' });
-        res.end(data);
+        // The page carries a plain intro with privacy links for Google's web check; the desktop app has no use for the flash of it.
+        res.end(path.basename(file) === 'index.html' ? data.toString('utf8').replace(/<main[\s\S]*?<\/main>/, '') : data);
       });
     });
     server.once('error', reject);
