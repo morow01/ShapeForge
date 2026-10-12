@@ -1,7 +1,7 @@
 {
   "name": "shapeforge",
   "private": true,
-  "version": "0.5.35",
+  "version": "0.5.36",
   "description": "ShapeForge 3D CAD modeling application",
   "author": "ShapeForge Team",
   "type": "module",

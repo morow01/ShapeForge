@@ -2307,9 +2307,16 @@ export class Scene {
    */
   private makeInfiniteGrid(): THREE.Mesh {
     const material = new THREE.ShaderMaterial({
-      transparent: true,
+      // Drawn first, before any part, in the opaque pass: it never writes depth, so every part simply paints over it
+      // (no fighting with the base of something standing on the ground, and no depth offset to go wrong in
+      // orthographic views). Its own fade still blends with the background through the custom blend below.
+      transparent: false,
       depthWrite: false,
       side: THREE.DoubleSide,
+      blending: THREE.CustomBlending,
+      blendEquation: THREE.AddEquation,
+      blendSrc: THREE.SrcAlphaFactor,
+      blendDst: THREE.OneMinusSrcAlphaFactor,
       uniforms: {
         uColor: { value: new THREE.Color(0xd8e0e5) },
         uCentre: { value: new THREE.Vector2() },
@@ -2331,20 +2338,20 @@ export class Scene {
         uniform float uFadeStart;
         uniform float uFadeEnd;
 
-        // 1 on a line of a grid with cells of this size, 0 between; thin lines stay one pixel wide at any zoom,
-        // and the level disappears when its cells shrink below a few pixels.
+        // 1 on a line of a grid with cells of this size, 0 between. The lines are one pixel wide at any zoom; a level
+        // fades out gradually as its cells shrink toward a few pixels, so there is no sharp cut-off at a set distance.
         float level(vec2 p, float size) {
           vec2 q = p / size;
           vec2 width = max(fwidth(q), vec2(1e-6));
-          vec2 distance = abs(fract(q - 0.5) - 0.5) / width;
-          float line = 1.0 - min(min(distance.x, distance.y), 1.0);
+          vec2 edge = abs(fract(q - 0.5) - 0.5) / width;
+          float line = 1.0 - min(min(edge.x, edge.y), 1.0);
           float cellPixels = 1.0 / max(width.x, width.y);
-          return line * smoothstep(3.0, 9.0, cellPixels);
+          return line * smoothstep(3.0, 14.0, cellPixels);
         }
 
         void main() {
-          float minor = level(vWorld.xy, 8.0) * 0.7;
-          float major = level(vWorld.xy, 80.0);
+          float minor = level(vWorld.xy, 8.0) * 0.75;
+          float major = level(vWorld.xy, 80.0) * 0.85;
           float huge = level(vWorld.xy, 800.0);
           float lines = max(minor, max(major, huge));
           float fade = 1.0 - smoothstep(uFadeStart, uFadeEnd, distance(vWorld.xy, uCentre));
@@ -2355,8 +2362,7 @@ export class Scene {
       `,
     });
     const mesh = new THREE.Mesh(new THREE.PlaneGeometry(200000, 200000), material);
-    // Just under the ground level, so parts sitting on it are never overdrawn by lines at their own base.
-    mesh.position.z = -0.02;
+    mesh.position.z = 0;
     mesh.renderOrder = -1;
     mesh.frustumCulled = false;
     // The fade follows the view: how far the grid reaches scales with how far the camera is from what it looks at.
