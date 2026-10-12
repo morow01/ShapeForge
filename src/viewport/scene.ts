@@ -9120,14 +9120,25 @@ export class Scene {
       for (const item of drag.items) {
         const offset = item.startPos.clone().sub(drag.center);
         offset.applyQuaternion(deltaQuat);
-        const newGroupPos = drag.center.clone().add(deltaPos).add(offset);
-        item.obj.position.copy(newGroupPos);
-
-        const newQuat = deltaQuat.clone().multiply(item.startRot);
-        item.obj.quaternion.copy(newQuat);
+        item.obj.position.copy(drag.center.clone().add(deltaPos).add(offset));
+        item.obj.quaternion.copy(deltaQuat.clone().multiply(item.startRot));
         item.obj.updateWorldMatrix(true, true);
-
-        const euler = new THREE.Euler().setFromQuaternion(newQuat, "XYZ");
+      }
+      // A move snaps the selection as one body, by its combined bounds, the same way a single object snaps.
+      if (this.gizmo.getMode() === "translate") {
+        const snap = this.snapGroup(drag.items.map((item) => item.id));
+        if (snap[0] || snap[1] || snap[2]) {
+          const shift = new THREE.Vector3(...snap);
+          this.multiGizmoPivot.position.add(shift);
+          for (const item of drag.items) {
+            item.obj.position.add(shift);
+            item.obj.updateWorldMatrix(true, true);
+          }
+        }
+      }
+      for (const item of drag.items) {
+        const newGroupPos = item.obj.position;
+        const euler = new THREE.Euler().setFromQuaternion(item.obj.quaternion, "XYZ");
         const newRotDeg: Vec3 = [euler.x / DEG, euler.y / DEG, euler.z / DEG];
 
         if (item.isAssembly) {
@@ -9344,6 +9355,45 @@ export class Scene {
     if (this.showSelectedCollisionContacts) {
       this.doRefreshCollisionContactsFor(pendingId, pendingSnaps);
     }
+  }
+
+  /**
+   * Snaps several objects that move together, treating them as one body: their combined bounds are matched against
+   * everything else, and the answer is the amount the whole selection has to shift by. Returns [0,0,0] when snapping
+   * is off (or held off with Alt) or nothing is close enough.
+   */
+  private snapGroup(ids: string[]): Vec3 {
+    if (!this.snapEnabled || this.altDown) {
+      this.guides.clear();
+      this.clearCollisionContacts();
+      return [0, 0, 0];
+    }
+    const min: Vec3 = [Infinity, Infinity, Infinity];
+    const max: Vec3 = [-Infinity, -Infinity, -Infinity];
+    for (const id of ids) {
+      const root = this.assemblyGroups.get(id) ?? this.parts.get(id)?.group;
+      if (!root) continue;
+      const bounds = this.boundsOf(root);
+      for (let axis = 0; axis < 3; axis++) {
+        min[axis] = Math.min(min[axis], bounds.min[axis]);
+        max[axis] = Math.max(max[axis], bounds.max[axis]);
+      }
+    }
+    if (!Number.isFinite(min[0]) || !Number.isFinite(max[0])) return [0, 0, 0];
+    const moving: Bounds3 = { min, max };
+    const targets = this.collectSnapTargets(ids[0], new Set(ids), moving);
+    const centre = new THREE.Vector3((min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2);
+    const result = snapBounds(moving, targets, this.worldSnapTolerance(centre));
+    this.clearCollisionContacts();
+    if (!result.active.length) {
+      this.guides.clear();
+      return [0, 0, 0];
+    }
+    this.guides.show(result.active, {
+      min: [min[0] + result.delta[0], min[1] + result.delta[1], min[2] + result.delta[2]],
+      max: [max[0] + result.delta[0], max[1] + result.delta[1], max[2] + result.delta[2]],
+    });
+    return result.delta;
   }
 
   /** Snaps `obj` to the guides around it and returns how far that moved it,
@@ -11345,13 +11395,24 @@ export class Scene {
     const leadItem = g.items.find((item) => item.id === g.id);
     const leadObj = leadItem && (this.assemblyGroups.get(leadItem.id) ?? this.parts.get(leadItem.id)?.group);
     if (leadItem && leadObj) {
-      leadObj.position.set(
-        leadItem.startGroupPos.x + dx,
-        leadItem.startGroupPos.y + dy,
-        leadItem.startGroupPos.z,
-      );
-      leadObj.updateWorldMatrix(true, true);
-      snap = this.applySmartSnap(g.id, leadObj);
+      if (g.items.length > 1) {
+        // Several objects travel together: put them all where the pointer says, then snap them as one body.
+        for (const item of g.items) {
+          const obj = this.assemblyGroups.get(item.id) ?? this.parts.get(item.id)?.group;
+          if (!obj) continue;
+          obj.position.set(item.startGroupPos.x + dx, item.startGroupPos.y + dy, item.startGroupPos.z);
+          obj.updateWorldMatrix(true, true);
+        }
+        snap = this.snapGroup(g.items.map((item) => item.id));
+      } else {
+        leadObj.position.set(
+          leadItem.startGroupPos.x + dx,
+          leadItem.startGroupPos.y + dy,
+          leadItem.startGroupPos.z,
+        );
+        leadObj.updateWorldMatrix(true, true);
+        snap = this.applySmartSnap(g.id, leadObj);
+      }
     }
 
     for (const item of g.items) {
