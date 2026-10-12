@@ -1716,6 +1716,8 @@ export class Scene {
   /** Separate pass so no transparent model overlay can cover the gizmo. */
   private gizmoScene = new THREE.Scene();
   private collisionContactOwnerId: string | null = null;
+  /** The owner's bounds when its contact patches were last drawn, so a typed size or position change can be told from no change. */
+  private collisionContactBounds: Bounds3 | null = null;
   private collisionContactCache = new Map<string, import("../snapping/snap").ActiveSnap[]>();
   private showSelectedCollisionContacts = true;
   /** Only meaningful for a coincident flat face, which can be shown as a
@@ -2994,7 +2996,7 @@ export class Scene {
     // A snap against a recessed face cannot be rediscovered from the whole
     // object's outer bounds. Keep the already verified real-surface patch
     // while its owner remains selected instead of replacing it here.
-    if (!this.collisionContactOwnerId || !this.selectedIds.includes(this.collisionContactOwnerId) || !this.collisionContacts.children.length) {
+    if (!this.collisionContactOwnerId || !this.selectedIds.includes(this.collisionContactOwnerId) || !this.collisionContacts.children.length || this.collisionBoundsChanged()) {
       this.refreshSelectedCollisionContacts();
     }
   }
@@ -3492,7 +3494,7 @@ export class Scene {
     this.applyPlacements();
     this.applyMaterials();
     this.attachGizmo();
-    if (!this.collisionContactOwnerId || !selectedIds.includes(this.collisionContactOwnerId) || !this.collisionContacts.children.length) {
+    if (!this.collisionContactOwnerId || !selectedIds.includes(this.collisionContactOwnerId) || !this.collisionContacts.children.length || this.collisionBoundsChanged()) {
       this.refreshSelectedCollisionContacts();
     }
   }
@@ -9658,6 +9660,7 @@ export class Scene {
    * collision and deliberately gets no orange contact surface. */
   private showCollisionContacts(id: string, moving: Bounds3, snaps: import("../snapping/snap").ActiveSnap[]) {
     this.clearCollisionContacts();
+    this.collisionContactBounds = { min: [...moving.min] as Vec3, max: [...moving.max] as Vec3 };
     const axisIndex = { x: 0, y: 1, z: 2 } as const;
     const faceTargets = new Set<string>();
     const selectedRoot = this.assemblyGroups.get(id) ?? this.parts.get(id)?.group;
@@ -10265,6 +10268,21 @@ export class Scene {
       (child as THREE.Mesh).geometry.dispose();
     }
     this.collisionContactOwnerId = null;
+    this.collisionContactBounds = null;
+  }
+
+  /** True when the object whose contact patches are showing has since been resized or moved (typed in the panel, say). */
+  private collisionBoundsChanged(): boolean {
+    const owner = this.collisionContactOwnerId;
+    const drawnFor = this.collisionContactBounds;
+    if (!owner || !drawnFor) return false;
+    const root = this.assemblyGroups.get(owner) ?? this.parts.get(owner)?.group;
+    if (!root) return true;
+    const now = this.boundsOf(root);
+    for (let axis = 0; axis < 3; axis++) {
+      if (Math.abs(now.min[axis] - drawnFor.min[axis]) > 1e-4 || Math.abs(now.max[axis] - drawnFor.max[axis]) > 1e-4) return true;
+    }
+    return false;
   }
 
   private boundsOf(object: THREE.Object3D): Bounds3 {
