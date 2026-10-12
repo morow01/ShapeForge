@@ -1007,6 +1007,13 @@ function isShapeDragKind(kind: string | null): kind is ShapeDragKind {
   );
 }
 
+/** A multi-selection whose contacts are drawn together: who is in it, who owns the patch, and whether this member adds to what is already drawn. */
+interface CollisionGroup {
+  ids: Set<string>;
+  firstId: string;
+  append: boolean;
+}
+
 export class Scene {
   private solidMaterialCache = new Map<string, THREE.MeshStandardMaterial>();
   private placementPreview: THREE.Mesh | null = null;
@@ -9158,6 +9165,7 @@ export class Scene {
           });
         }
       }
+      this.refreshGroupCollisionContacts();
       this.updateResizeOverlay();
       return;
     }
@@ -9384,7 +9392,6 @@ export class Scene {
     const targets = this.collectSnapTargets(ids[0], new Set(ids), moving);
     const centre = new THREE.Vector3((min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2);
     const result = snapBounds(moving, targets, this.worldSnapTolerance(centre));
-    this.clearCollisionContacts();
     if (!result.active.length) {
       this.guides.clear();
       return [0, 0, 0];
@@ -9708,9 +9715,17 @@ export class Scene {
   /** Highlights the shared patch only for opposing min/max faces that truly
    * overlap across both remaining axes. Centre/edge guide alignment is not a
    * collision and deliberately gets no orange contact surface. */
-  private showCollisionContacts(id: string, moving: Bounds3, snaps: import("../snapping/snap").ActiveSnap[]) {
-    this.clearCollisionContacts();
-    this.collisionContactBounds = { min: [...moving.min] as Vec3, max: [...moving.max] as Vec3 };
+  private showCollisionContacts(
+    id: string,
+    moving: Bounds3,
+    snaps: import("../snapping/snap").ActiveSnap[],
+    group?: CollisionGroup,
+  ) {
+    // A multi-selection draws every member's contacts into the same set, so only the first one starts it afresh.
+    if (!group?.append) {
+      this.clearCollisionContacts();
+      this.collisionContactBounds = { min: [...moving.min] as Vec3, max: [...moving.max] as Vec3 };
+    }
     const axisIndex = { x: 0, y: 1, z: 2 } as const;
     const faceTargets = new Set<string>();
     const selectedRoot = this.assemblyGroups.get(id) ?? this.parts.get(id)?.group;
@@ -9799,14 +9814,14 @@ export class Scene {
     // every visible object whose bounds are genuinely at the moving object.
     const edgeTargets = new Set(contactSnaps.map((snap) => snap.targetId));
     for (const [targetId, view] of this.parts) {
-      if (targetId === id || !view.group.visible || selectedRoot?.getObjectById(view.group.id)) continue;
+      if (targetId === id || group?.ids.has(targetId) || !view.group.visible || selectedRoot?.getObjectById(view.group.id)) continue;
       if (movingBox.intersectsBox(new THREE.Box3().setFromObject(view.group))) edgeTargets.add(targetId);
     }
     for (const targetId of edgeTargets) {
       if (!faceTargets.has(targetId)) this.showMeshEdgeContacts(id, targetId);
     }
     if (this.collisionContacts.children.length) {
-      this.collisionContactOwnerId = id;
+      this.collisionContactOwnerId = group ? group.firstId : id;
       this.collisionContactCache.set(id, contactSnaps);
     }
   }
@@ -10153,11 +10168,30 @@ export class Scene {
       this.clearCollisionContacts();
       return;
     }
-    if (this.selectedIds.length !== 1) {
+    if (this.selectedIds.length < 1) {
       this.clearCollisionContacts();
       return;
     }
-    this.refreshCollisionContactsFor(this.selectedIds[0]);
+    if (this.selectedIds.length === 1) {
+      this.refreshCollisionContactsFor(this.selectedIds[0]);
+      return;
+    }
+    // Several selected: every member's contact with anything outside the selection is shown.
+    const ids = new Set(this.selectedIds);
+    this.selectedIds.forEach((memberId, index) => {
+      this.doRefreshCollisionContactsFor(memberId, [], { ids, firstId: this.selectedIds[0], append: index > 0 });
+    });
+  }
+
+  private collisionGroupRaf: number | null = null;
+
+  /** While a multi-selection is being dragged: redraw its contacts once per frame. */
+  private refreshGroupCollisionContacts() {
+    if (!this.showSelectedCollisionContacts || this.selectedIds.length < 2 || this.collisionGroupRaf !== null) return;
+    this.collisionGroupRaf = requestAnimationFrame(() => {
+      this.collisionGroupRaf = null;
+      if (this.showSelectedCollisionContacts && this.selectedIds.length > 1) this.refreshSelectedCollisionContacts();
+    });
   }
 
   private refreshCollisionContactsFor(
@@ -10187,6 +10221,7 @@ export class Scene {
   private doRefreshCollisionContactsFor(
     id: string,
     activeSnaps: import("../snapping/snap").ActiveSnap[] = [],
+    group?: CollisionGroup,
   ) {
     if (!this.showSelectedCollisionContacts) {
       this.clearCollisionContacts();
@@ -10213,7 +10248,7 @@ export class Scene {
     const contacts: import("../snapping/snap").ActiveSnap[] = [...cached, ...activeSnaps];
     const tolerance = 0.05;
     for (const [targetId, view] of this.parts) {
-      if (targetId === id || !view.group.visible || selected.getObjectById(view.group.id)) continue;
+      if (targetId === id || group?.ids.has(targetId) || !view.group.visible || selected.getObjectById(view.group.id)) continue;
       const targetBounds = this.boundsOf(view.group);
       const gapX = Math.max(0, Math.max(moving.min[0] - targetBounds.max[0], targetBounds.min[0] - moving.max[0]));
       const gapY = Math.max(0, Math.max(moving.min[1] - targetBounds.max[1], targetBounds.min[1] - moving.max[1]));
@@ -10303,7 +10338,7 @@ export class Scene {
       `${contact.targetId}|${contact.axis}|${contact.movingAnchor}|${contact.targetAnchor}|${contact.value.toFixed(4)}`,
       contact,
     ])).values()];
-    this.showCollisionContacts(id, moving, unique);
+    this.showCollisionContacts(id, moving, unique, group);
   }
 
   private clearCollisionContacts() {
@@ -11434,6 +11469,7 @@ export class Scene {
         ],
       });
     }
+    if (g.items.length > 1) this.refreshGroupCollisionContacts();
     this.updateResizeOverlay();
   };
 
@@ -11462,6 +11498,7 @@ export class Scene {
         this.doRefreshCollisionContactsFor(pendingId, pendingSnaps);
       }
     }
+    if (this.showSelectedCollisionContacts && this.selectedIds.length > 1) this.refreshSelectedCollisionContacts();
     if (!this.showSelectedCollisionContacts || !this.collisionContactOwnerId || !this.selectedIds.includes(this.collisionContactOwnerId)) {
       this.clearCollisionContacts();
     }
