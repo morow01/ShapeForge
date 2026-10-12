@@ -10181,6 +10181,9 @@ export class Scene {
     this.selectedIds.forEach((memberId, index) => {
       this.doRefreshCollisionContactsFor(memberId, [], { ids, firstId: this.selectedIds[0], append: index > 0 });
     });
+    // Remember the whole selection's box, so a change to any member (not only the first) redraws the patches.
+    const whole = this.unionBoundsOf(this.selectedIds);
+    if (whole && this.collisionContactOwnerId) this.collisionContactBounds = whole;
   }
 
   private collisionGroupRaf: number | null = null;
@@ -10361,13 +10364,35 @@ export class Scene {
     const owner = this.collisionContactOwnerId;
     const drawnFor = this.collisionContactBounds;
     if (!owner || !drawnFor) return false;
-    const root = this.assemblyGroups.get(owner) ?? this.parts.get(owner)?.group;
-    if (!root) return true;
-    const now = this.boundsOf(root);
+    // With several selected, any member changing (not just the first) means the patches are out of date.
+    const now = this.selectedIds.length > 1 ? this.unionBoundsOf(this.selectedIds) : this.rootBounds(owner);
+    if (!now) return true;
     for (let axis = 0; axis < 3; axis++) {
       if (Math.abs(now.min[axis] - drawnFor.min[axis]) > 1e-4 || Math.abs(now.max[axis] - drawnFor.max[axis]) > 1e-4) return true;
     }
     return false;
+  }
+
+  private rootBounds(id: string): Bounds3 | null {
+    const root = this.assemblyGroups.get(id) ?? this.parts.get(id)?.group;
+    return root ? this.boundsOf(root) : null;
+  }
+
+  /** The box around several objects together; null when none of them is in the scene. */
+  private unionBoundsOf(ids: string[]): Bounds3 | null {
+    const min: Vec3 = [Infinity, Infinity, Infinity];
+    const max: Vec3 = [-Infinity, -Infinity, -Infinity];
+    let any = false;
+    for (const id of ids) {
+      const b = this.rootBounds(id);
+      if (!b) continue;
+      any = true;
+      for (let axis = 0; axis < 3; axis++) {
+        min[axis] = Math.min(min[axis], b.min[axis]);
+        max[axis] = Math.max(max[axis], b.max[axis]);
+      }
+    }
+    return any ? { min, max } : null;
   }
 
   private boundsOf(object: THREE.Object3D): Bounds3 {
