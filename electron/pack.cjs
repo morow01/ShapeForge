@@ -4,11 +4,18 @@ const { execSync } = require('child_process');
 const { packager } = require('@electron/packager');
 
 const root = process.cwd();
+
+// The public sign-in ID (not a secret) lives in .env.development; the packaged app needs it built in.
+function googleClientId() {
+  const env = fs.readFileSync(path.join(root, '.env.development'), 'utf8');
+  const hit = env.match(/^VITE_GOOGLE_CLIENT_ID=(.+)$/m);
+  return hit ? hit[1].trim() : '';
+}
 const stageDir = path.join(root, '.electron-stage');
 const outDir = path.join(root, 'release');
 
 console.log('Building Vite frontend...');
-execSync('npm run build', { stdio: 'inherit', env: { ...process.env, ELECTRON: 'true' } });
+execSync('npm run build', { stdio: 'inherit', env: { ...process.env, ELECTRON: 'true', VITE_GOOGLE_CLIENT_ID: process.env.VITE_GOOGLE_CLIENT_ID || googleClientId() } });
 
 console.log('Preparing clean staging area...');
 if (fs.existsSync(stageDir)) {

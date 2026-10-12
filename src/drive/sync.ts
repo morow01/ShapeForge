@@ -3,6 +3,7 @@ import {
   addRemoteProject,
   collectImportBlobIds,
   deleteProjectStorage,
+  moveToBin,
   hasProjectContents,
   listFolders,
   listProjects,
@@ -12,7 +13,9 @@ import {
   saveProject,
   saveThumbnail,
   setProjectLocation,
+  stampThumbnail,
   thumbnailHooks,
+  thumbnailStamp,
   updateProjectMeta,
   writeFolderList,
 } from "../document/persist";
@@ -23,6 +26,8 @@ import type { DriveFile } from "./api";
 import { getAccessToken, hasToken, signedOutByGoogle } from "./auth";
 import { APP_FOLDER_NAME, ASSETS_FOLDER_NAME } from "./config";
 import { useDrive } from "./state";
+import { createSerialRunner } from "./serial";
+import { thumbnailAction } from "./thumbRules";
 import { decodeTags, encodeTags } from "../document/tags";
 
 /* Keeps the designs and folders in this browser matched to the ShapeForge folder in Google Drive.
@@ -35,6 +40,14 @@ const ASSETS_KEY = "cad.drive.assetsId";
 const BLOBS_KEY = "cad.drive.blobs";
 const DIRTY_KEY = "cad.drive.dirty";
 const TRASH_KEY = "cad.drive.trash";
+/**
+ * Folders deleted here whose Drive copy has not been trashed yet, with what has to be moved out of them first
+ * (their designs and subfolders move up when only the folder is deleted). Kept on disk and retried until Drive
+ * accepts it, like a deleted design: a one-shot attempt that was lost (not connected at that moment, the sign-in
+ * had just expired, Drive hiccuped) left the folder in Drive, and the next sync brought it back.
+ */
+const FOLDER_TRASH_KEY = "cad.drive.trashFolders";
+type PendingFolderTrash = { driveId: string; designIds: string[]; subfolderIds: string[] };
 const VERSIONS_KEY = "cad.drive.versionsId";
 const THUMBS_KEY = "cad.drive.thumbsId";
 const THUMB_FILES_KEY = "cad.drive.thumbFiles";
@@ -109,7 +122,12 @@ export function resetDriveCaches(): void {
 const dirtySet = (): Set<string> => new Set(readJson<string[]>(DIRTY_KEY, []));
 const saveDirty = (set: Set<string>) => writeJson(DIRTY_KEY, [...set]);
 
+/** Counts every change marked on a design, so a send can tell whether it changed again while it was uploading. */
+const changeCount = new Map<string, number>();
+const changesOf = (id: string): number => changeCount.get(id) ?? 0;
+
 export function markDirty(id: string): void {
+  changeCount.set(id, changesOf(id) + 1);
   const set = dirtySet();
   set.add(id);
   saveDirty(set);
@@ -262,6 +280,7 @@ function designJson(project: ProjectData): string {
 
 /** Sends one design (and any imported files it uses) to Drive, creating or replacing its file. */
 export async function pushProject(id: string, attempt = 0): Promise<void> {
+  const changesAtStart = changesOf(id);
   const project = loadProject(id);
   if (!project) return;
   const meta = listProjects().find((p) => p.id === id);
@@ -306,7 +325,10 @@ export async function pushProject(id: string, attempt = 0): Promise<void> {
       m.driveModified = file.modifiedTime;
       delete m.remote;
     });
-    clearDirty(id);
+    // Changed again (renamed, edited) while this was uploading: what Drive now holds is already out of date, so the
+    // design stays marked and the send already queued for that change goes out. Clearing it here would let the
+    // next sync take Drive's older name and contents over the newer ones.
+    if (changesOf(id) === changesAtStart) clearDirty(id);
     try {
       await maybeAutoVersion(project);
     } catch {
@@ -394,7 +416,11 @@ export async function pullIndex(openProjectId?: string): Promise<string | null> 
   writeJson(BLOBS_KEY, blobMap);
 
   // Folders, parents before children.
-  const allDriveFolders = files.filter((f) => f.mimeType === FOLDER_MIME && f.appProperties?.kind === "folder");
+  // A folder deleted here that Drive has not been told about yet must not be brought back by this very pull.
+  const waitingFolders = new Set(readJson<PendingFolderTrash[]>(FOLDER_TRASH_KEY, []).map((j) => j.driveId));
+  const allDriveFolders = files.filter(
+    (f) => f.mimeType === FOLDER_MIME && f.appProperties?.kind === "folder" && !waitingFolders.has(f.id),
+  );
   // Two Drive folders for one local folder: keep the linked (else newest) one, move anything inside across, trash the rest.
   const linkedDriveIds = new Map(listFolders().map((f) => [f.id, f.driveId]));
   const keepFolder = new Map<string, DriveFile>();
@@ -571,12 +597,20 @@ export async function pullIndex(openProjectId?: string): Promise<string | null> 
     }
   }
 
-  // A design that Drive no longer lists was removed elsewhere. One with nothing here to lose goes
-  // away; one with contents just loses its link and will be sent again the next time it is saved.
+  // A design that Drive no longer lists was removed on another computer. One with nothing here to lose goes
+  // away. One with contents follows the deletion too, through the Bin so it can still be brought back, as long
+  // as nothing in it is waiting to be sent and it is not the one open right now. Otherwise it only loses its
+  // link (and is sent again the next time it is saved), so this never throws away work that exists nowhere else.
   for (const m of metas) {
     if (!m.driveId || seen.has(m.id)) continue;
-    if (!hasProjectContents(m.id) || m.remote) deleteProjectStorage(m.id);
-    else updateProjectMeta(m.id, (x) => { delete x.driveId; });
+    if (!hasProjectContents(m.id) || m.remote) {
+      deleteProjectStorage(m.id);
+    } else if (!isDirty(m.id) && m.id !== openProjectId) {
+      moveToBin(m.id);
+      deleteProjectStorage(m.id);
+    } else {
+      updateProjectMeta(m.id, (x) => { delete x.driveId; });
+    }
   }
   return staleOpen;
 }
@@ -613,11 +647,12 @@ async function refreshOpenDesign(id: string): Promise<void> {
 /* A design's preview picture is made on the computer that drew it, so each one is also kept as its own small
    file in a hidden Drive folder. A computer that has never opened a design fetches just the pictures it lacks. */
 
-/** A cheap fingerprint of a picture, to tell whether it changed since it was last sent. */
-function thumbSig(dataUrl: string): string {
-  let h = 5381;
-  for (let i = 0; i < dataUrl.length; i += 7) h = ((h << 5) + h + dataUrl.charCodeAt(i)) | 0;
-  return `${dataUrl.length}:${(h >>> 0).toString(36)}`;
+/** Sets one entry of a small list kept in storage, reading the list fresh so a stale copy never overwrites another job's entry. */
+function setEntry(key: string, id: string, value: string | undefined): void {
+  const map = readJson<Record<string, string>>(key, {});
+  if (value === undefined) delete map[id];
+  else map[id] = value;
+  writeJson(key, map);
 }
 
 let thumbsJob: Promise<string> | null = null;
@@ -648,13 +683,17 @@ async function refreshThumbMap(): Promise<Record<string, string>> {
   return map;
 }
 
-/** Sends a design's preview picture to Drive, unless Drive already has this exact picture. */
+/** Sends a design's preview picture to Drive, unless Drive already has this very picture (same drawn-at time). */
 export async function pushThumbnail(id: string, attempt = 0): Promise<void> {
   const thumb = loadThumbnail(id);
   if (!thumb) return;
-  const sig = thumbSig(thumb);
-  const sigs = readJson<Record<string, string>>(THUMB_SIGS_KEY, {});
-  if (sigs[id] === sig) return;
+  // A picture with no time (made before pictures were dated) is dated now: it is only sent when Drive has none.
+  let at = thumbnailStamp(id);
+  if (!at) {
+    at = Date.now();
+    stampThumbnail(id, at);
+  }
+  if (readJson<Record<string, string>>(THUMB_SIGS_KEY, {})[id] === String(at)) return;
   const parentId = await ensureThumbsFolder();
   let files = readJson<Record<string, string>>(THUMB_FILES_KEY, {});
   if (!files[id]) files = await refreshThumbMap();
@@ -666,53 +705,55 @@ export async function pushThumbnail(id: string, attempt = 0): Promise<void> {
       mimeType: "text/plain",
       body: thumb,
       kind: "thumb",
-      properties: { localId: id, sig },
+      properties: { localId: id, at: String(at) },
     });
-    files[id] = file.id;
-    writeJson(THUMB_FILES_KEY, files);
-    sigs[id] = sig;
-    writeJson(THUMB_SIGS_KEY, sigs);
+    setEntry(THUMB_FILES_KEY, id, file.id);
+    setEntry(THUMB_SIGS_KEY, id, String(at));
   } catch (error) {
     // The remembered file is gone from Drive: forget it and send a fresh one.
     if (error instanceof DriveError && error.status === 404 && attempt === 0) {
-      delete files[id];
-      writeJson(THUMB_FILES_KEY, files);
+      setEntry(THUMB_FILES_KEY, id, undefined);
       return pushThumbnail(id, 1);
     }
     throw error;
   }
 }
 
-/** Fetches the pictures this computer lacks, and sends the ones Drive lacks. */
+/**
+ * Brings the preview pictures level with Drive's by one rule: the newest picture wins (see thumbnailAction).
+ * Newer on Drive: fetched. Newer here, or Drive has none: sent.
+ */
 async function syncThumbnails(): Promise<void> {
   const remote = await driveApi().listAuxByKind("thumb");
   const files: Record<string, string> = {};
   for (const f of remote) if (f.appProperties?.localId) files[f.appProperties.localId] = f.id;
   writeJson(THUMB_FILES_KEY, files);
 
-  const sigs = readJson<Record<string, string>>(THUMB_SIGS_KEY, {});
   const projects = listProjects();
+  const remoteAt = new Map<string, number>();
   let fetched = 0;
   for (const f of remote) {
     const id = f.appProperties?.localId;
     if (!id || !projects.some((p) => p.id === id)) continue;
-    const remoteSig = f.appProperties?.sig ?? "";
-    const local = loadThumbnail(id);
-    // Missing here, or changed on another computer while this one's has not changed since it was last sent.
-    const needed = !local || (!!remoteSig && remoteSig !== sigs[id] && thumbSig(local) === sigs[id]);
-    if (!needed) continue;
+    const at = Number(f.appProperties?.at) || Date.parse(f.modifiedTime ?? "") || 0;
+    remoteAt.set(id, at);
+    const hasLocal = !!loadThumbnail(id);
+    if (thumbnailAction({ has: hasLocal, at: hasLocal ? thumbnailStamp(id) : 0 }, { has: true, at }) !== "pull") continue;
     if (fetched++ >= 40) break;
     const text = await driveApi().downloadText(f.id);
     if (!text.startsWith("data:image")) continue;
-    sigs[id] = thumbSig(text);
-    writeJson(THUMB_SIGS_KEY, sigs);
-    saveThumbnail(id, text);
+    // Recorded as "already on Drive" before it is saved, so saving it does not send it straight back.
+    setEntry(THUMB_SIGS_KEY, id, String(at));
+    saveThumbnail(id, text, at);
   }
 
-  // Pictures made here that Drive has never had (designs saved before this existed).
+  // Pictures made here that are newer than Drive's, or that Drive has never had.
   let sent = 0;
   for (const p of projects) {
-    if (p.location !== "drive" || p.remote || files[p.id] || !loadThumbnail(p.id)) continue;
+    if (p.location !== "drive" || p.remote || !loadThumbnail(p.id)) continue;
+    const there = remoteAt.get(p.id);
+    const action = thumbnailAction({ has: true, at: thumbnailStamp(p.id) }, { has: there !== undefined, at: there ?? 0 });
+    if (action !== "push") continue;
     if (sent++ >= 25) break;
     await pushThumbnail(p.id);
   }
@@ -986,36 +1027,149 @@ export async function flushPending(): Promise<void> {
       }
     }
   }
+  const folderJobs = readJson<PendingFolderTrash[]>(FOLDER_TRASH_KEY, []);
+  if (folderJobs.length) {
+    writeJson(FOLDER_TRASH_KEY, []);
+    for (let i = 0; i < folderJobs.length; i++) {
+      const job = folderJobs[i];
+      try {
+        for (const id of job.designIds) {
+          const meta = listProjects().find((p) => p.id === id);
+          if (meta?.driveId) await pushProject(id);
+        }
+        for (const id of job.subfolderIds) await moveFolderOnDrive(id);
+        await trashOnDrive(job.driveId);
+      } catch (error) {
+        writeJson(FOLDER_TRASH_KEY, [...folderJobs.slice(i), ...readJson<PendingFolderTrash[]>(FOLDER_TRASH_KEY, [])]);
+        throw error;
+      }
+    }
+  }
   for (const id of dirtySet()) await pushProject(id);
 }
 
+// ---- checking that this computer and Drive agree ----
+
+export type SyncCheckState = "same" | "driveNewer" | "thisNewer" | "differs" | "driveOnly" | "notOnDrive";
+export type SyncCheckRow = { id: string; name: string; state: SyncCheckState; note: string; open: boolean };
+
+/** Two copies of a design are the same when only default values are spelled differently (a missing "hidden" is "hidden: false"). */
+function withoutDefaults(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutDefaults);
+  if (value && typeof value === "object") {
+    const out: Record<string, unknown> = {};
+    for (const key of Object.keys(value as object).sort()) {
+      const v = (value as Record<string, unknown>)[key];
+      if (v === undefined) continue;
+      if ((key === "hidden" || key === "collapsed") && v === false) continue;
+      out[key] = withoutDefaults(v);
+    }
+    return out;
+  }
+  return value;
+}
+
+/**
+ * Compares every design here with its file on Drive and says which side is ahead. Reads only: nothing is
+ * changed. A design is "newer here" when it has changes waiting to be sent, and "newer on Drive" when Drive's
+ * file changed since this computer last sent or fetched it.
+ */
+export async function checkSync(): Promise<SyncCheckRow[]> {
+  const files = await driveApi().listAll();
+  const onDrive = new Map(files.map((f) => [f.id, f]));
+  const openId = useDoc.getState().currentProjectId;
+  const rows: SyncCheckRow[] = [];
+  for (const p of listProjects()) {
+    const open = p.id === openId;
+    const row = (state: SyncCheckState, note: string): SyncCheckRow => ({ id: p.id, name: p.name, state, note, open });
+    if (!p.driveId) {
+      if (hasProjectContents(p.id)) rows.push(row("notOnDrive", "Only on this computer; not saved to Drive."));
+      continue;
+    }
+    const file = onDrive.get(p.driveId);
+    if (!file) {
+      rows.push(row("notOnDrive", "Drive no longer has this design."));
+      continue;
+    }
+    if (!hasProjectContents(p.id)) {
+      rows.push(row("driveOnly", "On Drive only; it downloads when you open it."));
+      continue;
+    }
+    if (p.remote) {
+      // Drive changed since this computer last had it; the old copy here is kept until it is opened or updated.
+      rows.push(row("driveNewer", "Changed on another computer; this copy is older and refreshes when opened."));
+      continue;
+    }
+    const local = loadProject(p.id);
+    const remote = parseProjectFile(await driveApi().downloadText(file.id), p.name);
+    if (!local || !remote) {
+      rows.push(row("differs", "Could not read one of the copies."));
+      continue;
+    }
+    if (JSON.stringify(withoutDefaults(local.nodes)) === JSON.stringify(withoutDefaults(remote.nodes))) {
+      rows.push(row("same", ""));
+      continue;
+    }
+    const waiting = isDirty(p.id);
+    const driveChanged = !!p.driveModified && file.modifiedTime !== p.driveModified;
+    if (waiting && !driveChanged) rows.push(row("thisNewer", "This computer has changes that have not been sent yet."));
+    else if (driveChanged && !waiting) rows.push(row("driveNewer", "Changed on another computer; this copy is older."));
+    else if (waiting && driveChanged) rows.push(row("differs", "Changed in both places since they last matched."));
+    else rows.push(row("differs", "The two copies differ."));
+  }
+  return rows;
+}
+
+/** The safe fix for one row of the check: bring in Drive's newer copy, or send this computer's newer one. */
+export async function fixSyncRow(row: SyncCheckRow): Promise<void> {
+  if (row.state === "driveNewer" && !row.open) await fetchProject(row.id);
+  else if (row.state === "thisNewer") await pushProject(row.id);
+}
+
 /** Runs a Drive job, keeping the connection state and the last error up to date. */
+const runOneAtATime = createSerialRunner();
+let jobsWaiting = 0;
+
 export async function runSync<T>(job: () => Promise<T>): Promise<T | undefined> {
   const drive = useDrive.getState();
   if (drive.status !== "signedIn" && !hasToken()) return undefined;
+  jobsWaiting++;
   drive.setBusy(true);
   try {
-    const result = await job();
-    useDrive.getState().markSynced();
-    return result;
-  } catch (error) {
-    if (error instanceof DriveAuthError) {
-      if (error instanceof DriveScopeError) signedOutByGoogle(error.message, true);
-      else signedOutByGoogle();
-      useDrive.getState().setStatus("signedOut");
-    }
-    useDrive.getState().setError(
-      error instanceof Error && error.message ? error.message : "Couldn't reach Google Drive. Your changes will be sent next time.",
-    );
-    return undefined;
+    // One job at a time: see createSerialRunner for what overlapping jobs used to do.
+    return await runOneAtATime(async (): Promise<T | undefined> => {
+      try {
+        const result = await job();
+        useDrive.getState().markSynced();
+        return result;
+      } catch (error) {
+        if (error instanceof DriveAuthError) {
+          if (error instanceof DriveScopeError) signedOutByGoogle(error.message, true);
+          else signedOutByGoogle();
+          useDrive.getState().setStatus("signedOut");
+        }
+        useDrive.getState().setError(
+          error instanceof Error && error.message ? error.message : "Couldn't reach Google Drive. Your changes will be sent next time.",
+        );
+        return undefined;
+      }
+    });
   } finally {
-    useDrive.getState().setBusy(false);
+    jobsWaiting--;
+    if (jobsWaiting === 0) useDrive.getState().setBusy(false);
   }
 }
 
+let fullSyncWaiting = false;
+
 /** Reads Drive's current state, sends anything waiting, and refreshes what the Home page shows. */
 export async function syncNow(): Promise<void> {
+  // The minute check, a tab coming back into view and the button can all ask at nearly the same moment;
+  // one full sync waiting its turn covers every one of them.
+  if (fullSyncWaiting) return;
+  fullSyncWaiting = true;
   await runSync(async () => {
+    fullSyncWaiting = false;
     adoptAllIntoDrive();
     await flushPending();
     // Folders made before Drive was connected (or still empty) get their Drive twin too.
@@ -1121,14 +1275,11 @@ export function installDriveHooks(): void {
   };
   driveHooks.onFolderDeleted = ({ folder, designIds, subfolderIds }) => {
     if (!folder.driveId) return;
-    void runSync(async () => {
-      for (const id of designIds) {
-        const meta = listProjects().find((p) => p.id === id);
-        if (meta?.driveId) await pushProject(id);
-      }
-      for (const id of subfolderIds) await moveFolderOnDrive(id);
-      await trashOnDrive(folder.driveId!);
-    });
+    writeJson(FOLDER_TRASH_KEY, [
+      ...readJson<PendingFolderTrash[]>(FOLDER_TRASH_KEY, []),
+      { driveId: folder.driveId, designIds, subfolderIds },
+    ]);
+    void runSync(flushPending);
   };
 
   // Every edit to a design that lives on Drive is sent a moment later. Opening a design changes

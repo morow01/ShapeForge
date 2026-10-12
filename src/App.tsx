@@ -3725,20 +3725,35 @@ export function App() {
     setNewDesignPromptOpen(false);
   }, [newProject]);
 
+  // What the thumbnail code has to know about the scene, kept current without re-creating the callbacks.
+  const sceneStateRef = useRef({ busy: false, built: 0, setAside: 0 });
+  sceneStateRef.current = { busy: sceneBusy, built: parts.length, setAside: allSkipped.size };
+
+  /**
+   * Only a finished, complete scene may become the card's picture. Leaving a heavy design while it is still
+   * filling in, or while some of its objects are set aside (missing files, a timeout), used to save a blank or
+   * half-built picture over the good one, and sync then spread it to every computer.
+   */
+  const sceneIsComplete = () => {
+    const s = sceneStateRef.current;
+    return !s.busy && s.built > 0 && s.setAside === 0;
+  };
+
   /** Back to the Home page, leaving a small picture of the design for its card. */
   const openHome = useCallback(() => {
     const state = useDoc.getState();
-    if (state.nodes.length) {
+    if (state.nodes.length && sceneIsComplete()) {
       const shot = sceneRef.current?.captureThumbnail();
       if (shot) saveThumbnail(state.currentProjectId, shot);
     }
     setHomeOpen(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // The design that is open when the app starts never gets "left", so its card would
   // have no picture. Once it has finished building behind the Home page, take one.
   useEffect(() => {
-    if (!homeOpen || sceneBusy || !nodes.length || loadThumbnail(currentProjectId)) return;
+    if (!homeOpen || sceneBusy || !nodes.length || parts.length === 0 || loadThumbnail(currentProjectId)) return;
     const t = window.setTimeout(() => {
       const shot = sceneRef.current?.captureThumbnail();
       if (shot) {
@@ -3747,7 +3762,7 @@ export function App() {
       }
     }, 600);
     return () => window.clearTimeout(t);
-  }, [homeOpen, sceneBusy, nodes.length, currentProjectId]);
+  }, [homeOpen, sceneBusy, nodes.length, parts.length, currentProjectId]);
 
   /** Signed in to Drive, everything lives there and nothing is asked; otherwise ask where. */
   const chooseHome = useCallback(() => {
@@ -5735,7 +5750,9 @@ export function App() {
             <div className="canvas-error" role="alert">
               {error ?? editNotice}
               {missingFileList.length > 0 && (
-                <button className="canvas-error-btn" onClick={() => setLocateOpen(true)}>Locate files…</button>
+                <div className="canvas-error-actions">
+                  <button className="canvas-error-btn" onClick={() => setLocateOpen(true)}>Locate files…</button>
+                </div>
               )}
             </div>
           )}
@@ -8386,7 +8403,7 @@ export function App() {
         onSave={(name, location) => {
           if (name !== projectName) renameProject(name);
           saveCurrentTo(location);
-          const shot = useDoc.getState().nodes.length ? sceneRef.current?.captureThumbnail() : null;
+          const shot = useDoc.getState().nodes.length && sceneIsComplete() ? sceneRef.current?.captureThumbnail() : null;
           if (shot) saveThumbnail(useDoc.getState().currentProjectId, shot);
           setSaveDialogOpen(false);
         }}

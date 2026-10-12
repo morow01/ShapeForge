@@ -195,14 +195,62 @@ function ensureCodeClient(): CodeClient {
   return codeClient;
 }
 
-async function requestTokenViaWorker(): Promise<string> {
-  await loadGoogleScript();
-  const c = ensureCodeClient();
-  const code = await new Promise<string>((resolve, reject) => {
-    codePending = { resolve, reject };
-    c.requestCode();
+/**
+ * The desktop app is not a browser Google trusts, so it signs in through the person's own browser: that opens
+ * Google's page, which comes back to the app's local address, and the app collects the result from there.
+ * Returns null when this is not the desktop app.
+ */
+const DESKTOP_REDIRECT_PATH = "/oauth-callback";
+async function isDesktopApp(): Promise<boolean> {
+  try {
+    const res = await fetch("/__auth/available");
+    return res.ok && (await res.text()).trim() === "shapeforge-desktop";
+  } catch {
+    return false;
+  }
+}
+
+async function requestCodeInBrowser(): Promise<string> {
+  const state = crypto.randomUUID();
+  const params = new URLSearchParams({
+    client_id: getClientId(),
+    redirect_uri: location.origin + DESKTOP_REDIRECT_PATH,
+    response_type: "code",
+    scope: DRIVE_SCOPES,
+    access_type: "offline",
+    prompt: "consent",
+    state,
   });
-  const { status, data } = await callWorker("/exchange", { code });
+  window.open("https://accounts.google.com/o/oauth2/v2/auth?" + params.toString(), "_blank");
+  const deadline = Date.now() + 5 * 60_000;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 1000));
+    const res = await fetch("/__auth/poll?state=" + encodeURIComponent(state));
+    if (res.status !== 200) continue;
+    const result = (await res.json()) as { code?: string; error?: string };
+    if (result.code) return result.code;
+    throw new Error(result.error === "access_denied" ? "Sign-in was cancelled." : "Sign-in failed.");
+  }
+  throw new Error("Sign-in took too long. Click Connect to try again.");
+}
+
+async function requestTokenViaWorker(): Promise<string> {
+  const desktop = await isDesktopApp();
+  let code: string;
+  if (desktop) {
+    code = await requestCodeInBrowser();
+  } else {
+    await loadGoogleScript();
+    const c = ensureCodeClient();
+    code = await new Promise<string>((resolve, reject) => {
+      codePending = { resolve, reject };
+      c.requestCode();
+    });
+  }
+  const { status, data } = await callWorker(
+    "/exchange",
+    desktop ? { code, redirect_uri: location.origin + DESKTOP_REDIRECT_PATH } : { code },
+  );
   if (status !== 200 || !data.access_token) throw new Error(data.error_description || data.error || "The sign-in helper could not finish signing in.");
   if (data.scope && !data.scope.includes(DRIVE_FILE_SCOPE)) {
     throw new Error("The Drive permission wasn't ticked. Sign out, connect again, and tick the Google Drive box before clicking Continue.");

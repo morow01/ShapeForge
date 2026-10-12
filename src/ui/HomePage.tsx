@@ -17,6 +17,7 @@ import { connectDrive } from "../drive/actions";
 import { lastSignOut, signOut, wasConnected } from "../drive/auth";
 import { hasBuiltInClientId, hasClientIdOverride } from "../drive/config";
 import { fetchProject, runSync, syncNow } from "../drive/sync";
+import { SyncCheckDialog } from "./SyncCheckDialog";
 import { useDrive } from "../drive/state";
 import { FolderOpenIcon, PlusIcon } from "./icons";
 
@@ -213,6 +214,8 @@ export function HomePage({
     toastTimer.current = window.setTimeout(() => setToast(null), 2600);
   };
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [selectedFolders, setSelectedFolders] = useState<Set<string>>(new Set());
+  const [checkingSync, setCheckingSync] = useState(false);
   const [historyFor, setHistoryFor] = useState<string | null>(null);
   const [tagging, setTagging] = useState<ProjectMeta[] | null>(null);
   const [, setTagTick] = useState(0);
@@ -452,6 +455,16 @@ export function HomePage({
       return next;
     });
 
+  // Folders can be ticked on the cards and in the sidebar tree, which shows every folder, so any folder counts.
+  const selectedFolderList = folders.filter((f) => selectedFolders.has(f.id));
+  const toggleFolderSelected = (id: string) =>
+    setSelectedFolders((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
   const countIn = (folderId: string) => projects.filter((p) => p.folderId === folderId).length;
   const trail = folderPath(folders, viewFolderId);
 
@@ -616,6 +629,52 @@ export function HomePage({
     }
     deleteFolder(f.id, withDesigns);
     if (viewFolderId === f.id) setView({ kind: "folder", id: f.parentId });
+  };
+
+  const handleDeleteFolders = async (list: FolderMeta[]) => {
+    if (list.length === 1) {
+      await handleDeleteFolder(list[0]);
+      setSelectedFolders(new Set());
+      return;
+    }
+    const inTrees = new Set<string>();
+    for (const f of list) for (const id of collectFolderTree(f.id)) inTrees.add(id);
+    const designCount = projects.filter((p) => p.folderId && inTrees.has(p.folderId)).length;
+    const hasSubfolders = inTrees.size > list.length;
+    let withDesigns = true;
+    if (designCount || hasSubfolders) {
+      const choice = await askChoice({
+        title: `Delete ${list.length} folders?`,
+        message: `What should happen to what is inside these ${list.length} folders?`,
+        confirmLabel: `Delete ${list.length} folders`,
+        destructive: true,
+        choices: [
+          { id: "keep", label: "Delete the folders only", hint: "Their designs and folders move up one level." },
+          {
+            id: "all",
+            label: "Delete the folders and everything inside",
+            hint: `The ${designCount} ${designCount === 1 ? "design" : "designs"} go to the Bin for 30 days, together with the folders.`,
+          },
+        ],
+      });
+      if (!choice) return;
+      withDesigns = choice === "all";
+    } else {
+      const ok = await ask({
+        title: `Delete ${list.length} folders?`,
+        message: "They are empty. They move to the Bin and are kept for 30 days.",
+        confirmLabel: `Delete ${list.length} folders`,
+        destructive: true,
+      });
+      if (!ok) return;
+    }
+    // Deepest first, so a folder inside another selected folder is never left pointing at a deleted one.
+    const depth = (f: FolderMeta) => folderPath(folders, f.id).length;
+    for (const f of [...list].sort((a, b) => depth(b) - depth(a))) {
+      if (useDoc.getState().folders.some((x) => x.id === f.id)) deleteFolder(f.id, withDesigns);
+    }
+    setSelectedFolders(new Set());
+    if (viewFolderId && list.some((f) => f.id === viewFolderId)) setView({ kind: "folder", id: null });
   };
 
   const startMove = (group: ProjectMeta[]) => {
@@ -843,7 +902,23 @@ export function HomePage({
                     return <span key={k} className={`tree-cell ${cell}`} />;
                   })}
                 </span>
-                <FolderIcon className="home-nav-icon" /><span className="home-nav-name">{folder.name}</span>
+                <span className="nav-icon-slot">
+                  <FolderIcon className="home-nav-icon" />
+                  <span
+                    className={`home-nav-check${selectedFolders.has(folder.id) ? " on" : ""}`}
+                    role="checkbox"
+                    aria-checked={selectedFolders.has(folder.id)}
+                    aria-label={`Select folder ${folder.name} in the list`}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleFolderSelected(folder.id);
+                    }}
+                  >
+                    {selectedFolders.has(folder.id) ? "✓" : ""}
+                  </span>
+                </span>
+                <span className="home-nav-name">{folder.name}</span>
               </span>
               <span className="home-count">{countIn(folder.id)}</span>
             </button>
@@ -925,6 +1000,7 @@ export function HomePage({
                 {driveError && <span className="home-drive-error">{driveError}</span>}
                 <div className="home-drive-actions">
                   <button className="home-link" onClick={() => void syncNow()} disabled={driveBusy}>Sync now</button>
+                  <button className="home-link" onClick={() => setCheckingSync(true)} disabled={driveBusy} title="Compare every design with Google Drive">Check sync</button>
                   <button className="home-link" onClick={() => signOut()}>Sign out</button>
                 </div>
               </div>
@@ -996,7 +1072,7 @@ export function HomePage({
           )}
 
           {subfolders.length > 0 && (
-            <div className="home-folders">
+            <div className={`home-folders${selectedFolderList.length ? " has-selection" : ""}`}>
               {subfolders.map((f) => (
                 <div
                   key={f.id}
@@ -1004,6 +1080,15 @@ export function HomePage({
                   {...dropProps(f.id)}
                   onContextMenu={(e) => openMenu(e, { kind: "folder", folder: f })}
                 >
+                  <button
+                    className={`home-check home-folder-check${selectedFolders.has(f.id) ? " on" : ""}`}
+                    role="checkbox"
+                    aria-checked={selectedFolders.has(f.id)}
+                    aria-label={`Select folder ${f.name}`}
+                    onClick={() => toggleFolderSelected(f.id)}
+                  >
+                    {selectedFolders.has(f.id) ? "✓" : ""}
+                  </button>
                   <button className="home-folder-open" onClick={() => setView({ kind: "folder", id: f.id })} title={`Open ${f.name}`}>
                     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" aria-hidden="true">
                       <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
@@ -1032,6 +1117,17 @@ export function HomePage({
 
           {!searching && view.kind === "bin" && <BinView ask={ask} />}
           {!(view.kind === "bin" && !searching) && designs.length === 0 && subfolders.length === 0 && <div className="home-empty">{emptyText}</div>}
+
+          {selectedFolderList.length > 0 && (
+            <div className="home-selbar" role="toolbar" aria-label="Selected folders">
+              <b>{selectedFolderList.length} {selectedFolderList.length === 1 ? "folder" : "folders"} selected</b>
+              <button className="modal-btn home-danger" onClick={() => void handleDeleteFolders(selectedFolderList)}>Delete</button>
+              {selectedFolderList.length < subfolders.length && (
+                <button className="modal-btn" onClick={() => setSelectedFolders(new Set(subfolders.map((f) => f.id)))}>Select all {subfolders.length}</button>
+              )}
+              <button className="modal-btn" onClick={() => setSelectedFolders(new Set())}>Clear</button>
+            </div>
+          )}
 
           {selectedDesigns.length > 0 && (
             <div className="home-selbar" role="toolbar" aria-label="Selected designs">
@@ -1298,6 +1394,8 @@ export function HomePage({
           )}
         </main>
       </div>
+
+      {checkingSync && <SyncCheckDialog onClose={() => setCheckingSync(false)} />}
 
       {nameDialog && (
         <div className="modal-backdrop" onClick={() => setNameDialog(null)}>
