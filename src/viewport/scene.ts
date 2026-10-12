@@ -2317,6 +2317,9 @@ export class Scene {
       blendEquation: THREE.AddEquation,
       blendSrc: THREE.SrcAlphaFactor,
       blendDst: THREE.OneMinusSrcAlphaFactor,
+      // The canvas itself must stay fully opaque, or the page behind it shows through wherever a line is drawn.
+      blendSrcAlpha: THREE.ZeroFactor,
+      blendDstAlpha: THREE.OneFactor,
       uniforms: {
         uColor: { value: new THREE.Color(0xd8e0e5) },
         uCentre: { value: new THREE.Vector2() },
