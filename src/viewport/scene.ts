@@ -1,3 +1,4 @@
+import { createInfiniteGrid } from "./infiniteGrid";
 import { MeasuringTape } from "./MeasuringTape";
 import { mergedRenderGroups } from "./renderGroups";
 import { readViewportQuality, viewportQualitySettings, type ViewportQuality } from "./quality";
@@ -1556,6 +1557,7 @@ export class Scene {
   private plateVisible = true;
   /** The plate is an endless grid that fades out toward the horizon instead of a bed of fixed size. */
   private plateInfinite = false;
+  private infiniteGrid: ReturnType<typeof createInfiniteGrid> | null = null;
   private plateWidth = 256;
   private plateDepth = 256;
   private resizeHandles = new THREE.Group();
@@ -2278,23 +2280,11 @@ export class Scene {
     const w = this.plateWidth;
     const d = this.plateDepth;
 
-    // TODO(infinite grid): when this.plateInfinite is on, draw an endless ground grid here instead of the fixed-size
-    // plate below. The Settings > Build Plate > "Infinite grid" switch, its saved preference and the plateInfinite
-    // flag are all wired up already; only the drawing is missing. A first attempt (one huge plane with a grid
-    // fragment shader, lines every 8/80/800 mm, fading toward the horizon) was removed because it did not look
-    // right. Problems it ran into, so they are not repeated:
-    //  - Lines came out white instead of grey: blending the grid into the canvas also changed the canvas alpha, so
-    //    the page behind showed through (needs blendSrcAlpha Zero / blendDstAlpha One, or an opaque canvas).
-    //  - A grid plane at z = 0 fights in the depth buffer with the base of every part standing on the ground
-    //    (dashed marks along the bottom edges). A depth offset fixes that in perspective but pushes the plane out of
-    //    view in orthographic mode, so draw it first, without depth writes, instead.
-    //  - Fading lines by their size on screen leaves visible bands at a fixed distance, and shimmer (moire) far
-    //    away. Proper filtered lines (fade to a flat tone as cells shrink) made the stronger lines far too wide
-    //    and dark at shallow viewing angles.
-    //  - Not yet looked at: thumbnails (pictures of a design would include the endless grid), the exported
-    //    Blueprint, and very large zoom-outs in orthographic mode, where the ground is clipped by the camera's
-    //    fixed near/far range.
-    if (w === d) {
+    this.infiniteGrid = null;
+    if (this.plateInfinite) {
+      this.infiniteGrid = createInfiniteGrid();
+      this.plateGroup.add(this.infiniteGrid);
+    } else if (w === d) {
       const divisions = Math.max(2, Math.round(w / 8));
       const grid = new THREE.GridHelper(w, divisions, 0xd8e0e5, 0xd8e0e5);
       grid.rotation.x = Math.PI / 2;
@@ -12362,6 +12352,14 @@ export class Scene {
         this.camera.updateMatrixWorld();
       }
     }
+    if (this.infiniteGrid) {
+      const uniforms = this.infiniteGrid.material.uniforms;
+      uniforms.centre.value.set(this.controls.target.x, this.controls.target.y);
+      // Visible height keeps the fade stable when orthographic cameras move back.
+      uniforms.viewSpan.value = this.camera instanceof THREE.OrthographicCamera
+        ? (this.camera.top - this.camera.bottom) / this.camera.zoom
+        : 2 * this.camera.position.distanceTo(this.controls.target) / this.camera.projectionMatrix.elements[5];
+    }
     this.updateResizeOverlay();
     this.updateAlignOverlay();
     this.updatePushPullOverlay();
@@ -12472,6 +12470,9 @@ export class Scene {
     this.alignDragArrow.cone.geometry.dispose();
     (this.alignDragArrow.cone.material as THREE.Material).dispose();
     for (const handle of this.pushPullHandleMeshes) disposeArrow(handle);
+    this.infiniteGrid?.geometry.dispose();
+    this.infiniteGrid?.material.dispose();
+    this.infiniteGrid = null;
     this.renderer.dispose();
     for (const input of this.dimensionInputs) input.remove();
     for (const pill of this.movePills) pill.remove();

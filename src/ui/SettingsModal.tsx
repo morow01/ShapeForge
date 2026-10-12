@@ -267,7 +267,7 @@ export function SettingsModal({
                   <SettingsToggle checked={plateVisible} onChange={onPlateVisible} label="Show build plate" />
                 </div>
                 <div className="settings-row">
-                  <span><strong>Infinite grid</strong><small>An endless ground grid instead of a bed of fixed size (not working yet: the switch is saved but does nothing)</small></span>
+                  <span><strong>Infinite grid</strong><small>An endless ground grid that adapts to zoom and fades toward the horizon</small></span>
                   <SettingsToggle checked={plateInfinite} onChange={onPlateInfinite} label="Infinite grid" />
                 </div>
                 <label className="settings-row">
