@@ -121,7 +121,21 @@ function createWindow() {
   });
 }
 
+// A second copy could not use the page address the first one holds, and would open blank: bring the first forward.
+const hasLock = isDev || app.requestSingleInstanceLock();
+if (!hasLock) {
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  });
+}
+
 app.whenReady().then(async () => {
+  if (!hasLock) return;
   // Google refuses sign-in from browsers that call themselves Electron.
   const cleanAgent = (agent) => agent.replace(/\s*Electron\/\S+/, '').replace(/\s*shapeforge\/\S+/i, '');
   app.userAgentFallback = cleanAgent(app.userAgentFallback);
