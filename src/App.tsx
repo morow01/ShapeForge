@@ -373,6 +373,7 @@ const APPEARANCE_KEY = "cad.appearance";
 const BUILD_PLATE_VISIBLE_KEY = "cad.buildPlateVisible";
 const VIEW_CUBE_VISIBLE_KEY = "cad.viewCubeVisible";
 const BUILD_PLATE_SIZE_KEY = "cad.buildPlateSize";
+const BUILD_PLATE_INFINITE_KEY = "cad.buildPlateInfinite";
 
 /** What each preset costs, so the choice is not guesswork — measured on a
  *  40x30x15 box with a 10mm spherical bowl (see EXPORT_PRESETS in worker.ts). */
@@ -1060,6 +1061,12 @@ export function App() {
   useEffect(() => {
     localStorage.setItem(BUILD_PLATE_VISIBLE_KEY, plateVisible ? "on" : "off");
   }, [plateVisible]);
+  const [plateInfinite, setPlateInfinite] = useState(
+    () => localStorage.getItem(BUILD_PLATE_INFINITE_KEY) === "on",
+  );
+  useEffect(() => {
+    localStorage.setItem(BUILD_PLATE_INFINITE_KEY, plateInfinite ? "on" : "off");
+  }, [plateInfinite]);
   const [viewCubeVisible, setViewCubeVisible] = useState(
     () => localStorage.getItem(VIEW_CUBE_VISIBLE_KEY) !== "off",
   );
@@ -5592,6 +5599,7 @@ export function App() {
           gridSnapEnabled={gridSnapEnabled}
           showSelectedCollisionContacts={showSelectedCollisionContacts}
           plateVisible={plateVisible}
+          plateInfinite={plateInfinite}
           viewCubeVisible={viewCubeVisible}
           onHideViewCube={() => setViewCubeVisible(false)}
           onToggleCameraMode={() => setCameraMode((m) => (m === "perspective" ? "orthographic" : "perspective"))}
@@ -8417,6 +8425,7 @@ export function App() {
         decimals={decimalPlaces}
         appearance={appearance}
         plateVisible={plateVisible}
+        plateInfinite={plateInfinite}
         viewCubeVisible={viewCubeVisible}
         plateSize={plateSize}
         snapToGrid={gridSnapEnabled}
@@ -8429,6 +8438,7 @@ export function App() {
         onDecimals={setDecimalPlaces}
         onAppearance={setAppearance}
         onPlateVisible={setPlateVisible}
+        onPlateInfinite={setPlateInfinite}
         onViewCubeVisible={setViewCubeVisible}
         onPlateSize={setPlateSize}
         onSnapToGrid={setGridSnapEnabled}

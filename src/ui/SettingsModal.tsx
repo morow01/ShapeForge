@@ -29,6 +29,7 @@ interface Props {
   decimals: number;
   appearance: AppearancePreference;
   plateVisible: boolean;
+  plateInfinite: boolean;
   viewCubeVisible: boolean;
   plateSize: BuildPlateSize;
   snapToGrid: boolean;
@@ -43,6 +44,7 @@ interface Props {
   onDecimals: (decimals: number) => void;
   onAppearance: (appearance: AppearancePreference) => void;
   onPlateVisible: (visible: boolean) => void;
+  onPlateInfinite: (infinite: boolean) => void;
   onViewCubeVisible: (visible: boolean) => void;
   onPlateSize: (size: BuildPlateSize) => void;
   onSnapToGrid: (enabled: boolean) => void;
@@ -95,6 +97,7 @@ export function SettingsModal({
   decimals,
   appearance,
   plateVisible,
+  plateInfinite,
   viewCubeVisible,
   plateSize,
   snapToGrid,
@@ -107,6 +110,7 @@ export function SettingsModal({
   onDecimals,
   onAppearance,
   onPlateVisible,
+  onPlateInfinite,
   onViewCubeVisible,
   onPlateSize,
   onSnapToGrid,
@@ -261,6 +265,10 @@ export function SettingsModal({
                 <div className="settings-row">
                   <span><strong>Show build plate</strong><small>Display the printer bed and ground alignment grid</small></span>
                   <SettingsToggle checked={plateVisible} onChange={onPlateVisible} label="Show build plate" />
+                </div>
+                <div className="settings-row">
+                  <span><strong>Infinite grid</strong><small>An endless ground grid that fades toward the horizon, instead of a bed of fixed size</small></span>
+                  <SettingsToggle checked={plateInfinite} onChange={onPlateInfinite} label="Infinite grid" />
                 </div>
                 <label className="settings-row">
                   <span><strong>Build plate size</strong><small>Preset 3D printer bed dimensions (Width × Depth)</small></span>

@@ -1554,6 +1554,8 @@ export class Scene {
   private resizeBox = new THREE.Box3Helper(new THREE.Box3(), 0x00a9b7);
   private plateGroup = new THREE.Group();
   private plateVisible = true;
+  /** The plate is an endless grid that fades out toward the horizon instead of a bed of fixed size. */
+  private plateInfinite = false;
   private plateWidth = 256;
   private plateDepth = 256;
   private resizeHandles = new THREE.Group();
@@ -2221,6 +2223,12 @@ export class Scene {
     this.rebuildPlate();
   }
 
+  public setPlateInfinite(infinite: boolean) {
+    if (this.plateInfinite === infinite) return;
+    this.plateInfinite = infinite;
+    this.rebuildPlate();
+  }
+
   public getPlateVisible(): boolean {
     return this.plateVisible;
   }
@@ -2270,7 +2278,9 @@ export class Scene {
     const w = this.plateWidth;
     const d = this.plateDepth;
 
-    if (w === d) {
+    if (this.plateInfinite) {
+      this.plateGroup.add(this.makeInfiniteGrid());
+    } else if (w === d) {
       const divisions = Math.max(2, Math.round(w / 8));
       const grid = new THREE.GridHelper(w, divisions, 0xd8e0e5, 0xd8e0e5);
       grid.rotation.x = Math.PI / 2;
@@ -2288,6 +2298,79 @@ export class Scene {
     this.plateGroup.add(axes);
 
     this.plateGroup.visible = this.plateVisible;
+  }
+
+  /**
+   * A grid with no edge. One huge plane is shaded so that lines appear every 8 mm, with stronger ones every 80 mm
+   * and 800 mm; a level of lines fades out once its cells get too small to tell apart (zoomed far out), and the
+   * whole grid fades with distance from where the camera looks, so it reads as ground running to the horizon.
+   */
+  private makeInfiniteGrid(): THREE.Mesh {
+    const material = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      uniforms: {
+        uColor: { value: new THREE.Color(0xd8e0e5) },
+        uCentre: { value: new THREE.Vector2() },
+        uFadeStart: { value: 500 },
+        uFadeEnd: { value: 3000 },
+      },
+      vertexShader: `
+        varying vec3 vWorld;
+        void main() {
+          vec4 world = modelMatrix * vec4(position, 1.0);
+          vWorld = world.xyz;
+          gl_Position = projectionMatrix * viewMatrix * world;
+        }
+      `,
+      fragmentShader: `
+        varying vec3 vWorld;
+        uniform vec3 uColor;
+        uniform vec2 uCentre;
+        uniform float uFadeStart;
+        uniform float uFadeEnd;
+
+        // 1 on a line of a grid with cells of this size, 0 between; thin lines stay one pixel wide at any zoom,
+        // and the level disappears when its cells shrink below a few pixels.
+        float level(vec2 p, float size) {
+          vec2 q = p / size;
+          vec2 width = max(fwidth(q), vec2(1e-6));
+          vec2 distance = abs(fract(q - 0.5) - 0.5) / width;
+          float line = 1.0 - min(min(distance.x, distance.y), 1.0);
+          float cellPixels = 1.0 / max(width.x, width.y);
+          return line * smoothstep(3.0, 9.0, cellPixels);
+        }
+
+        void main() {
+          float minor = level(vWorld.xy, 8.0) * 0.7;
+          float major = level(vWorld.xy, 80.0);
+          float huge = level(vWorld.xy, 800.0);
+          float lines = max(minor, max(major, huge));
+          float fade = 1.0 - smoothstep(uFadeStart, uFadeEnd, distance(vWorld.xy, uCentre));
+          float alpha = lines * fade;
+          if (alpha < 0.01) discard;
+          gl_FragColor = vec4(uColor, alpha);
+        }
+      `,
+    });
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(200000, 200000), material);
+    // Just under the ground level, so parts sitting on it are never overdrawn by lines at their own base.
+    mesh.position.z = -0.02;
+    mesh.renderOrder = -1;
+    mesh.frustumCulled = false;
+    // The fade follows the view: how far the grid reaches scales with how far the camera is from what it looks at.
+    mesh.onBeforeRender = (_renderer, _scene, camera) => {
+      const target = this.controls.target;
+      const reach = camera instanceof THREE.OrthographicCamera
+        ? (camera.top - camera.bottom) / Math.max(camera.zoom, 1e-6)
+        : camera.position.distanceTo(target);
+      const end = Math.max(600, reach * 7);
+      material.uniforms.uCentre.value.set(target.x, target.y);
+      material.uniforms.uFadeEnd.value = end;
+      material.uniforms.uFadeStart.value = end * 0.3;
+    };
+    return mesh;
   }
 
   private setupResizeOverlay() {
