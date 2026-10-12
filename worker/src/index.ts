@@ -20,6 +20,8 @@ export interface Env {
 }
 
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
+/** Where the desktop app's sign-in comes back to (see electron/main.cjs). */
+const DESKTOP_REDIRECTS = ["http://localhost:5173/oauth-callback"];
 const REVOKE_URL = "https://oauth2.googleapis.com/revoke";
 
 const b64 = {
@@ -90,7 +92,7 @@ export default {
     if (request.method !== "POST") return reply({ error: "POST only" }, 405, cors);
 
     const path = new URL(request.url).pathname;
-    let body: { code?: string; sealed?: string } = {};
+    let body: { code?: string; sealed?: string; redirect_uri?: string } = {};
     try {
       body = (await request.json()) as typeof body;
     } catch {
@@ -100,8 +102,10 @@ export default {
 
     if (path === "/exchange") {
       if (!body.code) return reply({ error: "bad_request" }, 400, cors);
-      // "postmessage" is what Google expects for a code handed over by its sign-in popup.
-      const { ok, data } = await askGoogle({ ...base, grant_type: "authorization_code", code: body.code, redirect_uri: "postmessage" });
+      // "postmessage" is what Google expects for a code handed over by its sign-in popup. The desktop app signs in
+      // through the person's own browser instead, which comes back to its own local address.
+      const redirect = body.redirect_uri && DESKTOP_REDIRECTS.includes(body.redirect_uri) ? body.redirect_uri : "postmessage";
+      const { ok, data } = await askGoogle({ ...base, grant_type: "authorization_code", code: body.code, redirect_uri: redirect });
       if (!ok) return reply({ error: data.error ?? "exchange_failed", error_description: data.error_description }, 400, cors);
       const refresh = typeof data.refresh_token === "string" ? await seal(env, data.refresh_token) : null;
       return reply({ access_token: data.access_token, expires_in: data.expires_in, scope: data.scope, sealed: refresh }, 200, cors);

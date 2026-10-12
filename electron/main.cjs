@@ -13,10 +13,43 @@ const MIME = {
   '.png': 'image/png', '.jpg': 'image/jpeg', '.ico': 'image/x-icon', '.woff2': 'font/woff2',
 };
 
+// Sign-in runs in the person's own browser (Google refuses app windows). It comes back here, and the page collects
+// the result by asking this same server for it.
+const authResults = new Map();
+const DONE_PAGE = (text) => `<!doctype html><meta charset="utf-8"><title>ShapeForge</title><body style="font:18px system-ui;margin:3em auto;max-width:28em"><h2>ShapeForge</h2><p>${text}</p>`;
+
+function handleAuth(req, res) {
+  const url = new URL(req.url || '/', APP_ORIGIN);
+  if (url.pathname === '/__auth/available') {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('shapeforge-desktop');
+    return true;
+  }
+  if (url.pathname === '/oauth-callback') {
+    const state = url.searchParams.get('state') || '';
+    if (state) authResults.set(state, { code: url.searchParams.get('code') || '', error: url.searchParams.get('error') || '' });
+    const ok = !!url.searchParams.get('code');
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(DONE_PAGE(ok ? 'Signed in. You can close this tab and go back to the ShapeForge app.' : 'Sign-in was not completed. Go back to ShapeForge and try again.'));
+    return true;
+  }
+  if (url.pathname === '/__auth/poll') {
+    const state = url.searchParams.get('state') || '';
+    const found = authResults.get(state);
+    if (!found) { res.writeHead(204); res.end(); return true; }
+    authResults.delete(state);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(found));
+    return true;
+  }
+  return false;
+}
+
 function startLocalServer() {
   const root = path.join(__dirname, '../dist');
   return new Promise((resolve, reject) => {
     const server = http.createServer((req, res) => {
+      if (handleAuth(req, res)) return;
       let rel = decodeURIComponent((req.url || '/').split('?')[0]);
       if (rel.endsWith('/')) rel += 'index.html';
       const file = path.normalize(path.join(root, rel));
@@ -59,10 +92,8 @@ function createWindow() {
     },
   });
 
-  // Open external links in default OS browser. Google's sign-in window stays inside the app, so it can hand the
-  // result back to the page that opened it.
+  // Open external links (including Google's sign-in page) in the default OS browser.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith('https://accounts.google.com/')) return { action: 'allow' };
     if (url.startsWith('http://') || url.startsWith('https://')) {
       shell.openExternal(url);
       return { action: 'deny' };
