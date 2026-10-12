@@ -2278,9 +2278,23 @@ export class Scene {
     const w = this.plateWidth;
     const d = this.plateDepth;
 
-    if (this.plateInfinite) {
-      this.plateGroup.add(this.makeInfiniteGrid());
-    } else if (w === d) {
+    // TODO(infinite grid): when this.plateInfinite is on, draw an endless ground grid here instead of the fixed-size
+    // plate below. The Settings > Build Plate > "Infinite grid" switch, its saved preference and the plateInfinite
+    // flag are all wired up already; only the drawing is missing. A first attempt (one huge plane with a grid
+    // fragment shader, lines every 8/80/800 mm, fading toward the horizon) was removed because it did not look
+    // right. Problems it ran into, so they are not repeated:
+    //  - Lines came out white instead of grey: blending the grid into the canvas also changed the canvas alpha, so
+    //    the page behind showed through (needs blendSrcAlpha Zero / blendDstAlpha One, or an opaque canvas).
+    //  - A grid plane at z = 0 fights in the depth buffer with the base of every part standing on the ground
+    //    (dashed marks along the bottom edges). A depth offset fixes that in perspective but pushes the plane out of
+    //    view in orthographic mode, so draw it first, without depth writes, instead.
+    //  - Fading lines by their size on screen leaves visible bands at a fixed distance, and shimmer (moire) far
+    //    away. Proper filtered lines (fade to a flat tone as cells shrink) made the stronger lines far too wide
+    //    and dark at shallow viewing angles.
+    //  - Not yet looked at: thumbnails (pictures of a design would include the endless grid), the exported
+    //    Blueprint, and very large zoom-outs in orthographic mode, where the ground is clipped by the camera's
+    //    fixed near/far range.
+    if (w === d) {
       const divisions = Math.max(2, Math.round(w / 8));
       const grid = new THREE.GridHelper(w, divisions, 0xd8e0e5, 0xd8e0e5);
       grid.rotation.x = Math.PI / 2;
@@ -2298,88 +2312,6 @@ export class Scene {
     this.plateGroup.add(axes);
 
     this.plateGroup.visible = this.plateVisible;
-  }
-
-  /**
-   * A grid with no edge. One huge plane is shaded so that lines appear every 8 mm, with stronger ones every 80 mm
-   * and 800 mm; a level of lines fades out once its cells get too small to tell apart (zoomed far out), and the
-   * whole grid fades with distance from where the camera looks, so it reads as ground running to the horizon.
-   */
-  private makeInfiniteGrid(): THREE.Mesh {
-    const material = new THREE.ShaderMaterial({
-      // Drawn first, before any part, in the opaque pass: it never writes depth, so every part simply paints over it
-      // (no fighting with the base of something standing on the ground, and no depth offset to go wrong in
-      // orthographic views). Its own fade still blends with the background through the custom blend below.
-      transparent: false,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      blending: THREE.CustomBlending,
-      blendEquation: THREE.AddEquation,
-      blendSrc: THREE.SrcAlphaFactor,
-      blendDst: THREE.OneMinusSrcAlphaFactor,
-      // The canvas itself must stay fully opaque, or the page behind it shows through wherever a line is drawn.
-      blendSrcAlpha: THREE.ZeroFactor,
-      blendDstAlpha: THREE.OneFactor,
-      uniforms: {
-        uColor: { value: new THREE.Color(0xd8e0e5) },
-        uCentre: { value: new THREE.Vector2() },
-        uFadeStart: { value: 500 },
-        uFadeEnd: { value: 3000 },
-      },
-      vertexShader: `
-        varying vec3 vWorld;
-        void main() {
-          vec4 world = modelMatrix * vec4(position, 1.0);
-          vWorld = world.xyz;
-          gl_Position = projectionMatrix * viewMatrix * world;
-        }
-      `,
-      fragmentShader: `
-        varying vec3 vWorld;
-        uniform vec3 uColor;
-        uniform vec2 uCentre;
-        uniform float uFadeStart;
-        uniform float uFadeEnd;
-
-        // 1 on a line of a grid with cells of this size, 0 between. The lines are one pixel wide at any zoom; a level
-        // fades out gradually as its cells shrink toward a few pixels, so there is no sharp cut-off at a set distance.
-        float level(vec2 p, float size) {
-          vec2 q = p / size;
-          vec2 width = max(fwidth(q), vec2(1e-6));
-          vec2 edge = abs(fract(q - 0.5) - 0.5) / width;
-          float line = 1.0 - min(min(edge.x, edge.y), 1.0);
-          float cellPixels = 1.0 / max(width.x, width.y);
-          return line * smoothstep(3.0, 14.0, cellPixels);
-        }
-
-        void main() {
-          float minor = level(vWorld.xy, 8.0) * 0.75;
-          float major = level(vWorld.xy, 80.0) * 0.85;
-          float huge = level(vWorld.xy, 800.0);
-          float lines = max(minor, max(major, huge));
-          float fade = 1.0 - smoothstep(uFadeStart, uFadeEnd, distance(vWorld.xy, uCentre));
-          float alpha = lines * fade;
-          if (alpha < 0.01) discard;
-          gl_FragColor = vec4(uColor, alpha);
-        }
-      `,
-    });
-    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(200000, 200000), material);
-    mesh.position.z = 0;
-    mesh.renderOrder = -1;
-    mesh.frustumCulled = false;
-    // The fade follows the view: how far the grid reaches scales with how far the camera is from what it looks at.
-    mesh.onBeforeRender = (_renderer, _scene, camera) => {
-      const target = this.controls.target;
-      const reach = camera instanceof THREE.OrthographicCamera
-        ? (camera.top - camera.bottom) / Math.max(camera.zoom, 1e-6)
-        : camera.position.distanceTo(target);
-      const end = Math.max(600, reach * 7);
-      material.uniforms.uCentre.value.set(target.x, target.y);
-      material.uniforms.uFadeEnd.value = end;
-      material.uniforms.uFadeStart.value = end * 0.3;
-    };
-    return mesh;
   }
 
   private setupResizeOverlay() {
