@@ -20,7 +20,7 @@ import { findNode, resolveNodeColor, resolveNodeHideLines, resolveNodeTransparen
 import { loadCameraState, saveCameraState } from "../document/persist";
 import { getEffectiveDefaults } from "../document/store";
 import { snapBounds, snapFace } from "../snapping/snap";
-import type { Bounds3, SnapTarget } from "../snapping/snap";
+import type { Bounds3, SnapResult, SnapTarget } from "../snapping/snap";
 import { SmartGuides } from "./guides";
 import { CUBE_MARGIN_PX, CUBE_PX, NavCube } from "./navcube";
 import { surfaceOrientation } from "./surfaceOrientation";
@@ -9376,31 +9376,57 @@ export class Scene {
       this.clearCollisionContacts();
       return [0, 0, 0];
     }
+    const members: { id: string; bounds: Bounds3 }[] = [];
     const min: Vec3 = [Infinity, Infinity, Infinity];
     const max: Vec3 = [-Infinity, -Infinity, -Infinity];
     for (const id of ids) {
-      const root = this.assemblyGroups.get(id) ?? this.parts.get(id)?.group;
-      if (!root) continue;
-      const bounds = this.boundsOf(root);
+      const bounds = this.rootBounds(id);
+      if (!bounds) continue;
+      members.push({ id, bounds });
       for (let axis = 0; axis < 3; axis++) {
         min[axis] = Math.min(min[axis], bounds.min[axis]);
         max[axis] = Math.max(max[axis], bounds.max[axis]);
       }
     }
-    if (!Number.isFinite(min[0]) || !Number.isFinite(max[0])) return [0, 0, 0];
-    const moving: Bounds3 = { min, max };
-    const targets = this.collectSnapTargets(ids[0], new Set(ids), moving);
+    if (!members.length) return [0, 0, 0];
+    const travelling = new Set(ids);
+    const whole: Bounds3 = { min, max };
     const centre = new THREE.Vector3((min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2);
-    const result = snapBounds(moving, targets, this.worldSnapTolerance(centre));
-    if (!result.active.length) {
+    const tolerance = this.worldSnapTolerance(centre);
+
+    // Every selected object snaps on its own faces (its top, bottom, sides and middle), and so does the selection as
+    // a whole. On each axis the closest snap of any of them wins, and the whole selection shifts by that amount.
+    const candidates: { bounds: Bounds3; result: SnapResult }[] = [];
+    for (const candidate of [{ id: ids[0], bounds: whole }, ...members]) {
+      const targets = this.collectSnapTargets(candidate.id, travelling, candidate.bounds);
+      candidates.push({ bounds: candidate.bounds, result: snapBounds(candidate.bounds, targets, tolerance) });
+    }
+    const delta: Vec3 = [0, 0, 0];
+    const active: import("../snapping/snap").ActiveSnap[] = [];
+    let guideBounds: Bounds3 | null = null;
+    const axisNames = ["x", "y", "z"] as const;
+    for (let axis = 0; axis < 3; axis++) {
+      let best: { distance: number; snap: import("../snapping/snap").ActiveSnap; bounds: Bounds3 } | null = null;
+      for (const candidate of candidates) {
+        const snap = candidate.result.active.find((entry) => entry.axis === axisNames[axis]);
+        if (!snap) continue;
+        const distance = candidate.result.delta[axis];
+        if (!best || Math.abs(distance) < Math.abs(best.distance)) best = { distance, snap, bounds: candidate.bounds };
+      }
+      if (!best) continue;
+      delta[axis] = best.distance;
+      active.push(best.snap);
+      guideBounds ??= best.bounds;
+    }
+    if (!active.length || !guideBounds) {
       this.guides.clear();
       return [0, 0, 0];
     }
-    this.guides.show(result.active, {
-      min: [min[0] + result.delta[0], min[1] + result.delta[1], min[2] + result.delta[2]],
-      max: [max[0] + result.delta[0], max[1] + result.delta[1], max[2] + result.delta[2]],
+    this.guides.show(active, {
+      min: [guideBounds.min[0] + delta[0], guideBounds.min[1] + delta[1], guideBounds.min[2] + delta[2]],
+      max: [guideBounds.max[0] + delta[0], guideBounds.max[1] + delta[1], guideBounds.max[2] + delta[2]],
     });
-    return result.delta;
+    return delta;
   }
 
   /** Snaps `obj` to the guides around it and returns how far that moved it,
