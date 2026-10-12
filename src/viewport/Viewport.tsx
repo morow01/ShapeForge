@@ -32,6 +32,8 @@ interface Props {
   /** Exploded view outward displacement factor (0 to 1). */
   explodeAmount?: number;
   plateVisible?: boolean;
+  /** An endless grid instead of the fixed-size build plate. */
+  plateInfinite?: boolean;
   /** The view cube in the corner (and its Home button). */
   viewCubeVisible?: boolean;
   /** The hide button on the view cube's hover toolbar. */
@@ -164,6 +166,7 @@ export function Viewport(props: Props) {
     if (latest.current.plateVisible !== undefined) {
       scene.setPlateVisible(latest.current.plateVisible);
     }
+    scene.setPlateInfinite(latest.current.plateInfinite === true);
     scene.setNavCubeVisible(latest.current.viewCubeVisible !== false);
     if (latest.current.plateSize) {
       scene.setPlateSize(latest.current.plateSize.width, latest.current.plateSize.depth);
@@ -245,6 +248,10 @@ export function Viewport(props: Props) {
       sceneRef.current?.setPlateVisible(props.plateVisible);
     }
   }, [props.plateVisible]);
+
+  useEffect(() => {
+    sceneRef.current?.setPlateInfinite(props.plateInfinite === true);
+  }, [props.plateInfinite]);
 
   useEffect(() => {
     sceneRef.current?.setNavCubeVisible(props.viewCubeVisible !== false);

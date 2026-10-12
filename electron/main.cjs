@@ -83,6 +83,7 @@ function createWindow() {
     minWidth: 1024,
     minHeight: 640,
     title: 'ShapeForge 3D',
+    icon: path.join(__dirname, 'icon.png'),
     autoHideMenuBar: true,
     backgroundColor: '#ffffff',
     webPreferences: {

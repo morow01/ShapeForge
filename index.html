@@ -6,6 +6,12 @@
 <meta property="og:site_name" content="ShapeForge" />
 <meta property="og:title" content="ShapeForge" />
 <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+<style>
+  /* The plain intro below is for crawlers and for visitors whose browser is slow to start the app. It stays invisible
+     for the first 2 seconds, so a normal load or refresh never flashes it before the app takes over. */
+  #app > main { opacity: 0; animation: sf-intro-in 0s linear 2s forwards; }
+  @keyframes sf-intro-in { to { opacity: 1; } }
+</style>
 <div id="app">
   <main style="font-family: system-ui, -apple-system, 'Segoe UI', sans-serif; max-width: 620px; margin: 12vh auto; padding: 0 20px; color: #1f2a33; line-height: 1.55">
     <h1 style="margin: 0 0 10px; font-size: 28px">ShapeForge</h1>

@@ -41,6 +41,7 @@ console.log('Packaging ShapeForge.exe...');
 packager({
   dir: stageDir,
   name: 'ShapeForge',
+  icon: path.join(root, 'electron', 'icon.ico'),
   platform: 'win32',
   arch: 'x64',
   out: outDir,
