@@ -33,6 +33,9 @@ import { evaluateMathExpression } from "../utils/mathExpr";
 export type { CameraMode } from "../document/types";
 export type ToolMode = "measure" | "select" | "face" | "edge" | "place" | "move" | "rotate" | "align" | "build" | "join" | "cut";
 export type AlignAxis = 0 | 1 | 2;
+/** Where a new sketch is drawn: "auto" picks the face under the pointer or the
+ *  build plate; the rest pin it to an origin plane. */
+export type SketchPlaneChoice = "auto" | "top" | "front" | "right";
 export type AlignAnchor = "min" | "center" | "max";
 export type AlignSubMode = "box" | "points";
 export type WireframeMode = "off" | "outlined" | "edges" | "mesh" | "xray" | "transparent";
@@ -5069,17 +5072,134 @@ export class Scene {
     this.hoverFace = found;
   }
 
+  /** Which plane the sketch tool draws on: "auto" is the face under the
+   *  pointer or else the build plate; the others pin it to an origin plane. */
+  private sketchPlane: SketchPlaneChoice = "auto";
+
+  /** The three origin planes drawn as outlined tiles while the sketch tool is armed. */
+  private sketchPlaneFrame: THREE.Group | null = null;
+  /** The tiles' fill meshes, so a click or hover can find which plane it is on. */
+  private sketchTiles: { mesh: THREE.Mesh; plane: "top" | "front" | "right" }[] = [];
+  private hoveredSketchPlane: "top" | "front" | "right" | null = null;
+
+  setSketchPlane(choice: SketchPlaneChoice) {
+    this.sketchPlane = choice;
+    this.refreshSketchPlaneFrame();
+  }
+
+  private refreshSketchPlaneFrame() {
+    if (this.sketchPlaneFrame) {
+      this.sketchPlaneFrame.removeFromParent();
+      this.sketchPlaneFrame.traverse((child) => {
+        const m = child as THREE.Mesh;
+        m.geometry?.dispose();
+        (m.material as THREE.Material | undefined)?.dispose();
+      });
+      this.sketchPlaneFrame = null;
+    }
+    this.sketchTiles = [];
+    if (this.placementKind !== "sketch") {
+      this.hoveredSketchPlane = null;
+      return;
+    }
+    // The three origin planes form the inside corner of a cube at the origin:
+    // the floor plus two walls that meet it and each other along the axes.
+    // They are drawn as thin outlined tiles; the chosen one is brighter and
+    // tinted, the others stay faint reference. The corner flips toward the far
+    // side of the origin as the camera orbits, so you always look into it.
+    const size = 80;
+    const root = new THREE.Group();
+    for (const plane of ["top", "front", "right"] as const) {
+      const color = plane === "front" ? 0x3f9a55 : plane === "right" ? 0xd2544c : 0x0a8f8d;
+      const hovered = this.hoveredSketchPlane === plane;
+      const chosen = this.sketchPlane === plane || hovered;
+      const group = new THREE.Group();
+      const outline = new THREE.LineLoop(
+        new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(0, 0, 0), new THREE.Vector3(size, 0, 0),
+          new THREE.Vector3(size, size, 0), new THREE.Vector3(0, size, 0),
+        ]),
+        new THREE.LineBasicMaterial({ color, depthTest: false, transparent: true, opacity: chosen ? 0.95 : 0.4 }),
+      );
+      const fill = new THREE.Mesh(
+        new THREE.PlaneGeometry(size, size).translate(size / 2, size / 2, 0),
+        new THREE.MeshBasicMaterial({ color, transparent: true, opacity: hovered ? 0.3 : chosen ? 0.14 : 0.04, depthWrite: false, side: THREE.DoubleSide }),
+      );
+      outline.renderOrder = 18;
+      fill.renderOrder = 17;
+      group.add(fill, outline);
+      // The tile lies in XY; stand it up for Front (XZ, turn about X) and, for
+      // Right (YZ), turn a third of a turn about the cube's diagonal so its
+      // two edges run along Y and Z.
+      if (plane === "front") group.rotation.x = Math.PI / 2;
+      else if (plane === "right") group.quaternion.setFromAxisAngle(new THREE.Vector3(1, 1, 1).normalize(), (2 * Math.PI) / 3);
+      root.add(group);
+      this.sketchTiles.push({ mesh: fill, plane });
+    }
+    this.sketchPlaneFrame = root;
+    this.scene.add(root);
+    this.orientSketchCorner();
+  }
+
+  /** Mirrors the corner so its walls stand on the far side of the origin from the camera. */
+  private orientSketchCorner() {
+    const root = this.sketchPlaneFrame;
+    if (!root) return;
+    const sx = this.camera.position.x > 0 ? 1 : -1;
+    const sy = this.camera.position.y > 0 ? 1 : -1;
+    if (root.scale.x !== sx || root.scale.y !== sy) root.scale.set(sx, sy, 1);
+    root.updateMatrixWorld(true);
+  }
+
+  /** The nearest origin-plane tile under the ray, if any. */
+  private sketchTileAt(): { plane: "top" | "front" | "right"; point: THREE.Vector3; normal: THREE.Vector3; dist: number } | null {
+    if (this.placementKind !== "sketch" || this.sketchTiles.length === 0) return null;
+    const hit = this.raycaster.intersectObjects(this.sketchTiles.map((t) => t.mesh), false)[0];
+    if (!hit) return null;
+    const plane = this.sketchTiles.find((t) => t.mesh === hit.object)!.plane;
+    const normal = new THREE.Vector3(plane === "right" ? 1 : 0, plane === "front" ? 1 : 0, plane === "top" ? 1 : 0);
+    // Upright planes face the camera, so the sketch reads the right way round.
+    if (plane !== "top" && normal.dot(this.raycaster.ray.direction) > 0) normal.negate();
+    return { plane, point: hit.point.clone(), normal, dist: hit.distance };
+  }
+
+  private setHoveredSketchPlane(plane: "top" | "front" | "right" | null) {
+    if (this.hoveredSketchPlane === plane) return;
+    this.hoveredSketchPlane = plane;
+    this.refreshSketchPlaneFrame();
+  }
+
   private placementAt(e: PointerEvent): { point: THREE.Vector3; normal: THREE.Vector3; targetId?: string } | null {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    this.orientSketchCorner();
+    // A tile under the pointer is the plane being picked: it lights up, and a
+    // click on it starts the sketch there. With a plane pinned in the bar, the
+    // tiles still win where they are, and the pinned plane takes the rest.
+    const tile = this.sketchTileAt();
+    this.setHoveredSketchPlane(tile ? tile.plane : null);
+    if (tile) {
+      const face = this.sketchPlane === "auto" ? this.raycastFace(e) : null;
+      const faceDist = face ? this.raycaster.ray.origin.distanceTo(new THREE.Vector3(...face.point)) : Infinity;
+      if (tile.dist <= faceDist) return { point: tile.point, normal: tile.normal };
+    }
+    if (this.placementKind === "sketch" && this.sketchPlane !== "auto") {
+      const axis = this.sketchPlane === "front" ? new THREE.Vector3(0, 1, 0)
+        : this.sketchPlane === "right" ? new THREE.Vector3(1, 0, 0)
+        : new THREE.Vector3(0, 0, 1);
+      const normal = axis.clone();
+      if (this.sketchPlane !== "top" && normal.dot(this.raycaster.ray.direction) > 0) normal.negate();
+      const point = new THREE.Vector3();
+      return this.raycaster.ray.intersectPlane(new THREE.Plane(axis, 0), point) ? { point, normal } : null;
+    }
     const face = this.raycastFace(e);
     if (face) {
       const hitId = [...this.parts.entries()].find(([, v]) => v === face.view)?.[0];
       const targetId = hitId ? this.findRootOwner(hitId) : undefined;
       return { point: new THREE.Vector3(...face.point), normal: new THREE.Vector3(...face.normal), targetId };
     }
-    const rect = this.renderer.domElement.getBoundingClientRect();
-    this.pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
-    this.pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
-    this.raycaster.setFromCamera(this.pointer, this.camera);
     const point = new THREE.Vector3();
     return this.raycaster.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), point)
       ? { point, normal: new THREE.Vector3(0, 0, 1) }
@@ -5747,6 +5867,7 @@ export class Scene {
 
   setPlacementPreview(kind: PrimitiveKind | null) {
     this.placementKind = kind;
+    this.refreshSketchPlaneFrame();
     this.setPlacementTarget(null);
     this.disposeShapeDrag();
     if (this.placementPreview) {
@@ -12162,6 +12283,7 @@ export class Scene {
   private cameraSaveTimeout: ReturnType<typeof setTimeout> | null = null;
 
   private onCameraChange = () => {
+    this.orientSketchCorner();
     if (this.cameraSaveTimeout) clearTimeout(this.cameraSaveTimeout);
     this.cameraSaveTimeout = setTimeout(() => {
       this.saveCameraNow();

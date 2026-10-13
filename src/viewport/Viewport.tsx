@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Scene } from "./scene";
-import type { CameraMode, ToolMode, WireframeMode, AlignSubMode, DuplicateResult } from "./scene";
+import type { CameraMode, ToolMode, WireframeMode, AlignSubMode, DuplicateResult, SketchPlaneChoice } from "./scene";
 import type { PreviewBuild, ScenePart } from "../kernel/types";
 import type { PrimitiveKind, SceneNode, Vec3 } from "../document/types";
 import type { DisplayUnit } from "../measurement";
@@ -16,6 +16,8 @@ interface Props {
   /** Only Push/Pull owns the draggable face-normal arrow and its distance pill. */
   facePushPullEnabled: boolean;
   placementKind: PrimitiveKind | null;
+  /** The plane a new sketch is drawn on (only used while placementKind is "sketch"). */
+  sketchPlane?: SketchPlaneChoice;
   resizeConstrained: boolean;
   /** The Exact Spacing panel's "stays fixed" object id, when exactly two
    *  objects are selected — see Scene.alignFixedId. Null the rest of the
@@ -157,6 +159,7 @@ export function Viewport(props: Props) {
     scene.setAlignSubMode(latest.current.alignSubMode ?? "box");
     scene.setFacePushPullEnabled(latest.current.facePushPullEnabled);
     scene.setPlacementPreview(latest.current.placementKind);
+    scene.setSketchPlane(latest.current.sketchPlane ?? "auto");
     scene.setResizeConstrained(latest.current.resizeConstrained);
     scene.setAlignFixedId(latest.current.alignFixedId);
     scene.setWireframe(latest.current.wireframe);
@@ -214,6 +217,10 @@ export function Viewport(props: Props) {
   useEffect(() => {
     sceneRef.current?.setPlacementPreview(props.placementKind);
   }, [props.placementKind]);
+
+  useEffect(() => {
+    sceneRef.current?.setSketchPlane(props.sketchPlane ?? "auto");
+  }, [props.sketchPlane]);
 
   useEffect(() => {
     sceneRef.current?.setResizeConstrained(resizeConstrained);

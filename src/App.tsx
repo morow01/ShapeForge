@@ -120,7 +120,7 @@ import { loadCameraState, loadThumbnail, locationOf, saveThumbnail } from "./doc
 import type { EditOp, GroupNode, ImportNode, PrimitiveKind, SceneNode, ShellOp, HollowRim, ResizeFaceOp, SketchData, Vec3 } from "./document/types";
 import { RETRYABLE_MESH_ERROR } from "./kernel/types";
 import type { EditSpec, ExportQuality, NodeSpec, PreviewBuild, ScenePart } from "./kernel/types";
-import type { CameraMode, CollisionHighlightStyle, DuplicateResult, Scene, ToolMode, WireframeMode } from "./viewport/scene";
+import type { CameraMode, CollisionHighlightStyle, DuplicateResult, Scene, SketchPlaneChoice, ToolMode, WireframeMode } from "./viewport/scene";
 import { cellColour, DEFAULT_CELL_DISPLAY, type CellDisplay } from "./viewport/cellColours";
 import { APP_NAME, APP_VERSION } from "./version";
 import { CloudIcon, MonitorIcon } from "./ui/NavIcons";
@@ -382,6 +382,20 @@ const BUILD_PLATE_INFINITE_KEY = "cad.buildPlateInfinite";
 const BORDER_SLIDER_MAX_MM = 10;
 const BORDER_QUICK_SIZES_MM = [0.5, 1, 2, 3, 5] as const;
 
+/** Session flag: the editor (not Home) was showing when the tab was last used. */
+const EDITOR_OPEN_KEY = "cad.editorOpen";
+
+/** A small cube with the chosen sketch plane filled in: top, left (Front) or right (Right) face. */
+function PlaneGlyph({ plane }: { plane: SketchPlaneChoice }) {
+  return (
+    <svg className={`plane-glyph ${plane}`} viewBox="0 0 28 28" aria-hidden="true">
+      <polygon className={plane === "top" ? "on" : ""} points="14,3 25,9 14,15 3,9" />
+      <polygon className={plane === "front" ? "on" : ""} points="3,9 14,15 14,26 3,20" />
+      <polygon className={plane === "right" ? "on" : ""} points="14,15 25,9 25,20 14,26" />
+    </svg>
+  );
+}
+
 function SignedMeasurementInput({
   valueMm,
   unit,
@@ -496,8 +510,23 @@ export function App() {
   const storageBlocked = useDoc((s) => s.storageBlocked);
   const projectName = useDoc((s) => s.projectName);
   const sceneRef = useRef<Scene | null>(null);
-  // The app opens on the Home page; the editor is already loaded behind it.
-  const [homeOpen, setHomeOpen] = useState(true);
+  // The app opens on the Home page; the editor is already loaded behind it. A refresh while a
+  // design was open in this tab goes straight back to that design (a new tab opens on Home).
+  const [homeOpen, setHomeOpen] = useState(() => {
+    try {
+      return sessionStorage.getItem(EDITOR_OPEN_KEY) !== "1";
+    } catch {
+      return true;
+    }
+  });
+  useEffect(() => {
+    try {
+      if (homeOpen) sessionStorage.removeItem(EDITOR_OPEN_KEY);
+      else sessionStorage.setItem(EDITOR_OPEN_KEY, "1");
+    } catch {
+      // Storage can be blocked; the app then simply opens on Home after a refresh.
+    }
+  }, [homeOpen]);
   const [saveDialogOpen, setSaveDialogOpen] = useState(false);
   const [thumbVersion, setThumbVersion] = useState(0);
   const driveBusy = useDrive((s) => s.busy);
@@ -686,6 +715,11 @@ export function App() {
   const mirrorFlyoutRef = useRef<HTMLDivElement>(null);
   const [mirrorFlyoutPos, setMirrorFlyoutPos] = useState<{ top: number; left: number } | null>(null);
   const [pendingPrimitive, setPendingPrimitive] = useState<PrimitiveKind | null>(null);
+  /** The plane the next new sketch is drawn on; back to Auto whenever the tool is left. */
+  const [sketchPlane, setSketchPlane] = useState<SketchPlaneChoice>("auto");
+  useEffect(() => {
+    if (pendingPrimitive !== "sketch") setSketchPlane("auto");
+  }, [pendingPrimitive]);
   const [openCategories, setOpenCategories] = useState<Record<string, boolean>>(() => {
     try {
       const saved = localStorage.getItem("cad.primitiveCategoriesOpen");
@@ -5590,6 +5624,7 @@ export function App() {
           alignSubMode={alignSubMode}
           facePushPullEnabled={faceOp === "push"}
           placementKind={pendingPrimitive}
+          sketchPlane={sketchPlane}
           resizeConstrained={resizeConstrained}
           alignFixedId={effectiveAlignFixedId}
           onSelectAnchor={handleSelectAnchor}
@@ -5677,7 +5712,7 @@ export function App() {
             <strong>{pendingPrimitive === "sketch" ? "New sketch" : `Place ${PRIMITIVES[pendingPrimitive].label}`}</strong>
             <span>
               {pendingPrimitive === "sketch"
-                ? "Click the workplane or a flat face to draw on"
+                ? "Pick a plane, then click to draw on it"
                 : pendingPrimitive === "sphere"
                   ? "Click to place at default size, or drag to set size · hold Space to move it"
                   : pendingPrimitive === "box" || pendingPrimitive === "wedge" || pendingPrimitive === "triangle"
@@ -5685,6 +5720,29 @@ export function App() {
                     ? "Click to place at default size, or drag to set size then height · hold Space to move it"
                     : "Choose a face or the workplane"}
             </span>
+            {pendingPrimitive === "sketch" && (
+              <div className="plane-switch" role="radiogroup" aria-label="Sketch plane">
+                {([
+                  ["auto", "Auto", "The face under the pointer, otherwise the build plate"],
+                  ["top", "Top", "Draw flat on the build plate"],
+                  ["front", "Front", "Draw upright, facing you along the Y axis"],
+                  ["right", "Right", "Draw upright, facing you along the X axis"],
+                ] as const).map(([value, label, hint]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    role="radio"
+                    aria-checked={sketchPlane === value}
+                    className={sketchPlane === value ? "active" : ""}
+                    title={hint}
+                    onClick={() => setSketchPlane(value)}
+                  >
+                    <PlaneGlyph plane={value} />
+                    <span>{label}</span>
+                  </button>
+                ))}
+              </div>
+            )}
             <button onClick={() => { setPendingPrimitive(null); setToolMode("select"); }}>Cancel</button>
           </div>
         )}
