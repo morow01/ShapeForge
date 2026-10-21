@@ -329,6 +329,9 @@ export async function pushProject(id: string, attempt = 0): Promise<void> {
     // design stays marked and the send already queued for that change goes out. Clearing it here would let the
     // next sync take Drive's older name and contents over the newer ones.
     if (changesOf(id) === changesAtStart) clearDirty(id);
+    if (loadThumbnail(id)) {
+      void runSync(() => pushThumbnail(id));
+    }
     try {
       await maybeAutoVersion(project);
     } catch {
@@ -702,10 +705,10 @@ export async function pushThumbnail(id: string, attempt = 0): Promise<void> {
     at = Date.now();
     stampThumbnail(id, at);
   }
-  if (readJson<Record<string, string>>(THUMB_SIGS_KEY, {})[id] === String(at)) return;
   const parentId = await ensureThumbsFolder();
   let files = readJson<Record<string, string>>(THUMB_FILES_KEY, {});
   if (!files[id]) files = await refreshThumbMap();
+  if (files[id] && readJson<Record<string, string>>(THUMB_SIGS_KEY, {})[id] === String(at)) return;
   try {
     const file = await driveApi().upload({
       fileId: files[id],
@@ -722,6 +725,7 @@ export async function pushThumbnail(id: string, attempt = 0): Promise<void> {
     // The remembered file is gone from Drive: forget it and send a fresh one.
     if (error instanceof DriveError && error.status === 404 && attempt === 0) {
       setEntry(THUMB_FILES_KEY, id, undefined);
+      setEntry(THUMB_SIGS_KEY, id, undefined);
       return pushThumbnail(id, 1);
     }
     throw error;
