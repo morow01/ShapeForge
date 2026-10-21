@@ -325,7 +325,8 @@ export function listProjects(): ProjectMeta[] {
 }
 
 /** Where a design is kept; a design saved before locations existed is in the browser. */
-export function locationOf(meta: Pick<ProjectMeta, "location">): ProjectLocation {
+export function locationOf(meta: Pick<ProjectMeta, "location" | "driveId">): ProjectLocation {
+  if (meta.location === "drive" && !meta.driveId) return "browser";
   return meta.location ?? "browser";
 }
 

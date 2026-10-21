@@ -8,7 +8,7 @@ import { ListIcon, BinIcon, ClockIcon, CloudIcon, CopyIcon, DownloadIcon, DraftI
 import { collectFolderTree as folderSubtree } from "../document/persist";
 import { addToTagRegistry, cleanTag, loadTagRegistry, removeFromTagRegistry, sameTag, uniqueTags } from "../document/tags";
 import { TagManager } from "./TagManager";
-import type { FolderMeta, ProjectMeta } from "../document/types";
+import type { FolderMeta, ProjectLocation, ProjectMeta } from "../document/types";
 import { APP_NAME, APP_VERSION } from "../version";
 import { useConfirm } from "./ConfirmDialog";
 import { confirmExportWithMissingFiles } from "./exportWarning";
@@ -166,6 +166,39 @@ function MissingFilesTag({ count, row }: { count: number; row?: boolean }) {
       {count} {count === 1 ? "file" : "files"} missing
     </span>
   );
+}
+
+function projectMetaSubtitle(
+  p: ProjectMeta,
+  where: ProjectLocation,
+  driveStatus: string,
+  isOpening: boolean,
+  isOpen: boolean,
+): string {
+  if (isOpening) return "Downloading from Drive…";
+
+  const parts: string[] = [];
+
+  if (where === "draft") {
+    parts.push("Not saved yet");
+  } else if (where === "drive") {
+    parts.push("Google Drive");
+    if (!p.remote) {
+      parts.push(`${p.objectCount} ${p.objectCount === 1 ? "shape" : "shapes"}`);
+    }
+  } else {
+    if (driveStatus === "signedIn") {
+      parts.push("This browser");
+    }
+    parts.push(`${p.objectCount} ${p.objectCount === 1 ? "shape" : "shapes"}`);
+  }
+
+  parts.push(timeAgo(p.updatedAt));
+  if (isOpen) {
+    parts.push("open");
+  }
+
+  return parts.join(" · ");
 }
 
 export function HomePage({
@@ -1343,12 +1376,7 @@ export function HomePage({
                     <div className="home-cap">
                       <button className="home-name" onClick={() => handleOpen(p)} title={p.name}>{p.name}</button>
                       <span className="home-meta">
-                        {openingId === p.id
-                          ? "Downloading from Drive…"
-                          : p.remote
-                            ? `On Google Drive · ${timeAgo(p.updatedAt)}`
-                            : `${p.objectCount} ${p.objectCount === 1 ? "shape" : "shapes"} · ${timeAgo(p.updatedAt)}`}
-                        {p.id === currentProjectId ? " · open" : ""}
+                        {projectMetaSubtitle(p, where, driveStatus, openingId === p.id, p.id === currentProjectId)}
                       </span>
                       {(searching || view.kind !== "folder" || viewFolderId === null) && folderName && <span className="home-meta">In {folderName}</span>}
                       {(p.tags ?? []).length > 0 && (
@@ -1380,10 +1408,6 @@ export function HomePage({
                             </span>
                           )}
                         </span>
-                      )}
-                      {/* Drive is where designs normally live, so only the exceptions are labelled. */}
-                      {where !== "drive" && (
-                        <span className={`home-tag ${where}`}>{where === "draft" ? "Not saved yet" : "This browser"}</span>
                       )}
                       {(p.missingFiles ?? 0) > 0 && <MissingFilesTag count={p.missingFiles!} />}
                     </div>

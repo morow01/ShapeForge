@@ -602,14 +602,23 @@ export async function pullIndex(openProjectId?: string): Promise<string | null> 
   // as nothing in it is waiting to be sent and it is not the one open right now. Otherwise it only loses its
   // link (and is sent again the next time it is saved), so this never throws away work that exists nowhere else.
   for (const m of metas) {
-    if (!m.driveId || seen.has(m.id)) continue;
+    if (!m.driveId || seen.has(m.id)) {
+      if (!m.driveId && m.location === "drive" && !isDirty(m.id)) {
+        updateProjectMeta(m.id, (x) => { x.location = "browser"; });
+      }
+      continue;
+    }
     if (!hasProjectContents(m.id) || m.remote) {
       deleteProjectStorage(m.id);
     } else if (!isDirty(m.id) && m.id !== openProjectId) {
       moveToBin(m.id);
       deleteProjectStorage(m.id);
     } else {
-      updateProjectMeta(m.id, (x) => { delete x.driveId; });
+      updateProjectMeta(m.id, (x) => {
+        delete x.driveId;
+        delete x.driveModified;
+        x.location = "browser";
+      });
     }
   }
   return staleOpen;
