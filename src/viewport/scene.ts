@@ -303,6 +303,9 @@ interface ResizeDrag {
   startScale: Vec3;
   axis: 0 | 1 | 2 | null;
   lockAspectXY?: boolean;
+  /** Holding Shift lets the XY lock go: set when only tubes hold it, since an
+   *  oval tube is a legitimate choice where a triangle's locked angles are not. */
+  shiftFreesXY?: boolean;
   centreX: number;
   centreY: number;
   startDistance: number;
@@ -11353,7 +11356,7 @@ export class Scene {
         factors[0] = Math.max(0.01, ratio);
         factors[1] = Math.max(0.01, ratio);
         factors[2] = Math.max(0.01, ratio);
-      } else if (this.resizeDrag.lockAspectXY) {
+      } else if (this.resizeDrag.lockAspectXY && !(this.resizeDrag.shiftFreesXY && e.shiftKey)) {
         // When triangle angles are locked, preserve them by scaling uniformly in XY.
         if (this.resizeDrag.axis === 2) {
           factors[2] = Math.max(0.01, ratio);
@@ -11485,7 +11488,7 @@ export class Scene {
             let faceAxes: number[] = [];
             let uniform: ((u: number) => Vec3) | null = null;
             if (constrainedNow) uniform = (u) => [u, u, u];
-            else if (drag.lockAspectXY) {
+            else if (drag.lockAspectXY && !(drag.shiftFreesXY && e.shiftKey)) {
               if (drag.axis === 2) faceAxes = [2];
               else uniform = (u) => [u, u, 1];
             } else if (drag.cornerSigns) faceAxes = [0, 1];
@@ -11954,6 +11957,7 @@ export class Scene {
       startScale: [...first.node.scale] as Vec3,
       axis: localAxis,
       lockAspectXY,
+      shiftFreesXY: selectedViews.every(({ node }) => !keepsXYRatio(node) || node.type === "object" && node.kind === "tube"),
       centreX,
       centreY,
       startDistance: Math.max(1, Math.hypot(e.clientX - centreX, e.clientY - centreY)),
