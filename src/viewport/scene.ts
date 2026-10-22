@@ -76,6 +76,17 @@ export interface JoineryPreviewData {
 const CLICK_SLOP_PX = 7;
 const SNAP_TOLERANCE_PX = 10;
 const DEG = Math.PI / 180;
+
+/** Shapes whose width and depth must scale together. A triangle with locked
+ *  angles would change them otherwise, and a tube is one circle with one wall
+ *  thickness: stretched unevenly it cannot fold back into its parameters, so
+ *  the wall would stay scaled (a 2 mm wall measuring 3.5 mm). */
+function keepsXYRatio(node: SceneNode): boolean {
+  if (node.type !== "object") return false;
+  if (node.kind === "tube") return true;
+  return node.kind === "triangle" &&
+    !!(node.params.lockAngleLeft || node.params.lockAngleRight || node.params.lockAngleApex);
+}
 /** How much a resize/align dot grows on hover — same modest pop the
  *  push/pull arrow's own hover already uses. A colour change alone read as
  *  too subtle to notice; the earlier 1.35x read as too much. */
@@ -7705,12 +7716,7 @@ export class Scene {
       }
       const centre = box.getCenter(new THREE.Vector3());
 
-      const hasLocks = selectedViews.some(
-        ({ node }) =>
-          node.type === "object" &&
-          node.kind === "triangle" &&
-          !!(node.params.lockAngleLeft || node.params.lockAngleRight || node.params.lockAngleApex),
-      );
+      const hasLocks = selectedViews.some(({ node }) => keepsXYRatio(node));
 
       for (const { id: sId, node } of selectedViews) {
         const scale = [...node.scale] as Vec3;
@@ -7742,10 +7748,7 @@ export class Scene {
       return;
     }
     const scale = [...node.scale] as Vec3;
-    const hasLocks =
-      node.type === "object" &&
-      node.kind === "triangle" &&
-      !!(node.params.lockAngleLeft || node.params.lockAngleRight || node.params.lockAngleApex);
+    const hasLocks = keepsXYRatio(node);
 
     if (this.resizeConstrained || (hasLocks && (axis === 0 || axis === 1))) {
       if (hasLocks && !this.resizeConstrained) {
@@ -11943,12 +11946,7 @@ export class Scene {
     first.view.mesh.geometry.computeBoundingBox();
     const rawSize = (first.view.mesh.geometry.boundingBox?.getSize(new THREE.Vector3()) ?? new THREE.Vector3(1, 1, 1)).toArray() as Vec3;
 
-    const lockAspectXY = selectedViews.some(
-      ({ node }) =>
-        node.type === "object" &&
-        node.kind === "triangle" &&
-        !!(node.params.lockAngleLeft || node.params.lockAngleRight || node.params.lockAngleApex),
-    );
+    const lockAspectXY = selectedViews.some(({ node }) => keepsXYRatio(node));
 
     this.resizeDrag = {
       id: first.id,
