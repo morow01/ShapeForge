@@ -35,6 +35,13 @@ import {
   moveFolderEntry,
   binFolderTree,
 } from "./persist";
+import {
+  deleteHistory,
+  loadHistory,
+  saveHistory,
+  trimHistoryWindow,
+  type HistorySnapshot,
+} from "./historyStore";
 import { addToTagRegistry, sameTag, tagsFitDrive, uniqueTags } from "./tags";
 import {
   TRI_BY_ANGLES,
@@ -79,7 +86,10 @@ export const driveHooks: DriveHooks = {};
  *  the person moves on, so it is dropped rather than left on the Home page. */
 function dropEmptyDraft(id: string) {
   const meta = listProjects().find((p) => p.id === id);
-  if (meta && meta.location === "draft" && meta.objectCount === 0) deleteProjectStorage(id);
+  if (meta && meta.location === "draft" && meta.objectCount === 0) {
+    deleteProjectStorage(id);
+    void deleteHistory(id);
+  }
 }
 
 // Restored synchronously at module load, so the first render already has the
@@ -1002,6 +1012,9 @@ export const useDoc = create<DocState>()(
         const updatedProjects = listProjects();
 
         useDoc.temporal.getState().clear();
+        // Nothing to read back under an id that has never existed, but the
+        // switch still has to stop a write meant for the design being left.
+        switchHistory(newId, "none");
         ownStep("New design");
         set({
           currentProjectId: newId,
@@ -1023,6 +1036,7 @@ export const useDoc = create<DocState>()(
         const updatedProjects = listProjects();
 
         useDoc.temporal.getState().clear();
+        switchHistory(proj.id, "restore");
         ownStep("Open");
         set({
           currentProjectId: proj.id,
@@ -1083,6 +1097,7 @@ export const useDoc = create<DocState>()(
         const deletedMeta = s.projects.find((p) => p.id === id);
         moveToBin(id, via);
         deleteProjectStorage(id);
+        void deleteHistory(id);
         if (deletedMeta) driveHooks.onProjectDeleted?.(deletedMeta);
         const remaining = listProjects();
         if (s.currentProjectId === id) {
@@ -1261,6 +1276,10 @@ export const useDoc = create<DocState>()(
         const updatedProjects = listProjects();
 
         useDoc.temporal.getState().clear();
+        // An imported file replaces whatever was under this id, so any window
+        // stored against it belongs to a different design and has to go —
+        // undo must never walk into someone else's states.
+        switchHistory(proj.id, "drop");
         ownStep("Open");
         set({
           currentProjectId: proj.id,
@@ -2092,8 +2111,7 @@ export const useDoc = create<DocState>()(
   ),
 );
 
-/** One state of the document as the undo stack holds it. */
-export type HistorySnapshot = { nodes: SceneNode[]; historyLabel: string };
+export type { HistorySnapshot };
 
 /** Subscribe to undo/redo state. zundo keeps its history in a separate store. */
 export function useTemporal<T>(selector: (s: TemporalState<HistorySnapshot>) => T): T {
@@ -2242,11 +2260,95 @@ useDoc.subscribe((state, prev) => {
   saveTimer = setTimeout(flushSave, SAVE_DEBOUNCE_MS);
 });
 
+/* ---- the history window across reloads -----------------------------------
+ * The undo stack is in memory, so without this a reload left the design with
+ * no way back — the History panel showed one step and Ctrl+Z did nothing,
+ * however much work had gone in. A window of the most recent steps is kept
+ * in IndexedDB instead (see historyStore.ts for why not localStorage, and
+ * for how many), keyed by design, written on the same debounce idea as the
+ * autosave so a drag does not serialise it frame by frame.
+ */
+const HISTORY_SAVE_DEBOUNCE_MS = 1200;
+let historyTimer: ReturnType<typeof setTimeout> | null = null;
+/** Set from the moment a design is opened until its stored window is back on
+ *  the stack. Until then the stack is empty by construction, and writing it
+ *  out would overwrite the very window being read. */
+let historyRestoring = true;
+
+function flushHistory() {
+  if (historyTimer) {
+    clearTimeout(historyTimer);
+    historyTimer = null;
+  }
+  if (historyRestoring) return;
+  const s = useDoc.getState();
+  const t = useDoc.temporal.getState();
+  void saveHistory(
+    s.currentProjectId,
+    trimHistoryWindow(t.pastStates, t.futureStates, s.historyLabel),
+  ).catch(() => {
+    // Out of quota, or private browsing: the design itself is still saved,
+    // and the history simply will not outlive this tab.
+  });
+}
+
+/**
+ * Points the stored history at a different design. `restore` reads its window
+ * back onto the stack, `drop` throws any stored window away, and `none` is
+ * for an id that cannot have one yet. In every case a write still queued for
+ * the design being left is cancelled first — it would land under the new id.
+ */
+function switchHistory(projectId: string, mode: "restore" | "drop" | "none") {
+  historyRestoring = true;
+  if (historyTimer) {
+    clearTimeout(historyTimer);
+    historyTimer = null;
+  }
+  void (async () => {
+    try {
+      if (mode === "drop") await deleteHistory(projectId);
+      if (mode !== "restore") return;
+      const saved = await loadHistory(projectId);
+      // Reading is asynchronous, so the person may have moved on, or started
+      // editing, while it was in flight. Either way what is on screen wins.
+      if (!saved || useDoc.getState().currentProjectId !== projectId) return;
+      if (useDoc.temporal.getState().pastStates.length) return;
+      useDoc.temporal.setState({ pastStates: saved.past, futureStates: saved.future });
+      useDoc.setState({ historyLabel: saved.label });
+    } catch {
+      // A window that will not load just means no history to walk back
+      // through; the design opened from its own storage regardless.
+    } finally {
+      if (useDoc.getState().currentProjectId === projectId) historyRestoring = false;
+    }
+  })();
+}
+
+useDoc.subscribe((state, prev) => {
+  // Every move the history can make — an edit, an undo, a jump in the panel —
+  // shows up as a new node list, so this one test covers them all.
+  if (state.nodes === prev.nodes) return;
+  if (historyTimer) clearTimeout(historyTimer);
+  historyTimer = setTimeout(flushHistory, HISTORY_SAVE_DEBOUNCE_MS);
+});
+
+if (typeof indexedDB !== "undefined") {
+  switchHistory(activeProject.id, "restore");
+} else {
+  historyRestoring = false;
+}
+
 if (typeof window !== "undefined") {
   // pagehide is the reliable one — beforeunload does not always fire, and
   // neither does unload on mobile. visibilitychange covers tab switches.
-  window.addEventListener("pagehide", flushSave);
+  window.addEventListener("pagehide", () => {
+    flushSave();
+    flushHistory();
+  });
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "hidden") flushSave();
+    if (document.visibilityState === "hidden") {
+      flushSave();
+      flushHistory();
+    }
   });
 }
