@@ -292,6 +292,9 @@ interface ResizeTarget {
   startGroupPosition: THREE.Vector3;
   rawSize: Vec3;
   rotation: THREE.Quaternion;
+  /** Centre of this part's world box when the drag began. A part scales about
+   *  its own centre, which is not where its position sits. */
+  startCentre: Vec3;
 }
 
 interface ResizeDrag {
@@ -11395,9 +11398,13 @@ export class Scene {
         const basisLengthSq = basis[0] * basis[0] + basis[1] * basis[1];
         if (basisLengthSq > 1e-6) {
           const travelled = (dx * basis[0] + dy * basis[1]) / basisLengthSq;
+          // Several objects: the length being dragged is the combined box's,
+          // not the first object's.
           const startLength = Math.max(
             0.01,
-            this.resizeDrag.rawSize[axis] * this.resizeDrag.startScale[axis],
+            this.resizeDrag.targets.length > 1
+              ? this.resizeDrag.startSize[axis]
+              : this.resizeDrag.rawSize[axis] * this.resizeDrag.startScale[axis],
           );
           const nextLength = Math.max(
             0.01,
@@ -11412,17 +11419,46 @@ export class Scene {
       }
 
       if (this.resizeDrag.targets.length > 1) {
-        for (const target of this.resizeDrag.targets) {
+        const drag = this.resizeDrag;
+        // A face handle stretches the combined box along one world axis with
+        // the opposite face held still (Alt: about the centre), so the handle
+        // stays under the cursor.
+        const faceAxis = drag.axis !== null && !constrainedNow && !drag.lockAspectXY ? drag.axis : null;
+        const centreOf = [drag.startBoxCentre.x, drag.startBoxCentre.y, drag.startBoxCentre.z];
+        const anchor = centreOf.map((c, i) =>
+          faceAxis === i && !e.altKey ? c - drag.handleSigns[i] * drag.startSize[i] / 2 : c,
+        );
+        for (const target of drag.targets) {
           const targetView = this.parts.get(target.id);
+          // The world axis being stretched is, for a rotated object, one of
+          // its other local axes: scale the one that lies along it.
+          const targetFactors: Vec3 = [...factors] as Vec3;
+          if (faceAxis !== null) {
+            const world = new THREE.Vector3();
+            let local = faceAxis as number;
+            let best = -1;
+            for (let i = 0; i < 3; i++) {
+              world.set(i === 0 ? 1 : 0, i === 1 ? 1 : 0, i === 2 ? 1 : 0).applyQuaternion(target.rotation);
+              const along = Math.abs(world.getComponent(faceAxis));
+              if (along > best) {
+                best = along;
+                local = i;
+              }
+            }
+            targetFactors[0] = targetFactors[1] = targetFactors[2] = 1;
+            targetFactors[local] = factors[faceAxis];
+          }
           const targetScale: Vec3 = [
-            Math.max(0.01, target.startScale[0] * factors[0]),
-            Math.max(0.01, target.startScale[1] * factors[1]),
-            Math.max(0.01, target.startScale[2] * factors[2]),
+            Math.max(0.01, target.startScale[0] * targetFactors[0]),
+            Math.max(0.01, target.startScale[1] * targetFactors[1]),
+            Math.max(0.01, target.startScale[2] * targetFactors[2]),
           ];
+          // Each part's centre moves out from the anchor by the stretch; its
+          // position moves by the same amount.
           const targetPosition: Vec3 = [
-            this.resizeDrag.startBoxCentre.x + (target.startPosition[0] - this.resizeDrag.startBoxCentre.x) * factors[0],
-            this.resizeDrag.startBoxCentre.y + (target.startPosition[1] - this.resizeDrag.startBoxCentre.y) * factors[1],
-            this.resizeDrag.startBoxCentre.z + (target.startPosition[2] - this.resizeDrag.startBoxCentre.z) * factors[2],
+            target.startPosition[0] + (target.startCentre[0] - anchor[0]) * (factors[0] - 1),
+            target.startPosition[1] + (target.startCentre[1] - anchor[1]) * (factors[1] - 1),
+            target.startPosition[2] + (target.startCentre[2] - anchor[2]) * (factors[2] - 1),
           ];
           if (targetView) {
             targetView.group.scale.fromArray(targetScale);
@@ -11885,7 +11921,11 @@ export class Scene {
     };
     const [centreX, centreY] = project(worldCentre.clone());
     const first = selectedViews[0];
-    const quaternion = first.view.group.getWorldQuaternion(new THREE.Quaternion());
+    // A selection of several objects is resized by its combined world box, so
+    // its handles follow the world axes, not whichever object came first.
+    const quaternion = selectedViews.length > 1
+      ? new THREE.Quaternion()
+      : first.view.group.getWorldQuaternion(new THREE.Quaternion());
     const invQuat = quaternion.clone().invert();
     const [xPixelX, xPixelY] = project(worldCentre.clone().add(new THREE.Vector3(1, 0, 0).applyQuaternion(quaternion)));
     const [yPixelX, yPixelY] = project(worldCentre.clone().add(new THREE.Vector3(0, 1, 0).applyQuaternion(quaternion)));
@@ -11938,6 +11978,7 @@ export class Scene {
         startGroupPosition: view.group.position.clone(),
         rawSize,
         rotation: view.group.getWorldQuaternion(new THREE.Quaternion()),
+        startCentre: new THREE.Box3().expandByObject(view.group).getCenter(new THREE.Vector3()).toArray() as Vec3,
       };
     });
     first.view.mesh.geometry.computeBoundingBox();
