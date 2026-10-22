@@ -1016,14 +1016,20 @@ export const useDoc = create<DocState>()(
         // switch still has to stop a write meant for the design being left.
         switchHistory(newId, "none");
         ownStep("New design");
-        set({
-          currentProjectId: newId,
-          projectName: newProjName,
-          projects: updatedProjects,
-          nodes: [],
-          selectedIds: [],
-          savedAt: Date.now(),
-        });
+        // Putting a different design on screen is not an edit of either one.
+        // Recorded it would be: the state it captures on the way out is the
+        // design being LEFT, which then sits in this one's history as a step
+        // above "New design" that undoes into the old document.
+        withoutHistory(() =>
+          set({
+            currentProjectId: newId,
+            projectName: newProjName,
+            projects: updatedProjects,
+            nodes: [],
+            selectedIds: [],
+            savedAt: Date.now(),
+          }),
+        );
         return newId;
       },
 
@@ -1038,14 +1044,24 @@ export const useDoc = create<DocState>()(
         useDoc.temporal.getState().clear();
         switchHistory(proj.id, "restore");
         ownStep("Open");
-        set({
-          currentProjectId: proj.id,
-          projectName: proj.name,
-          projects: updatedProjects,
-          nodes: proj.nodes,
-          selectedIds: [],
-          savedAt: Date.now(),
-        });
+        // Not an edit of either design — see newProject. Here it did a second
+        // kind of damage: the step it recorded left the stack non-empty, and
+        // a stack with anything on it is what tells the restore above that
+        // the person has started working and its window is no longer wanted.
+        // So a design's own history was being discarded by the act of opening
+        // it, whenever the read came back after this line — which, the read
+        // being asynchronous and this being the rest of a synchronous
+        // function, was every time.
+        withoutHistory(() =>
+          set({
+            currentProjectId: proj.id,
+            projectName: proj.name,
+            projects: updatedProjects,
+            nodes: proj.nodes,
+            selectedIds: [],
+            savedAt: Date.now(),
+          }),
+        );
         return true;
       },
 
@@ -1281,14 +1297,17 @@ export const useDoc = create<DocState>()(
         // undo must never walk into someone else's states.
         switchHistory(proj.id, "drop");
         ownStep("Open");
-        set({
-          currentProjectId: proj.id,
-          projectName: proj.name,
-          projects: updatedProjects,
-          nodes: proj.nodes,
-          selectedIds: [],
-          savedAt: Date.now(),
-        });
+        // Not an edit of either design — see newProject.
+        withoutHistory(() =>
+          set({
+            currentProjectId: proj.id,
+            projectName: proj.name,
+            projects: updatedProjects,
+            nodes: proj.nodes,
+            selectedIds: [],
+            savedAt: Date.now(),
+          }),
+        );
         return proj.id;
       },
 
@@ -2274,6 +2293,11 @@ let historyTimer: ReturnType<typeof setTimeout> | null = null;
  *  the stack. Until then the stack is empty by construction, and writing it
  *  out would overwrite the very window being read. */
 let historyRestoring = true;
+/** Each switch takes the next number, and only the newest may act on what it
+ *  reads or declare the switch finished. Checking the open design instead
+ *  does not work: in "none" there is nothing to wait for, so the check would
+ *  run before the caller had swapped documents at all. */
+let historySwitch = 0;
 
 function flushHistory() {
   if (historyTimer) {
@@ -2299,6 +2323,7 @@ function flushHistory() {
  * the design being left is cancelled first — it would land under the new id.
  */
 function switchHistory(projectId: string, mode: "restore" | "drop" | "none") {
+  const token = ++historySwitch;
   historyRestoring = true;
   if (historyTimer) {
     clearTimeout(historyTimer);
@@ -2309,9 +2334,10 @@ function switchHistory(projectId: string, mode: "restore" | "drop" | "none") {
       if (mode === "drop") await deleteHistory(projectId);
       if (mode !== "restore") return;
       const saved = await loadHistory(projectId);
-      // Reading is asynchronous, so the person may have moved on, or started
-      // editing, while it was in flight. Either way what is on screen wins.
-      if (!saved || useDoc.getState().currentProjectId !== projectId) return;
+      // Reading is asynchronous, so the person may have moved on to another
+      // design, or started working on this one, while it was in flight.
+      // Either way what is on screen wins.
+      if (!saved || token !== historySwitch) return;
       if (useDoc.temporal.getState().pastStates.length) return;
       useDoc.temporal.setState({ pastStates: saved.past, futureStates: saved.future });
       useDoc.setState({ historyLabel: saved.label });
@@ -2319,7 +2345,11 @@ function switchHistory(projectId: string, mode: "restore" | "drop" | "none") {
       // A window that will not load just means no history to walk back
       // through; the design opened from its own storage regardless.
     } finally {
-      if (useDoc.getState().currentProjectId === projectId) historyRestoring = false;
+      // Not "is this still the open design": with nothing awaited above, a
+      // "none" switch reaches here before its caller has opened anything,
+      // and the flag would then stay set for the rest of the session with
+      // every write to storage blocked behind it.
+      if (token === historySwitch) historyRestoring = false;
     }
   })();
 }
