@@ -381,11 +381,15 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
     defaults: {
       radius: 15, wallThickness: 3, height: 10, sides: 32, bevel: 0,
       outerTopFillet: 0, outerBottomFillet: 0, innerTopFillet: 0, innerBottomFillet: 0,
-      cornerEdges: 0,
+      cornerEdges: 0, wallGrows: 0,
     },
     fields: [
       diam("radius", "Outer diameter"),
       { key: "wallThickness", label: "Wall thickness", min: 0.1, max: 1000, step: 0.1, noSlider: true },
+      {
+        key: "wallGrows", label: "Wall when resized", min: 0, max: 1, step: 1,
+        options: [{ value: 0, label: "Stays" }, { value: 1, label: "Grows" }],
+      },
       dim("height", "Height"),
       { key: "sides", label: "Sides", min: 3, max: 64, step: 1 },
       { key: "outerTopFillet", label: "Outer top corner radius", min: 0, max: 100, step: 0.25 },
