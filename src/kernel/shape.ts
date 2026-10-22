@@ -1233,7 +1233,39 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
       const innerTop = Math.min(Math.max(p.innerTopFillet ?? legacyBevel, 0), maxRim);
       const innerBottom = Math.min(Math.max(p.innerBottomFillet ?? legacyBevel, 0), maxRim);
 
-      if (sides >= 32) {
+      const rOutY = Math.max(p.radiusY ?? rOut, 0.1);
+      if (Math.abs(rOutY - rOut) > 1e-6) {
+        // An oval tube: stretching a round one leaves the wall thick where it
+        // is stretched, so the inner edge is instead the outer ellipse pushed
+        // in along its normals by exactly the wall thickness. The wall cannot
+        // exceed the tightest curvature radius (b²/a) or the inner edge
+        // folds over itself.
+        const a = rOut;
+        const b = rOutY;
+        const ovalWall = Math.min(
+          Math.max(p.wallThickness ?? 3, 0.05),
+          Math.min(a, b) - 0.05,
+          (Math.min(a, b) ** 2) / Math.max(a, b) - 0.05,
+        );
+        const steps = 96;
+        let penOut: ReturnType<typeof draw> | null = null;
+        let penIn: ReturnType<typeof draw> | null = null;
+        for (let i = 0; i < steps; i++) {
+          const t = (i / steps) * 2 * Math.PI;
+          const ox = a * Math.cos(t);
+          const oy = b * Math.sin(t);
+          const nx = Math.cos(t) / a;
+          const ny = Math.sin(t) / b;
+          const nl = Math.hypot(nx, ny);
+          const ix = ox - (ovalWall * nx) / nl;
+          const iy = oy - (ovalWall * ny) / nl;
+          penOut = penOut ? penOut.lineTo([ox, oy]) : draw([ox, oy]);
+          penIn = penIn ? penIn.lineTo([ix, iy]) : draw([ix, iy]);
+        }
+        const outer = penOut!.close().sketchOnPlane("XY").extrude(h) as Shape3D;
+        const inner = penIn!.close().sketchOnPlane("XY").extrude(h + 2).translate([0, 0, -1]) as Shape3D;
+        s = outer.cut(inner) as Shape3D;
+      } else if (sides >= 32) {
         // Revolve the 2D annular profile directly with true circular arcs.
         // This avoids OCCT BRepFillet seam artifacts while producing an exact analytic
         // toroidal blend surface for each rounded rim.
