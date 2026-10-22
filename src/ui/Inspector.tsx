@@ -1162,7 +1162,7 @@ const DIM_AXES: Partial<Record<PrimitiveKind, Record<string, number[]>>> = {
   polygonPrism: { radius: [0, 1], height: [2] },
   hemisphere: { radius: [0, 1, 2] },
   capsule: { radius: [0, 1], height: [2] },
-  tube: { radius: [0, 1], height: [2] },
+  tube: { radius: [0], radiusY: [1], height: [2] },
   paraboloid: { radius: [0, 1], height: [2] },
   text: { size: [0, 1] },
   connector: { width: [0], length: [1, 2], height: [2], thickness: [1], radius: [0, 1], outerRadius: [0, 1], innerRadius: [0, 1] },
@@ -1372,6 +1372,8 @@ function ObjectParams({
       {groupDimensionFields(fields.map((f) => {
         let base = node.params[f.key] ?? 0;
         const displayScale = f.displayScale ?? 1;
+        // A round tube stores radiusY as 0 ("same as X"); show the real size.
+        if (node.kind === "tube" && f.key === "radiusY" && !(base > 0)) base = node.params.radius ?? 0;
         if ((node.kind === "cylinder" || node.kind === "cone") && f.key === "sides" && node.params.sides == null) {
           base = 48;
         }
@@ -1450,8 +1452,22 @@ function ObjectParams({
         const lockDisabled = isAngleField && !isLocked && lockedCount >= 2;
         const isConstrained3rdAngle = isAngleField && !isLocked && lockedCount === 2;
 
-        const onToggleLock = lockKey
-          ? () => onParam(lockKey!, isLocked ? 0 : 1)
+        // Tube wall: locked (the default) keeps the wall when the tube is
+        // resized; unlocked lets it grow with the tube.
+        const isWallField = node.kind === "tube" && f.key === "wallThickness";
+        const wallLocked = (node.params.wallGrows ?? 0) < 0.5;
+        const fieldLockable = isAngleField || isWallField;
+        const fieldLocked = isWallField ? wallLocked : isLocked;
+        const onToggleLock = isWallField
+          ? () => onParam("wallGrows", wallLocked ? 1 : 0)
+          : lockKey
+            ? () => onParam(lockKey!, isLocked ? 0 : 1)
+            : undefined;
+        const lockTitles = isWallField
+          ? {
+              locked: "Wall stays this thickness when the tube is resized. Click to let it grow with the tube.",
+              unlocked: "Wall grows with the tube when it is resized. Click to keep it this thickness.",
+            }
           : undefined;
 
         const axes = axesByKey[f.key];
@@ -1510,8 +1526,9 @@ function ObjectParams({
                 key={f.key}
                 field={displayField}
                 value={shownValue}
-                lockable={isAngleField}
-                locked={isLocked}
+                lockable={fieldLockable}
+                locked={fieldLocked}
+                lockTitles={lockTitles}
                 onToggleLock={onToggleLock}
                 lockDisabled={lockDisabled}
                 disabled={isConstrained3rdAngle || (node.kind === "threadedNut" && f.key === "clearance" && (node.params.fit ?? 1) !== 3)}
@@ -1542,8 +1559,9 @@ function ObjectParams({
                 step: displayField.step,
               }}
               value={currentVal}
-              lockable={isAngleField}
-              locked={isLocked}
+              lockable={fieldLockable}
+              locked={fieldLocked}
+              lockTitles={lockTitles}
               onToggleLock={onToggleLock}
               lockDisabled={lockDisabled}
               axis={singleAxis}
@@ -1924,6 +1942,7 @@ function Field({
   lockable,
   locked,
   onToggleLock,
+  lockTitles,
   lockDisabled,
   disabled,
   dotColorClass,
@@ -1940,6 +1959,8 @@ function Field({
   lockable?: boolean;
   locked?: boolean;
   onToggleLock?: () => void;
+  /** Overrides the angle-lock tooltips for a lock that means something else. */
+  lockTitles?: { locked: string; unlocked: string };
   lockDisabled?: boolean;
   disabled?: boolean;
   dotColorClass?: string;
@@ -2374,7 +2395,9 @@ function Field({
             }}
             disabled={!locked && lockDisabled}
             title={
-              locked
+              lockTitles
+                ? (locked ? lockTitles.locked : lockTitles.unlocked)
+                : locked
                 ? "Angle is locked. Click to unlock."
                 : lockDisabled
                   ? "At most 2 corners can be locked at the same time."
