@@ -1748,14 +1748,30 @@ function groupDimensionFields(
   }
   const rows: React.ReactNode[] = [];
   let run: React.ReactNode[] = [];
+  let runFields: ParamField[] = [];
   const flushRun = () => {
-    if (run.length >= 2) rows.push(<div className="triple" key={`dim-row-${rows.length}`}>{run}</div>);
-    else if (run.length === 1) rows.push(run[0]);
+    if (run.length >= 2) {
+      // A pair that asked for it (a tube's two diameters) spans two equal
+      // columns instead of leaving the third one empty and its labels wrapped.
+      const pair = run.length === 2 && runFields.every((f) => f.pairRow);
+      rows.push(
+        <div
+          className="triple"
+          style={pair ? { gridTemplateColumns: "repeat(2, minmax(0, 1fr))" } : undefined}
+          key={`dim-row-${rows.length}`}
+        >
+          {run}
+        </div>,
+      );
+    } else if (run.length === 1) rows.push(run[0]);
     run = [];
+    runFields = [];
   };
   for (const { field, el } of entries) {
-    if (!field.options && field.noSlider) run.push(el);
-    else {
+    if (!field.options && field.noSlider && !field.ownRow) {
+      run.push(el);
+      runFields.push(field);
+    } else {
       flushRun();
       rows.push(el);
     }
