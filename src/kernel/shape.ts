@@ -1233,7 +1233,8 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
       const innerTop = Math.min(Math.max(p.innerTopFillet ?? legacyBevel, 0), maxRim);
       const innerBottom = Math.min(Math.max(p.innerBottomFillet ?? legacyBevel, 0), maxRim);
 
-      const rOutY = Math.max(p.radiusY ?? rOut, 0.1);
+      // radiusY of 0 (the default) means "same as radius": a round tube.
+      const rOutY = Math.max((p.radiusY ?? 0) > 0 ? p.radiusY : rOut, 0.1);
       if (Math.abs(rOutY - rOut) > 1e-6) {
         // An oval tube: stretching a round one leaves the wall thick where it
         // is stretched, so the inner edge is instead the outer ellipse pushed

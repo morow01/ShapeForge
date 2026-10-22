@@ -144,7 +144,7 @@ export function bakeScale(node: ObjectNode): ObjectNode | null {
     // An uneven X/Y scale becomes a separate Y radius (an oval tube with an
     // even wall) instead of staying a stretch that thickens it.
     const radius = p.radius * sx;
-    const radiusY = (p.radiusY ?? p.radius) * sy;
+    const radiusY = ((p.radiusY ?? 0) > 0 ? p.radiusY : p.radius) * sy;
     // "Wall when resized: Grows" scales it with the tube instead (by the mean
     // of the two stretches when X and Y differ).
     const wall = (p.wallGrows ?? 0) >= 0.5 ? p.wallThickness * ((sx + sy) / 2) : p.wallThickness;
