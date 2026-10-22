@@ -79,6 +79,30 @@ assert.ok(stoppingShort.wrapped.intersect(corner).volume() > 1e-4,
 assert.ok(throughRemnant.wrapped.intersect(corner).volume() < 1e-9,
   'the finish must run through a sliver of leftover surface to the face behind it');
 
+// A straight border joined up from pieces that are collinear only to within
+// the tolerance they were joined at: the junction between them stands a few
+// hundredths of a millimetre off the line through the whole run. Taking that
+// junction for the corner of a face gave both sides of the cutter the same
+// direction, so it had no thickness and the finish quietly did nothing.
+const firstCorner = build(js.replace('if (off > furthest) {', 'if (off > furthest && !best) {'));
+assert.ok(js.includes('if (off > furthest) {'), 'fixture must be able to take the first corner instead');
+const sloped = (degrees, zFrom, zTo) => {
+  const a = (degrees * Math.PI) / 180;
+  return wasm.Manifold.cube([40, 20, zTo - zFrom], true)
+    .translate([0, 0, (zFrom + zTo) / 2])
+    .trimByPlane([Math.cos(a), 0, Math.sin(a)], -10 * Math.cos(a));
+};
+const kinked = sloped(12, -25, 0).add(sloped(12.15, 0, 25));
+// Midway down the lower piece, on the front face: x = -10 - z·tan(tilt).
+const kinkedAnchor = [-10 + 12.5 * Math.tan((12 * Math.PI) / 180), -10, -12.5];
+const onKinked = (edgeFinish) => {
+  const result = edgeFinish(new MeshShape(new wasm.Manifold(kinked.getMesh())), [kinkedAnchor], 2, 'chamfer');
+  return result ? kinked.volume() - result.volume() : null;
+};
+assert.ok(onKinked(firstCorner) < 1, 'fixture must reproduce the cutter with no thickness');
+const kinkedRemoved = onKinked(finish);
+assert.ok(kinkedRemoved > 50, `a border joined from near-collinear pieces must still finish (removed ${kinkedRemoved})`);
+
 // An edge that meets its end face square keeps its square end: no reaching
 // past the corner into the shoulder below it.
 const stepped = wasm.Manifold.cube([40, 20, 20], true).translate([0, 0, 10])

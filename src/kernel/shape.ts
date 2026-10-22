@@ -4348,17 +4348,31 @@ function finishMeshEdge(
     const u = seg.u;
     const mid: [number, number, number] = [(v0[0] + v1[0]) / 2, (v0[1] + v1[1]) / 2, (v0[2] + v1[2]) / 2];
 
+    // The corner of this triangle that is off the edge — the one that says
+    // which way the face runs. Take the corner standing FURTHEST off the
+    // edge, not merely the first one clear of it: a straight run joined up
+    // from several triangles is collinear only to within the tolerance it was
+    // joined at, so the junction between two of its pieces stands a couple of
+    // hundredths of a millimetre off the line through the whole run. That is
+    // enough to pass for a corner, and taking it gave both faces the same
+    // direction and a cutter of no thickness, which quietly finished nothing
+    // at all.
     const getThird = (triIdx: number): [number, number, number] | null => {
+      let best: [number, number, number] | null = null;
+      let furthest = 1e-6;
       for (let j = 0; j < 3; j++) {
         const vi = raw.triVerts[triIdx * 3 + j];
-        if (vi !== seg.v0Idx && vi !== seg.v1Idx) {
-          const point: Vec3 = [raw.vertProperties[vi * 3], raw.vertProperties[vi * 3 + 1], raw.vertProperties[vi * 3 + 2]];
-          const offset = point.map((value, i) => value - v0[i]) as Vec3;
-          const along = dot3(offset, u);
-          if (Math.hypot(...offset.map((value, i) => value - along * u[i])) > 1e-6) return point;
+        if (vi === seg.v0Idx || vi === seg.v1Idx) continue;
+        const point: Vec3 = [raw.vertProperties[vi * 3], raw.vertProperties[vi * 3 + 1], raw.vertProperties[vi * 3 + 2]];
+        const offset = point.map((value, i) => value - v0[i]) as Vec3;
+        const along = dot3(offset, u);
+        const off = Math.hypot(...offset.map((value, i) => value - along * u[i]));
+        if (off > furthest) {
+          furthest = off;
+          best = point;
         }
       }
-      return null;
+      return best;
     };
     const vA3 = getThird(seg.tA);
     const vB3 = getThird(seg.tB);
