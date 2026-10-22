@@ -1247,7 +1247,9 @@ export function makePrimitive(spec: ObjectSpec): AnySolid {
           Math.min(a, b) - 0.05,
           (Math.min(a, b) ** 2) / Math.max(a, b) - 0.05,
         );
-        const steps = 96;
+        // Same rule as the round tube: 32+ sides reads as smooth, fewer is a
+        // true polygon with that many flat faces.
+        const steps = sides >= 32 ? 96 : sides;
         let penOut: ReturnType<typeof draw> | null = null;
         let penIn: ReturnType<typeof draw> | null = null;
         for (let i = 0; i < steps; i++) {
