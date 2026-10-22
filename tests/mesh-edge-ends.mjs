@@ -103,6 +103,41 @@ assert.ok(onKinked(firstCorner) < 1, 'fixture must reproduce the cutter with no 
 const kinkedRemoved = onKinked(finish);
 assert.ok(kinkedRemoved > 50, `a border joined from near-collinear pieces must still finish (removed ${kinkedRemoved})`);
 
+// Two borders that meet: the second one's run ends on the face the first
+// one's chamfer left behind. Ending the cutter exactly flush with that face
+// gives the boolean two faces in one plane, and on a dense mesh it leaves a
+// scrap of the old surface — or a flap of no thickness — standing in the
+// corner. The same shape, coarse or dense, must come out with the same
+// surface; the scrap shows up as surface area that the volume cannot account
+// for.
+const flushEnds = build(js.replace('const CAP_PAST_FACE = 0.02;', 'const CAP_PAST_FACE = 0;'));
+assert.ok(js.includes('const CAP_PAST_FACE = 0.02;'), 'fixture must be able to end the cutter flush');
+const trimmed = (dense) => {
+  const start = wasm.Manifold.cube([40, 20, 50], true);
+  return (dense ? start.refine(4) : start)
+    .trimByPlane([Math.cos(TILT), 0, Math.sin(TILT)], -10 * Math.cos(TILT));
+};
+const twoBorders = (edgeFinish, dense) => {
+  let solid = new MeshShape(new wasm.Manifold(trimmed(dense).getMesh()));
+  const slantedBorder = [-10, -10, 0];
+  const bottomBorder = [(-10 + 25 * Math.tan(TILT) + 20) / 2, -10, -25];
+  for (const anchor of [slantedBorder, bottomBorder]) {
+    const next = edgeFinish(solid, [anchor], 5, 'chamfer');
+    assert.ok(next, 'both borders must chamfer');
+    solid = next;
+  }
+  return solid.wrapped;
+};
+const coarse = twoBorders(finish, false);
+const dense = twoBorders(finish, true);
+const denseFlush = twoBorders(flushEnds, true);
+assert.ok(denseFlush.surfaceArea() > dense.surfaceArea() + 20,
+  'fixture must reproduce the scrap left by a cutter ending flush');
+assert.ok(Math.abs(denseFlush.volume() - dense.volume()) < 0.01,
+  'fixture: that scrap is surface, not material');
+assert.ok(Math.abs(dense.surfaceArea() - coarse.surfaceArea()) < 0.05,
+  `a scrap of the old surface is left in the corner (${dense.surfaceArea()} vs ${coarse.surfaceArea()})`);
+
 // An edge that meets its end face square keeps its square end: no reaching
 // past the corner into the shoulder below it.
 const stepped = wasm.Manifold.cube([40, 20, 20], true).translate([0, 0, 10])

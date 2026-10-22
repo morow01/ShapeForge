@@ -4133,6 +4133,10 @@ function finishMeshEdge(
   kind: "chamfer" | "fillet" = "chamfer",
 ): MeshShape | null {
   if (Math.abs(distance) < 1e-6 || !anchors.length) return solid;
+  /** How far past the face it ends on a cutter runs, in mm, so the boolean
+   *  never has to resolve two faces lying in the same plane (see
+   *  miterProfile). Far below anything a printer resolves. */
+  const CAP_PAST_FACE = 0.02;
   const raw = solid.wrapped.getMesh();
   const numTris = raw.triVerts.length / 3;
   if (numTris === 0) return null;
@@ -4463,7 +4467,15 @@ function finishMeshEdge(
         const away: Vec3 = u.map((value) => -sign * value) as Vec3;
         const denominator = dot(away, cap.normal);
         if (denominator < 0.3) return point;
-        const shift = dot(cap.origin.map((value, i) => value - point[i]) as Vec3, cap.normal) / denominator;
+        // A hair PAST that face, never exactly on it. A cutter ending flush
+        // with a surface gives the boolean two faces in the same plane, and
+        // what it leaves behind there is a scrap of that surface or a flap of
+        // no thickness standing in the corner — the artefacts reported at
+        // both ends of a chamfered bottom border. This step past is far below
+        // anything a printer resolves, and goes nowhere the cut was not
+        // already going.
+        const shift = CAP_PAST_FACE +
+          dot(cap.origin.map((value, i) => value - point[i]) as Vec3, cap.normal) / denominator;
         // Never past the other end of this segment, and never further out
         // than the finish itself is wide.
         const reach = Math.abs(distance) * 2 + 0.5;
