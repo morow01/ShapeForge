@@ -4346,6 +4346,16 @@ function finishMeshEdge(
 
   const manifold = getManifold();
   let currentSolid = solid;
+  // Every cutter is built first and they go in together, in one boolean each.
+  // Cutting them one at a time meant each cutter met the face the previous
+  // one had just left behind, and where two of them are mitred into each
+  // other those faces lie in the same plane — which a mesh boolean resolves
+  // by leaving a sheet of no thickness standing in the model. A face border
+  // is dozens of cutters mitred end to end, so it came out carrying dozens of
+  // those sheets (21 of them, some hundreds of mm², on the bracket this was
+  // reported on). Unioned first, the mitres simply merge.
+  const toCut: ReturnType<typeof manifold.Manifold.union>[] = [];
+  const toAdd: ReturnType<typeof manifold.Manifold.union>[] = [];
 
   for (const seg of matchedSegments) {
     const v0 = seg.v0, v1 = seg.v1;
@@ -4553,8 +4563,7 @@ function finishMeshEdge(
         vertProperties: Float32Array.from(verts),
         triVerts: Uint32Array.from(tris),
       });
-      const prism = new MeshShape(new manifold.Manifold(prismMesh));
-      currentSolid = isConcave ? currentSolid.fuse(prism) : currentSolid.cut(prism);
+      (isConcave ? toAdd : toCut).push(new manifold.Manifold(prismMesh));
     } else {
       const arcSteps = 8;
       const profile0: [number, number, number][] = [];
@@ -4617,10 +4626,12 @@ function finishMeshEdge(
         vertProperties: Float32Array.from(verts),
         triVerts: Uint32Array.from(tris),
       });
-      const prism = new MeshShape(new manifold.Manifold(prismMesh));
-      currentSolid = isConcave ? currentSolid.fuse(prism) : currentSolid.cut(prism);
+      (isConcave ? toAdd : toCut).push(new manifold.Manifold(prismMesh));
     }
   }
+
+  if (toCut.length) currentSolid = currentSolid.cut(new MeshShape(manifold.Manifold.union(toCut)));
+  if (toAdd.length) currentSolid = currentSolid.fuse(new MeshShape(manifold.Manifold.union(toAdd)));
 
   if (currentSolid.isEmpty || currentSolid.volume() <= 1e-9) return null;
 
