@@ -4174,6 +4174,17 @@ function finishMeshEdge(
     }
   }
 
+  // Which triangles touch each vertex — how the end of an edge finds the face
+  // that closes it off (see capAt).
+  const vertexToTris = new Map<number, number[]>();
+  for (let t = 0; t < numTris; t++) {
+    for (let j = 0; j < 3; j++) {
+      const vertex = raw.triVerts[t * 3 + j];
+      const list = vertexToTris.get(vertex);
+      if (list) list.push(t); else vertexToTris.set(vertex, [t]);
+    }
+  }
+
   interface SharpEdge {
     key: string;
     v0Idx: number;
@@ -4295,6 +4306,10 @@ function finishMeshEdge(
       if (merged) break;
     }
   }
+  // Every sharp edge of the solid, kept while vertexToSharpEdges is narrowed
+  // to the selected ones below. capAt reads this one: the sliver it has to
+  // look past belongs to the shape, not to the selection.
+  const sharpEdgesAtVertex = new Map(vertexToSharpEdges);
   vertexToSharpEdges.clear();
   for (const edge of matchedSegments) {
     for (const id of [edge.v0Idx, edge.v1Idx]) {
@@ -4366,6 +4381,51 @@ function finishMeshEdge(
     const nAvgL = Math.hypot(nAvgRaw[0], nAvgRaw[1], nAvgRaw[2]) || 1;
     const nAvg: [number, number, number] = [nAvgRaw[0] / nAvgL, nAvgRaw[1] / nAvgL, nAvgRaw[2] / nAvgL];
 
+    /**
+     * The face an edge runs into at `vertexIdx`, looking along `away`.
+     *
+     * Where an edge meets a face square on, a cutter cut off square across
+     * the edge ends flush with it. Where it meets at a slant — the tall
+     * borders of a tilted cut, which arrive at the top and bottom faces at
+     * 75 degrees — a square end leaves a wedge of material standing in the
+     * corner, as wide as the finish itself. Finishing on this face's own
+     * plane instead ends the cutter exactly where the solid does.
+     */
+    const capAt = (vertexIdx: number, away: Vec3): { origin: Vec3; normal: Vec3 } | null => {
+      const facing = (at: number) => {
+        const origin: Vec3 = [raw.vertProperties[at * 3], raw.vertProperties[at * 3 + 1], raw.vertProperties[at * 3 + 2]];
+        let best: { origin: Vec3; normal: Vec3; towards: number } | null = null;
+        for (const t of vertexToTris.get(at) ?? []) {
+          const normal = triNormals[t];
+          if (dot3(normal, seg.nA) > 0.99999 || dot3(normal, seg.nB) > 0.99999) continue;
+          const towards = dot3(normal, away);
+          // Only a face the edge really runs into closes it off; one lying
+          // along the edge would send the cutter off down the shape.
+          if (towards <= 0.5) continue;
+          if (!best || towards > best.towards) best = { origin, normal, towards };
+        }
+        return best;
+      };
+      const here = facing(vertexIdx);
+      if (here) return here;
+      // A cut that stopped a fraction of a millimetre short of the far face
+      // leaves a sliver of the original surface standing between the end of
+      // this edge and the face that closes it off. Step over a remnant that
+      // small and finish on the face behind it, rather than stopping on the
+      // sliver and leaving a notch.
+      for (const other of sharpEdgesAtVertex.get(vertexIdx) ?? []) {
+        // Not this border itself (a merged run still has its own pieces here).
+        if (other === seg || sameFaces(other, seg) || other.len > Math.abs(distance)) continue;
+        const along: Vec3 = other.v0Idx === vertexIdx ? other.u : other.u.map((value) => -value) as Vec3;
+        if (dot3(along, away) < 0.86) continue;
+        const beyond = facing(other.v0Idx === vertexIdx ? other.v1Idx : other.v0Idx);
+        if (beyond) return beyond;
+      }
+      return null;
+    };
+    const capStart = capAt(seg.v0Idx, u.map((value) => -value) as Vec3);
+    const capEnd = capAt(seg.v1Idx, u);
+
     // Adjacent selected borders must share a miter plane. Square caps leave
     // an uncut wedge at reentrant face corners; uniform extensions overcut
     // other corners. Move each profile vertex along this edge to the angle
@@ -4381,7 +4441,21 @@ function finishMeshEdge(
           [other.nA, other.nB].some((otherNormal) => dot(normal, otherNormal) > 0.99999)),
       );
       // Multi-edge junctions need a corner patch, not an arbitrary pairing.
-      if (neighbors.length !== 1) return point;
+      if (neighbors.length !== 1) {
+        // Nothing carries this border on, so the run ends here: finish on the
+        // face it runs into (capAt) rather than square across the edge.
+        const cap = atStart ? capStart : capEnd;
+        if (!cap) return point;
+        const away: Vec3 = u.map((value) => -sign * value) as Vec3;
+        const denominator = dot(away, cap.normal);
+        if (denominator < 0.3) return point;
+        const shift = dot(cap.origin.map((value, i) => value - point[i]) as Vec3, cap.normal) / denominator;
+        // Never past the other end of this segment, and never further out
+        // than the finish itself is wide.
+        const reach = Math.abs(distance) * 2 + 0.5;
+        const bounded = Math.max(-seg.len * 0.45, Math.min(reach, shift));
+        return point.map((value, i) => value + bounded * away[i]) as Vec3;
+      }
       const other = neighbors[0];
       const otherSign = other.v0Idx === vertexIdx ? 1 : -1;
       // Difference of directions pointing away from the shared endpoint is
