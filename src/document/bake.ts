@@ -145,12 +145,15 @@ export function bakeScale(node: ObjectNode): ObjectNode | null {
     // even wall) instead of staying a stretch that thickens it.
     const radius = p.radius * sx;
     const radiusY = (p.radiusY ?? p.radius) * sy;
+    // "Wall when resized: Grows" scales it with the tube instead (by the mean
+    // of the two stretches when X and Y differ).
+    const wall = (p.wallGrows ?? 0) >= 0.5 ? p.wallThickness * ((sx + sy) / 2) : p.wallThickness;
     const { radiusY: _oldRadiusY, ...rest } = p;
     params = {
       ...rest,
       radius,
       ...(Math.abs(radiusY - radius) > 1e-6 ? { radiusY } : {}),
-      wallThickness: Math.min(p.wallThickness, Math.max(0.05, Math.min(radius, radiusY) - 0.05)),
+      wallThickness: Math.min(wall, Math.max(0.05, Math.min(radius, radiusY) - 0.05)),
       height: p.height * sz,
     };
   } else if (node.kind === "paraboloid" && sx === sy) {
