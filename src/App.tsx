@@ -6930,7 +6930,18 @@ export function App() {
                 }
                 endHistoryBatch();
               }}
-              onTransform={(patch) => setTransform(selected.id, patch)}
+              onTransform={(patch) => {
+                setTransform(selected.id, patch);
+                // A typed scale on a tube folds into its diameter at once, so
+                // the wall stays what the panel says instead of being scaled.
+                if (patch.scale) {
+                  const now = findNode(useDoc.getState().nodes, selected.id);
+                  const baked = now?.type === "object" && now.kind === "tube" ? bakeScale(now) : null;
+                  if (baked && baked !== now) {
+                    useDoc.setState((s) => ({ nodes: updateNode(s.nodes, selected.id, () => baked) }));
+                  }
+                }
+              }}
               resizeConstrained={resizeConstrained}
               onResizeConstrained={setResizeConstrained}
               onHole={(h) => {

@@ -137,12 +137,20 @@ export function bakeScale(node: ObjectNode): ObjectNode | null {
       radius: p.radius * sx,
       height: p.height * sz,
     };
-  } else if (node.kind === "tube" && sx === sy) {
+  } else if (node.kind === "tube") {
     height = p.height;
+    // The wall is deliberately NOT scaled: a tube resized to twice the
+    // diameter should still have the wall the user set, not a doubled one.
+    // An uneven X/Y scale becomes a separate Y radius (an oval tube with an
+    // even wall) instead of staying a stretch that thickens it.
+    const radius = p.radius * sx;
+    const radiusY = (p.radiusY ?? p.radius) * sy;
+    const { radiusY: _oldRadiusY, ...rest } = p;
     params = {
-      ...p,
-      radius: p.radius * sx,
-      wallThickness: p.wallThickness * sx,
+      ...rest,
+      radius,
+      ...(Math.abs(radiusY - radius) > 1e-6 ? { radiusY } : {}),
+      wallThickness: Math.min(p.wallThickness, Math.max(0.05, Math.min(radius, radiusY) - 0.05)),
       height: p.height * sz,
     };
   } else if (node.kind === "paraboloid" && sx === sy) {
