@@ -4216,6 +4216,11 @@ function finishMeshEdge(
     }
   }
 
+  const dot3 = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const sameFaces = (a: SharpEdge, b: SharpEdge) =>
+    (dot3(a.nA, b.nA) > 0.99999 && dot3(a.nB, b.nB) > 0.99999) ||
+    (dot3(a.nA, b.nB) > 0.99999 && dot3(a.nB, b.nA) > 0.99999);
+
   const matchedSegments = new Set<SharpEdge>();
   for (const anchor of anchors) {
     let bestSeg: SharpEdge | null = null;
@@ -4235,18 +4240,26 @@ function finishMeshEdge(
     }
     if (bestSeg && bestDist < 1.5) {
       matchedSegments.add(bestSeg);
+      // The anchor names one segment of a straight run that a boolean's
+      // triangulation chopped up, so take the rest of that run with it — but
+      // only while it is unmistakably the same edge: between the same two
+      // faces, carrying straight on, and with no third edge joining. Taking
+      // every collinear neighbour instead ran the fillet on past the corner
+      // the run ends at, down whatever other edge happened to line up with
+      // it, which is what made a picked edge come out filleted far beyond
+      // the piece that was selected.
       const toCheck = [bestSeg];
       while (toCheck.length > 0) {
         const curr = toCheck.pop()!;
         for (const vIdx of [curr.v0Idx, curr.v1Idx]) {
-          const neighbors = vertexToSharpEdges.get(vIdx) || [];
-          for (const nb of neighbors) {
-            if (matchedSegments.has(nb)) continue;
-            const dotU = Math.abs(curr.u[0] * nb.u[0] + curr.u[1] * nb.u[1] + curr.u[2] * nb.u[2]);
-            if (dotU > 0.99) {
-              matchedSegments.add(nb);
-              toCheck.push(nb);
-            }
+          const onward = (vertexToSharpEdges.get(vIdx) ?? []).filter((nb) => nb !== curr && sameFaces(nb, curr));
+          if (onward.length !== 1) continue;
+          const nb = onward[0];
+          if (matchedSegments.has(nb)) continue;
+          const dotU = Math.abs(curr.u[0] * nb.u[0] + curr.u[1] * nb.u[1] + curr.u[2] * nb.u[2]);
+          if (dotU > 0.99) {
+            matchedSegments.add(nb);
+            toCheck.push(nb);
           }
         }
       }
@@ -4258,10 +4271,6 @@ function finishMeshEdge(
   // Boolean triangulation can split a straight border very near a corner.
   // Miter the whole straight run: mitering the tiny last fragment can turn
   // its cutter inside out and leave a notch or a square-ended strip.
-  const dot3 = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
-  const sameFaces = (a: SharpEdge, b: SharpEdge) =>
-    (dot3(a.nA, b.nA) > 0.99999 && dot3(a.nB, b.nB) > 0.99999) ||
-    (dot3(a.nA, b.nB) > 0.99999 && dot3(a.nB, b.nA) > 0.99999);
   let merged = true;
   while (merged) {
     merged = false;

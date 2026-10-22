@@ -356,14 +356,17 @@ function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdg
     });
   }
 
-  // Extract sharp feature edges
+  // Extract sharp feature edges, each carrying the pair of patches it divides
   const edgeLines: number[] = [];
   const edgeGroups: { start: number; count: number; edgeId: number }[] = [];
+  const segments: { s0: number; s1: number; between: number }[] = [];
 
   for (const [key, tris] of edgeToTris.entries()) {
     let isSharp = false;
+    let between = -1;
     if (tris.length === 1) {
       isSharp = true;
+      between = triGroup[tris[0]] * -2 - 2; // a border of one patch only
     } else if (tris.length >= 2) {
       const tA = tris[0], tB = tris[1];
       const dot = triNormals[tA * 3] * triNormals[tB * 3] +
@@ -374,22 +377,83 @@ function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdg
       // of the tessellation, not a feature, so only the borders between patches count.
       if (dot < 0.999 && triGroup[tA] !== triGroup[tB]) {
         isSharp = true;
+        between = Math.min(triGroup[tA], triGroup[tB]) * groupedTriangles.length +
+                  Math.max(triGroup[tA], triGroup[tB]);
       }
     }
     if (isSharp) {
-      const s0 = Math.floor(key / 20000000);
-      const s1 = key % 20000000;
-      const startIdx = edgeLines.length / 3;
-      edgeLines.push(
-        spatialToCoord[s0 * 3], spatialToCoord[s0 * 3 + 1], spatialToCoord[s0 * 3 + 2],
-        spatialToCoord[s1 * 3], spatialToCoord[s1 * 3 + 1], spatialToCoord[s1 * 3 + 2],
-      );
-      edgeGroups.push({
-        start: startIdx,
-        count: 2,
-        edgeId: edgeGroups.length,
-      });
+      segments.push({ s0: Math.floor(key / 20000000), s1: key % 20000000, between });
     }
+  }
+
+  // One straight edge is one pickable edge, however many triangles it is cut
+  // into. A boolean leaves a planar face triangulated with extra vertices
+  // along its borders, so the single edge a person sees arrives here as a
+  // string of separate segments — some a hundredth of a millimetre long.
+  // Emitting those raw made edge mode select (and highlight) one crumb of the
+  // edge that was clicked. Join each run that carries straight on between the
+  // same two patches, and stop where a third edge joins: that junction is a
+  // real corner of the shape, and running past it would hand the fillet
+  // scraps of edges the user never picked.
+  const STRAIGHT_ON = Math.cos((2 * Math.PI) / 180);
+  const segmentsAt = new Map<number, number[]>();
+  for (let i = 0; i < segments.length; i++) {
+    for (const vertex of [segments[i].s0, segments[i].s1]) {
+      const list = segmentsAt.get(vertex);
+      if (list) list.push(i); else segmentsAt.set(vertex, [i]);
+    }
+  }
+  const direction = (from: number, to: number): [number, number, number] => {
+    const dx = spatialToCoord[to * 3] - spatialToCoord[from * 3];
+    const dy = spatialToCoord[to * 3 + 1] - spatialToCoord[from * 3 + 1];
+    const dz = spatialToCoord[to * 3 + 2] - spatialToCoord[from * 3 + 2];
+    const length = Math.hypot(dx, dy, dz) || 1;
+    return [dx / length, dy / length, dz / length];
+  };
+  const taken = new Uint8Array(segments.length);
+  /** The segment this run continues into at `vertex`, or -1 where it ends. */
+  const onward = (index: number, vertex: number, heading: [number, number, number]): number => {
+    const here = (segmentsAt.get(vertex) ?? []).filter((i) => segments[i].between === segments[index].between);
+    if (here.length !== 2) return -1;
+    const next = here[0] === index ? here[1] : here[0];
+    if (taken[next]) return -1;
+    const ahead = segments[next].s0 === vertex
+      ? direction(segments[next].s0, segments[next].s1)
+      : direction(segments[next].s1, segments[next].s0);
+    const straight = heading[0] * ahead[0] + heading[1] * ahead[1] + heading[2] * ahead[2];
+    return straight > STRAIGHT_ON ? next : -1;
+  };
+
+  for (let i = 0; i < segments.length; i++) {
+    if (taken[i]) continue;
+    taken[i] = 1;
+    const run = [segments[i].s0, segments[i].s1];
+    for (const end of [1, 0]) {
+      let index = i;
+      for (;;) {
+        const tip = end ? run[run.length - 1] : run[0];
+        const heading = end
+          ? direction(run[run.length - 2], tip)
+          : direction(run[1], tip);
+        const next = onward(index, tip, heading);
+        if (next < 0) break;
+        taken[next] = 1;
+        index = next;
+        const far = segments[next].s0 === tip ? segments[next].s1 : segments[next].s0;
+        if (end) run.push(far); else run.unshift(far);
+      }
+    }
+    const startIdx = edgeLines.length / 3;
+    for (let at = 0; at + 1 < run.length; at++) {
+      for (const vertex of [run[at], run[at + 1]]) {
+        edgeLines.push(spatialToCoord[vertex * 3], spatialToCoord[vertex * 3 + 1], spatialToCoord[vertex * 3 + 2]);
+      }
+    }
+    edgeGroups.push({
+      start: startIdx,
+      count: (run.length - 1) * 2,
+      edgeId: edgeGroups.length,
+    });
   }
 
   return {
