@@ -53,6 +53,11 @@ export interface ParamField {
    *  actually the point and being a fraction of a unit off rarely matters
    *  the way a structural dimension does. */
   noSlider?: boolean;
+  /** Keeps a noSlider field out of the shared row of compact fields, giving it
+   *  a full-width row of its own (room for a long label or a lock button). */
+  ownRow?: boolean;
+  /** Two such fields in a row share two equal columns, not three. */
+  pairRow?: boolean;
   /** Multiplies the stored value for display and divides edited values before
    *  saving. Circular sizes use 2 so the UI speaks in measured diameters while
    *  existing documents and geometry continue storing radii. */
@@ -387,9 +392,9 @@ export const PRIMITIVES: Record<PrimitiveKind, PrimitiveDef> = {
       radiusY: 0, wallGrows: 0,
     },
     fields: [
-      diam("radius", "Outer diameter X"),
-      diam("radiusY", "Outer diameter Y"),
-      { key: "wallThickness", label: "Wall thickness", min: 0.1, max: 1000, step: 0.1, noSlider: true },
+      { ...diam("radius", "Outer diameter X"), pairRow: true },
+      { ...diam("radiusY", "Outer diameter Y"), pairRow: true },
+      { key: "wallThickness", label: "Wall thickness", min: 0.1, max: 1000, step: 0.1, noSlider: true, ownRow: true },
       dim("height", "Height"),
       { key: "sides", label: "Sides", min: 3, max: 64, step: 1 },
       { key: "outerTopFillet", label: "Outer top corner radius", min: 0, max: 100, step: 0.25 },
