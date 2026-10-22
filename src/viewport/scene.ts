@@ -7669,7 +7669,29 @@ export class Scene {
       return;
     }
     const ratio = desired / current;
-    const axis = this.dimensionInputs.indexOf(input) as 0 | 1 | 2;
+    const worldAxis = this.dimensionInputs.indexOf(input) as 0 | 1 | 2;
+    let axis = worldAxis;
+
+    if (id !== "multi") {
+      // The readouts measure the world-space box, but scale lives on the
+      // object's own axes. Once it is rotated (say 90° about Z) the world
+      // width is the local depth, so typing a width must scale whichever
+      // local axis currently points most nearly along that world axis.
+      const rotated = id ? findNode(this.lastNodes, id) : undefined;
+      if (rotated) {
+        const m = new THREE.Matrix4().makeRotationFromEuler(
+          new THREE.Euler(rotated.rotation[0] * DEG, rotated.rotation[1] * DEG, rotated.rotation[2] * DEG, "XYZ"),
+        );
+        let best = 0;
+        for (let local = 0; local < 3; local++) {
+          // Column `local` of the rotation is that local axis in world space.
+          if (Math.abs(m.elements[local * 4 + worldAxis]) > best) {
+            best = Math.abs(m.elements[local * 4 + worldAxis]);
+            axis = local as 0 | 1 | 2;
+          }
+        }
+      }
+    }
 
     if (id === "multi") {
       const selectedViews = this.selectedIds
