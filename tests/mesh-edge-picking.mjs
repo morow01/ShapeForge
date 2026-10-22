@@ -14,7 +14,10 @@ setManifold(wasm);
 const source = readFileSync(new URL('../src/kernel/worker.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const body = source.slice(source.indexOf('function meshFromMeshShape('), source.indexOf('function normalsPerCadFace('));
 const js = ts.transpile(body, { target: ts.ScriptTarget.ES2023, module: ts.ModuleKind.None });
-const meshFromMeshShape = new Function('SMOOTH_PATCH_MAX_AREA_SHARE', 'SMOOTH_PATCH_DEGREES', `${js}; return meshFromMeshShape;`)(0.02, 25);
+const meshFromMeshShape = new Function(
+  'SMOOTH_PATCH_MAX_AREA_SHARE', 'SMOOTH_PATCH_DEGREES', 'SPECK_FACE_SHARE', 'SPECK_FACE_AREA',
+  `${js}; return meshFromMeshShape;`,
+)(0.02, 20, 1e-4, 2);
 
 const shape = (manifold) => new MeshShape(new wasm.Manifold(manifold.getMesh()));
 const point = (lines, vertex) => [lines[vertex * 3], lines[vertex * 3 + 1], lines[vertex * 3 + 2]];

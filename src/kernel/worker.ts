@@ -144,6 +144,13 @@ const SMOOTH_PATCH_DEGREES = 20;
  *  next to a gentle curve stays its own face. A thin strip of a curved surface is tiny by area however
  *  many triangles it holds. */
 const SMOOTH_PATCH_MAX_AREA_SHARE = 0.02;
+/** A patch this much smaller than the whole surface is a speck a boolean left
+ *  behind rather than a face of the shape, and joins the face it lies in (see
+ *  meshFromMeshShape) — but never anything bigger than SPECK_FACE_AREA, so a
+ *  genuinely small face on a large model is still a face of its own. */
+const SPECK_FACE_SHARE = 1e-4;
+/** 2mm² — a millimetre and a half square, under anything a person points at. */
+const SPECK_FACE_AREA = 2;
 
 /**
  * Converts a MeshShape into CAD-style meshed faces and sharp feature edges.
@@ -335,6 +342,85 @@ function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdg
   groupedTriangles.length = 0;
   groupedTriangles.push(...mergedGroups);
   for (let g = 0; g < groupedTriangles.length; g++) for (const t of groupedTriangles[g]) triGroup[t] = g;
+
+  // Specks belong to the face they sit in, not to themselves. A boolean
+  // strews slivers along everything it cuts — a quarter of a millimetre
+  // square, at angles that are rounding noise rather than shape — and a
+  // border finish, which is dozens of cutters, strews hundreds of them. Left
+  // on their own they each counted as a face of the solid, so the model came
+  // back covered in stray edge lines and shading facets: on the bracket this
+  // was reported on, 422 faces where the shape has 26, and 329 of them
+  // smaller than a tenth of a square millimetre. Each speck now joins the
+  // neighbour it shares the most boundary with, which is the face it visibly
+  // lies in.
+  const groupTotals = groupedTriangles.map((tris) => tris.reduce((sum, t) => sum + triAreas[t], 0));
+  const speckArea = Math.min(totalArea * SPECK_FACE_SHARE, SPECK_FACE_AREA);
+  const specks = groupedTriangles
+    .map((_, g) => g)
+    .filter((g) => groupTotals[g] < speckArea)
+    .sort((a, b) => groupTotals[a] - groupTotals[b]);
+  if (specks.length) {
+    const host = Int32Array.from({ length: groupedTriangles.length }, (_, i) => i);
+    const owner = (g: number): number => {
+      while (host[g] !== g) g = host[g];
+      return g;
+    };
+    for (const speck of specks) {
+      // How much boundary this speck shares with each of its neighbours.
+      const shared = new Map<number, number>();
+      for (const t of groupedTriangles[speck]) {
+        const corners = [raw.triangles[t * 3], raw.triangles[t * 3 + 1], raw.triangles[t * 3 + 2]];
+        for (let j = 0; j < 3; j++) {
+          const from = corners[j];
+          const to = corners[(j + 1) % 3];
+          const neighbours = edgeToTris.get(edgeKey(from, to));
+          if (!neighbours) continue;
+          const length = Math.hypot(
+            raw.vertices[to * 3] - raw.vertices[from * 3],
+            raw.vertices[to * 3 + 1] - raw.vertices[from * 3 + 1],
+            raw.vertices[to * 3 + 2] - raw.vertices[from * 3 + 2],
+          );
+          for (const other of neighbours) {
+            const group = owner(triGroup[other]);
+            if (group === owner(speck)) continue;
+            shared.set(group, (shared.get(group) ?? 0) + length);
+          }
+        }
+      }
+      // The face it shares the most boundary with, preferring a real face —
+      // but a speck surrounded by other specks joins one of those instead, so
+      // a drift of them ends up as one patch rather than fifty.
+      let best = -1;
+      let longest = 0;
+      let bestSpeck = -1;
+      let longestSpeck = 0;
+      for (const [group, length] of shared) {
+        if (groupTotals[group] < speckArea) {
+          if (length > longestSpeck) { longestSpeck = length; bestSpeck = group; }
+        } else if (length > longest) {
+          longest = length;
+          best = group;
+        }
+      }
+      const into = best >= 0 ? best : bestSpeck;
+      if (into >= 0 && owner(into) !== owner(speck)) host[owner(speck)] = owner(into);
+    }
+    const absorbed: number[][] = [];
+    const indexOfHost = new Map<number, number>();
+    for (let g = 0; g < groupedTriangles.length; g++) {
+      const into = owner(g);
+      let at = indexOfHost.get(into);
+      if (at === undefined) {
+        at = absorbed.length;
+        indexOfHost.set(into, at);
+        absorbed.push([]);
+      }
+      for (const t of groupedTriangles[g]) absorbed[at].push(t);
+    }
+    groupedTriangles.length = 0;
+    groupedTriangles.push(...absorbed);
+    for (let g = 0; g < groupedTriangles.length; g++) for (const t of groupedTriangles[g]) triGroup[t] = g;
+  }
 
   // Reorder triangles so each faceGroup has contiguous triangles
   const reorderedTriangles = new Uint32Array(raw.triangles.length);

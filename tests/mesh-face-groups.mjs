@@ -52,4 +52,25 @@ assert.ok(b.triangles > 30000, `bowl is a heavy mesh (${b.triangles} triangles)`
 assert.ok(b.faces < 20, `bowl is a handful of faces, got ${b.faces} from ${before} triangles`);
 assert.ok(b.edges < 2000, `bowl edges are only patch borders, got ${b.edges}`);
 
-console.log(`Faces: box ${box.faces}, cylinder ${cyl.faces}, holed box ${holed.faces}, revolved bowl ${b.faces} (was about ${Math.round(b.triangles / 2)}); bowl edges ${b.edges}.`);
+// Specks a boolean leaves behind are part of the face they lie in, not faces
+// of their own. Every cut strews them — a border finish, which is dozens of
+// cutters, strews hundreds — and counted as faces they cover the model in
+// stray edge lines and shading facets.
+const nicked = Array.from({ length: 18 }, (_, i) => i).reduce((solid, i) => solid.subtract(
+  m.Manifold.cube([1.6, 0.12, 0.4], true).rotate([8, 0, 0]).translate([-18 + i * 2.1, -9.95, 25.18]),
+), m.Manifold.cube([40, 20, 50], true));
+const withSpecks = new Function(`${js.replace('const speckArea = Math.min(totalArea * SPECK_FACE_SHARE, SPECK_FACE_AREA);', 'const speckArea = 0;')}; return meshFromMeshShape;`)();
+const raw = withSpecks(shape(nicked));
+assert.ok(raw.faces.faceGroups.length > 50, `fixture must strew specks, got ${raw.faces.faceGroups.length} faces`);
+const specked = stats(nicked);
+assert.ok(specked.faces <= 8, `a nicked box is still about six faces, got ${specked.faces}`);
+assert.ok(specked.edges <= 20, `and about twelve edges, got ${specked.edges}`);
+
+// A small face is still a face: only specks are absorbed, and 9mm² is not a
+// speck — it is something a person can see and click.
+const stepped = m.Manifold.cube([40, 20, 50], true)
+  .subtract(m.Manifold.cube([3, 3, 3], true).translate([0, -10 + 1.5, 25]));
+const step = stats(stepped);
+assert.ok(step.faces >= 10, `the 3mm step keeps its own faces, got ${step.faces}`);
+
+console.log(`Faces: box ${box.faces}, cylinder ${cyl.faces}, holed box ${holed.faces}, revolved bowl ${b.faces} (was about ${Math.round(b.triangles / 2)}); bowl edges ${b.edges}. Nicked box ${specked.faces} faces, not ${raw.faces.faceGroups.length}.`);
