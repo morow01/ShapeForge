@@ -11,6 +11,7 @@ import { readViewportQuality, VIEWPORT_QUALITY_KEY, type ViewportQuality } from 
 import type { FaceBounds, FaceResizeFrame } from "./viewport/FaceResizeHandles";
 import { Inspector } from "./ui/Inspector";
 import { Tree } from "./ui/Tree";
+import { HistoryPanel } from "./ui/HistoryPanel";
 import { HomePage } from "./ui/HomePage";
 import { SaveDialog } from "./ui/SaveDialog";
 import { VersionHistoryDialog } from "./ui/VersionHistoryDialog";
@@ -38,6 +39,7 @@ import {
   GridSnapIcon,
   GroupIcon,
   HideLinesIcon,
+  HistoryIcon,
   ImportIcon,
   JoineryToolIcon,
   RoundPinIcon,
@@ -364,6 +366,7 @@ const HIDE_ALL_LINES_KEY = "cad.hideAllLines";
 const RANDOM_NEW_OBJECT_COLORS_KEY = "cad.randomNewObjectColors";
 const RANDOM_NEW_OBJECT_COLORS_MIGRATED_KEY = "cad.randomNewObjectColors.v2";
 const OBJECTS_PANEL_KEY = "cad.objectsPanelOpen";
+const HISTORY_PANEL_KEY = "cad.historyPanelOpen";
 const VIEW_STYLE_KEY = "cad.viewStyle";
 const RESIZE_CONSTRAINED_KEY = "cad.resizeConstrained";
 const DISPLAY_UNIT_KEY = "cad.displayUnit";
@@ -1127,6 +1130,11 @@ export function App() {
   // of all — so it is a toggle, remembered the same way Snap is.
   const [objectsPanelOpen, setObjectsPanelOpen] = useState(
     () => localStorage.getItem(OBJECTS_PANEL_KEY) !== "off",
+  );
+  // History shares the left column with Objects, and starts closed: it is
+  // there for the moment you want to walk a design back, not all the time.
+  const [historyPanelOpen, setHistoryPanelOpen] = useState(
+    () => localStorage.getItem(HISTORY_PANEL_KEY) === "on",
   );
   /** Shape Builder session: the ids that were decomposed, in the order the
    *  cell masks index them. Null whenever the tool is not running. */
@@ -2900,6 +2908,14 @@ export function App() {
       // Private mode / blocked storage: the choice just won't be remembered.
     }
   }, [objectsPanelOpen]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(HISTORY_PANEL_KEY, historyPanelOpen ? "on" : "off");
+    } catch {
+      // Private mode / blocked storage: the choice just won't be remembered.
+    }
+  }, [historyPanelOpen]);
 
   useEffect(() => {
     try {
@@ -4735,7 +4751,7 @@ export function App() {
   });
 
   return (
-    <div className={`app-shell${objectsPanelOpen ? "" : " objects-collapsed"}${allTools ? "" : " rail-compact"}${showRailLabels ? " rail-expanded" : ""}`}>
+    <div className={`app-shell${objectsPanelOpen || historyPanelOpen ? "" : " objects-collapsed"}${allTools ? "" : " rail-compact"}${showRailLabels ? " rail-expanded" : ""}`}>
       <header className="topbar">
         <div className="topbar-left">
           <button
@@ -4912,6 +4928,15 @@ export function App() {
               aria-label="Redo"
             >
               <RedoIcon className="topbar-icon" />
+            </button>
+            <button
+              className={`topbar-icon-btn ${historyPanelOpen ? "on" : ""}`}
+              onClick={() => setHistoryPanelOpen((v) => !v)}
+              title={historyPanelOpen ? "Hide History panel" : "Show History panel"}
+              aria-pressed={historyPanelOpen}
+              aria-label="Toggle History panel"
+            >
+              <HistoryIcon className="topbar-icon" />
             </button>
           </div>
 
@@ -5578,38 +5603,45 @@ export function App() {
         </button>
       </div>
 
-      {objectsPanelOpen && (
-        <aside className="panel object-panel">
-          <div className="panel-heading">
-            <div>
-              <h1>Objects</h1>
-              <p>{nodes.length} in design</p>
+      {(objectsPanelOpen || historyPanelOpen) && (
+        <aside
+          className={`panel object-panel${objectsPanelOpen && historyPanelOpen ? " with-history" : ""}`}
+        >
+          {objectsPanelOpen && (
+            <div className="object-panel-list">
+              <div className="panel-heading">
+                <div>
+                  <h1>Objects</h1>
+                  <p>{nodes.length} in design</p>
+                </div>
+                <button
+                  className="icon-button"
+                  onClick={() => {
+                    startNewDesign();
+                  }}
+                  disabled={!nodes.length}
+                  title="New design"
+                >
+                  ＋
+                </button>
+              </div>
+              {nodes.length === 0 && <div className="empty-state">Add a shape from the library to begin.</div>}
+              <Tree
+                nodes={nodes}
+                selectedIds={selectedIds}
+                invalid={invalid}
+                onSelect={onSelect}
+                onToggleCollapsed={toggleCollapsed}
+                onToggleHidden={toggleHidden}
+                onRename={rename}
+              />
+              <div className="panel-footer">
+                <span>{saveLabel}</span>
+                <span>{selectedIds.length} selected</span>
+              </div>
             </div>
-            <button
-              className="icon-button"
-              onClick={() => {
-                startNewDesign();
-              }}
-              disabled={!nodes.length}
-              title="New design"
-            >
-              ＋
-            </button>
-          </div>
-          {nodes.length === 0 && <div className="empty-state">Add a shape from the library to begin.</div>}
-          <Tree
-            nodes={nodes}
-            selectedIds={selectedIds}
-            invalid={invalid}
-            onSelect={onSelect}
-            onToggleCollapsed={toggleCollapsed}
-            onToggleHidden={toggleHidden}
-            onRename={rename}
-          />
-          <div className="panel-footer">
-            <span>{saveLabel}</span>
-            <span>{selectedIds.length} selected</span>
-          </div>
+          )}
+          {historyPanelOpen && <HistoryPanel />}
         </aside>
       )}
 

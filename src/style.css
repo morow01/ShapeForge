@@ -1321,6 +1321,52 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 .visibility-icon { display: block; width: 15px; height: 15px; }
 .panel-footer { display: flex; justify-content: space-between; gap: 6px; margin-top: 12px; padding: 10px 3px 0; color: #96a1a8; border-top: 1px solid #e3e8eb; font-size: 10px; }
 
+/* History panel — Photoshop's palette, sharing the left column with Objects:
+   oldest step at the top, the one the design is at highlighted, and steps
+   that were undone greyed out until the next edit drops them. With both
+   open the column stops scrolling as a whole and each half scrolls itself,
+   so History keeps a foot on the ground as the tree grows. */
+.object-panel-list { display: flex; flex-direction: column; min-height: 0; }
+.object-panel.with-history { overflow: hidden; }
+.object-panel.with-history .object-panel-list { flex: 1 1 auto; overflow: auto; }
+.object-panel.with-history .history-panel {
+  flex: 0 0 auto;
+  max-height: 45%;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid #e3e8eb;
+}
+
+.history-panel { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
+.history-panel .panel-heading { flex-shrink: 0; }
+.history-list { flex: 1 1 auto; min-height: 0; margin: 0; padding: 0; overflow: auto; list-style: none; }
+.history-list li { display: flex; }
+.history-step {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 28px;
+  padding: 4px 7px;
+  color: #52616c;
+  background: none;
+  border: none;
+  border-radius: 5px;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.history-step:hover { background: #f0f5f7; }
+.history-step.current { color: #096f6e; background: #dff5f4; font-weight: 650; }
+.history-step.undone { color: #a9b4bc; }
+.history-step.undone:hover { color: #52616c; }
+.history-step:focus-visible { outline: 2px solid #308294; outline-offset: -2px; }
+.history-step-dot { flex: 0 0 auto; width: 7px; height: 7px; border: 1.5px solid currentColor; border-radius: 50%; }
+.history-step.current .history-step-dot { background: currentColor; }
+.history-step-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .canvas-help, .canvas-notice, .canvas-error { border-radius: 7px; box-shadow: 0 2px 10px rgb(31 50 62 / 13%); }
 .canvas-help { position: absolute; z-index: 3; left: 50%; transform: translateX(-50%); bottom: 14px; padding: 6px 11px; color: #687782; background: rgb(255 255 255 / 88%); font-size: 10px; backdrop-filter: blur(6px); }
 .edge-bar { position:absolute; z-index:12; left:50%; bottom:46px; transform:translateX(-50%); display:flex; align-items:center; gap:10px; padding:9px 12px; border:1px solid #ccd8df; border-radius:10px; background:rgba(255,255,255,.96); box-shadow:0 3px 14px rgb(31 50 62 / 18%); font-size:12px; }

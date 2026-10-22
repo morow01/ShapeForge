@@ -305,6 +305,93 @@ export function endHistoryBatch() {
   useDoc.temporal.getState().resume();
 }
 
+/* ---- history labels ------------------------------------------------------
+ * The History panel lists the steps taken, so every state the undo stack
+ * holds has to know which action produced it. Nothing downstream can work
+ * that out — two node trees do not say whether a box was moved or resized —
+ * so each action names its own step and `set` below stamps that name onto
+ * the state it writes. The name travels with `nodes` through partialize, so
+ * undo and redo carry each state's name back with it.
+ */
+let pendingLabel: string | null = null;
+
+/** Names the step the next document change will appear as in History. A
+ *  caller that wraps another action (paste wrapping duplicate) names it
+ *  first, and the inner action's own name then does not replace it. */
+export function labelStep(label: string) {
+  pendingLabel = label;
+}
+
+/** An action naming its own step, yielding to a name a caller already set. */
+function ownStep(label: string) {
+  if (pendingLabel === null) pendingLabel = label;
+}
+
+/** Runs `fn` without recording a history step — for a write that touches the
+ *  document but is not an edit of it. */
+function withoutHistory(fn: () => void) {
+  const tracking = useDoc.temporal.getState().isTracking;
+  useDoc.temporal.getState().pause();
+  try {
+    fn();
+  } finally {
+    if (tracking) useDoc.temporal.getState().resume();
+  }
+}
+
+/** A node's name, for a step label. */
+const stepTarget = (nodes: SceneNode[], id: string) => findNode(nodes, id)?.name ?? "object";
+
+/** "Delete Box 2" for one, "Delete 3 objects" for several. */
+function deleteLabel(nodes: SceneNode[], ids: string[]): string {
+  return ids.length === 1 ? `Delete ${stepTarget(nodes, ids[0])}` : `Delete ${ids.length} objects`;
+}
+
+/** What an edit op is called in History. */
+function editOpLabel(op: EditOp): string {
+  switch (op.kind) {
+    case "fillet":
+      return "Round edge";
+    case "chamfer":
+      return "Chamfer edge";
+    case "shell":
+      return "Hollow";
+    case "resizeFace":
+      return "Resize face";
+    case "offsetExtrude":
+      return "Rim face";
+    default:
+      return "Push/pull";
+  }
+}
+
+/**
+ * Every document write in the store below goes through this instead of the
+ * `set` zustand hands the creator — deliberately taking that name, so the
+ * actions read exactly as they did. zundo wraps `useDoc.setState` the same
+ * way it wraps that `set`, so the undo stack records the write either way;
+ * what this adds is the step's name.
+ *
+ * The name has to go on at the moment of the write. zundo snapshots the
+ * outgoing state around the write, so a name applied any later would land on
+ * the state that followed the action rather than the one it produced.
+ */
+function set(partial: Partial<DocState> | ((s: DocState) => Partial<DocState>)) {
+  const named = pendingLabel;
+  pendingLabel = null;
+  useDoc.setState((s) => {
+    const patch = typeof partial === "function" ? partial(s) : partial;
+    if (!patch.nodes || patch.nodes === s.nodes) return patch;
+    // While recording is paused the burst's first write is already in the
+    // history and the rest are that same step carrying on (a gizmo drag, a
+    // slider sweep), so they keep its name rather than each taking one.
+    return {
+      ...patch,
+      historyLabel: named ?? (useDoc.temporal.getState().isTracking ? "Edit" : s.historyLabel),
+    };
+  });
+}
+
 /**
  * Whether a transform patch would change anything at all.
  *
@@ -734,6 +821,10 @@ interface DocState {
   savedAt: number | null;
   /** Set when localStorage refuses writes (quota, or private browsing). */
   storageBlocked: boolean;
+  /** What the action that produced the current document state was called —
+   *  the step the History panel highlights. Stamped by `set`, never by an
+   *  action's own returned patch. */
+  historyLabel: string;
 
   newProject: (name?: string) => string;
   openProject: (id: string) => boolean;
@@ -876,7 +967,9 @@ interface DocState {
 
 export const useDoc = create<DocState>()(
   temporal(
-    (set, get) => ({
+    // `set` here is the module-level one above, which names the history step;
+    // the one zustand passes in is deliberately left unused.
+    (_set, get) => ({
       currentProjectId: activeProject.id,
       projectName: activeProject.name,
       projects: initialProjects,
@@ -887,6 +980,8 @@ export const useDoc = create<DocState>()(
       // A restored document is already on disk, so it counts as saved.
       savedAt: restored.length ? Date.now() : null,
       storageBlocked: false,
+      // Photoshop's first history entry is the document as it was opened.
+      historyLabel: restored.length ? "Open" : "New design",
 
       newProject: (name) => {
         flushSave();
@@ -907,6 +1002,7 @@ export const useDoc = create<DocState>()(
         const updatedProjects = listProjects();
 
         useDoc.temporal.getState().clear();
+        ownStep("New design");
         set({
           currentProjectId: newId,
           projectName: newProjName,
@@ -927,6 +1023,7 @@ export const useDoc = create<DocState>()(
         const updatedProjects = listProjects();
 
         useDoc.temporal.getState().clear();
+        ownStep("Open");
         set({
           currentProjectId: proj.id,
           projectName: proj.name,
@@ -1164,6 +1261,7 @@ export const useDoc = create<DocState>()(
         const updatedProjects = listProjects();
 
         useDoc.temporal.getState().clear();
+        ownStep("Open");
         set({
           currentProjectId: proj.id,
           projectName: proj.name,
@@ -1180,6 +1278,7 @@ export const useDoc = create<DocState>()(
       },
 
       addPrimitive: (kind, position, rotation, paramsOverride) => {
+        ownStep(`Add ${PRIMITIVES[kind].label}`);
         set((s) => {
           const def = PRIMITIVES[kind];
           let randomColor: string | undefined;
@@ -1218,7 +1317,8 @@ export const useDoc = create<DocState>()(
         afterBatchedMutation();
       },
 
-      addImport: (blobId, fileName, byteSize, svg, position) =>
+      addImport: (blobId, fileName, byteSize, svg, position) => {
+        ownStep(`Import ${fileName.replace(/\.stl$/i, "")}`);
         set((s) => {
           const node: ImportNode = {
             type: "import",
@@ -1236,22 +1336,27 @@ export const useDoc = create<DocState>()(
             isHole: false,
           };
           return { nodes: [...s.nodes, node], selectedIds: [node.id] };
-        }),
+        });
+      },
 
-      removeSelected: () =>
+      removeSelected: () => {
+        ownStep(deleteLabel(get().nodes, get().selectedIds));
         set((s) => ({
           nodes: extractNodes(s.nodes, new Set(s.selectedIds)).remaining,
           selectedIds: [],
-        })),
+        }));
+      },
 
-      removeNodesDeep: (ids) =>
+      removeNodesDeep: (ids) => {
+        ownStep(deleteLabel(get().nodes, ids));
         set((s) => {
           const gone = new Set(ids);
           return {
             nodes: removeNodesDeepInTree(s.nodes, gone),
             selectedIds: s.selectedIds.filter((id) => !gone.has(id)),
           };
-        }),
+        });
+      },
 
       select: (id, additive = false) =>
         set((s) => {
@@ -1279,6 +1384,7 @@ export const useDoc = create<DocState>()(
         }),
 
       setParam: (id, key, value) => {
+        ownStep(`Set ${key}`);
         set((s) => ({
           nodes: updateNode(s.nodes, id, (n) => {
             if (n.type === "edit" && n.base.type === "object") {
@@ -1338,6 +1444,7 @@ export const useDoc = create<DocState>()(
       },
 
       resetParams: (id) => {
+        ownStep(`Reset ${stepTarget(get().nodes, id)}`);
         set((s) => ({
           nodes: updateNode(s.nodes, id, (n) => {
             if (n.type === "edit" && n.base.type === "object") {
@@ -1353,7 +1460,9 @@ export const useDoc = create<DocState>()(
 
       addSketch: (sketch, sketchParams, position, rotation) => {
         // Created and filled in as one undo step: undoing half of it would
-        // leave an empty sketch that cannot build.
+        // leave an empty sketch that cannot build. Naming it here keeps
+        // addPrimitive's own "Add Sketch" out of History.
+        labelStep("Add sketch");
         beginHistoryBatch();
         try {
           get().addPrimitive("sketch", position, rotation);
@@ -1369,6 +1478,7 @@ export const useDoc = create<DocState>()(
       },
 
       setSketch: (id, sketch, sketchParams, transform) => {
+        ownStep("Edit sketch");
         set((s) => ({
           nodes: updateNode(s.nodes, id, (n) =>
             n.type === "object" && n.kind === "sketch" ? { ...n, sketch, params: { ...n.params, ...sketchParams }, ...(transform ?? {}) } : n),
@@ -1377,6 +1487,7 @@ export const useDoc = create<DocState>()(
       },
 
       setText: (id, text) => {
+        ownStep("Set text");
         set((s) => ({
           nodes: updateNode(s.nodes, id, (n) => (n.type === "object" ? { ...n, text } : n)),
         }));
@@ -1384,6 +1495,7 @@ export const useDoc = create<DocState>()(
       },
 
       setFontName: (id, fontName) => {
+        ownStep("Set font");
         set((s) => ({
           nodes: updateNode(s.nodes, id, (n) => (n.type === "object" ? { ...n, fontName } : n)),
         }));
@@ -1391,6 +1503,11 @@ export const useDoc = create<DocState>()(
       },
 
       setTransform: (id, patch) => {
+        // A resize drag sends a position correction along with the scale, so
+        // the scale is what names the step.
+        ownStep(
+          `${patch.scale ? "Resize" : patch.rotation ? "Rotate" : "Move"} ${stepTarget(get().nodes, id)}`,
+        );
         set((s) => ({
           nodes: updateNode(s.nodes, id, (n) => (sameTransform(n, patch) ? n : { ...n, ...patch })),
         }));
@@ -1400,6 +1517,11 @@ export const useDoc = create<DocState>()(
       // One alignment click may move several objects, but it is one user
       // action and therefore one immutable state transition / undo step.
       setPositions: (updates) => {
+        ownStep(
+          updates.length === 1
+            ? `Move ${stepTarget(get().nodes, updates[0].id)}`
+            : `Move ${updates.length} objects`,
+        );
         const byId = new Map(updates.map((update) => [update.id, update.position]));
         const updateRecursive = (nodes: SceneNode[]): SceneNode[] =>
           nodes.map((node) => {
@@ -1417,6 +1539,9 @@ export const useDoc = create<DocState>()(
       },
 
       duplicateNodes: (source, offset) => {
+        ownStep(
+          source.length === 1 ? `Duplicate ${source[0].name}` : `Duplicate ${source.length} objects`,
+        );
         const clones = source.map((n) => cloneSubtree(n, offset));
         set((s) => ({ nodes: [...s.nodes, ...clones], selectedIds: clones.map((c) => c.id) }));
         afterBatchedMutation();
@@ -1427,6 +1552,7 @@ export const useDoc = create<DocState>()(
         const source = get().nodes.find(n => n.id === sourceId);
         if (!source || source.type === "group" || !placements.length || placements.length > 300) return;
         if (placements.some(p => [...p.position, ...p.rotation].some(v => !Number.isFinite(v)))) return;
+        ownStep("Along path");
         const children = placements.map((p, i) => ({ ...(i === 0 ? source : cloneSubtree(source, [0,0,0])), position: p.position, rotation: p.rotation }));
         const group: GroupNode = { id: nextId(), name: `Along Path (${children.length})`, type: "group", op: "assembly", children,
           position: [0,0,0], rotation: [0,0,0], scale: [1,1,1], isHole: false };
@@ -1438,6 +1564,7 @@ export const useDoc = create<DocState>()(
         const state = get();
         const source = findNode(state.nodes, id);
         if (!source || source.type !== "object") return null;
+        ownStep(`Duplicate ${source.name}`);
         const clone = cloneSubtree(source, [0, 0, 0]) as ObjectNode;
         clone.params = { ...clone.params, ...params };
         if (overrides) Object.assign(clone, overrides);
@@ -1447,6 +1574,7 @@ export const useDoc = create<DocState>()(
       },
 
       pushPullFace: (id, op, positionDelta) => {
+        ownStep(`Push/pull ${stepTarget(get().nodes, id)}`);
         const moved = !!positionDelta &&
           positionDelta.every(Number.isFinite) &&
           positionDelta.some((d) => d !== 0);
@@ -1508,6 +1636,7 @@ export const useDoc = create<DocState>()(
       },
 
       finishEdit: (id, op) => {
+        ownStep(editOpLabel(op));
         set((s) => ({
           nodes: updateNode(s.nodes, id, (n) => {
             if (n.type === "edit") {
@@ -1559,6 +1688,7 @@ export const useDoc = create<DocState>()(
       },
 
       setOps: (id, ops) => {
+        ownStep(ops.length ? "Drop edit" : "Remove edits");
         set((s) => ({
           nodes: updateNode(s.nodes, id, (n) => {
             if (n.type !== "edit") return n;
@@ -1583,6 +1713,7 @@ export const useDoc = create<DocState>()(
       },
 
       setSvgThickness: (id, thickness) => {
+        ownStep("Set thickness");
         set((s) => ({
           nodes: updateNode(s.nodes, id, (n) =>
             n.type === "import" && n.svg
@@ -1594,6 +1725,7 @@ export const useDoc = create<DocState>()(
       },
 
       replaceImportBlob: (id, blobId, byteSize) => {
+        ownStep("Simplify mesh");
         set((s) => ({
           nodes: updateNode(s.nodes, id, (n) =>
             n.type === "import" ? { ...n, blobId, byteSize } : n,
@@ -1603,11 +1735,13 @@ export const useDoc = create<DocState>()(
       },
 
       setHole: (id, isHole) => {
+        ownStep(isHole ? "Make hole" : "Make solid");
         set((s) => ({ nodes: updateNode(s.nodes, id, (n) => ({ ...n, isHole })) }));
         afterBatchedMutation();
       },
 
       setColor: (id, color) => {
+        ownStep(`Colour ${stepTarget(get().nodes, id)}`);
         set((s) => ({
           nodes: updateNode(s.nodes, id, (n) => {
             if (n.type === "edit") {
@@ -1620,6 +1754,7 @@ export const useDoc = create<DocState>()(
       },
 
       setTransparent: (id, transparent) => {
+        ownStep(transparent ? "Make transparent" : "Make opaque");
         set((s) => ({
           nodes: updateNode(s.nodes, id, (n) => {
             if (n.type === "edit") {
@@ -1632,6 +1767,7 @@ export const useDoc = create<DocState>()(
       },
 
       setHideLines: (id, hideLines) => {
+        ownStep(hideLines ? "Hide edges" : "Show edges");
         set((s) => ({
           nodes: updateNode(s.nodes, id, (n) => ({ ...n, hideLines: hideLines || undefined })),
         }));
@@ -1639,30 +1775,43 @@ export const useDoc = create<DocState>()(
       },
 
       setLowPoly: (id, lowPoly) => {
+        ownStep(lowPoly ? "Low poly" : "Full detail");
         set((s) => ({
           nodes: updateNode(s.nodes, id, (n) => ({ ...n, lowPoly })),
         }));
         afterBatchedMutation();
       },
 
-      setGroupOp: (id, op) =>
+      setGroupOp: (id, op) => {
+        ownStep(`Set ${op}`);
         set((s) => ({
           nodes: updateNode(s.nodes, id, (n) => (isGroup(n) ? { ...n, op } : n)),
-        })),
+        }));
+      },
 
       toggleCollapsed: (id) =>
-        set((s) => ({
-          nodes: updateNode(s.nodes, id, (n) =>
-            isGroup(n) ? { ...n, collapsed: !n.collapsed } : n,
-          ),
-        })),
+        // Folding a group in the Objects tree is a view affordance, not an
+        // edit of the design: a History step for it is one Ctrl+Z would
+        // appear to ignore.
+        withoutHistory(() =>
+          set((s) => ({
+            nodes: updateNode(s.nodes, id, (n) =>
+              isGroup(n) ? { ...n, collapsed: !n.collapsed } : n,
+            ),
+          })),
+        ),
 
-      toggleHidden: (id) =>
+      toggleHidden: (id) => {
+        ownStep(
+          `${findNode(get().nodes, id)?.hidden ? "Show" : "Hide"} ${stepTarget(get().nodes, id)}`,
+        );
         set((s) => ({
           nodes: updateNode(s.nodes, id, (n) => ({ ...n, hidden: !n.hidden })),
-        })),
+        }));
+      },
 
       rename: (id, name) => {
+        ownStep(`Rename to ${name}`);
         set((s) => ({ nodes: updateNode(s.nodes, id, (n) => ({ ...n, name })) }));
         afterBatchedMutation();
       },
@@ -1673,6 +1822,7 @@ export const useDoc = create<DocState>()(
        * origin so grouping never moves anything.
        */
       group: (centres) => {
+        ownStep("Group");
         set((s) => {
           if (s.selectedIds.length < 2) return {};
           const ids = new Set(s.selectedIds);
@@ -1739,6 +1889,7 @@ export const useDoc = create<DocState>()(
        * Fuses the selection into a single solid Boolean combine (union, subtract, intersect).
        */
       combine: (op = "union", centres) => {
+        ownStep(`${op[0].toUpperCase()}${op.slice(1)}`);
         set((s) => {
           if (!s.selectedIds.length) return {};
           let targetIds = [...s.selectedIds];
@@ -1795,7 +1946,8 @@ export const useDoc = create<DocState>()(
       },
 
       /** Dissolves selected groups, lifting their children into their place. */
-      ungroup: (centres) =>
+      ungroup: (centres) => {
+        ownStep("Ungroup");
         set((s) => {
           let targetIds = [...s.selectedIds];
           if (targetIds.length === 1) {
@@ -1831,11 +1983,13 @@ export const useDoc = create<DocState>()(
             });
 
           return { nodes: expand(s.nodes), selectedIds: lifted };
-        }),
+        });
+      },
 
       setShowResult: (v) => set({ showResult: v }),
 
-      shapeBuild: (sourceIds, keep, centres, owners = []) =>
+      shapeBuild: (sourceIds, keep, centres, owners = []) => {
+        ownStep("Build shape");
         set((s) => {
           if (sourceIds.length < 2 || !keep.length) return {};
           const ids = new Set(sourceIds);
@@ -1878,11 +2032,16 @@ export const useDoc = create<DocState>()(
           const nodes = [...remaining];
           nodes.splice(Math.min(at, nodes.length), 0, ...made);
           return { nodes, selectedIds: made.map((n) => n.id) };
-        }),
+        });
+      },
 
-      restoreNodes: (nodes, selectedIds) => set({ nodes, selectedIds }),
+      restoreNodes: (nodes, selectedIds) => {
+        ownStep("Restore");
+        set({ nodes, selectedIds });
+      },
 
       replaceNodeWithSplitParts: (targetId, partNodes) => {
+        ownStep("Split");
         set((s) => {
           const replaceInList = (list: SceneNode[]): SceneNode[] => {
             const out: SceneNode[] = [];
@@ -1904,13 +2063,16 @@ export const useDoc = create<DocState>()(
       },
 
       clearAll: () => {
+        ownStep("Clear all");
         set({ nodes: [], selectedIds: [] });
       },
     }),
     {
       // Only geometry belongs in the undo history — selection and view toggles
       // would otherwise make undo feel like it "does nothing".
-      partialize: (s) => ({ nodes: s.nodes }),
+      // historyLabel rides along so each state keeps the name of the action
+      // that produced it, and undo/redo carry that name back with it.
+      partialize: (s) => ({ nodes: s.nodes, historyLabel: s.historyLabel }),
       // partialize alone does not achieve that: it runs on every write and
       // hands zundo a brand-new { nodes } wrapper each time, which the default
       // Object.is comparison always reads as "changed". So a write that never
@@ -1921,14 +2083,81 @@ export const useDoc = create<DocState>()(
       // what the intent above actually requires: every action here rebuilds
       // that array when, and only when, something in it really changed.
       equality: (a, b) => a.nodes === b.nodes,
+      // A snapshot is one node tree, and an edit rebuilds only the nodes on
+      // the path it touched — every other subtree is shared by reference with
+      // the snapshot before it, so 200 of them cost far less than 200 copies
+      // of the document. No geometry is in here; the kernel rebuilds that.
       limit: 200,
     },
   ),
 );
 
+/** One state of the document as the undo stack holds it. */
+export type HistorySnapshot = { nodes: SceneNode[]; historyLabel: string };
+
 /** Subscribe to undo/redo state. zundo keeps its history in a separate store. */
-export function useTemporal<T>(selector: (s: TemporalState<{ nodes: SceneNode[] }>) => T): T {
+export function useTemporal<T>(selector: (s: TemporalState<HistorySnapshot>) => T): T {
   return useStore(useDoc.temporal, selector);
+}
+
+/* ---- the History panel's view of that stack ------------------------------
+ * zundo keeps the timeline as two stacks either side of the live state, and
+ * its future stack runs backwards (redo pops from its end). The panel wants
+ * one list, oldest first, so both are put back in order here.
+ */
+
+/** One state the document can be put back to. */
+export type HistoryStep = {
+  /** Where it sits in the timeline — what jumpToHistory takes. */
+  index: number;
+  label: string;
+  /** The one state the document is at now. */
+  current: boolean;
+  /** Undone, and still ahead of the present until the next edit drops it. */
+  undone: boolean;
+};
+
+export function historyTimeline(
+  past: Partial<HistorySnapshot>[],
+  future: Partial<HistorySnapshot>[],
+  currentLabel: string,
+): HistoryStep[] {
+  const steps: HistoryStep[] = past.map((s, index) => ({
+    index,
+    label: s.historyLabel ?? "Edit",
+    current: false,
+    undone: false,
+  }));
+  steps.push({ index: past.length, label: currentLabel, current: true, undone: false });
+  for (let i = future.length - 1; i >= 0; i--) {
+    steps.push({
+      index: steps.length,
+      label: future[i].historyLabel ?? "Edit",
+      current: false,
+      undone: true,
+    });
+  }
+  return steps;
+}
+
+/** Steps of redo (positive) or undo (negative) that reach `index` from a
+ *  present sitting on top of `pastLength` earlier states. */
+export function historyJump(index: number, pastLength: number): number {
+  return index - pastLength;
+}
+
+/**
+ * Puts the document at step `index` of historyTimeline. One state change
+ * however many steps are skipped, so the kernel rebuilds once rather than
+ * replaying every step on the way. Landing on a step is not itself a step,
+ * as in Photoshop: it moves where the present sits in the history, and the
+ * next edit from there drops whatever was ahead of it.
+ */
+export function jumpToHistory(index: number) {
+  const temporal = useDoc.temporal.getState();
+  const steps = historyJump(index, temporal.pastStates.length);
+  if (steps < 0) temporal.undo(-steps);
+  else if (steps > 0) temporal.redo(steps);
 }
 
 /* ---- clipboard -------------------------------------------------------
@@ -1960,6 +2189,7 @@ export function cutSelected() {
   if (!picked.length) return;
   clipboard = picked;
   pasteRun = 0;
+  labelStep("Cut");
   s.removeSelected();
 }
 
@@ -1968,6 +2198,7 @@ export function pasteClipboard() {
   if (!clipboard?.length) return;
   pasteRun++;
   const offset: Vec3 = [PASTE_STEP[0] * pasteRun, PASTE_STEP[1] * pasteRun, PASTE_STEP[2] * pasteRun];
+  labelStep("Paste");
   useDoc.getState().duplicateNodes(clipboard, offset);
 }
 

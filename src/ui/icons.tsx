@@ -665,6 +665,19 @@ export function RedoIcon({ className = "tool-icon" }: { className?: string }) {
 }
 
 /** Assembly / Group icon: bounding frame enclosing multiple parts */
+/** The History panel's toggle: a step list beside a clock hand. */
+export function HistoryIcon({ className = "tool-icon" }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <g fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M3.5 9.5A8.5 8.5 0 1 1 4 15" />
+        <path d="M3 5v5h5" />
+        <path d="M12 8v4.5l3 2" />
+      </g>
+    </svg>
+  );
+}
+
 export function GroupIcon({ className = "tool-icon" }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
