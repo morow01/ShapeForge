@@ -1350,6 +1350,18 @@ function ObjectParams({
             the same way Position and Rotation already do. */}
         <h2>Dimensions ({displayUnit})</h2>
         <div className="h2-actions">
+          {node.kind === "tube" && (
+            <button
+              type="button"
+              className="lock-icon-btn diameter-mode-btn"
+              onClick={() => onParam("diameterMode", (node.params.diameterMode ?? 0) >= 0.5 ? 0 : 1)}
+              title={(node.params.diameterMode ?? 0) >= 0.5
+                ? "Diameters measure the hole. Click to measure the outside instead."
+                : "Diameters measure the outside. Click to measure the hole instead."}
+            >
+              {(node.params.diameterMode ?? 0) >= 0.5 ? "Inner Ø" : "Outer Ø"}
+            </button>
+          )}
           <button
             type="button"
             className="lock-icon-btn reset-shape-btn"
@@ -1518,6 +1530,45 @@ function ObjectParams({
         // alone: grow the box again and the radius originally asked for
         // comes back, which is what makes resizing non-destructive.
         const shownValue = (isCornerRadius ? Math.min(base, shown.max) : base) * displayScale;
+        // A tube can have its diameters measure the hole instead of the
+        // outside. The stored radius stays the outer one; only what the
+        // fields show and accept is converted.
+        const tubeInner = node.kind === "tube" && (node.params.diameterMode ?? 0) >= 0.5;
+        const tubeWall = node.params.wallThickness ?? 3;
+        if (tubeInner && (f.key === "radius" || f.key === "radiusY")) {
+          const idx = f.key === "radius" ? 0 : 1;
+          const k = node.scale[idx];
+          return {
+            field: displayField,
+            el: (
+              <Field
+                key={f.key}
+                field={{ ...displayField, label: `Inner diameter ${idx === 0 ? "X" : "Y"}` }}
+                value={round(Math.max(0, 2 * (base - tubeWall) * k))}
+                axis={singleAxis}
+                onChange={(v) => {
+                  if (!Number.isFinite(v) || v <= 0) return;
+                  onParam(f.key, v / (2 * k) + tubeWall);
+                  if (node.scale.some((s) => Math.abs(s - 1) > 1e-4)) onTransform({ scale: [1, 1, 1] });
+                }}
+                displayUnit={displayUnit}
+                decimalPlaces={decimalPlaces}
+                isLength
+              />
+            ),
+          };
+        }
+        // In inner mode the hole is what the user set, so a thicker wall
+        // grows outward instead of eating into it.
+        const wallOnChange = tubeInner && f.key === "wallThickness"
+          ? (v: number) => {
+              const wall = Math.max(0.05, v);
+              const delta = wall - tubeWall;
+              onParam("wallThickness", wall);
+              onParam("radius", node.params.radius + delta);
+              if ((node.params.radiusY ?? 0) > 0) onParam("radiusY", node.params.radiusY + delta);
+            }
+          : null;
         if (!axes || !uniform || base <= 0) {
           return {
             field: displayField,
@@ -1534,7 +1585,7 @@ function ObjectParams({
                 disabled={isConstrained3rdAngle || (node.kind === "threadedNut" && f.key === "clearance" && (node.params.fit ?? 1) !== 3)}
                 dotColorClass={dotColorClass}
                 axis={singleAxis}
-                onChange={(v) => onParam(f.key, Math.min(v / displayScale, shown.max))}
+                onChange={wallOnChange ?? ((v) => onParam(f.key, Math.min(v / displayScale, shown.max)))}
                 displayUnit={displayUnit}
                 decimalPlaces={decimalPlaces}
                 screwHoleIcon={node.kind === "screwHole" && SCREW_HOLE_COMPACT_KEYS.has(f.key)}
@@ -1768,7 +1819,8 @@ function groupDimensionFields(
     runFields = [];
   };
   for (const { field, el } of entries) {
-    if (!field.options && field.noSlider && !field.ownRow) {
+    if (!field.options && field.noSlider) {
+      if (field.newRow) flushRun();
       run.push(el);
       runFields.push(field);
     } else {

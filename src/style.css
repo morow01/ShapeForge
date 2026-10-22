@@ -1682,6 +1682,10 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 .h2-actions { display: flex; align-items: center; gap: 6px; }
 .h2-actions .lock-icon-btn { width: 30px; height: 30px; padding: 0; flex: 0 0 30px; font-size: 15px; }
 .h2-actions .reset-shape-btn { color: #62727d; font-size: 21px; }
+/* A text toggle among the square icon buttons: same height, as wide as its
+   label, and no zoom on hover (a scaled-up word looks blurry). */
+.h2-actions .diameter-mode-btn { width: auto; flex: 0 0 auto; height: 30px; padding: 0 10px; font-size: 12px; font-weight: 600; white-space: nowrap; color: #4b5b66; opacity: 1; border-color: #d6e0e6; }
+.h2-actions .diameter-mode-btn:hover:not(:disabled) { opacity: 1; transform: none; background: #eef3f6; border-color: #b8c8d2; }
 .connector-pair { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 4px; }
 .connector-pair-btn { width: 100%; color: #087a79; border-style: dashed; border-color: #74c9c7; font-weight: 600; }
 .connector-pair-btn:hover { background: #eef8f7; }
