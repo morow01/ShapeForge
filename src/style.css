@@ -1887,6 +1887,57 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
   display: block;
 }
 
+/* ---- Named fits above the clearance box ---- */
+.clearance-presets {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+  margin-bottom: 5px;
+}
+.clearance-preset {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 2px;
+  color: #475569;
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  border-radius: 5px;
+  line-height: 1.1;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.clearance-preset:hover {
+  background: #f8fafc;
+  border-color: #00a7a5;
+}
+.clearance-preset.active {
+  color: #007a79;
+  background: #e6f7f7;
+  border-color: #00a7a5;
+  box-shadow: 0 0 0 1px #00a7a5;
+}
+.clearance-preset-name {
+  font-size: 9.5px;
+  font-weight: 700;
+}
+.clearance-preset-mm {
+  font-size: 9px;
+  opacity: 0.75;
+}
+/* In Settings the row sits above the box in the right-hand column. */
+.settings-clearance {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+.settings-clearance .clearance-presets {
+  width: 200px;
+  margin-bottom: 0;
+}
+
 /* Color Popover */
 .tinkercad-color-popover {
   position: absolute;

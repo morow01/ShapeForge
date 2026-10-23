@@ -118,6 +118,7 @@ import { MAX_BUILD_SOURCES, PRIMITIVES, PRIMITIVE_CATEGORIES, SKETCH_CURVE_SEGME
 import { findAssemblyOwner, findNode, parentOf, resolveNodeTransparent, resolveNodeColor, updateNode, walk } from "./document/tree";
 import { bakeScale } from "./document/bake";
 import { getDefaultClearance } from "./document/clearance";
+import { ClearancePresets } from "./ui/ClearancePresets";
 import { missingBlobs, putBlob } from "./document/blobStore";
 import { loadCameraState, loadThumbnail, locationOf, saveThumbnail } from "./document/persist";
 import type { EditOp, GroupNode, ImportNode, PrimitiveKind, SceneNode, ShellOp, HollowRim, ResizeFaceOp, SketchData, Vec3 } from "./document/types";
@@ -6230,6 +6231,7 @@ export function App() {
 
                 <div className="build-panel-section">
                   <label className="field-label" htmlFor="build-clearance">Clearance (mm)</label>
+                  <ClearancePresets value={buildClearance} onPick={setBuildClearance} />
                   <input
                     id="build-clearance"
                     className="num"

@@ -3,6 +3,7 @@ import type { AppearancePreference, DisplayUnit } from "../measurement";
 import type { ViewportQuality } from "../viewport/quality";
 import type { CollisionHighlightStyle } from "../viewport/scene";
 import { getDefaultClearance, setDefaultClearance } from "../document/clearance";
+import { ClearancePresets } from "./ClearancePresets";
 
 export interface BuildPlateSize {
   width: number;
@@ -219,19 +220,28 @@ export function SettingsModal({
                 </div>
                 <label className="settings-row">
                   <span><strong>Default clearance (mm)</strong><small>New Subtract groups cut this much bigger than the shape, so a printed part fits (0.2 suits most FDM printers; 0 = exact)</small></span>
-                  <input
-                    type="number"
-                    min={0}
-                    max={5}
-                    step={0.05}
-                    value={clearance}
-                    onChange={(e) => {
-                      const next = Number(e.target.value);
-                      setClearance(next);
-                      if (Number.isFinite(next)) setDefaultClearance(next);
-                    }}
-                    style={{ width: 80 }}
-                  />
+                  <div className="settings-clearance">
+                    <ClearancePresets
+                      value={clearance}
+                      onPick={(mm) => {
+                        setClearance(mm);
+                        setDefaultClearance(mm);
+                      }}
+                    />
+                    <input
+                      type="number"
+                      min={0}
+                      max={5}
+                      step={0.05}
+                      value={clearance}
+                      onChange={(e) => {
+                        const next = Number(e.target.value);
+                        setClearance(next);
+                        if (Number.isFinite(next)) setDefaultClearance(next);
+                      }}
+                      style={{ width: 80 }}
+                    />
+                  </div>
                 </label>
               </div>
             )}

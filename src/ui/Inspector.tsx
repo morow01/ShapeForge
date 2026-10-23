@@ -8,6 +8,7 @@ import {
   visibleFields,
 } from "../document/types";
 import { beginHistoryBatch, endHistoryBatch } from "../document/store";
+import { ClearancePresets } from "./ClearancePresets";
 import { getBlob, getAllStoredBlobs } from "../document/blobStore";
 import { getStlTriangleCount } from "../mesh/simplify";
 import type { SimplifyResult } from "../mesh/simplify";
@@ -635,6 +636,10 @@ export function Inspector({
               {(node.op === "subtract" || node.op === "union") && onClearance && (
                 <label className="field clearance-field">
                   <span className="field-label">Clearance (mm)</span>
+                  <ClearancePresets
+                    value={node.clearance ?? 0}
+                    onPick={(mm) => onClearance(mm)}
+                  />
                   <MathNumInput
                     className="num"
                     min={0}
@@ -1173,6 +1178,7 @@ function BuildInfo({
       {onClearance && (
         <label className="field clearance-field">
           <span className="field-label">Clearance (mm)</span>
+          <ClearancePresets value={node.clearance ?? 0} onPick={(mm) => onClearance(mm)} />
           <MathNumInput
             className="num"
             min={0}
