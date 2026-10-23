@@ -6052,3 +6052,19 @@ span.status-btn { cursor: default; }
 .sync-check-list li.differs, .sync-check-list li.notOnDrive { border-color: #efb6bb; background: #fff7f8; }
 .sync-check-name { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .sync-check-name small { font-size: 12px; color: #6a7a86; line-height: 1.4; }
+
+/* Snapshots in the History panel */
+.history-panel .panel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.history-snapshot-btn { flex: 0 0 auto; padding: 3px 9px; color: #096f6e; background: #fff; border: 1px solid #b9d9d8; border-radius: 6px; font: inherit; font-size: 11px; font-weight: 650; cursor: pointer; }
+.history-snapshot-btn:hover { background: #dff5f4; }
+.history-snapshot-new { display: flex; flex-shrink: 0; gap: 6px; margin: 0 0 6px; }
+.history-snapshot-new input { flex: 1 1 auto; min-width: 0; padding: 4px 7px; border: 1px solid #ccd8df; border-radius: 6px; font: inherit; font-size: 12px; }
+.history-snapshot-new button { padding: 4px 10px; color: #fff; background: #308294; border: none; border-radius: 6px; font: inherit; font-size: 12px; cursor: pointer; }
+.history-snapshots { flex-shrink: 0; max-height: 96px; margin: 0 0 6px; padding: 0 0 6px; overflow: auto; list-style: none; border-bottom: 1px solid #e3e8eb; }
+.history-snapshots li { display: flex; align-items: center; }
+.history-step.snapshot { color: #3b4a54; font-weight: 600; }
+.history-snapshot-icon { flex: 0 0 auto; width: 9px; height: 9px; border: 1.5px solid currentColor; border-radius: 2px; transform: rotate(45deg) scale(.85); }
+.history-snapshot-delete { flex: 0 0 auto; width: 22px; height: 22px; color: #a9b4bc; background: none; border: none; border-radius: 5px; font-size: 15px; line-height: 1; cursor: pointer; }
+.history-snapshot-delete:hover { color: #b3261e; background: #fbeceb; }
+.history-snapshot-new button.cancel { color: #52616c; background: #eef2f4; }
+.history-snapshot-rename { flex: 1 1 auto; min-width: 0; margin: 2px 0; padding: 3px 6px; border: 1px solid #308294; border-radius: 5px; font: inherit; font-size: 12px; }
