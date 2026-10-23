@@ -196,7 +196,7 @@ export function HistoryPanel() {
                   </button>
                   <button
                     type="button"
-                    className="history-snapshot-tool danger"
+                    className="history-snapshot-tool remove"
                     title="Delete this snapshot"
                     aria-label={`Delete snapshot ${snap.name}`}
                     onClick={() => store(snapshots.filter((x) => x.id !== snap.id))}

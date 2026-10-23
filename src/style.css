@@ -6057,7 +6057,7 @@ span.status-btn { cursor: default; }
 .history-panel .panel-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
 .history-snapshot-btn { flex: 0 0 auto; padding: 4px 10px; color: #096f6e; background: #fff; border: 1px solid #b9d9d8; border-radius: 6px; font: inherit; font-size: 12px; font-weight: 650; cursor: pointer; }
 .history-snapshot-btn:hover { background: #dff5f4; }
-.history-snapshot-form { display: flex; flex: 1 1 auto; flex-direction: column; gap: 6px; margin: 0 0 8px; padding: 8px; background: #f4f8fa; border: 1px solid #dbe5ea; border-radius: 8px; }
+.history-snapshot-form { display: flex; flex: 0 0 auto; flex-direction: column; gap: 6px; margin: 0 0 8px; padding: 8px; background: #f4f8fa; border: 1px solid #dbe5ea; border-radius: 8px; }
 .history-snapshot-form input { box-sizing: border-box; width: 100%; padding: 6px 8px; border: 1px solid #ccd8df; border-radius: 6px; font: inherit; font-size: 13px; }
 .history-snapshot-form input:focus { outline: 2px solid #308294; outline-offset: -1px; }
 .history-snapshot-form-actions { display: flex; justify-content: flex-end; gap: 6px; }
@@ -6073,4 +6073,4 @@ span.status-btn { cursor: default; }
 .history-snapshot-icon { flex: 0 0 auto; width: 9px; height: 9px; border: 1.5px solid currentColor; border-radius: 2px; transform: rotate(45deg) scale(.85); }
 .history-snapshot-tool { display: grid; flex: 0 0 auto; place-items: center; width: 26px; height: 26px; color: #8a99a3; background: none; border: none; border-radius: 5px; cursor: pointer; }
 .history-snapshot-tool:hover { color: #1f2e38; background: #e6ecef; }
-.history-snapshot-tool.danger:hover { color: #b3261e; background: #fbeceb; }
+.history-snapshot-tool.remove:hover { color: #b3261e; background: #fbeceb; }
