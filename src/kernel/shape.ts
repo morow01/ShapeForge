@@ -5587,7 +5587,7 @@ function cellStep(a: AnySolid, b: AnySolid, op: "intersect" | "cut"): AnySolid |
   }
 }
 
-export function cellSolid(solids: AnySolid[], mask: number): AnySolid | null {
+export function cellSolid(solids: AnySolid[], mask: number, firstCut?: AnySolid): AnySolid | null {
   const members = solids.filter((_, i) => (mask >> i) & 1);
   const others = solids.filter((_, i) => !((mask >> i) & 1));
   if (!members.length) return null;
@@ -5595,6 +5595,13 @@ export function cellSolid(solids: AnySolid[], mask: number): AnySolid | null {
   let result: AnySolid | null = members[0];
   for (const other of members.slice(1)) {
     result = cellStep(result, other, "intersect");
+    if (!result) return null;
+  }
+  // A clearance cutter goes in before the other members are cut away: OCCT
+  // quietly does nothing when it cuts a leftover cell (a sphere with a box
+  // already taken out of it), but cuts the whole shape fine.
+  if (firstCut) {
+    result = cellStep(result, firstCut, "cut");
     if (!result) return null;
   }
   for (const other of others) {
@@ -6393,16 +6400,48 @@ async function mergeBuild(
   const keptMasks = new Set(spec.keep);
   let result: AnySolid | null = merged;
   let skipped = 0;
-  for (let mask = 1; mask < 1 << solids.length && result; mask++) {
-    if (keptMasks.has(mask)) continue;
-    const region = cellSolid(solids, mask);
-    if (!region) continue;
-    const grown = growSolid(region, clearance);
-    if (!grown) {
-      skipped++;
-      continue;
+  const removedMasks: number[] = [];
+  for (let mask = 1; mask < 1 << solids.length; mask++) {
+    if (!keptMasks.has(mask)) removedMasks.push(mask);
+  }
+  const regionOf = (mask: number) => cellSolid(solids, mask);
+  const removed = removedMasks.map(regionOf).filter((s): s is AnySolid => !!s);
+  // The removed cells are fused and grown as one first: cut apart they are
+  // leftovers (a box with a dent, a lens) whose mitred offset is unreliable,
+  // but fused they are often the plain shape they came from (the box again),
+  // which grows with sharp corners — the arc join would round them and leave a
+  // part with square corners no room.
+  let fused: AnySolid | null = null;
+  if (removed.length > 1 && !removed.some(isMesh)) {
+    try {
+      fused = (removed as Shape3D[]).reduce((all, next) => all.fuse(next) as Shape3D);
+    } catch {
+      fused = null;
     }
-    result = cellStep(result, grown, "cut") ?? result;
+  }
+  const grownWhole = fused ? growSolid(fused, clearance) : null;
+  let viaWhole: AnySolid | null = null;
+  if (grownWhole) {
+    const pieces = spec.keep
+      .map((mask) => cellSolid(solids, mask, grownWhole.clone()))
+      .filter((s): s is AnySolid => !!s);
+    viaWhole = pieces.length > 1
+      ? combine("union", pieces.map((solid) => ({ solid, isHole: false })))
+      : pieces[0] ?? null;
+  }
+  if (viaWhole) {
+    result = viaWhole;
+  } else {
+    // Fusing may have consumed the cells, so they are cut again.
+    for (const region of removedMasks.map(regionOf)) {
+      if (!region) continue;
+      const grown = growSolid(region, clearance);
+      if (!grown) {
+        skipped++;
+        continue;
+      }
+      result = cellStep(result, grown, "cut") ?? result;
+    }
   }
   if (skipped) {
     onError?.(
