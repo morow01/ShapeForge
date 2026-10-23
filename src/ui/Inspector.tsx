@@ -290,6 +290,9 @@ interface Props {
   onOp: (op: BooleanOp) => void;
   /** Groups only: millimetres the cut-away shapes are grown by. */
   onClearance?: (mm: number) => void;
+  /** Groups and built shapes: whether the faint cutter ghost is drawn. */
+  showCutterGhost?: boolean;
+  onShowCutterGhost?: (on: boolean) => void;
   onRename: (name: string) => void;
   onDelete: () => void;
   onRetryNode?: (id: string) => void;
@@ -409,6 +412,8 @@ export function Inspector({
   onRestoreBlob,
   onOp,
   onClearance,
+  showCutterGhost,
+  onShowCutterGhost,
   onRename,
   onDelete,
   onRetryNode,
@@ -659,6 +664,9 @@ export function Inspector({
                   </span>
                 </label>
               )}
+              {(node.op === "subtract" || node.op === "union") && onShowCutterGhost && (
+                <CutterGhostToggle checked={!!showCutterGhost} onChange={onShowCutterGhost} />
+              )}
               <p className="hint">
                 {node.children.length} {node.children.length === 1 ? "child" : "children"}
               </p>
@@ -702,7 +710,12 @@ export function Inspector({
               )}
             </>
           ) : node.type === "build" ? (
-            <BuildInfo node={node} onClearance={onClearance} />
+            <BuildInfo
+              node={node}
+              onClearance={onClearance}
+              showCutterGhost={showCutterGhost}
+              onShowCutterGhost={onShowCutterGhost}
+            />
           ) : (
             <ObjectParams
               node={node}
@@ -1159,12 +1172,26 @@ function ImportInfo({
   );
 }
 
+/** Shows or hides the faint outline of the shapes a cut took away. */
+function CutterGhostToggle({ checked, onChange }: { checked: boolean; onChange: (on: boolean) => void }) {
+  return (
+    <label className="lowpoly-toggle" title="Draws the exact-size parts that were cut away, faintly, while this is selected">
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      <span>Show cutter ghost</span>
+    </label>
+  );
+}
+
 function BuildInfo({
   node,
   onClearance,
+  showCutterGhost,
+  onShowCutterGhost,
 }: {
   node: Extract<SceneNode, { type: "build" }>;
   onClearance?: (mm: number) => void;
+  showCutterGhost?: boolean;
+  onShowCutterGhost?: (on: boolean) => void;
 }) {
   const total = (1 << node.sources.length) - 1;
   return (
@@ -1199,6 +1226,7 @@ function BuildInfo({
           </span>
         </label>
       )}
+      {onShowCutterGhost && <CutterGhostToggle checked={!!showCutterGhost} onChange={onShowCutterGhost} />}
       <p className="hint">
         The shapes it was built from are frozen inside it, so its dimensions are
         no longer editable — move, rotate and scale still apply.

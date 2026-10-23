@@ -37,6 +37,7 @@ interface Props {
   snapToGrid: boolean;
   snapToObjects: boolean;
   showSelectedCollisionContacts: boolean;
+  showCutterGhost: boolean;
   collisionHighlightStyle: CollisionHighlightStyle;
   randomNewObjectColors: boolean;
   /** Global performance override: forces every object's edge lines off,
@@ -52,6 +53,7 @@ interface Props {
   onSnapToGrid: (enabled: boolean) => void;
   onSnapToObjects: (enabled: boolean) => void;
   onShowSelectedCollisionContacts: (enabled: boolean) => void;
+  onShowCutterGhost: (enabled: boolean) => void;
   onCollisionHighlightStyle: (style: CollisionHighlightStyle) => void;
   onRandomNewObjectColors: (enabled: boolean) => void;
   onHideAllLines: (enabled: boolean) => void;
@@ -105,6 +107,7 @@ export function SettingsModal({
   snapToGrid,
   snapToObjects,
   showSelectedCollisionContacts,
+  showCutterGhost,
   collisionHighlightStyle,
   randomNewObjectColors,
   hideAllLines,
@@ -118,6 +121,7 @@ export function SettingsModal({
   onSnapToGrid,
   onSnapToObjects,
   onShowSelectedCollisionContacts,
+  onShowCutterGhost,
   onCollisionHighlightStyle,
   onRandomNewObjectColors,
   onHideAllLines,
@@ -382,6 +386,10 @@ export function SettingsModal({
                 <div className="settings-row">
                   <span><strong>Show selected collisions</strong><small>Keeps touching areas highlighted after selecting an object</small></span>
                   <SettingsToggle checked={showSelectedCollisionContacts} onChange={onShowSelectedCollisionContacts} label="Show selected collisions" />
+                </div>
+                <div className="settings-row">
+                  <span><strong>Show cutter ghost</strong><small>Draws the exact-size parts that were cut away, faintly, when a built shape or Subtract/Union group is selected</small></span>
+                  <SettingsToggle checked={showCutterGhost} onChange={onShowCutterGhost} label="Show cutter ghost" />
                 </div>
                 <label className="settings-row">
                   <span>

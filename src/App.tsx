@@ -370,6 +370,7 @@ const EXPORT_FORMAT_KEY = "cad.exportFormat";
 const SNAP_KEY = "cad.smartGuides";
 const GRID_SNAP_KEY = "cad.gridSnap";
 const SELECTED_COLLISIONS_KEY = "cad.showSelectedCollisions";
+const CUTTER_GHOST_KEY = "cad.showCutterGhost";
 const COLLISION_HIGHLIGHT_STYLE_KEY = "cad.collisionHighlightStyle";
 const HIDE_ALL_LINES_KEY = "cad.hideAllLines";
 const RANDOM_NEW_OBJECT_COLORS_KEY = "cad.randomNewObjectColors";
@@ -1081,6 +1082,9 @@ export function App() {
   );
   const [showSelectedCollisionContacts, setShowSelectedCollisionContacts] = useState(
     () => localStorage.getItem(SELECTED_COLLISIONS_KEY) !== "off",
+  );
+  const [showCutterGhost, setShowCutterGhost] = useState(
+    () => localStorage.getItem(CUTTER_GHOST_KEY) !== "off",
   );
   const [hideAllLines, setHideAllLines] = useState(
     () => localStorage.getItem(HIDE_ALL_LINES_KEY) === "on",
@@ -2878,6 +2882,14 @@ export function App() {
   }, [showSelectedCollisionContacts]);
 
   useEffect(() => {
+    try {
+      localStorage.setItem(CUTTER_GHOST_KEY, showCutterGhost ? "on" : "off");
+    } catch {
+      // Private mode / blocked storage: the choice just won't be remembered.
+    }
+  }, [showCutterGhost]);
+
+  useEffect(() => {
     sceneRef.current?.setHideAllLines(hideAllLines);
     try {
       localStorage.setItem(HIDE_ALL_LINES_KEY, hideAllLines ? "on" : "off");
@@ -3994,7 +4006,7 @@ export function App() {
   // one, the kernel returns the exact-size cutters and the viewport draws them
   // over the result, so the gap shows as the space around them.
   const clearanceOutlineSpec = useMemo(() => {
-    if (toolMode === "build" || selectedIds.length !== 1) return null;
+    if (!showCutterGhost || toolMode === "build" || selectedIds.length !== 1) return null;
     const node = findNode(nodes, selectedIds[0]);
     if (!node || !((isGroup(node) && (node.op === "subtract" || node.op === "union")) || node.type === "build")) return null;
     // Drawn at every clearance, nought included: the ghost is what is being
@@ -4002,7 +4014,7 @@ export function App() {
     // cutter itself disappearing. With no gap it simply sits flush in the
     // hole it made.
     return JSON.stringify(toSpec(node));
-  }, [nodes, selectedIds, toolMode]);
+  }, [nodes, selectedIds, toolMode, showCutterGhost]);
   useEffect(() => {
     const scene = sceneRef.current;
     if (!scene) return;
@@ -7053,6 +7065,8 @@ export function App() {
               onRestoreBlob={handleRestoreBlob}
               onOp={(op) => setGroupOp(selected.id, op)}
               onClearance={(mm) => setGroupClearance(selected.id, mm)}
+              showCutterGhost={showCutterGhost}
+              onShowCutterGhost={setShowCutterGhost}
               onRename={(n) => rename(selected.id, n)}
               onDelete={removeSelected}
               onPruneDeadOps={onPruneDeadOps}
@@ -8614,6 +8628,7 @@ export function App() {
         snapToGrid={gridSnapEnabled}
         snapToObjects={snapEnabled}
         showSelectedCollisionContacts={showSelectedCollisionContacts}
+        showCutterGhost={showCutterGhost}
         collisionHighlightStyle={collisionHighlightStyle}
         randomNewObjectColors={randomNewObjectColors}
         hideAllLines={hideAllLines}
@@ -8627,6 +8642,7 @@ export function App() {
         onSnapToGrid={setGridSnapEnabled}
         onSnapToObjects={setSnapEnabled}
         onShowSelectedCollisionContacts={setShowSelectedCollisionContacts}
+        onShowCutterGhost={setShowCutterGhost}
         onCollisionHighlightStyle={setCollisionHighlightStyle}
         onRandomNewObjectColors={setRandomNewObjectColors}
         onHideAllLines={setHideAllLines}
