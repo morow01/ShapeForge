@@ -633,7 +633,7 @@ export function Inspector({
               )}
             </>
           ) : node.type === "build" ? (
-            <BuildInfo node={node} />
+            <BuildInfo node={node} onClearance={onClearance} />
           ) : (
             <ObjectParams
               node={node}
@@ -1090,7 +1090,13 @@ function ImportInfo({
   );
 }
 
-function BuildInfo({ node }: { node: Extract<SceneNode, { type: "build" }> }) {
+function BuildInfo({
+  node,
+  onClearance,
+}: {
+  node: Extract<SceneNode, { type: "build" }>;
+  onClearance?: (mm: number) => void;
+}) {
   const total = (1 << node.sources.length) - 1;
   return (
     <>
@@ -1103,6 +1109,23 @@ function BuildInfo({ node }: { node: Extract<SceneNode, { type: "build" }> }) {
           {node.keep.length} of {total}
         </dd>
       </dl>
+      {onClearance && (
+        <label className="field clearance-field">
+          <span className="field-label">Clearance (mm)</span>
+          <MathNumInput
+            className="num"
+            min={0}
+            step={0.05}
+            value={Math.round((node.clearance ?? 0) * 1000) / 1000}
+            onFocus={beginHistoryBatch}
+            onBlur={endHistoryBatch}
+            onCommit={(v) => onClearance(Number.isFinite(v) ? Math.max(0, v) : 0)}
+          />
+          <span className="hint">
+            The regions that were taken out grow by this much in every direction, so what was kept pulls back from them and a printed part fits. 0 cuts the exact region.
+          </span>
+        </label>
+      )}
       <p className="hint">
         The shapes it was built from are frozen inside it, so its dimensions are
         no longer editable — move, rotate and scale still apply.

@@ -133,7 +133,15 @@ export function parseNode(raw: unknown): SceneNode | null {
     );
     if (!keep.length) return null;
     const piece = typeof n.piece === "number" && Number.isInteger(n.piece) && n.piece >= 0 ? n.piece : undefined;
-    return { ...base, type: "build", sources, keep, ...(piece !== undefined ? { piece } : {}) };
+    const clearance = typeof n.clearance === "number" && n.clearance > 0 && n.clearance <= 5 ? n.clearance : undefined;
+    return {
+      ...base,
+      type: "build",
+      sources,
+      keep,
+      ...(piece !== undefined ? { piece } : {}),
+      ...(clearance ? { clearance } : {}),
+    };
   }
 
   if (n.type === "import") {

@@ -6383,7 +6383,34 @@ async function mergeBuild(
     onError?.(spec.id, "Nothing left in this shape — every region was removed.");
     return null;
   }
-  return combine("union", kept.map((solid) => ({ solid, isHole: false })));
+  const merged = combine("union", kept.map((solid) => ({ solid, isHole: false })));
+  const clearance = spec.clearance ?? 0;
+  if (!merged || !(clearance > 0)) return merged;
+
+  // Clearance: what was taken out grows by the gap, so whatever was kept pulls
+  // back from it. A removed region is cut from the finished shape at its grown
+  // size — the same thing a Subtract group does with its cutters.
+  const keptMasks = new Set(spec.keep);
+  let result: AnySolid | null = merged;
+  let skipped = 0;
+  for (let mask = 1; mask < 1 << solids.length && result; mask++) {
+    if (keptMasks.has(mask)) continue;
+    const region = cellSolid(solids, mask);
+    if (!region) continue;
+    const grown = growSolid(region, clearance);
+    if (!grown) {
+      skipped++;
+      continue;
+    }
+    result = cellStep(result, grown, "cut") ?? result;
+  }
+  if (skipped) {
+    onError?.(
+      spec.id,
+      `${skipped === 1 ? "One removed region" : `${skipped} removed regions`} could not be grown by the ${clearance} mm clearance — cut at the exact size.`,
+    );
+  }
+  return result;
 }
 
 /**
@@ -6495,32 +6522,47 @@ export function growSolid(solid: AnySolid, d: number): AnySolid | null {
       const grown = (solid.wrapped as { minkowskiSum(o: unknown): unknown }).minkowskiSum(cube);
       return new MeshShape(grown as ConstructorParameters<typeof MeshShape>[0]);
     }
-    const oc = getOC();
-    const maker = new oc.BRepOffsetAPI_MakeOffsetShape();
-    maker.PerformByJoin(
-      (solid as Shape3D).wrapped,
-      d,
-      1e-4,
-      oc.BRepOffset_Mode.BRepOffset_Skin,
-      false,
-      false,
-      oc.GeomAbs_JoinType.GeomAbs_Intersection,
-      false,
-      new oc.Message_ProgressRange(),
-    );
-    if (!maker.IsDone()) {
-      maker.delete();
-      return null;
+    // A shape that is really several separate solids in one compound (the two
+    // ends of a bar sticking out of a block) is offset one solid at a time and
+    // fused back; offsetting the compound whole fails.
+    const parts = [...iterTopo((solid as Shape3D).wrapped, "solid")].map((raw) => cast(raw) as Shape3D);
+    const grownParts: Shape3D[] = [];
+    for (const part of parts.length ? parts : [solid as Shape3D]) {
+      const grown = growOcctSolid(part, d);
+      if (!grown) return null;
+      grownParts.push(grown);
     }
-    let grown = cast(maker.Shape()) as Shape3D;
-    maker.delete();
-    // A compound's offset comes back as a bare shell; booleans need a solid.
-    if (grown.constructor.name === "Shell") grown = makeSolid([grown as never]) as unknown as Shape3D;
-    // An offset outward must add material. Anything else is a failed offset.
-    return measureVolume(grown) > measureVolume(solid as Shape3D) ? grown : null;
+    return grownParts.reduce((all, next) => all.fuse(next) as Shape3D);
   } catch {
     return null;
   }
+}
+
+/** One B-rep solid offset outward by `d`, or null when OCCT cannot. */
+function growOcctSolid(solid: Shape3D, d: number): Shape3D | null {
+  const oc = getOC();
+  const maker = new oc.BRepOffsetAPI_MakeOffsetShape();
+  maker.PerformByJoin(
+    solid.wrapped,
+    d,
+    1e-4,
+    oc.BRepOffset_Mode.BRepOffset_Skin,
+    false,
+    false,
+    oc.GeomAbs_JoinType.GeomAbs_Intersection,
+    false,
+    new oc.Message_ProgressRange(),
+  );
+  if (!maker.IsDone()) {
+    maker.delete();
+    return null;
+  }
+  let grown = cast(maker.Shape()) as Shape3D;
+  maker.delete();
+  // An offset can come back as a bare shell; booleans need a solid.
+  if (grown.constructor.name === "Shell") grown = makeSolid([grown as never]) as unknown as Shape3D;
+  // An offset outward must add material. Anything else is a failed offset.
+  return measureVolume(grown) > measureVolume(solid) ? grown : null;
 }
 
 /**

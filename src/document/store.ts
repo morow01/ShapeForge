@@ -969,7 +969,14 @@ interface DocState {
    *  `owners` has one entry per separate solid the kept regions come to, each
    *  the index (into `sourceIds`) of the shape most of it is made of: several
    *  entries make several nodes, and every node takes its owner's colour. */
-  shapeBuild: (sourceIds: string[], keep: number[], centres?: Record<string, Vec3>, owners?: number[]) => void;
+  shapeBuild: (
+    sourceIds: string[],
+    keep: number[],
+    centres?: Record<string, Vec3>,
+    owners?: number[],
+    /** Millimetres the removed regions grow by, so kept parts pull back from them. */
+    clearance?: number,
+  ) => void;
   /** Puts the document back as it was — used to undo a grouping that turned
    *  out to change the model rather than just its arrangement. */
   restoreNodes: (nodes: SceneNode[], selectedIds: string[]) => void;
@@ -1839,8 +1846,9 @@ export const useDoc = create<DocState>()(
       setGroupClearance: (id, clearance) => {
         ownStep("Set clearance");
         set((s) => ({
+          // A built shape carries one too: what Shape Builder removed grows by it.
           nodes: updateNode(s.nodes, id, (n) =>
-            isGroup(n) ? { ...n, clearance: clearance > 0 ? Math.min(clearance, 5) : 0 } : n),
+            isGroup(n) || n.type === "build" ? { ...n, clearance: clearance > 0 ? Math.min(clearance, 5) : 0 } : n),
         }));
         afterBatchedMutation();
       },
@@ -2045,7 +2053,7 @@ export const useDoc = create<DocState>()(
 
       setShowResult: (v) => set({ showResult: v }),
 
-      shapeBuild: (sourceIds, keep, centres, owners = []) => {
+      shapeBuild: (sourceIds, keep, centres, owners = [], clearance = 0) => {
         ownStep("Build shape");
         set((s) => {
           if (sourceIds.length < 2 || !keep.length) return {};
@@ -2078,6 +2086,7 @@ export const useDoc = create<DocState>()(
               name: `Built ${buildCount + i + 1}`,
               sources: i === 0 ? sources : sources.map((n) => cloneSubtree(n, [0, 0, 0])),
               keep: [...keep].sort((a, b) => a - b),
+              ...(clearance > 0 ? { clearance: Math.min(clearance, 5) } : {}),
               ...(count > 1 ? { piece: i } : {}),
               ...(colour !== DEFAULT_OBJECT_COLOR ? { color: colour } : {}),
               position: [0, 0, 0],

@@ -75,6 +75,9 @@ export interface BuildSpec extends SpecBase {
   keep: number[];
   /** Which connected piece of the result this is — see BuildNode.piece. */
   piece?: number;
+  /** Millimetres the removed regions are grown by, so what was kept pulls back
+   *  from them and a printed part fits. 0 = exact. */
+  clearance?: number;
 }
 
 export type NodeSpec = ObjectSpec | GroupSpec | ImportSpec | EditSpec | BuildSpec;

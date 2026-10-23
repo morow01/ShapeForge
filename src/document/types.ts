@@ -1836,6 +1836,9 @@ export interface BuildNode extends NodeBase {
    * they sit. Absent means the whole result, however many pieces it has.
    */
   piece?: number;
+  /** Millimetres the removed regions are grown by, so what was kept pulls back
+   *  from them and a printed part has a gap to fit. Absent or 0 = exact. */
+  clearance?: number;
 }
 
 export type SceneNode = ObjectNode | GroupNode | ImportNode | EditNode | BuildNode;
