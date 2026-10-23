@@ -6483,7 +6483,38 @@ async function mergeBuild(
  * stand, cut them into cells, fuse back the ones that were kept, and — for one
  * of several pieces — pick out that solid.
  */
+/**
+ * The last couple of finished builds. Every push/pull preview, commit and check
+ * replays the edit on top of its base, and with a clearance the base costs
+ * seconds to rebuild (the cell cuts and grown cutters), so one push/pull took
+ * 30-50 s. The solid is handed out as a clone because edits consume their input.
+ */
+const buildCache: { key: string; solid: AnySolid; errors: [string, string][] }[] = [];
+
 async function makeBuild(
+  spec: BuildSpec,
+  onError?: (id: string, msg: string) => void,
+  onProgress?: (id: string) => void,
+): Promise<AnySolid | null> {
+  const key = JSON.stringify(spec);
+  const hit = buildCache.find((entry) => entry.key === key);
+  if (hit) {
+    for (const [id, message] of hit.errors) onError?.(id, message);
+    return hit.solid.clone() as AnySolid;
+  }
+  const errors: [string, string][] = [];
+  const built = await makeBuildUncached(spec, (id, message) => {
+    errors.push([id, message]);
+    onError?.(id, message);
+  }, onProgress);
+  if (built) {
+    buildCache.unshift({ key, solid: built.clone() as AnySolid, errors });
+    buildCache.length = Math.min(buildCache.length, 2);
+  }
+  return built;
+}
+
+async function makeBuildUncached(
   spec: BuildSpec,
   onError?: (id: string, msg: string) => void,
   onProgress?: (id: string) => void,
