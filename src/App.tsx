@@ -331,6 +331,11 @@ const shapeOf = (n: SceneNode): unknown => {
       n.id,
       "g",
       n.op,
+      // Clearance grows what the boolean cuts away, so it is shape-defining
+      // in exactly the way faceting is: without it here, typing a new
+      // clearance updated the document and the panel but never asked the
+      // kernel for the new solid, so the hole kept its old size.
+      n.clearance ?? 0,
       // A child's hole flag affects this group's boolean, while this group's
       // own hole flag only affects its parent (or root display material).
       // A child's HIDDEN flag is the same story: toSpec drops a hidden child
@@ -348,7 +353,7 @@ const shapeOf = (n: SceneNode): unknown => {
   // Thickness is part of the shape for artwork, so a change to it rebuilds.
   if (n.type === "import") return [n.id, "import", n.blobId, n.svg?.thickness, facets];
   if (n.type === "edit") return [n.id, "edit", shapeOf(n.base), n.ops, facets];
-  if (n.type === "build") return [n.id, "build", n.sources.map(shapeOf), n.keep, n.piece, facets];
+  if (n.type === "build") return [n.id, "build", n.sources.map(shapeOf), n.keep, n.piece, n.clearance ?? 0, facets];
   return [n.id, n.kind, n.params, n.text, n.fontName, n.sketch, facets];
 };
 

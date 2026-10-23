@@ -320,6 +320,58 @@ const AXES = ["X", "Y", "Z"] as const;
  *  three axes. */
 const WDH_LABELS = ["Width", "Depth", "Height"] as const;
 
+/** The four combine modes drawn as the usual boolean diagrams: two circles,
+ *  with whatever the operation keeps filled in. The cut-away circle in
+ *  Subtract is painted in the button's own background (--op-icon-bg) so the
+ *  bite reads the same on a pressed button as on an idle one. */
+function OpIcon({ op }: { op: BooleanOp }) {
+  const common = { width: 26, height: 17, viewBox: "0 0 24 16", "aria-hidden": true } as const;
+  if (op === "assembly") {
+    return (
+      <svg {...common}>
+        <rect x="0.75" y="1.75" width="22.5" height="12.5" rx="3" fill="none"
+          stroke="currentColor" strokeWidth="1.2" strokeDasharray="2.5 2" opacity="0.6" />
+        <rect x="4" y="5" width="6" height="6" rx="1.2" fill="currentColor" opacity="0.85" />
+        <rect x="14" y="5" width="6" height="6" rx="1.2" fill="currentColor" opacity="0.85" />
+      </svg>
+    );
+  }
+  if (op === "union") {
+    return (
+      <svg {...common}>
+        <circle cx="9" cy="8" r="6" fill="currentColor" opacity="0.85" />
+        <circle cx="15" cy="8" r="6" fill="currentColor" opacity="0.85" />
+      </svg>
+    );
+  }
+  if (op === "subtract") {
+    return (
+      <svg {...common}>
+        <circle cx="9" cy="8" r="6" fill="currentColor" opacity="0.85" />
+        <circle cx="15" cy="8" r="6" fill="var(--op-icon-bg)" stroke="currentColor"
+          strokeWidth="1.2" strokeDasharray="2.5 2" opacity="0.9" />
+      </svg>
+    );
+  }
+  return (
+    <svg {...common}>
+      <circle cx="9" cy="8" r="6" fill="none" stroke="currentColor" strokeWidth="1.2" opacity="0.55" />
+      <circle cx="15" cy="8" r="6" fill="none" stroke="currentColor" strokeWidth="1.2" opacity="0.55" />
+      {/* The lens: the right bulge of the left circle, then the left bulge of
+          the right one. Both arcs meet where the circles cross, at x = 12. */}
+      <path d="M12 2.804 A6 6 0 0 1 12 13.196 A6 6 0 0 1 12 2.804" fill="currentColor" opacity="0.85" />
+    </svg>
+  );
+}
+
+/** "Group (Assembly)" is too long to sit under an icon; the rest already fit. */
+const OP_ICON_LABEL: Record<BooleanOp, string> = {
+  assembly: "Group",
+  union: "Union",
+  subtract: "Subtract",
+  intersect: "Intersect",
+};
+
 function isLightColor(hex: string): boolean {
   const c = hex.replace("#", "");
   if (c.length !== 6) return false;
@@ -561,13 +613,22 @@ export function Inspector({
           {group ? (
             <>
               <h2>Combine children by</h2>
-              <select className="num" value={node.op} onChange={(e) => onOp(e.target.value as BooleanOp)}>
+              <div className="op-icons" role="radiogroup" aria-label="Combine children by">
                 {BOOLEAN_OPS.map((o) => (
-                  <option key={o.value} value={o.value}>
-                    {o.label}
-                  </option>
+                  <button
+                    key={o.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={node.op === o.value}
+                    className={`op-icon-btn ${node.op === o.value ? "active" : ""}`}
+                    onClick={() => onOp(o.value)}
+                    title={`${o.label} — ${o.hint}`}
+                  >
+                    <OpIcon op={o.value} />
+                    <span className="op-icon-name">{OP_ICON_LABEL[o.value]}</span>
+                  </button>
                 ))}
-              </select>
+              </div>
               <p className="hint op-hint">
                 {BOOLEAN_OPS.find((o) => o.value === node.op)?.hint}
               </p>

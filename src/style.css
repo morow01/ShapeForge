@@ -1842,6 +1842,51 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
   color: #00a7a5;
 }
 
+/* ---- Combine children by: the four boolean ops as icons ---- */
+.op-icons {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+}
+.op-icon-btn {
+  /* What Subtract's cut-away circle is painted with, so the bite matches
+     whichever background the button itself is showing. */
+  --op-icon-bg: #f6f8fa;
+
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 2px 6px;
+  color: #4b5a66;
+  background: #f6f8fa;
+  border: 1.5px solid #d3dce2;
+  border-radius: 7px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition: all 0.12s ease;
+}
+.op-icon-btn:hover {
+  background: #edf3f7;
+  border-color: #b5c4ce;
+}
+.op-icon-btn:hover {
+  --op-icon-bg: #edf3f7;
+}
+.op-icon-btn.active {
+  --op-icon-bg: #fff;
+
+  color: #00807e;
+  background: #fff;
+  border-color: #00a7a5;
+  box-shadow: 0 1px 4px rgb(0 167 165 / 16%);
+}
+.op-icon-btn svg {
+  display: block;
+}
+
 /* Color Popover */
 .tinkercad-color-popover {
   position: absolute;

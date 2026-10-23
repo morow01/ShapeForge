@@ -1238,10 +1238,15 @@ function localKey(spec: NodeSpec): string {
   // out would serve the full-detail mesh straight back out of the cache and
   // the faceting controls would appear to do nothing.
   const facets = spec.lowPoly ? [spec.lowPoly.facet, spec.lowPoly.even] : null;
+  // clearance is part of the key for the same reason lowPoly is: it grows what
+  // the boolean cuts away, so leaving it out handed back the solid built with
+  // the PREVIOUS clearance and the field did nothing until some other edit
+  // forced a rebuild.
   if (spec.type === "group") {
     return JSON.stringify([
       spec.type,
       spec.op,
+      spec.clearance ?? 0,
       spec.children.map((c) => [localKey(c), c.position, c.rotation, c.scale, c.isHole]),
       facets,
       KERNEL_REVISION,
@@ -1263,6 +1268,7 @@ function localKey(spec: NodeSpec): string {
       spec.sources.map((s) => [localKey(s), s.position, s.rotation, s.scale]),
       spec.keep,
       spec.piece,
+      spec.clearance ?? 0,
       facets,
       KERNEL_REVISION,
     ]);
