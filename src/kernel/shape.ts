@@ -6573,7 +6573,17 @@ function offsetWithJoin(solid: Shape3D, d: number, join: unknown): Shape3D | nul
     // An offset can come back as a bare shell; booleans need a solid.
     if (grown.constructor.name === "Shell") grown = makeSolid([grown as never]) as unknown as Shape3D;
     // An offset outward must add material. Anything else is a failed offset.
-    return measureVolume(grown) > measureVolume(solid) ? grown : null;
+    if (!(measureVolume(grown) > measureVolume(solid))) return null;
+    // OCCT sometimes "succeeds" with a runaway mitre (a lens-shaped sliver came
+    // back 1e14 mm3). A true offset by d stays within d of the original, so
+    // anything reaching past 2d of its bounds is rejected and the next join tried.
+    const [lo, hi] = getTightSolidBounds(solid);
+    const [glo, ghi] = getTightSolidBounds(grown);
+    const slack = 2 * d + 1e-3;
+    for (let i = 0; i < 3; i++) {
+      if (glo[i] < lo[i] - slack || ghi[i] > hi[i] + slack) return null;
+    }
+    return grown;
   } catch {
     return null;
   } finally {
