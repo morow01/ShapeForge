@@ -287,6 +287,8 @@ interface Props {
   onReplaceFile?: (id: string, file: File) => Promise<void>;
   onRestoreBlob?: (id: string, blobId: string, byteSize: number) => void;
   onOp: (op: BooleanOp) => void;
+  /** Groups only: millimetres the cut-away shapes are grown by. */
+  onClearance?: (mm: number) => void;
   onRename: (name: string) => void;
   onDelete: () => void;
   onRetryNode?: (id: string) => void;
@@ -353,6 +355,7 @@ export function Inspector({
   onReplaceFile,
   onRestoreBlob,
   onOp,
+  onClearance,
   onRename,
   onDelete,
   onRetryNode,
@@ -568,6 +571,25 @@ export function Inspector({
               <p className="hint op-hint">
                 {BOOLEAN_OPS.find((o) => o.value === node.op)?.hint}
               </p>
+              {(node.op === "subtract" || node.op === "union") && onClearance && (
+                <label className="field clearance-field">
+                  <span className="field-label">Clearance (mm)</span>
+                  <MathNumInput
+                    className="num"
+                    min={0}
+                    step={0.05}
+                    value={Math.round((node.clearance ?? 0) * 1000) / 1000}
+                    onFocus={beginHistoryBatch}
+                    onBlur={endHistoryBatch}
+                    onCommit={(v) => onClearance(Number.isFinite(v) ? Math.max(0, v) : 0)}
+                  />
+                  <span className="hint">
+                    {node.op === "subtract"
+                      ? "The shapes cut away grow by this much in every direction, so a printed part fits into the hole. 0 cuts the exact size."
+                      : "Hole shapes in this union grow by this much in every direction, so a printed part fits. 0 cuts the exact size."}
+                  </span>
+                </label>
+              )}
               <p className="hint">
                 {node.children.length} {node.children.length === 1 ? "child" : "children"}
               </p>

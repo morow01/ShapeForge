@@ -95,7 +95,8 @@ export function parseNode(raw: unknown): SceneNode | null {
     if (!Array.isArray(n.children)) return null;
     const op = OPS.includes(n.op as BooleanOp) ? (n.op as BooleanOp) : "union";
     const children = n.children.map(parseNode).filter((c): c is SceneNode => c !== null);
-    return { ...base, type: "group", op, children, collapsed: n.collapsed === true };
+    const clearance = typeof n.clearance === "number" && n.clearance > 0 && n.clearance <= 5 ? n.clearance : undefined;
+    return { ...base, type: "group", op, children, collapsed: n.collapsed === true, ...(clearance ? { clearance } : {}) };
   }
 
   if (n.type === "object") {

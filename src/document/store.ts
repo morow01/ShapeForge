@@ -5,6 +5,7 @@ import type { TemporalState } from "zundo";
 import { DEFAULT_OBJECT_COLOR, PRIMITIVES, TINKERCAD_COLORS, isGroup } from "./types";
 import { extractNodes, findAssemblyOwner, findNode, firstRootIndex, removeNodesDeep as removeNodesDeepInTree, resolveNodeColor, updateNode, walk } from "./tree";
 import { bakeScale } from "./bake";
+import { getDefaultClearance } from "./clearance";
 import {
   applyMatrix,
   eulerToMatrix,
@@ -942,6 +943,8 @@ interface DocState {
   /** Faceted low-poly styling; undefined clears it back to full detail. */
   setLowPoly: (id: string, lowPoly: LowPoly | undefined) => void;
   setGroupOp: (id: string, op: BooleanOp) => void;
+  /** Millimetres the cut-away shapes of a group's boolean are grown by. */
+  setGroupClearance: (id: string, clearance: number) => void;
   toggleCollapsed: (id: string) => void;
   /** Flips a node's `hidden` flag — the eye icon in the Objects panel. Works
    *  on any node type at any depth; see NodeBase.hidden for what hiding
@@ -1823,8 +1826,23 @@ export const useDoc = create<DocState>()(
       setGroupOp: (id, op) => {
         ownStep(`Set ${op}`);
         set((s) => ({
-          nodes: updateNode(s.nodes, id, (n) => (isGroup(n) ? { ...n, op } : n)),
+          // Turning a group into a Subtract is asking for a cut a part has to
+          // fit into, so it starts with the printer's usual clearance — unless
+          // it already carries one.
+          nodes: updateNode(s.nodes, id, (n) =>
+            isGroup(n)
+              ? { ...n, op, ...(op === "subtract" && n.clearance === undefined ? { clearance: getDefaultClearance() } : {}) }
+              : n),
         }));
+      },
+
+      setGroupClearance: (id, clearance) => {
+        ownStep("Set clearance");
+        set((s) => ({
+          nodes: updateNode(s.nodes, id, (n) =>
+            isGroup(n) ? { ...n, clearance: clearance > 0 ? Math.min(clearance, 5) : 0 } : n),
+        }));
+        afterBatchedMutation();
       },
 
       toggleCollapsed: (id) =>
@@ -1970,6 +1988,7 @@ export const useDoc = create<DocState>()(
             id: nextId(),
             name: `Combine ${combineCount}`,
             op,
+            ...(op === "subtract" ? { clearance: getDefaultClearance() } : {}),
             children: expanded,
             position: [0, 0, 0],
             rotation: [0, 0, 0],
