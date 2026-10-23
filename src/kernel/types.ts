@@ -50,6 +50,9 @@ export interface GroupSpec extends SpecBase {
   type: "group";
   op: BooleanOp;
   children: NodeSpec[];
+  /** Millimetres the cut-away shapes are grown by before the boolean, so a
+   *  part that goes into the hole has the gap a printer needs. 0 = exact. */
+  clearance?: number;
 }
 
 export interface ImportSpec extends SpecBase {

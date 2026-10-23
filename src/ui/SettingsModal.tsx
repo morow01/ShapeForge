@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { AppearancePreference, DisplayUnit } from "../measurement";
 import type { ViewportQuality } from "../viewport/quality";
 import type { CollisionHighlightStyle } from "../viewport/scene";
+import { getDefaultClearance, setDefaultClearance } from "../document/clearance";
 
 export interface BuildPlateSize {
   width: number;
@@ -124,6 +125,7 @@ export function SettingsModal({
 }: Props) {
   const [activeCategory, setActiveCategory] = useState<SettingsCategory>("general");
   const [fps, setFps] = useState<number | null>(null);
+  const [clearance, setClearance] = useState<number>(() => getDefaultClearance());
 
   useEffect(() => {
     if (!open || !getFps) return;
@@ -215,6 +217,22 @@ export function SettingsModal({
                   <span><strong>Random colours for new objects</strong><small>Gives each newly created object a varied colour instead of default blue</small></span>
                   <SettingsToggle checked={randomNewObjectColors} onChange={onRandomNewObjectColors} label="Random colours for new objects" />
                 </div>
+                <label className="settings-row">
+                  <span><strong>Default clearance (mm)</strong><small>New Subtract groups cut this much bigger than the shape, so a printed part fits (0.2 suits most FDM printers; 0 = exact)</small></span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={5}
+                    step={0.05}
+                    value={clearance}
+                    onChange={(e) => {
+                      const next = Number(e.target.value);
+                      setClearance(next);
+                      if (Number.isFinite(next)) setDefaultClearance(next);
+                    }}
+                    style={{ width: 80 }}
+                  />
+                </label>
               </div>
             )}
 

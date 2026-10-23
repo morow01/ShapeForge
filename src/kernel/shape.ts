@@ -3,6 +3,7 @@ import {
   makeCylinder,
   makeSphere,
   makeCompound,
+  makeSolid,
   basicFaceExtrusion,
   cast,
   Vector,
@@ -6474,6 +6475,89 @@ export async function makeLocal(
   }
 }
 
+/**
+ * `solid` pushed outward by `d` mm in every direction, or null when it cannot
+ * be done (a shape OCCT will not offset, a mesh the Minkowski sum chokes on).
+ *
+ * This is what gives a printed part its fit: a cutter exactly the size of the
+ * part that goes in leaves no gap, and a printer cannot make a gap of zero.
+ * B-reps take OCCT's offset with the intersection join, so corners stay sharp
+ * (a 20 mm box grows to exactly 20.4 mm at 0.2); the default arc join would
+ * round every convex corner of the cutter. Meshes are grown by a Minkowski sum
+ * with a cube, which is the same mitred growth along the axes.
+ */
+export function growSolid(solid: AnySolid, d: number): AnySolid | null {
+  if (!(d > 0)) return solid;
+  try {
+    if (isMesh(solid)) {
+      const manifold = getManifold();
+      const cube = manifold.Manifold.cube([2 * d, 2 * d, 2 * d], true);
+      const grown = (solid.wrapped as { minkowskiSum(o: unknown): unknown }).minkowskiSum(cube);
+      return new MeshShape(grown as ConstructorParameters<typeof MeshShape>[0]);
+    }
+    const oc = getOC();
+    const maker = new oc.BRepOffsetAPI_MakeOffsetShape();
+    maker.PerformByJoin(
+      (solid as Shape3D).wrapped,
+      d,
+      1e-4,
+      oc.BRepOffset_Mode.BRepOffset_Skin,
+      false,
+      false,
+      oc.GeomAbs_JoinType.GeomAbs_Intersection,
+      false,
+      new oc.Message_ProgressRange(),
+    );
+    if (!maker.IsDone()) {
+      maker.delete();
+      return null;
+    }
+    let grown = cast(maker.Shape()) as Shape3D;
+    maker.delete();
+    // A compound's offset comes back as a bare shell; booleans need a solid.
+    if (grown.constructor.name === "Shell") grown = makeSolid([grown as never]) as unknown as Shape3D;
+    // An offset outward must add material. Anything else is a failed offset.
+    return measureVolume(grown) > measureVolume(solid as Shape3D) ? grown : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Grows what a boolean cuts away by `clearance` mm: every operand after the
+ * first for a subtract, the holes for a union. Returns the operands unchanged
+ * when there is no clearance. A cutter that cannot be grown is left as it was
+ * and reported, so the part still builds — just without that gap.
+ */
+function withClearance(
+  op: GroupOp,
+  kids: { solid: AnySolid; isHole: boolean }[],
+  clearance: number,
+  report?: (msg: string) => void,
+): { solid: AnySolid; isHole: boolean }[] {
+  if (!(clearance > 0)) return kids;
+  const cuts = (i: number, kid: { isHole: boolean }) =>
+    op === "subtract" ? i > 0 : op === "union" ? kid.isHole : false;
+  let skipped = 0;
+  const out = kids.map((kid, i) => {
+    if (!cuts(i, kid)) return kid;
+    const grown = growSolid(kid.solid, clearance);
+    if (!grown) {
+      skipped++;
+      return kid;
+    }
+    return { ...kid, solid: grown };
+  });
+  if (skipped) {
+    report?.(
+      skipped === 1
+        ? `One shape could not be grown by the ${clearance} mm clearance — it was cut at its exact size.`
+        : `${skipped} shapes could not be grown by the ${clearance} mm clearance — they were cut at their exact size.`,
+    );
+  }
+  return out;
+}
+
 async function buildLocal(
   spec: NodeSpec,
   onError?: (id: string, msg: string) => void,
@@ -6530,8 +6614,9 @@ async function buildLocal(
   // return on the next group cycle. Keep the previous viewport mesh instead
   // of replacing it with a group that is missing pieces.
   if (!built.complete) return null;
-  const kids = built.kids;
   const op: GroupOp = spec.op === "subtract" || spec.op === "intersect" ? spec.op : "union";
+  const clearance = spec.clearance ?? 0;
+  const kids = withClearance(op, built.kids, clearance, (msg) => onError?.(spec.id, msg));
   const result = combine(op, kids);
   if (!result) return result;
 
@@ -6552,7 +6637,7 @@ async function buildLocal(
   if (hasSphere) {
     const retryBuild = await build(true);
     if (!retryBuild.complete) return result;
-    const retryKids = retryBuild.kids;
+    const retryKids = withClearance(op, retryBuild.kids, clearance);
     const retry = combine(op, retryKids);
     // A retry has to actually be better, not merely different: when the first
     // attempt was outright invalid any sound solid is an improvement, but when

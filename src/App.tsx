@@ -160,6 +160,7 @@ const toSpec = (n: SceneNode): NodeSpec => {
       type: "group",
       id: n.id,
       op: n.op,
+      clearance: n.clearance,
       // A hidden TOP-LEVEL node still builds normally (see NodeBase.hidden) —
       // only Scene.applyMaterials toggles its visibility, instantly, with no
       // rebuild. A hidden node NESTED in a group has no ScenePart of its own
@@ -620,6 +621,7 @@ export function App() {
     setHideLines,
     setLowPoly,
     setGroupOp,
+    setGroupClearance,
     toggleCollapsed,
     toggleHidden,
     rename,
@@ -6971,6 +6973,7 @@ export function App() {
               onReplaceFile={handleReplaceFile}
               onRestoreBlob={handleRestoreBlob}
               onOp={(op) => setGroupOp(selected.id, op)}
+              onClearance={(mm) => setGroupClearance(selected.id, mm)}
               onRename={(n) => rename(selected.id, n)}
               onDelete={removeSelected}
               onPruneDeadOps={onPruneDeadOps}

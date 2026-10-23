@@ -1661,6 +1661,9 @@ export interface GroupNode extends NodeBase {
   op: BooleanOp;
   children: SceneNode[];
   collapsed?: boolean;
+  /** Millimetres the shapes cut away by this group's boolean are grown by, so
+   *  a printed part has a gap to fit into the hole. Absent or 0 = exact. */
+  clearance?: number;
 }
 
 /** An imported STL. The file bytes live in IndexedDB (see blobStore.ts) keyed
