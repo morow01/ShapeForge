@@ -11,7 +11,9 @@ export const FALLBACK_CLEARANCE_MM = 0.2;
  * The fits worth naming, in mm of gap per side — which is what this clearance
  * is, since the cutter grows by it in every direction. Two mating parts end up
  * this far apart all round, so a hole comes out twice this much wider than the
- * peg that goes into it.
+ * peg that goes into it. Exact (0) is the one that is not a print fit at all:
+ * the boolean cuts the shape's true size, which is what a drawing, a render or
+ * a part going to a machinist wants.
  *
  * The numbers are the usual FDM ones and assume a well-tuned printer: a badly
  * squashed first layer or over-extrusion eats a fit before any of this
@@ -19,6 +21,7 @@ export const FALLBACK_CLEARANCE_MM = 0.2;
  * round peg the tighter.
  */
 export const CLEARANCE_PRESETS: { mm: number; label: string; hint: string }[] = [
+  { mm: 0, label: "Exact", hint: "No gap at all: the cut is exactly the size of the shape — for work that is not being printed" },
   { mm: 0.05, label: "Press", hint: "Press fit: needs force to assemble and is not meant to come apart again" },
   { mm: 0.1, label: "Snug", hint: "Friction fit: goes together by hand and stays put — pegs, dowels, lids" },
   { mm: 0.2, label: "Standard", hint: "The general-purpose fit: assembles easily, barely any play" },

@@ -1889,8 +1889,11 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 
 /* ---- Named fits above the clearance box ---- */
 .clearance-presets {
+  /* auto-fit rather than a fixed count: the row holds all the named fits
+     side by side in a normal panel and wraps to two rows in a narrow one,
+     instead of squeezing "Standard" until it breaks. */
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(48px, 1fr));
   gap: 4px;
   margin-bottom: 5px;
 }
@@ -1934,7 +1937,7 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
   gap: 4px;
 }
 .settings-clearance .clearance-presets {
-  width: 200px;
+  width: 272px;
   margin-bottom: 0;
 }
 
