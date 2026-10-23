@@ -6578,18 +6578,13 @@ export function growSolid(solid: AnySolid, d: number): AnySolid | null {
 }
 
 /**
- * One B-rep solid offset outward by `d`, or null when OCCT cannot. The mitred
- * intersection join goes first; where it fails (a curved face meeting a flat
- * one at a sharp edge, say) the arc join is tried, which keeps a true constant
- * gap and only rounds the convex corners.
+ * One B-rep solid offset outward by `d`, or null when OCCT cannot. Only the
+ * mitred intersection join is used: the arc join would round the corners (a
+ * part with square corners then has no room in them), and on a cone's tip it
+ * never returns at all, which freezes the worker.
  */
 function growOcctSolid(solid: Shape3D, d: number): Shape3D | null {
-  const oc = getOC();
-  for (const join of [oc.GeomAbs_JoinType.GeomAbs_Intersection, oc.GeomAbs_JoinType.GeomAbs_Arc]) {
-    const grown = offsetWithJoin(solid, d, join);
-    if (grown) return grown;
-  }
-  return null;
+  return offsetWithJoin(solid, d, getOC().GeomAbs_JoinType.GeomAbs_Intersection);
 }
 
 function offsetWithJoin(solid: Shape3D, d: number, join: unknown): Shape3D | null {
@@ -6614,11 +6609,12 @@ function offsetWithJoin(solid: Shape3D, d: number, join: unknown): Shape3D | nul
     // An offset outward must add material. Anything else is a failed offset.
     if (!(measureVolume(grown) > measureVolume(solid))) return null;
     // OCCT sometimes "succeeds" with a runaway mitre (a lens-shaped sliver came
-    // back 1e14 mm3). A true offset by d stays within d of the original, so
-    // anything reaching past 2d of its bounds is rejected and the next join tried.
+    // back 1e14 mm3). A true offset stays near the original — a mitre at a sharp
+    // tip reaches d / sin(half-angle), so allow 10d — and anything reaching
+    // further is rejected.
     const [lo, hi] = getTightSolidBounds(solid);
     const [glo, ghi] = getTightSolidBounds(grown);
-    const slack = 2 * d + 1e-3;
+    const slack = 10 * d + 1e-3;
     for (let i = 0; i < 3; i++) {
       if (glo[i] < lo[i] - slack || ghi[i] > hi[i] + slack) return null;
     }
