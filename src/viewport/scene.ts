@@ -8508,6 +8508,49 @@ export class Scene {
     this.reportCells();
   }
 
+  /** The faint outline of what a clearance leaves a gap around — see
+   *  setClearanceOutline. */
+  private clearanceOutline: THREE.Group | null = null;
+
+  /**
+   * Draws the exact-size shapes a group or built shape cuts away as a faint
+   * amber ghost, over the finished result. Inside a hole that was cut bigger by
+   * the clearance, the ghost is the part that fits there, so the gap shows as
+   * the space between it and the wall. Not part of the document, never
+   * pickable (hitTest only looks at `parts`). Null removes it.
+   */
+  setClearanceOutline(cells: CellPart[] | null) {
+    if (this.clearanceOutline) {
+      this.scene.remove(this.clearanceOutline);
+      this.clearanceOutline.traverse((o) => {
+        const m = o as THREE.Mesh | THREE.LineSegments;
+        m.geometry?.dispose();
+      });
+      this.clearanceOutline = null;
+    }
+    if (!cells?.length) return;
+    const group = new THREE.Group();
+    const body = new THREE.MeshBasicMaterial({
+      color: 0xff9f1a,
+      transparent: true,
+      opacity: 0.16,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    });
+    const line = new THREE.LineBasicMaterial({ color: 0xe08a00, transparent: true, opacity: 0.75 });
+    for (const cell of cells) {
+      const geom = syncKernelGeometry(cell.mesh);
+      group.add(new THREE.Mesh(geom[0].faces, body));
+      group.add(new THREE.LineSegments(new THREE.EdgesGeometry(geom[0].faces, 30), line));
+    }
+    for (const child of group.children) {
+      child.raycast = () => {};
+      child.renderOrder = 15;
+    }
+    this.clearanceOutline = group;
+    this.scene.add(group);
+  }
+
   private reportCells() {
     this.onCellsChanged?.(
       [...this.cellViews].map(([mask, view]) => ({ mask, kept: view.kept })),

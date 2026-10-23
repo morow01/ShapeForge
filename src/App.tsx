@@ -3983,6 +3983,42 @@ export function App() {
     if (toolMode === "build") setBuildClearance(getDefaultClearance());
   }, [toolMode]);
 
+  // The faint outline of the part that fits into a hole cut with a clearance:
+  // when the selection is a single Subtract/Union group or built shape that has
+  // one, the kernel returns the exact-size cutters and the viewport draws them
+  // over the result, so the gap shows as the space around them.
+  const clearanceOutlineSpec = useMemo(() => {
+    if (toolMode === "build" || selectedIds.length !== 1) return null;
+    const node = findNode(nodes, selectedIds[0]);
+    if (!node || !((isGroup(node) && (node.op === "subtract" || node.op === "union")) || node.type === "build")) return null;
+    if (!((node.clearance ?? 0) > 0)) return null;
+    return JSON.stringify(toSpec(node));
+  }, [nodes, selectedIds, toolMode]);
+  useEffect(() => {
+    const scene = sceneRef.current;
+    if (!scene) return;
+    if (!clearanceOutlineSpec) {
+      scene.setClearanceOutline(null);
+      return;
+    }
+    let stale = false;
+    const timer = window.setTimeout(() => {
+      kernel
+        .cutterOutline(JSON.parse(clearanceOutlineSpec) as NodeSpec)
+        .then((cells) => {
+          if (!stale) sceneRef.current?.setClearanceOutline(cells);
+        })
+        .catch(() => {
+          // The outline is a nicety: failing to draw it must never raise an error.
+          if (!stale) sceneRef.current?.setClearanceOutline(null);
+        });
+    }, 350);
+    return () => {
+      stale = true;
+      window.clearTimeout(timer);
+    };
+  }, [clearanceOutlineSpec]);
+
   /** Commits the session. Kept regions that touch become one built shape;
    *  regions that end up apart from each other become separate objects. */
   const commitBuild = useCallback(async () => {
