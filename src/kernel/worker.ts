@@ -1850,7 +1850,7 @@ const api = {
     if (specs.length === 1 && !specs[0].isHole) {
       const cached = meshCache.get(specs[0].id);
       resultSolidCache = cached?.solid && cached.key === localKey(specs[0])
-        ? { key: resultKey(specs), solid: place(cached.solid, specs[0]), meshQuality: null }
+        ? { key: resultKey(specs), solid: place(cached.solid.clone() as AnySolid, specs[0]), meshQuality: null }
         : null;
     } else if (resultSolidCache?.key !== resultKey(specs)) {
       resultSolidCache = null;
@@ -2015,12 +2015,12 @@ const api = {
     for (const spec of solids) {
       const cached = meshCache.get(spec.id);
       if (!cached || !cached.solid) return null;
-      let solid: AnySolid = place(cached.solid, spec);
+      let solid: AnySolid = place(cached.solid.clone() as AnySolid, spec);
       if (holes.length > 0) {
         for (const hole of holes) {
           const holeCached = meshCache.get(hole.id);
           if (!holeCached || !holeCached.solid) return null;
-          const holeSolid = place(holeCached.solid, hole);
+          const holeSolid = place(holeCached.solid.clone() as AnySolid, hole);
           if (solidBoundsOverlap(solid, holeSolid)) {
             const cutter = isMesh(holeSolid)
               ? holeSolid

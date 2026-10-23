@@ -47,6 +47,8 @@ export function FeedbackNotes() {
   const lastSig = useRef("");
   const syncTimer = useRef<number | undefined>(undefined);
   const driveStatus = useDrive((s) => s.status);
+  const driveError = useDrive((s) => s.lastError);
+  const lastSyncAt = useDrive((s) => s.lastSyncAt);
 
   useEffect(() => {
     fetch(ENDPOINT)
@@ -143,6 +145,22 @@ export function FeedbackNotes() {
           />
           <div className="feedback-actions">
             <button onClick={add} disabled={!draft.trim()}>Add note</button>
+            <button
+              disabled={driveStatus !== "signedIn"}
+              title="Check Google Drive for notes from your other computers right now"
+              onClick={() => { lastSig.current = ""; setAutoTick((n) => n + 1); }}
+            >
+              Sync now
+            </button>
+          </div>
+          <div className="feedback-where" style={{ margin: "4px 0" }}>
+            {driveStatus !== "signedIn"
+              ? "Not connected to Google Drive, so these notes stay on this computer. Connect from the Home page."
+              : driveError
+                ? "Drive problem: " + driveError
+                : lastSyncAt
+                  ? "Last checked Drive at " + new Date(lastSyncAt).toLocaleTimeString()
+                  : "Connected to Drive, checking…"}
           </div>
           <ul className="feedback-list">
             {notes.length === 0 && <li className="feedback-empty">No notes yet.</li>}
