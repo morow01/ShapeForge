@@ -2,6 +2,49 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { historyTimeline, jumpToHistory, labelStep, useDoc, useTemporal } from "../document/store";
 import { loadSnapshots, saveSnapshots, type DesignSnapshot } from "../document/snapshotStore";
 
+const iconProps = { width: 14, height: 14, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const, "aria-hidden": true };
+const PencilIcon = () => <svg {...iconProps}><path d="M4 20h4L19 9l-4-4L4 16z" /><path d="M13.5 6.5l4 4" /></svg>;
+const TrashIcon = () => <svg {...iconProps}><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" /></svg>;
+
+/** A name field with its own Save and Cancel, on a line of its own so nothing is squeezed. */
+function NameForm({
+  value,
+  placeholder,
+  saveLabel,
+  onChange,
+  onSave,
+  onCancel,
+}: {
+  value: string;
+  placeholder: string;
+  saveLabel: string;
+  onChange: (v: string) => void;
+  onSave: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="history-snapshot-form">
+      <input
+        autoFocus
+        value={value}
+        maxLength={60}
+        placeholder={placeholder}
+        onFocus={(e) => e.currentTarget.select()}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          e.stopPropagation();
+          if (e.key === "Enter") onSave();
+          else if (e.key === "Escape") onCancel();
+        }}
+      />
+      <div className="history-snapshot-form-actions">
+        <button type="button" className="cancel" onClick={onCancel}>Cancel</button>
+        <button type="button" className="save" onClick={onSave}>{saveLabel}</button>
+      </div>
+    </div>
+  );
+}
+
 /**
  * Photoshop's History palette over the document's own undo stack: the steps
  * taken in this design, oldest at the top, and a click puts the document back
@@ -108,43 +151,30 @@ export function HistoryPanel() {
         </button>
       </div>
       {naming && (
-        <div className="history-snapshot-new">
-          <input
-            autoFocus
-            value={name}
-            maxLength={60}
-            placeholder="Name this snapshot (optional)"
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => {
-              e.stopPropagation();
-              if (e.key === "Enter") addSnapshot();
-              else if (e.key === "Escape") { setNaming(false); setName(""); }
-            }}
-          />
-          <button type="button" onClick={addSnapshot}>Save</button>
-          <button type="button" className="cancel" onClick={() => { setNaming(false); setName(""); }}>Cancel</button>
-        </div>
+        <NameForm
+          value={name}
+          placeholder="Name this snapshot (optional)"
+          saveLabel="Save"
+          onChange={setName}
+          onSave={addSnapshot}
+          onCancel={() => { setNaming(false); setName(""); }}
+        />
       )}
       {snapshots.length > 0 && (
         <ul className="history-snapshots" aria-label="Snapshots">
           {snapshots.map((snap) => (
             <li key={snap.id}>
               {renamingId === snap.id ? (
-                <input
-                  className="history-snapshot-rename"
-                  autoFocus
+                <NameForm
                   value={renameText}
-                  maxLength={60}
-                  onChange={(e) => setRenameText(e.target.value)}
-                  onBlur={commitRename}
-                  onKeyDown={(e) => {
-                    e.stopPropagation();
-                    if (e.key === "Enter") commitRename();
-                    else if (e.key === "Escape") setRenamingId(null);
-                  }}
+                  placeholder="Snapshot name"
+                  saveLabel="Rename"
+                  onChange={setRenameText}
+                  onSave={commitRename}
+                  onCancel={() => setRenamingId(null)}
                 />
               ) : (
-                <>
+                <div className="history-snapshot-row">
                   <button
                     type="button"
                     className="history-step snapshot"
@@ -157,24 +187,24 @@ export function HistoryPanel() {
                   </button>
                   <button
                     type="button"
-                    className="history-snapshot-delete"
+                    className="history-snapshot-tool"
                     title="Rename this snapshot"
                     aria-label={`Rename snapshot ${snap.name}`}
                     onClick={() => { setRenamingId(snap.id); setRenameText(snap.name); }}
                   >
-                    ✎
+                    <PencilIcon />
                   </button>
-                </>
+                  <button
+                    type="button"
+                    className="history-snapshot-tool danger"
+                    title="Delete this snapshot"
+                    aria-label={`Delete snapshot ${snap.name}`}
+                    onClick={() => store(snapshots.filter((x) => x.id !== snap.id))}
+                  >
+                    <TrashIcon />
+                  </button>
+                </div>
               )}
-              <button
-                type="button"
-                className="history-snapshot-delete"
-                title="Delete this snapshot"
-                aria-label={`Delete snapshot ${snap.name}`}
-                onClick={() => store(snapshots.filter((s) => s.id !== snap.id))}
-              >
-                ×
-              </button>
             </li>
           ))}
         </ul>
