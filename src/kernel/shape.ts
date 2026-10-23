@@ -6538,31 +6538,47 @@ export function growSolid(solid: AnySolid, d: number): AnySolid | null {
   }
 }
 
-/** One B-rep solid offset outward by `d`, or null when OCCT cannot. */
+/**
+ * One B-rep solid offset outward by `d`, or null when OCCT cannot. The mitred
+ * intersection join goes first; where it fails (a curved face meeting a flat
+ * one at a sharp edge, say) the arc join is tried, which keeps a true constant
+ * gap and only rounds the convex corners.
+ */
 function growOcctSolid(solid: Shape3D, d: number): Shape3D | null {
   const oc = getOC();
-  const maker = new oc.BRepOffsetAPI_MakeOffsetShape();
-  maker.PerformByJoin(
-    solid.wrapped,
-    d,
-    1e-4,
-    oc.BRepOffset_Mode.BRepOffset_Skin,
-    false,
-    false,
-    oc.GeomAbs_JoinType.GeomAbs_Intersection,
-    false,
-    new oc.Message_ProgressRange(),
-  );
-  if (!maker.IsDone()) {
-    maker.delete();
-    return null;
+  for (const join of [oc.GeomAbs_JoinType.GeomAbs_Intersection, oc.GeomAbs_JoinType.GeomAbs_Arc]) {
+    const grown = offsetWithJoin(solid, d, join);
+    if (grown) return grown;
   }
-  let grown = cast(maker.Shape()) as Shape3D;
-  maker.delete();
-  // An offset can come back as a bare shell; booleans need a solid.
-  if (grown.constructor.name === "Shell") grown = makeSolid([grown as never]) as unknown as Shape3D;
-  // An offset outward must add material. Anything else is a failed offset.
-  return measureVolume(grown) > measureVolume(solid) ? grown : null;
+  return null;
+}
+
+function offsetWithJoin(solid: Shape3D, d: number, join: unknown): Shape3D | null {
+  const oc = getOC();
+  const maker = new oc.BRepOffsetAPI_MakeOffsetShape();
+  try {
+    maker.PerformByJoin(
+      solid.wrapped,
+      d,
+      1e-4,
+      oc.BRepOffset_Mode.BRepOffset_Skin,
+      false,
+      false,
+      join as never,
+      false,
+      new oc.Message_ProgressRange(),
+    );
+    if (!maker.IsDone()) return null;
+    let grown = cast(maker.Shape()) as Shape3D;
+    // An offset can come back as a bare shell; booleans need a solid.
+    if (grown.constructor.name === "Shell") grown = makeSolid([grown as never]) as unknown as Shape3D;
+    // An offset outward must add material. Anything else is a failed offset.
+    return measureVolume(grown) > measureVolume(solid) ? grown : null;
+  } catch {
+    return null;
+  } finally {
+    maker.delete();
+  }
 }
 
 /**
