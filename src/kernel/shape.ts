@@ -5587,7 +5587,7 @@ function cellStep(a: AnySolid, b: AnySolid, op: "intersect" | "cut"): AnySolid |
   }
 }
 
-export function cellSolid(solids: AnySolid[], mask: number, firstCut?: AnySolid): AnySolid | null {
+export function cellSolid(solids: AnySolid[], mask: number, firstCut?: AnySolid | AnySolid[]): AnySolid | null {
   const members = solids.filter((_, i) => (mask >> i) & 1);
   const others = solids.filter((_, i) => !((mask >> i) & 1));
   if (!members.length) return null;
@@ -5600,8 +5600,8 @@ export function cellSolid(solids: AnySolid[], mask: number, firstCut?: AnySolid)
   // A clearance cutter goes in before the other members are cut away: OCCT
   // quietly does nothing when it cuts a leftover cell (a sphere with a box
   // already taken out of it), but cuts the whole shape fine.
-  if (firstCut) {
-    result = cellStep(result, firstCut, "cut");
+  for (const cutter of firstCut ? [firstCut].flat() : []) {
+    result = cellStep(result, cutter, "cut");
     if (!result) return null;
   }
   for (const other of others) {
@@ -6115,7 +6115,11 @@ const SEAM_CHECK_QUALITY = { tolerance: 0.08, angularTolerance: 0.20 };
 /** World bounds of a solid, or null when it will not report any. */
 export function boundsOf(solid: AnySolid): { min: Vec3; max: Vec3 } | null {
   try {
-    const [min, max] = solid.boundingBox.bounds;
+    // OCCT's own box is loose, and it TIGHTENS once the solid has been
+    // tessellated (a union's bounds shrank by 5 mm between two calls), so a
+    // correct fuse was rejected whenever the check ran after a tessellation and
+    // the shape silently became a mesh. The optimal box does not depend on that.
+    const [min, max] = getTightSolidBounds(solid);
     const box = { min: min as Vec3, max: max as Vec3 };
     return box.min.every(Number.isFinite) && box.max.every(Number.isFinite) ? box : null;
   } catch {
@@ -6429,6 +6433,28 @@ async function mergeBuild(
       ? combine("union", pieces.map((solid) => ({ solid, isHole: false })))
       : pieces[0] ?? null;
   }
+  if (!viaWhole && removedMasks.length) {
+    // Cell by cell, from the shapes each cell was made of.
+    const cutters: AnySolid[] = [];
+    let allGrown = true;
+    for (const mask of removedMasks) {
+      if (!regionOf(mask)) continue;
+      const cutter = growCell(solids, mask, clearance);
+      if (cutter === null) {
+        allGrown = false;
+        break;
+      }
+      if (cutter) cutters.push(cutter);
+    }
+    if (allGrown) {
+      const pieces = spec.keep
+        .map((mask) => cellSolid(solids, mask, cutters.map((c) => c.clone())))
+        .filter((s): s is AnySolid => !!s);
+      viaWhole = pieces.length > 1
+        ? combine("union", pieces.map((solid) => ({ solid, isHole: false })))
+        : pieces[0] ?? null;
+    }
+  }
   if (viaWhole) {
     result = viaWhole;
   } else {
@@ -6577,6 +6603,42 @@ export function growSolid(solid: AnySolid, d: number): AnySolid | null {
   }
 }
 
+/** A B-rep primitive pulled inward by `d`, or null when OCCT cannot. */
+function shrinkSolid(solid: Shape3D, d: number): Shape3D | null {
+  return offsetWithJoin(solid, -d, getOC().GeomAbs_JoinType.GeomAbs_Intersection);
+}
+
+/**
+ * The cutter for one cell of a Shape Builder, grown by `d`, built from the
+ * shapes the cell was made of instead of by offsetting the leftover itself.
+ * OCCT cannot offset those leftovers (a box with a sphere and a cylinder taken
+ * out of it came back null, 1e14 mm3 or negative), but it offsets the plain
+ * shapes fine. The cell is members-in-common minus the others, so its grown
+ * form is taken as every member grown, in common, minus every other shrunk —
+ * a point within d of the cell can only be in that, so the gap is never short;
+ * at a concave edge it can be a hair generous. Null when any step fails, false
+ * when nothing is left of the cutter.
+ */
+function growCell(solids: AnySolid[], mask: number, d: number): AnySolid | null | false {
+  if (solids.some(isMesh)) return null;
+  let result: AnySolid | null = null;
+  for (const [i, solid] of solids.entries()) {
+    if (!((mask >> i) & 1)) continue;
+    const grown = growSolid(solid.clone() as Shape3D, d);
+    if (!grown) return null;
+    result = result ? cellStep(result, grown, "intersect") : grown;
+    if (!result) return false;
+  }
+  for (const [i, solid] of solids.entries()) {
+    if ((mask >> i) & 1) continue;
+    const shrunk = shrinkSolid((solid as Shape3D).clone(), d);
+    if (!shrunk) return null;
+    result = cellStep(result!, shrunk, "cut");
+    if (!result) return false;
+  }
+  return result;
+}
+
 /**
  * One B-rep solid offset outward by `d`, or null when OCCT cannot. Only the
  * mitred intersection join is used: the arc join would round the corners (a
@@ -6606,15 +6668,18 @@ function offsetWithJoin(solid: Shape3D, d: number, join: unknown): Shape3D | nul
     let grown = cast(maker.Shape()) as Shape3D;
     // An offset can come back as a bare shell; booleans need a solid.
     if (grown.constructor.name === "Shell") grown = makeSolid([grown as never]) as unknown as Shape3D;
-    // An offset outward must add material. Anything else is a failed offset.
-    if (!(measureVolume(grown) > measureVolume(solid))) return null;
+    // An offset outward must add material, and one inward must remove some but
+    // not all. Anything else is a failed offset.
+    const before = measureVolume(solid);
+    const after = measureVolume(grown);
+    if (d > 0 ? !(after > before) : !(after < before && after > 0)) return null;
     // OCCT sometimes "succeeds" with a runaway mitre (a lens-shaped sliver came
     // back 1e14 mm3). A true offset stays near the original — a mitre at a sharp
     // tip reaches d / sin(half-angle), so allow 10d — and anything reaching
     // further is rejected.
     const [lo, hi] = getTightSolidBounds(solid);
     const [glo, ghi] = getTightSolidBounds(grown);
-    const slack = 10 * d + 1e-3;
+    const slack = 10 * Math.abs(d) + 1e-3;
     for (let i = 0; i < 3; i++) {
       if (glo[i] < lo[i] - slack || ghi[i] > hi[i] + slack) return null;
     }
