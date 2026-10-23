@@ -6569,15 +6569,15 @@ function growOcctSolid(solid: Shape3D, d: number): Shape3D | null {
  * The shapes a group or built shape cuts away, at their EXACT size and placed
  * where they sit in the world — the parts a printed piece would have to fit
  * into the hole. Drawn faintly over the result, they show the gap the
- * clearance leaves around them. Empty for anything that cuts nothing, or whose
- * clearance is 0 (there is no gap to show).
+ * clearance leaves around them — and at a clearance of 0 they sit flush in
+ * the hole instead, which is the honest picture of an exact cut. Empty only
+ * for a shape that cuts nothing.
  */
 export async function cutterSolids(
   spec: NodeSpec,
   onError?: (id: string, msg: string) => void,
 ): Promise<AnySolid[]> {
   if (spec.type === "group") {
-    if (!((spec.clearance ?? 0) > 0)) return [];
     const out: AnySolid[] = [];
     for (const [i, child] of spec.children.entries()) {
       const cuts = spec.op === "subtract" ? i > 0 : spec.op === "union" ? child.isHole : false;
@@ -6588,7 +6588,6 @@ export async function cutterSolids(
     return out;
   }
   if (spec.type === "build") {
-    if (!((spec.clearance ?? 0) > 0)) return [];
     const { solids } = await buildSources(spec, onError);
     if (solids.length < 2) return [];
     const kept = new Set(spec.keep);

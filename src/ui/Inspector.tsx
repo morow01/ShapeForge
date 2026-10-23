@@ -641,7 +641,7 @@ export function Inspector({
                     onPick={(mm) => onClearance(mm)}
                   />
                   <span className="clearance-custom">
-                    <span className="clearance-custom-label">Custom</span>
+                    <span className="field-label clearance-custom-label">Custom</span>
                     <MathNumInput
                       className="num"
                       min={0}
@@ -1183,7 +1183,7 @@ function BuildInfo({
           <span className="field-label">Clearance (mm)</span>
           <ClearancePresets value={node.clearance ?? 0} onPick={(mm) => onClearance(mm)} />
           <span className="clearance-custom">
-            <span className="clearance-custom-label">Custom</span>
+            <span className="field-label clearance-custom-label">Custom</span>
             <MathNumInput
               className="num"
               min={0}

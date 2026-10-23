@@ -3997,7 +3997,10 @@ export function App() {
     if (toolMode === "build" || selectedIds.length !== 1) return null;
     const node = findNode(nodes, selectedIds[0]);
     if (!node || !((isGroup(node) && (node.op === "subtract" || node.op === "union")) || node.type === "build")) return null;
-    if (!((node.clearance ?? 0) > 0)) return null;
+    // Drawn at every clearance, nought included: the ghost is what is being
+    // cut away, and it vanishing the moment the gap went to zero read as the
+    // cutter itself disappearing. With no gap it simply sits flush in the
+    // hole it made.
     return JSON.stringify(toSpec(node));
   }, [nodes, selectedIds, toolMode]);
   useEffect(() => {
@@ -6233,7 +6236,7 @@ export function App() {
                   <label className="field-label" htmlFor="build-clearance">Clearance (mm)</label>
                   <ClearancePresets value={buildClearance} onPick={setBuildClearance} />
                   <span className="clearance-custom">
-                    <span className="clearance-custom-label">Custom</span>
+                    <span className="field-label clearance-custom-label">Custom</span>
                     <input
                       id="build-clearance"
                       className="num"

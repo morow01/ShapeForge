@@ -1933,14 +1933,12 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
    the main control with the presets as an afterthought, and left a lot of
    empty box around three characters; this is as wide as the number needs. */
 .clearance-custom {
-  display: flex;
-  align-items: center;
-  gap: 7px;
+  display: block;
 }
 .clearance-custom-label {
-  font-size: 10px;
-  font-weight: 600;
-  color: #64748b;
+  /* A heading over its box, like every other label on the panel — beside it
+     the row read as a sentence and left an odd gap across the panel. */
+  margin-top: 2px;
 }
 .clearance-custom .num-stepper-wrap {
   flex: none;
@@ -1949,6 +1947,11 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
 .clearance-custom > input.num {
   width: 78px;
   box-sizing: border-box;
+}
+/* The clearance is a new subject after the op's own hint, so it starts a
+   little further down than the fields that simply follow one another. */
+.clearance-field > .field-label {
+  padding-top: 7px;
 }
 
 /* In Settings the row sits above the box in the right-hand column. */

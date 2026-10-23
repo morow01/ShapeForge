@@ -8536,6 +8536,14 @@ export class Scene {
       opacity: 0.16,
       depthWrite: false,
       side: THREE.DoubleSide,
+      // At a clearance of 0 the ghost's faces land exactly on the walls of
+      // the hole it cut, and the two meshes are tessellated separately, so
+      // their facets cross: -1 still left the curved wall striped. This is
+      // enough to settle it, and a ghost this faint can afford to sit a
+      // little proud of what is behind it.
+      polygonOffset: true,
+      polygonOffsetFactor: -6,
+      polygonOffsetUnits: -6,
     });
     const line = new THREE.LineBasicMaterial({ color: 0xe08a00, transparent: true, opacity: 0.75 });
     for (const cell of cells) {
