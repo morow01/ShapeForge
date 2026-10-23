@@ -303,6 +303,8 @@ interface ResizeDrag {
   startScale: Vec3;
   axis: 0 | 1 | 2 | null;
   lockAspectXY?: boolean;
+  /** The undo batch has been (re)opened by this drag's first move. */
+  batchOpened?: boolean;
   centreX: number;
   centreY: number;
   startDistance: number;
@@ -11338,6 +11340,15 @@ export class Scene {
     }
 
     if (this.resizeDrag) {
+      // The undo batch is opened on the press, but pressing a handle also takes
+      // focus away from whatever field was being edited, and that field's blur
+      // ends the batch right after it opened. Every later frame of the drag
+      // then became its own history step — 40+ "Resize" entries for one drag.
+      // Opening it again here, on the first move, is after that blur.
+      if (!this.resizeDrag.batchOpened) {
+        this.resizeDrag.batchOpened = true;
+        this.onDragChange?.(true);
+      }
       this.updateScaleHint(e);
       const d = Math.hypot(e.clientX - this.resizeDrag.centreX, e.clientY - this.resizeDrag.centreY);
       const ratio = d / this.resizeDrag.startDistance;
