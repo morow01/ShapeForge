@@ -1929,6 +1929,28 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
   font-size: 9px;
   opacity: 0.75;
 }
+/* The box for a value none of the fits covers. A full-width field read as
+   the main control with the presets as an afterthought, and left a lot of
+   empty box around three characters; this is as wide as the number needs. */
+.clearance-custom {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.clearance-custom-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: #64748b;
+}
+.clearance-custom .num-stepper-wrap {
+  flex: none;
+  width: 78px;
+}
+.clearance-custom > input.num {
+  width: 78px;
+  box-sizing: border-box;
+}
+
 /* In Settings the row sits above the box in the right-hand column. */
 .settings-clearance {
   display: flex;

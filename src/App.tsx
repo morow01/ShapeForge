@@ -6232,19 +6232,22 @@ export function App() {
                 <div className="build-panel-section">
                   <label className="field-label" htmlFor="build-clearance">Clearance (mm)</label>
                   <ClearancePresets value={buildClearance} onPick={setBuildClearance} />
-                  <input
-                    id="build-clearance"
-                    className="num"
-                    type="number"
-                    min={0}
-                    max={5}
-                    step={0.05}
-                    value={buildClearance}
-                    onChange={(e) => {
-                      const next = Number(e.target.value);
-                      setBuildClearance(Number.isFinite(next) ? Math.max(0, Math.min(5, next)) : 0);
-                    }}
-                  />
+                  <span className="clearance-custom">
+                    <span className="clearance-custom-label">Custom</span>
+                    <input
+                      id="build-clearance"
+                      className="num"
+                      type="number"
+                      min={0}
+                      max={5}
+                      step={0.05}
+                      value={buildClearance}
+                      onChange={(e) => {
+                        const next = Number(e.target.value);
+                        setBuildClearance(Number.isFinite(next) ? Math.max(0, Math.min(5, next)) : 0);
+                      }}
+                    />
+                  </span>
                   <p className="hint">
                     Regions you take out grow by this much, so what you keep pulls back from them and a printed part fits. 0 cuts the exact region.
                   </p>

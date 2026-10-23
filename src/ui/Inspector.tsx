@@ -640,15 +640,18 @@ export function Inspector({
                     value={node.clearance ?? 0}
                     onPick={(mm) => onClearance(mm)}
                   />
-                  <MathNumInput
-                    className="num"
-                    min={0}
-                    step={0.05}
-                    value={Math.round((node.clearance ?? 0) * 1000) / 1000}
-                    onFocus={beginHistoryBatch}
-                    onBlur={endHistoryBatch}
-                    onCommit={(v) => onClearance(Number.isFinite(v) ? Math.max(0, v) : 0)}
-                  />
+                  <span className="clearance-custom">
+                    <span className="clearance-custom-label">Custom</span>
+                    <MathNumInput
+                      className="num"
+                      min={0}
+                      step={0.05}
+                      value={Math.round((node.clearance ?? 0) * 1000) / 1000}
+                      onFocus={beginHistoryBatch}
+                      onBlur={endHistoryBatch}
+                      onCommit={(v) => onClearance(Number.isFinite(v) ? Math.max(0, v) : 0)}
+                    />
+                  </span>
                   <span className="hint">
                     {node.op === "subtract"
                       ? "The shapes cut away grow by this much in every direction, so a printed part fits into the hole. 0 cuts the exact size."
@@ -1179,15 +1182,18 @@ function BuildInfo({
         <label className="field clearance-field">
           <span className="field-label">Clearance (mm)</span>
           <ClearancePresets value={node.clearance ?? 0} onPick={(mm) => onClearance(mm)} />
-          <MathNumInput
-            className="num"
-            min={0}
-            step={0.05}
-            value={Math.round((node.clearance ?? 0) * 1000) / 1000}
-            onFocus={beginHistoryBatch}
-            onBlur={endHistoryBatch}
-            onCommit={(v) => onClearance(Number.isFinite(v) ? Math.max(0, v) : 0)}
-          />
+          <span className="clearance-custom">
+            <span className="clearance-custom-label">Custom</span>
+            <MathNumInput
+              className="num"
+              min={0}
+              step={0.05}
+              value={Math.round((node.clearance ?? 0) * 1000) / 1000}
+              onFocus={beginHistoryBatch}
+              onBlur={endHistoryBatch}
+              onCommit={(v) => onClearance(Number.isFinite(v) ? Math.max(0, v) : 0)}
+            />
+          </span>
           <span className="hint">
             The regions that were taken out grow by this much in every direction, so what was kept pulls back from them and a printed part fits. 0 cuts the exact region.
           </span>
