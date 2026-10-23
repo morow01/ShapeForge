@@ -6566,6 +6566,44 @@ function growOcctSolid(solid: Shape3D, d: number): Shape3D | null {
 }
 
 /**
+ * The shapes a group or built shape cuts away, at their EXACT size and placed
+ * where they sit in the world — the parts a printed piece would have to fit
+ * into the hole. Drawn faintly over the result, they show the gap the
+ * clearance leaves around them. Empty for anything that cuts nothing, or whose
+ * clearance is 0 (there is no gap to show).
+ */
+export async function cutterSolids(
+  spec: NodeSpec,
+  onError?: (id: string, msg: string) => void,
+): Promise<AnySolid[]> {
+  if (spec.type === "group") {
+    if (!((spec.clearance ?? 0) > 0)) return [];
+    const out: AnySolid[] = [];
+    for (const [i, child] of spec.children.entries()) {
+      const cuts = spec.op === "subtract" ? i > 0 : spec.op === "union" ? child.isHole : false;
+      if (!cuts) continue;
+      const solid = await makeWorld({ ...child, isHole: false }, onError);
+      if (solid) out.push(place(solid, spec));
+    }
+    return out;
+  }
+  if (spec.type === "build") {
+    if (!((spec.clearance ?? 0) > 0)) return [];
+    const { solids } = await buildSources(spec, onError);
+    if (solids.length < 2) return [];
+    const kept = new Set(spec.keep);
+    const out: AnySolid[] = [];
+    for (let mask = 1; mask < 1 << solids.length; mask++) {
+      if (kept.has(mask)) continue;
+      const region = cellSolid(solids, mask);
+      if (region) out.push(place(region, spec));
+    }
+    return out;
+  }
+  return [];
+}
+
+/**
  * Grows what a boolean cuts away by `clearance` mm: every operand after the
  * first for a subtract, the holes for a union. Returns the operands unchanged
  * when there is no clearance. A cutter that cannot be grown is left as it was

@@ -508,6 +508,10 @@ export const kernel = {
   // Shape Builder commit: the separate solids the kept regions make, and which
   // source each one mostly came from.
   analyseBuild: (spec: NodeSpec) => withWatchdog("heavy", (raw) => raw.analyseBuild(spec)),
+  // The exact-size shapes a group or built shape cuts away, for the faint
+  // clearance outline. Heavy lane: it is a background nicety and must not queue
+  // in front of the interactive rebuilds.
+  cutterOutline: (spec: NodeSpec) => withWatchdog("heavy", (raw) => raw.cutterOutline(spec)),
 
   // A live push/pull drag's preview — see previewLocal's own doc comment in
   // worker.ts. Shares the "scene" lane/worker with buildScene (it needs to

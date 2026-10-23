@@ -23,6 +23,7 @@ import {
   getTightSolidBounds,
   makeLocal,
   makeWorld,
+  cutterSolids,
   makePushPullPreviewBase,
   place,
   survivingOps,
@@ -1954,6 +1955,20 @@ const api = {
     return decompose(solids).map(({ mask, solid }) => ({
       mask,
       mesh: toMesh(`cell-${mask}`, solid, EDIT_QUALITY),
+    }));
+  },
+
+  /**
+   * The exact-size shapes a group or built shape cuts away, meshed in world
+   * position, for the faint clearance outline. Empty when there is none.
+   */
+  async cutterOutline(spec: NodeSpec): Promise<CellPart[]> {
+    await init();
+    const { onError } = collector();
+    const solids = await cutterSolids(spec, onError);
+    return solids.map((solid, index) => ({
+      mask: index,
+      mesh: toMesh(`cutter-${index}`, solid, EDIT_QUALITY),
     }));
   },
 
