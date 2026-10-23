@@ -5752,7 +5752,7 @@ function combineShape(
         return combineMesh(op, meshed);
       }
     }
-    return result;
+    return unifyCoplanarFaces(result);
   }
   if (op === "intersect") {
     let result = children[0].solid.clone();
@@ -5767,7 +5767,7 @@ function combineShape(
         return combineMesh(op, meshed);
       }
     }
-    return result;
+    return unifyCoplanarFaces(result);
   }
   const solids = children.filter((c) => !c.isHole);
   const holes = children.filter((c) => c.isHole);
@@ -5817,7 +5817,33 @@ function combineShape(
       return combineMesh(op, meshed);
     }
   }
-  return result;
+  return unifyCoplanarFaces(result);
+}
+
+/**
+ * A boolean leaves the faces of its operands as separate faces even where they
+ * lie in one plane — a bar whose end is flush with a cube's face shows up as a
+ * square outlined on that face, as if the two had not really joined. Merging
+ * same-plane faces makes the result one body with one face there. Anything
+ * the merge cannot handle keeps the plain boolean result.
+ *
+ * The merge tolerance is wider than OCCT's own (1e-7 mm): positions that were
+ * dragged and snapped carry rounding drift, so two faces meant to be flush
+ * can sit a few 1e-7 apart — in a real model a bar 2.3e-7 mm behind a cube's
+ * face left its end as a separate square. 1e-5 mm is far below anything
+ * printable and moves the volume by under a thousandth of a mm³.
+ */
+function unifyCoplanarFaces(shape: Shape3D): Shape3D {
+  try {
+    const unifier = new (getOC()).ShapeUpgrade_UnifySameDomain(shape.wrapped, true, true, false);
+    unifier.SetLinearTolerance(1e-5);
+    unifier.Build();
+    const merged = cast(unifier.Shape()) as Shape3D;
+    unifier.delete();
+    return merged;
+  } catch {
+    return shape;
+  }
 }
 
 /** Same three ops, run through manifold-3d instead of OCCT — used whenever an
