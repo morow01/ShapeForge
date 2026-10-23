@@ -117,6 +117,7 @@ import {
 import { MAX_BUILD_SOURCES, PRIMITIVES, PRIMITIVE_CATEGORIES, SKETCH_CURVE_SEGMENTS, isGroup } from "./document/types";
 import { findAssemblyOwner, findNode, parentOf, resolveNodeTransparent, resolveNodeColor, updateNode, walk } from "./document/tree";
 import { bakeScale } from "./document/bake";
+import { getDefaultClearance } from "./document/clearance";
 import { missingBlobs, putBlob } from "./document/blobStore";
 import { loadCameraState, loadThumbnail, locationOf, saveThumbnail } from "./document/persist";
 import type { EditOp, GroupNode, ImportNode, PrimitiveKind, SceneNode, ShellOp, HollowRim, ResizeFaceOp, SketchData, Vec3 } from "./document/types";
@@ -195,6 +196,7 @@ const toSpec = (n: SceneNode): NodeSpec => {
       sources: n.sources.map(toSpec),
       keep: n.keep,
       piece: n.piece,
+      clearance: n.clearance,
       position: n.position,
       rotation: n.rotation,
       scale: n.scale,
@@ -3973,6 +3975,13 @@ export function App() {
   );
 
   const keptCount = buildCells.filter((c) => c.kept).length;
+  /** Millimetres the regions taken out grow by, so what was kept pulls back from
+   *  them and a printed part fits. Starts from the printer default each time a
+   *  session opens; 0 cuts the exact region. */
+  const [buildClearance, setBuildClearance] = useState<number>(() => getDefaultClearance());
+  useEffect(() => {
+    if (toolMode === "build") setBuildClearance(getDefaultClearance());
+  }, [toolMode]);
 
   /** Commits the session. Kept regions that touch become one built shape;
    *  regions that end up apart from each other become separate objects. */
@@ -3997,6 +4006,7 @@ export function App() {
         id: "build-preview",
         sources: sources.map(toSpec),
         keep: kept,
+        clearance: buildClearance,
         position: [0, 0, 0],
         rotation: [0, 0, 0],
         scale: [1, 1, 1],
@@ -4009,9 +4019,9 @@ export function App() {
     } finally {
       setBuildBusy(false);
     }
-    shapeBuild(buildSources, kept, undefined, owners);
+    shapeBuild(buildSources, kept, undefined, owners, buildClearance);
     setToolMode("select");
-  }, [buildSources, buildBusy, shapeBuild]);
+  }, [buildSources, buildBusy, shapeBuild, buildClearance]);
 
   /** Drop (D): let the selection fall onto whatever is underneath it. The
    *  geometry that answers "what is underneath" only exists in the viewport,
@@ -6175,6 +6185,26 @@ export function App() {
                     <input type="checkbox" checked={cellDisplay.showRemoved} onChange={(e) => updateCellDisplay({ showRemoved: e.target.checked })} />
                     Show removed regions
                   </label>
+                </div>
+
+                <div className="build-panel-section">
+                  <label className="field-label" htmlFor="build-clearance">Clearance (mm)</label>
+                  <input
+                    id="build-clearance"
+                    className="num"
+                    type="number"
+                    min={0}
+                    max={5}
+                    step={0.05}
+                    value={buildClearance}
+                    onChange={(e) => {
+                      const next = Number(e.target.value);
+                      setBuildClearance(Number.isFinite(next) ? Math.max(0, Math.min(5, next)) : 0);
+                    }}
+                  />
+                  <p className="hint">
+                    Regions you take out grow by this much, so what you keep pulls back from them and a printed part fits. 0 cuts the exact region.
+                  </p>
                 </div>
 
                 {/* Finishing has to be visible. Enter alone was not: Esc is the
