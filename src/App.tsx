@@ -938,6 +938,11 @@ export function App() {
     const { position, rotation, nodeId } = sketchSession;
     return () => sceneRef.current?.sketchPlaneOutline(position, rotation, nodeId ?? undefined) ?? [];
   }, [sketchSession]);
+  const sketchTriangles = useMemo(() => {
+    if (!sketchSession) return undefined;
+    const { position, rotation, nodeId } = sketchSession;
+    return () => sceneRef.current?.sketchPlaneTriangles(position, rotation, nodeId ?? undefined) ?? new Float32Array(0);
+  }, [sketchSession]);
 
   const placePrimitive = useCallback((point: Vec3, normal: Vec3, targetId?: string, sizeOverride?: Record<string, number>) => {
     if (!pendingPrimitive) return;
@@ -3150,6 +3155,14 @@ export function App() {
       if (parent) delete next[parent.id];
       return next;
     });
+    return res;
+  }, [replaceImportBlob]);
+
+  const handleSmoothMesh = useCallback(async (nodeId: string, size: number) => {
+    const targetNode = findNode(useDoc.getState().nodes, nodeId);
+    if (!targetNode || targetNode.type !== "import") return;
+    const res = await kernel.smoothMesh(targetNode.blobId, size);
+    replaceImportBlob(nodeId, res.newBlobId, res.byteSize);
     return res;
   }, [replaceImportBlob]);
 
@@ -7067,6 +7080,7 @@ export function App() {
               onLowPoly={(lowPoly) => setLowPoly(selected.id, lowPoly)}
               onSvgThickness={(mm) => setSvgThickness(selected.id, mm)}
               onSimplifyMesh={handleSimplifyMesh}
+              onSmoothMesh={handleSmoothMesh}
               onReplaceFile={handleReplaceFile}
               onRestoreBlob={handleRestoreBlob}
               onOp={(op) => setGroupOp(selected.id, op)}
@@ -8711,6 +8725,7 @@ export function App() {
           initialDepth={sketchSession.depth}
           guides={sketchSession.guides}
           objectOutline={sketchOutline}
+          objectTriangles={sketchTriangles}
           displayUnit={displayUnit}
           decimals={decimalPlaces}
           onCancel={() => setSketchSession(null)}

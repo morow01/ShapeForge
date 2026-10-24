@@ -285,6 +285,7 @@ interface Props {
   onSvgThickness: (mm: number) => void;
   /** Imported STL only: decimate mesh by given ratio. */
   onSimplifyMesh?: (id: string, ratio: number) => Promise<SimplifyResult | void>;
+  onSmoothMesh?: (id: string, size: number) => Promise<SimplifyResult | void>;
   onReplaceFile?: (id: string, file: File) => Promise<void>;
   onRestoreBlob?: (id: string, blobId: string, byteSize: number) => void;
   onOp: (op: BooleanOp) => void;
@@ -408,6 +409,7 @@ export function Inspector({
   onLowPoly,
   onSvgThickness,
   onSimplifyMesh,
+  onSmoothMesh,
   onReplaceFile,
   onRestoreBlob,
   onOp,
@@ -681,6 +683,7 @@ export function Inspector({
               node={node}
               onSvgThickness={onSvgThickness}
               onSimplifyMesh={onSimplifyMesh}
+              onSmoothMesh={onSmoothMesh}
               onReplaceFile={onReplaceFile}
               onRestoreBlob={onRestoreBlob}
               displayUnit={displayUnit}
@@ -977,6 +980,7 @@ function ImportInfo({
   node,
   onSvgThickness,
   onSimplifyMesh,
+  onSmoothMesh,
   onReplaceFile,
   onRestoreBlob,
   displayUnit,
@@ -985,6 +989,7 @@ function ImportInfo({
   node: Extract<SceneNode, { type: "import" }>;
   onSvgThickness: (mm: number) => void;
   onSimplifyMesh?: (id: string, ratio: number) => Promise<SimplifyResult | void>;
+  onSmoothMesh?: (id: string, size: number) => Promise<SimplifyResult | void>;
   onReplaceFile?: (id: string, file: File) => Promise<void>;
   onRestoreBlob?: (id: string, blobId: string, byteSize: number) => void;
   displayUnit: DisplayUnit;
@@ -1038,6 +1043,23 @@ function ImportInfo({
     } catch (err: unknown) {
       const e = err as Error;
       setStatusMessage(`Error: ${e?.message || "Failed to simplify mesh"}`);
+    } finally {
+      setSimplifying(false);
+    }
+  };
+
+  const handleSmooth = async (size: number) => {
+    if (simplifying || !onSmoothMesh) return;
+    setSimplifying(true);
+    setStatusMessage(null);
+    try {
+      const res = await onSmoothMesh(node.id, size);
+      if (res) {
+        setTriangleCount(res.trianglesAfter);
+        setStatusMessage(`✓ Smoothed, now ${res.trianglesAfter.toLocaleString()} triangles`);
+      }
+    } catch (err: unknown) {
+      setStatusMessage(`Error: ${(err as Error)?.message || "Failed to smooth mesh"}`);
     } finally {
       setSimplifying(false);
     }
@@ -1157,6 +1179,26 @@ function ImportInfo({
           >
             {simplifying ? "Simplifying…" : "Reduce 75%"}
           </button>
+        </div>
+        <div className="simplify-mesh-title" style={{ marginTop: 8 }}>
+          <span>〰 Smooth Mesh</span>
+        </div>
+        <p className="hint" style={{ margin: 0 }}>
+          Rounds off facets and scan roughness, losing small details. Good for a rough shape to build around.
+        </p>
+        <div className="simplify-actions three">
+          {([["Light", 1], ["Medium", 3], ["Strong", 6]] as const).map(([label, size]) => (
+            <button
+              key={label}
+              type="button"
+              className="simplify-btn"
+              disabled={simplifying || !onSmoothMesh}
+              onClick={() => handleSmooth(size)}
+              title={`Wears away roughness and detail up to about ${size} mm across`}
+            >
+              {simplifying ? "Working…" : label}
+            </button>
+          ))}
         </div>
         {statusMessage && (
           <div className="simplify-status">

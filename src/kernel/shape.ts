@@ -2173,6 +2173,134 @@ export async function simplifyImport(
 }
 
 /**
+ * Taubin smoothing: alternating shrink and inflate passes over the vertices, so
+ * scan noise and facets wear away without the shape collapsing inwards the way
+ * plain averaging would. Returns the new x, y, z of every vertex.
+ */
+function taubinSmooth(
+  mesh: { numProp: number; vertProperties: Float32Array; triVerts: Uint32Array },
+  iterations: number,
+): Float32Array {
+  const { numProp, vertProperties, triVerts } = mesh;
+  const count = vertProperties.length / numProp;
+  let pos = new Float32Array(count * 3);
+  for (let v = 0; v < count; v++) {
+    pos[v * 3] = vertProperties[v * numProp];
+    pos[v * 3 + 1] = vertProperties[v * numProp + 1];
+    pos[v * 3 + 2] = vertProperties[v * numProp + 2];
+  }
+  // Neighbours in compressed rows; a shared edge is listed once per triangle
+  // side, which weights every neighbour alike.
+  const degree = new Uint32Array(count + 1);
+  for (let i = 0; i < triVerts.length; i += 3) {
+    for (let k = 0; k < 3; k++) degree[triVerts[i + k] + 1] += 2;
+  }
+  for (let v = 0; v < count; v++) degree[v + 1] += degree[v];
+  const fill = degree.slice(0, count);
+  const neighbours = new Uint32Array(degree[count]);
+  for (let i = 0; i < triVerts.length; i += 3) {
+    for (let k = 0; k < 3; k++) {
+      const a = triVerts[i + k];
+      neighbours[fill[a]++] = triVerts[i + (k + 1) % 3];
+      neighbours[fill[a]++] = triVerts[i + (k + 2) % 3];
+    }
+  }
+  let next = new Float32Array(pos.length);
+  const pass = (factor: number) => {
+    for (let v = 0; v < count; v++) {
+      const from = degree[v], to = degree[v + 1];
+      if (to === from) { next[v * 3] = pos[v * 3]; next[v * 3 + 1] = pos[v * 3 + 1]; next[v * 3 + 2] = pos[v * 3 + 2]; continue; }
+      let sx = 0, sy = 0, sz = 0;
+      for (let n = from; n < to; n++) {
+        const u = neighbours[n] * 3;
+        sx += pos[u]; sy += pos[u + 1]; sz += pos[u + 2];
+      }
+      const inv = 1 / (to - from);
+      next[v * 3] = pos[v * 3] + factor * (sx * inv - pos[v * 3]);
+      next[v * 3 + 1] = pos[v * 3 + 1] + factor * (sy * inv - pos[v * 3 + 1]);
+      next[v * 3 + 2] = pos[v * 3 + 2] + factor * (sz * inv - pos[v * 3 + 2]);
+    }
+    [pos, next] = [next, pos];
+  };
+  for (let i = 0; i < iterations; i++) {
+    pass(0.5);
+    pass(-0.53);
+  }
+  return pos;
+}
+
+/** Most triangles a smoothed mesh may be refined up to. */
+const SMOOTH_MAX_TRIANGLES = 150_000;
+
+/**
+ * Makes a rough or faceted imported mesh smooth, losing small detail. The
+ * vertices are relaxed (Taubin), then the surface is subdivided along its own
+ * curvature so the facets are really gone, not just shaded away. The result is
+ * a new STL blob, like simplifyImport.
+ */
+export async function smoothImport(
+  blobId: string,
+  /** Size of the detail to wear away, in mm. */
+  size: number,
+): Promise<{
+  newBlobId: string;
+  byteSize: number;
+  trianglesBefore: number;
+  trianglesAfter: number;
+}> {
+  const shape = await loadImport(blobId);
+  const raw = (shape as any).wrapped;
+  const trianglesBefore = raw.numTri();
+  const meanEdge = (m: { numProp: number; vertProperties: Float32Array; triVerts: Uint32Array }) => {
+    let sum = 0, n = 0;
+    for (let i = 0; i < m.triVerts.length; i += 3) {
+      const a = m.triVerts[i] * m.numProp, b = m.triVerts[i + 1] * m.numProp;
+      sum += Math.hypot(
+        m.vertProperties[a] - m.vertProperties[b],
+        m.vertProperties[a + 1] - m.vertProperties[b + 1],
+        m.vertProperties[a + 2] - m.vertProperties[b + 2],
+      );
+      n++;
+    }
+    return n ? sum / n : 1;
+  };
+  // Each pass only reaches as far as one edge, so a fine mesh would need
+  // hundreds of them to wear away detail of `size` mm, and that many passes
+  // wander. Thin it out first, to edges a fraction of that size.
+
+  let mesh = raw.getMesh();
+  let edge = meanEdge(mesh);
+  if (edge < size / 3) {
+    const thinned = raw.simplify(size * 0.25);
+    if (thinned.numTri() >= 12) {
+
+      mesh = thinned.getMesh();
+      edge = meanEdge(mesh);
+    }
+  }
+  const iterations = Math.min(40, Math.max(1, Math.ceil(2 * (size / Math.max(edge, 1e-6)) ** 2)));
+  const relaxed = taubinSmooth(mesh, iterations);
+  const manifold = getManifold();
+  const triVerts = new Uint32Array(mesh.triVerts);
+  let result = new manifold.Manifold(new manifold.Mesh({
+    numProp: 3,
+    vertProperties: relaxed,
+    triVerts,
+  }));
+  const levels = Math.max(1, Math.min(4, Math.floor(Math.sqrt(SMOOTH_MAX_TRIANGLES / Math.max(1, result.numTri())))));
+  if (levels > 1) {
+    const refined = result.smoothOut(180, 0).refine(levels);
+    if (refined.numTri() > 0 && refined.volume() > 1e-9) result = refined;
+  }
+  const outMesh = result.getMesh();
+  const resultBuffer = exportManifoldToBinarySTL(outMesh);
+  const newBlobId = crypto.randomUUID();
+  await putBlob(newBlobId, resultBuffer);
+  importCache.set(newBlobId, Promise.resolve(normalise(new MeshShape(result))));
+  return { newBlobId, byteSize: resultBuffer.byteLength, trianglesBefore, trianglesAfter: result.numTri() };
+}
+
+/**
  * Rebuilds a solid as a deliberately faceted, low-poly version of itself.
  *
  * This is real geometry, not a shading trick: the result is what gets sliced

@@ -29,6 +29,7 @@ import {
   survivingOps,
   boundsOf,
   simplifyImport,
+  smoothImport,
 } from "./shape";
 import { SVG_IMPORT_REVISION } from "./svgSolid";
 import { loadSTLPreview } from "./stlPreview";
@@ -2477,6 +2478,12 @@ const api = {
   async simplifyMesh(blobId: string, ratio: number) {
     await init();
     return simplifyImport(blobId, ratio);
+  },
+
+  /** Smooths an imported STL mesh: relaxes the vertices, then subdivides along the curvature. */
+  async smoothMesh(blobId: string, size: number) {
+    await init();
+    return smoothImport(blobId, size);
   },
 
   /**

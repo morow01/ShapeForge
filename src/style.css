@@ -1714,6 +1714,7 @@ button.danger:hover:not(:disabled) { background: #ffeded; }
   grid-template-columns: 1fr 1fr;
   gap: 6px;
 }
+.simplify-actions.three { grid-template-columns: repeat(3, 1fr); }
 .simplify-btn {
   padding: 6px 8px;
   font-size: 11px;
@@ -4173,6 +4174,8 @@ button.stepper-btn:disabled {
 }
 .sketch-outline { fill: none; stroke: #2b8ac6; stroke-width: 1; opacity: 0.7; pointer-events: none; }
 .sketch-show-objects { display: flex; align-items: center; gap: 5px; font-size: 13px; cursor: pointer; white-space: nowrap; }
+.sketch-show-objects input[type="range"] { width: 90px; }
+.sketch-smooth-value { min-width: 24px; color: #5b6b78; }
 .sketch-guides line { stroke: #8a98a4; stroke-width: 1.5; stroke-dasharray: 5 3; pointer-events: none; }
 .sketch-anchor.symmetric { rx: 3.5; }
 .sketch-quality-card {

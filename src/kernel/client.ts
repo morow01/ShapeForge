@@ -528,6 +528,8 @@ export const kernel = {
   pushPullIssue: (spec: NodeSpec) => withWatchdog("scene", (raw) => raw.pushPullIssue(spec)),
   simplifyMesh: (blobId: string, ratio: number) =>
     withWatchdog("scene", (raw) => raw.simplifyMesh(blobId, ratio)),
+  smoothMesh: (blobId: string, size: number) =>
+    withWatchdog("scene", (raw) => raw.smoothMesh(blobId, size)),
   splitByPlane: (spec: NodeSpec, planePoint: Vec3, planeNormal: Vec3) =>
     withWatchdog("heavy", (raw) => raw.splitByPlane(spec, planePoint, planeNormal), EXPORT_WATCHDOG_MS),
 };

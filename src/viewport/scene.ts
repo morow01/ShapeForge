@@ -1177,6 +1177,37 @@ export class Scene {
     return out;
   }
 
+  /** Every visible object's triangles flattened onto a sketch plane: x, y pairs, three per triangle. */
+  sketchPlaneTriangles(origin: Vec3, rotation: Vec3, excludeId?: string): Float32Array {
+    const toPlane = new THREE.Matrix4().compose(
+      new THREE.Vector3(...origin),
+      new THREE.Quaternion().setFromEuler(new THREE.Euler(...rotation.map((d) => d * Math.PI / 180) as Vec3, "XYZ")),
+      new THREE.Vector3(1, 1, 1),
+    ).invert();
+    const chunks: Float32Array[] = [];
+    for (const [id, view] of this.parts) {
+      if (id === excludeId || !view.group.visible) continue;
+      view.group.updateWorldMatrix(true, true);
+      const geometry = view.mesh.geometry as THREE.BufferGeometry;
+      const position = geometry.getAttribute("position");
+      if (!position) continue;
+      const index = geometry.getIndex();
+      const matrix = new THREE.Matrix4().multiplyMatrices(toPlane, view.mesh.matrixWorld);
+      const count = index ? index.count : position.count;
+      const flat = new Float32Array(Math.floor(count / 3) * 6);
+      const p = new THREE.Vector3();
+      for (let i = 0, o = 0; o < flat.length; i++, o += 2) {
+        p.fromBufferAttribute(position, index ? index.getX(i) : i).applyMatrix4(matrix);
+        flat[o] = p.x; flat[o + 1] = p.y;
+      }
+      chunks.push(flat);
+    }
+    const all = new Float32Array(chunks.reduce((n, c) => n + c.length, 0));
+    let at = 0;
+    for (const c of chunks) { all.set(c, at); at += c.length; }
+    return all;
+  }
+
   captureBlueprintGeometry(): BlueprintGeometry[] {
     const result:BlueprintGeometry[]=[];
     for(const [id,view] of this.parts) {

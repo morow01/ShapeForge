@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { smoothFootprint } from "../sketch/footprint";
 import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import * as THREE from "three";
 import { type AnchorMode, type SketchAnchor, type SketchData, type SketchPath, DEFAULT_OBJECT_COLOR } from "../document/types";
@@ -49,6 +50,7 @@ const TOOLS: { id: Tool; label: string; key: string; hint: string }[] = [
 /** Sketch snapping preferences, remembered between sketches and sessions. */
 const SNAP_GRID_KEY = "cad.sketchSnapGrid";
 const SHOW_OBJECTS_KEY = "cad.sketchShowObjects";
+const SMOOTH_OBJECTS_KEY = "cad.sketchSmoothObjects";
 const GRID_STEP_KEY = "cad.sketchGridStep";
 function readSetting(key: string, fallback: string): string {
   try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; }
@@ -148,19 +150,35 @@ interface Props {
   guides?: [Pt, Pt][];
   /** The outline of the other objects seen onto the sketch plane, for tracing; read only when shown. */
   objectOutline?: () => [Pt, Pt][];
+  /** The same objects as flat triangles (x, y pairs), for the smoothed footprint. */
+  objectTriangles?: () => Float32Array;
   displayUnit: DisplayUnit;
   decimals: number;
   onCancel: () => void;
   onApply: (sketch: SketchData, depth: number, shape: SketchShape) => void;
 }
 
-export function SketchEditor({ guideOnly = false, title, applyLabel, initialShape, initial, initialDepth, guides = [], objectOutline, displayUnit, decimals, onCancel, onApply }: Props) {
+export function SketchEditor({ guideOnly = false, title, applyLabel, initialShape, initial, initialDepth, guides = [], objectOutline, objectTriangles, displayUnit, decimals, onCancel, onApply }: Props) {
   const [showObjects, setShowObjects] = useState(() => readSetting(SHOW_OBJECTS_KEY, "off") === "on");
   useEffect(() => writeSetting(SHOW_OBJECTS_KEY, showObjects ? "on" : "off"), [showObjects]);
+  /** How much detail of the shown objects is smoothed away, in plane units; 0 is the raw outline. */
+  const [smooth, setSmooth] = useState(() => {
+    const saved = Number(readSetting(SMOOTH_OBJECTS_KEY, "0"));
+    return Number.isFinite(saved) && saved >= 0 ? saved : 0;
+  });
+  useEffect(() => writeSetting(SMOOTH_OBJECTS_KEY, String(smooth)), [smooth]);
+  const smoothNow = useDeferredValue(smooth);
+  const flatObjects = useMemo(() => {
+    if (!showObjects || !objectTriangles) return null;
+    try { return objectTriangles(); } catch { return null; }
+  }, [showObjects, objectTriangles]);
   const outline = useMemo<[Pt, Pt][]>(() => {
     if (!showObjects || !objectOutline) return [];
-    try { return objectOutline(); } catch { return []; }
-  }, [showObjects, objectOutline]);
+    try {
+      if (smoothNow > 0 && flatObjects) return smoothFootprint(flatObjects, smoothNow);
+      return objectOutline();
+    } catch { return []; }
+  }, [showObjects, objectOutline, flatObjects, smoothNow]);
   const [paths, setPaths] = useState<SketchPath[]>(() => clonePaths(initial.paths));
   const [depth, setDepth] = useState(initialDepth);
   const [shape, setShape] = useState<SketchShape>(initialShape);
@@ -253,10 +271,16 @@ export function SketchEditor({ guideOnly = false, title, applyLabel, initialShap
 
   const fitView = useCallback(() => {
     let bounds = sketchBounds({ paths: pathsRef.current });
-    if (!bounds && guides.length) {
-      // A new sketch on a face opens framed on that face.
-      const xs = guides.flatMap(([a, b]) => [a[0], b[0]]), ys = guides.flatMap(([a, b]) => [a[1], b[1]]);
-      bounds = { minX: Math.min(...xs), maxX: Math.max(...xs), minY: Math.min(...ys), maxY: Math.max(...ys) };
+    // A new sketch on a face opens framed on that face; shown objects frame
+    // the view on themselves, so a big import is not left off-screen.
+    const framing = [...(outline.length ? outline : guides)];
+    if (!bounds && framing.length) {
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (const [a, b] of framing) {
+        minX = Math.min(minX, a[0], b[0]); maxX = Math.max(maxX, a[0], b[0]);
+        minY = Math.min(minY, a[1], b[1]); maxY = Math.max(maxY, a[1], b[1]);
+      }
+      bounds = { minX, maxX, minY, maxY };
     }
     const el = canvasRef.current;
     const width = el?.clientWidth || size.width, height = el?.clientHeight || size.height;
@@ -270,7 +294,7 @@ export function SketchEditor({ guideOnly = false, title, applyLabel, initialShap
       cy: (bounds.minY + bounds.maxY) / 2,
       zoom: Math.min(width / (w * 1.4), height / (h * 1.4)),
     });
-  }, [size, guides]);
+  }, [size, guides, outline]);
 
   const fittedOnce = useRef(false);
   useEffect(() => {
@@ -278,6 +302,11 @@ export function SketchEditor({ guideOnly = false, title, applyLabel, initialShap
     fittedOnce.current = true;
     fitView();
   }, [size, fitView]);
+  // Switching Show objects on frames them, so they are never off-screen.
+  useEffect(() => {
+    if (outline.length) fitView();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showObjects, flatObjects]);
 
   const onWheel = useCallback((e: WheelEvent) => {
     e.preventDefault();
@@ -1082,6 +1111,13 @@ export function SketchEditor({ guideOnly = false, title, applyLabel, initialShap
           {objectOutline && (
             <label className="sketch-show-objects" title="Show the outline of the other objects on this plane, to trace over">
               <input type="checkbox" checked={showObjects} onChange={(e) => setShowObjects(e.target.checked)} /> Show objects
+            </label>
+          )}
+          {objectOutline && objectTriangles && showObjects && (
+            <label className="sketch-show-objects" title="Fill in and round off the outline, losing small details (0 = exact). Handy for rough scans.">
+              Smooth
+              <input type="range" min={0} max={20} step={0.5} value={smooth} onChange={(e) => setSmooth(Number(e.target.value))} />
+              <span className="sketch-smooth-value">{smooth ? smooth : "off"}</span>
             </label>
           )}
           <button type="button" onClick={fitView} title="Fit the drawing in view (F)">Fit</button>
