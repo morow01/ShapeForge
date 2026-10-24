@@ -933,6 +933,12 @@ export function App() {
     }
   }, []);
 
+  const sketchOutline = useMemo(() => {
+    if (!sketchSession) return undefined;
+    const { position, rotation, nodeId } = sketchSession;
+    return () => sceneRef.current?.sketchPlaneOutline(position, rotation, nodeId ?? undefined) ?? [];
+  }, [sketchSession]);
+
   const placePrimitive = useCallback((point: Vec3, normal: Vec3, targetId?: string, sizeOverride?: Record<string, number>) => {
     if (!pendingPrimitive) return;
     const n = new THREE.Vector3(...normal).normalize();
@@ -8704,6 +8710,7 @@ export function App() {
           initial={sketchSession.sketch}
           initialDepth={sketchSession.depth}
           guides={sketchSession.guides}
+          objectOutline={sketchOutline}
           displayUnit={displayUnit}
           decimals={decimalPlaces}
           onCancel={() => setSketchSession(null)}

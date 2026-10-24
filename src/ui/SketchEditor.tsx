@@ -48,6 +48,7 @@ const TOOLS: { id: Tool; label: string; key: string; hint: string }[] = [
 
 /** Sketch snapping preferences, remembered between sketches and sessions. */
 const SNAP_GRID_KEY = "cad.sketchSnapGrid";
+const SHOW_OBJECTS_KEY = "cad.sketchShowObjects";
 const GRID_STEP_KEY = "cad.sketchGridStep";
 function readSetting(key: string, fallback: string): string {
   try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; }
@@ -145,13 +146,21 @@ interface Props {
   initialDepth: number;
   /** Model edges in the sketch plane (the face it was started on), shown and snapped to. */
   guides?: [Pt, Pt][];
+  /** The outline of the other objects seen onto the sketch plane, for tracing; read only when shown. */
+  objectOutline?: () => [Pt, Pt][];
   displayUnit: DisplayUnit;
   decimals: number;
   onCancel: () => void;
   onApply: (sketch: SketchData, depth: number, shape: SketchShape) => void;
 }
 
-export function SketchEditor({ guideOnly = false, title, applyLabel, initialShape, initial, initialDepth, guides = [], displayUnit, decimals, onCancel, onApply }: Props) {
+export function SketchEditor({ guideOnly = false, title, applyLabel, initialShape, initial, initialDepth, guides = [], objectOutline, displayUnit, decimals, onCancel, onApply }: Props) {
+  const [showObjects, setShowObjects] = useState(() => readSetting(SHOW_OBJECTS_KEY, "off") === "on");
+  useEffect(() => writeSetting(SHOW_OBJECTS_KEY, showObjects ? "on" : "off"), [showObjects]);
+  const outline = useMemo<[Pt, Pt][]>(() => {
+    if (!showObjects || !objectOutline) return [];
+    try { return objectOutline(); } catch { return []; }
+  }, [showObjects, objectOutline]);
   const [paths, setPaths] = useState<SketchPath[]>(() => clonePaths(initial.paths));
   const [depth, setDepth] = useState(initialDepth);
   const [shape, setShape] = useState<SketchShape>(initialShape);
@@ -1070,6 +1079,11 @@ export function SketchEditor({ guideOnly = false, title, applyLabel, initialShap
           </div>
         </div>
         <div className="sketch-header-actions">
+          {objectOutline && (
+            <label className="sketch-show-objects" title="Show the outline of the other objects on this plane, to trace over">
+              <input type="checkbox" checked={showObjects} onChange={(e) => setShowObjects(e.target.checked)} /> Show objects
+            </label>
+          )}
           <button type="button" onClick={fitView} title="Fit the drawing in view (F)">Fit</button>
           <span className="sketch-header-sep" />
           <button type="button" onClick={onCancel}>Cancel</button>
@@ -1116,6 +1130,15 @@ export function SketchEditor({ guideOnly = false, title, applyLabel, initialShap
             <g className="sketch-grid">
               {grid.lines.map((l, i) => <path key={i} d={l.d} className={l.kind} />)}
             </g>
+            {outline.length > 0 && (
+              <path
+                className="sketch-outline"
+                d={outline.map(([a, b]) => {
+                  const [x1, y1] = toScreen(a[0], a[1]), [x2, y2] = toScreen(b[0], b[1]);
+                  return `M${x1.toFixed(1)} ${y1.toFixed(1)}L${x2.toFixed(1)} ${y2.toFixed(1)}`;
+                }).join("")}
+              />
+            )}
             <g className="sketch-guides">
               {guides.map(([a, b], i) => {
                 const [x1, y1] = toScreen(a[0], a[1]), [x2, y2] = toScreen(b[0], b[1]);

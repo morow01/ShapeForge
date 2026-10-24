@@ -1130,6 +1130,53 @@ export class Scene {
     return out;
   }
 
+  /**
+   * The outline of every visible object as seen straight down onto a sketch
+   * plane (same frame as sketchPlaneEdges), for tracing: edges where the
+   * surface turns from facing the plane to facing away, plus open boundaries.
+   */
+  sketchPlaneOutline(origin: Vec3, rotation: Vec3, excludeId?: string): [[number, number], [number, number]][] {
+    const toPlane = new THREE.Matrix4().compose(
+      new THREE.Vector3(...origin),
+      new THREE.Quaternion().setFromEuler(new THREE.Euler(...rotation.map((d) => d * Math.PI / 180) as Vec3, "XYZ")),
+      new THREE.Vector3(1, 1, 1),
+    ).invert();
+    const out: [[number, number], [number, number]][] = [];
+    for (const [id, view] of this.parts) {
+      if (id === excludeId || !view.group.visible) continue;
+      view.group.updateWorldMatrix(true, true);
+      const geometry = view.mesh.geometry as THREE.BufferGeometry;
+      const position = geometry.getAttribute("position");
+      if (!position) continue;
+      const index = geometry.getIndex();
+      const matrix = new THREE.Matrix4().multiplyMatrices(toPlane, view.mesh.matrixWorld);
+      // Keyed on the untransformed vertex, so a mesh split into separate
+      // vertices along a seam still pairs its edges up.
+      const key = (i: number) => `${Math.round(position.getX(i) * 1e4)},${Math.round(position.getY(i) * 1e4)},${Math.round(position.getZ(i) * 1e4)}`;
+      const at = (i: number) => new THREE.Vector3().fromBufferAttribute(position, i).applyMatrix4(matrix);
+      const count = index ? index.count : position.count;
+      const edges = new Map<string, { a: THREE.Vector3; b: THREE.Vector3; side: number; seen: number; open: boolean }>();
+      for (let t = 0; t + 2 < count; t += 3) {
+        const ids = [0, 1, 2].map((k) => (index ? index.getX(t + k) : t + k));
+        const p = ids.map(at);
+        const nz = new THREE.Vector3().subVectors(p[1], p[0]).cross(new THREE.Vector3().subVectors(p[2], p[0])).normalize().z;
+        const side = nz > 1e-4 ? 1 : nz < -1e-4 ? -1 : 0;
+        for (const [i, j] of [[0, 1], [1, 2], [2, 0]]) {
+          const ka = key(ids[i]), kb = key(ids[j]);
+          if (ka === kb) continue;
+          const k = ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
+          const known = edges.get(k);
+          if (!known) edges.set(k, { a: p[i], b: p[j], side, seen: 1, open: true });
+          else if (known.seen === 1) { known.seen = 2; known.open = known.side !== side; }
+        }
+      }
+      for (const e of edges.values()) {
+        if (e.seen === 1 || e.open) out.push([[e.a.x, e.a.y], [e.b.x, e.b.y]]);
+      }
+    }
+    return out;
+  }
+
   captureBlueprintGeometry(): BlueprintGeometry[] {
     const result:BlueprintGeometry[]=[];
     for(const [id,view] of this.parts) {
