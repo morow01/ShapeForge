@@ -3848,6 +3848,37 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // The card's picture used to be retaken only on leaving to Home or on Save, so editing and then
+  // reloading or closing the tab left the old picture. Retake it once an edit has finished building.
+  const thumbDirtyRef = useRef(false);
+  const thumbProjectRef = useRef<{ id: string; seen: boolean }>({ id: "", seen: false });
+  useEffect(() => {
+    const mark = thumbProjectRef.current;
+    if (mark.id !== currentProjectId) {
+      // Opening a design is not an edit: its first scene only sets the baseline.
+      thumbProjectRef.current = { id: currentProjectId, seen: false };
+      thumbDirtyRef.current = false;
+      return;
+    }
+    if (!mark.seen) { mark.seen = true; return; }
+    thumbDirtyRef.current = true;
+  }, [nodes, currentProjectId]);
+  useEffect(() => {
+    if (!thumbDirtyRef.current || homeOpen || sceneBusy || !nodes.length || parts.length === 0 || !sceneIsComplete()) return;
+    const id = currentProjectId;
+    const t = window.setTimeout(() => {
+      if (useDoc.getState().currentProjectId !== id || !sceneIsComplete()) return;
+      const shot = sceneRef.current?.captureThumbnail();
+      if (shot) {
+        saveThumbnail(id, shot);
+        thumbDirtyRef.current = false;
+        setThumbVersion((n) => n + 1);
+      }
+    }, 2500);
+    return () => window.clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [homeOpen, sceneBusy, nodes, parts, currentProjectId]);
+
   // The design that is open when the app starts never gets "left", so its card would
   // have no picture. Once it has finished building behind the Home page, take one.
   useEffect(() => {
