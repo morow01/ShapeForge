@@ -6079,3 +6079,5 @@ span.status-btn { cursor: default; }
 .history-snapshot-tool { display: grid; flex: 0 0 auto; place-items: center; width: 26px; height: 26px; color: #8a99a3; background: none; border: none; border-radius: 5px; cursor: pointer; }
 .history-snapshot-tool:hover { color: #1f2e38; background: #e6ecef; }
 .history-snapshot-tool.remove:hover { color: #b3261e; background: #fbeceb; }
+.adaptive-row { position: relative; }
+.adaptive-corner-mark { right: 2px; bottom: 2px; }

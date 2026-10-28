@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { CornerFlyoutMark } from "./icons";
 
 /*
  * Selection-driven tool suggestions (Shapr3D-style): the tools that make sense
@@ -26,6 +27,8 @@ export interface ToolItem {
   run: () => void;
   /** Inline sub-choices shown on the row itself, e.g. Mirror's X / Y / Z. */
   choices?: { label: string; title: string; run: () => void }[];
+  /** Hold the row's icon to open these as a picture menu beside it, e.g. Drop's six directions. */
+  flyout?: { label: string; title: string; run: () => void; icon: ReactNode; active?: boolean }[];
 }
 
 export interface ToolSection {
@@ -42,8 +45,30 @@ export interface ToolSuggestions {
 }
 
 function ToolRow({ item, primary, onDone }: { item: ToolItem; primary?: boolean; onDone?: () => void }) {
+  const rowRef = useRef<HTMLDivElement>(null);
+  const flyoutRef = useRef<HTMLDivElement>(null);
+  const timer = useRef<number | null>(null);
+  const held = useRef(false);
+  const [flyoutAt, setFlyoutAt] = useState<{ top: number; left: number } | null>(null);
+  const clearTimer = () => { if (timer.current !== null) { window.clearTimeout(timer.current); timer.current = null; } };
+  const openFlyout = () => {
+    const r = rowRef.current?.getBoundingClientRect();
+    if (r) setFlyoutAt({ top: r.top + r.height / 2, left: r.right + 10 });
+  };
+  useEffect(() => {
+    if (!flyoutAt) return;
+    const close = (e: Event) => {
+      if (e instanceof KeyboardEvent && e.key !== "Escape") return;
+      if (e.type === "pointerdown" && flyoutRef.current?.contains(e.target as Node)) return;
+      setFlyoutAt(null);
+    };
+    document.addEventListener("pointerdown", close, true);
+    window.addEventListener("keydown", close, true);
+    return () => { document.removeEventListener("pointerdown", close, true); window.removeEventListener("keydown", close, true); };
+  }, [flyoutAt]);
+  useEffect(() => clearTimer, []);
   return (
-    <div className={`adaptive-row${primary ? " primary" : ""}${item.active ? " active" : ""}`}>
+    <div ref={rowRef} className={`adaptive-row${primary ? " primary" : ""}${item.active ? " active" : ""}`}>
       <button
         type="button"
         className="adaptive-tool"
@@ -52,13 +77,39 @@ function ToolRow({ item, primary, onDone }: { item: ToolItem; primary?: boolean;
         // it is collapsed to icons), so the tooltip always names the tool.
         title={!item.enabled ? item.reason : item.keys ? `${item.tooltip ?? item.label} (${item.keys})` : item.tooltip ?? item.label}
         disabled={!item.enabled}
-        onClick={() => { item.run(); onDone?.(); }}
+        onPointerDown={item.flyout && item.enabled ? (e) => {
+          if (e.button !== 0) return;
+          held.current = false;
+          clearTimer();
+          timer.current = window.setTimeout(() => { held.current = true; timer.current = null; openFlyout(); }, 400);
+        } : undefined}
+        onPointerUp={item.flyout ? clearTimer : undefined}
+        onPointerLeave={item.flyout ? clearTimer : undefined}
+        onClick={() => {
+          // The hold already opened the menu — releasing shouldn't also run the tool.
+          if (held.current) { held.current = false; return; }
+          item.run(); onDone?.();
+        }}
       >
         <span className="adaptive-icon" aria-hidden="true">{item.icon}</span>
         <span className="adaptive-label">{item.label}</span>
         {/* Single-key shortcuts fit on the row; longer chords go in the tooltip. */}
         {item.keys && item.keys.length <= 3 && !item.choices && <kbd>{item.keys}</kbd>}
       </button>
+      {item.flyout && item.enabled && <CornerFlyoutMark className="corner-flyout-mark adaptive-corner-mark" />}
+      {flyoutAt && item.flyout && createPortal(
+        <div ref={flyoutRef} className="tool-rail-flyout drop-direction-flyout" role="menu" aria-label={item.label}
+          style={{ position: "fixed", top: flyoutAt.top, left: flyoutAt.left, transform: "translateY(-50%)" }}>
+          {item.flyout.map((choice) => (
+            <button key={choice.label} type="button" role="menuitem" className={choice.active ? "active" : ""} title={choice.title}
+              onClick={() => { choice.run(); setFlyoutAt(null); }}>
+              <span className="drop-direction-arrow">{choice.icon}</span>
+              <span className="flyout-label">{choice.label}</span>
+            </button>
+          ))}
+        </div>,
+        document.body,
+      )}
       {item.choices && item.enabled && (
         <span className="adaptive-choices">
           {item.choices.map((choice) => (

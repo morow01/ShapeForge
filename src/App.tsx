@@ -4749,7 +4749,21 @@ export function App() {
       })) },
     drop: { id: "drop", label: `Drop ${dropDirection.label.toLowerCase()}`, aria: `Drop ${dropDirection.label.toLowerCase()}`,
       icon: <DropIcon direction={dropDirection.label.toLowerCase() as DropDirection} />, keys: "D", enabled: anySelected, reason: needOne,
-      run: dropSelected },
+      run: dropSelected,
+      // Hold the icon for the picture menu; picking one only sets the
+      // direction (the row then reads "Drop left"), the click or D drops.
+      flyout: ([
+        ["left", "Left", [-1, 0, 0]],
+        ["right", "Right", [1, 0, 0]],
+        ["back", "Back", [0, -1, 0]],
+        ["front", "Front", [0, 1, 0]],
+        ["down", "Down", [0, 0, -1]],
+        ["up", "Up", [0, 0, 1]],
+      ] as [Parameters<typeof DirectionArrowIcon>[0]["direction"], string, Vec3][]).map(([arrowDir, label, vector]) => ({
+        label, title: `Use ${label.toLowerCase()} for D`, run: () => selectDropDirection(label, vector),
+        icon: <DirectionArrowIcon direction={arrowDir} />,
+        active: dropDirection.label === label,
+      })) },
     place: { id: "place", label: "Place on object", aria: "Place on object",
       icon: <svg className="topbar-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7"><path d="M3 20q9-9 18 0M12 3v10m-4-4 4 4 4-4"/><path d="m8 3 4-2 4 2"/></svg>,
       enabled: one && !!selected && selected.type !== "group" && nodes.some((n) => n.id === selected.id) && !treeChangeBusy,
