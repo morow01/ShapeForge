@@ -1,0 +1,16 @@
+.saved-import-dialog { width:min(600px,calc(100vw - 32px)); max-height:calc(100vh - 48px); overflow:auto; }
+.saved-import-dialog p { font-size:13px; line-height:1.5; color:#64748b; }
+.saved-import-filters { display:flex; gap:8px; margin:16px 0; }
+.saved-import-filters input { flex:1; min-width:0; }
+.saved-import-filters select { max-width:190px; border:1px solid #cbd5df; border-radius:7px; background:white; padding:7px; font:inherit; }
+.saved-import-files { max-height:340px; overflow:auto; border:1px solid #e2e8f0; border-radius:8px; }
+.saved-import-files>p { padding:14px; }
+.saved-import-row { display:flex; align-items:center; gap:12px; padding:12px; cursor:pointer; border-bottom:1px solid #eef2f5; }
+.saved-import-row:last-child { border-bottom:0; }
+.saved-import-row:hover { background:#f5f9fa; }
+.saved-import-row.selected { background:#e6f7f7; }
+.saved-import-row input { flex:0 0 auto; width:auto; }
+.saved-import-row strong { display:block; font-size:13px; overflow-wrap:anywhere; }
+.saved-import-row small { display:block; margin-top:4px; color:#64748b; font-size:11px; }
+.saved-import-dialog .saved-import-error { color:#b91c1c; }
+@media(max-width:500px) { .saved-import-filters { flex-direction:column; } .saved-import-filters select { max-width:none; } }

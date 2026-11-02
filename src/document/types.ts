@@ -70,6 +70,11 @@ export interface PrimitiveDef {
   fields: ParamField[];
 }
 
+/** The smallest push/pull distance (mm) that counts as an edit. The kernel itself
+ *  only ignores anything under a micron; this just keeps a stray click from
+ *  building a no-op. */
+export const MIN_PUSH_PULL_MM = 0.01;
+
 const dim = (key: string, label: string, max = 1000): ParamField => ({
   key,
   label,

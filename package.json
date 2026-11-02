@@ -1,7 +1,7 @@
 {
   "name": "shapeforge",
   "private": true,
-  "version": "0.5.96",
+  "version": "0.6.9",
   "description": "ShapeForge 3D CAD modeling application",
   "author": "ShapeForge Team",
   "type": "module",
@@ -39,6 +39,7 @@
     "fflate": "^0.8.3",
     "manifold-3d": "^3.5.1",
     "opentype.js": "^2.0.0",
+    "pdfjs-dist": "^6.5.438",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "replicad": "^1.0.1",

@@ -143,3 +143,44 @@ deployment workflow. Consequently, the repository's `/deployments` URL may
 return 404 or show nothing. A deployment will appear only after a hosting
 workflow (for example GitHub Pages via GitHub Actions) is configured and run.
 Local development remains available through `npm run dev`.
+
+### Folder files
+
+Open a folder on the Home page and choose **Add files** to keep original 3MF
+prototyping templates, STL models, PDFs, images, ZIPs or other supporting files
+alongside your designs. Multiple files can be added at once. Attachments are
+stored separately from project geometry, so saving one does not import it into
+the model or increase the project's geometry workload.
+
+Use the file row to download, rename, move or delete it. Downloads preserve the
+original bytes. Files are kept on this computer and sync to the corresponding
+Google Drive folders when Drive is connected. Other devices load the file list
+first and fetch the original bytes only on Download. Pending changes retry on
+the next sync. Move or delete a folder's attachments before deleting the folder.
+Attachments are separate from a project's `.shapeforge` export.
+
+Folder attachments support three saved layouts: thumbnail cards matching the
+project cards, a list with small previews, and the original compact panel.
+Attachment and ShapeForge project layouts are remembered independently, so files can remain in a list while projects use thumbnails.
+Thumbnails show STL/3MF geometry (or the 3MF's embedded slicer preview), the first
+PDF page, the beginning of text files, and common image formats. Previews are
+cached separately and generated one at a time for visible files. A Drive-only
+file offers **Load preview** rather than downloading large originals on opening
+a folder. Unsupported, invalid, encrypted, or oversized files retain a file icon
+and remain downloadable. Rendered model previews are limited to 40 MB; PDF,
+image, and embedded 3MF previews to 150 MB.
+
+Attachments use the same context menu as designs, including outside-click,
+Escape, scroll and resize dismissal. Each file has a selection checkbox in all
+three layouts. Select several files to move or delete them together. Drag any
+selected file onto a folder in the sidebar or main area, or onto a breadcrumb
+(including All designs) to move the selection. Move to folder is also available
+from the shared-style menu and selection toolbar.
+
+Use **File → Import from saved files…** to choose a stored STL, 3MF or SVG and add
+it to the currently open project. The picker supports search and folder filters,
+shows the destination project's name, and downloads a Drive-only original on
+demand. The same picker is available through **Import into project…** in a
+supported attachment's context menu. It uses the normal model importer (including
+3MF assemblies, SVG options and complexity limits), leaving the saved original
+untouched. PDF, text and other reference files remain download-only attachments.

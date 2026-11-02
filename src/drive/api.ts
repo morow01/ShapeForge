@@ -9,7 +9,7 @@
 export const FOLDER_MIME = "application/vnd.google-apps.folder";
 export const APP_TAG = { key: "shapeforge", value: "1" } as const;
 
-export type DriveKind = "root" | "assets" | "folder" | "design" | "blob" | "version" | "versions" | "notes" | "thumb" | "thumbs";
+export type DriveKind = "attachment" | "root" | "assets" | "folder" | "design" | "blob" | "version" | "versions" | "notes" | "thumb" | "thumbs";
 
 /** Saved versions carry their own tag, so the regular listing of designs never has to page through them. */
 export const VERSION_TAG = { key: "shapeforgeVersion", value: "1" } as const;

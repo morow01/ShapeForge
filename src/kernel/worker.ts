@@ -370,6 +370,9 @@ function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdg
     for (const speck of specks) {
       // How much boundary this speck shares with each of its neighbours.
       const shared = new Map<number, number>();
+      // One triangle of each real face this speck touches, to tell whether
+      // the faces on either side of it are really one flat face.
+      const touching = new Map<number, number>();
       for (const t of groupedTriangles[speck]) {
         const corners = [raw.triangles[t * 3], raw.triangles[t * 3 + 1], raw.triangles[t * 3 + 2]];
         for (let j = 0; j < 3; j++) {
@@ -386,6 +389,7 @@ function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdg
             const group = owner(triGroup[other]);
             if (group === owner(speck)) continue;
             shared.set(group, (shared.get(group) ?? 0) + length);
+            if (groupTotals[group] >= speckArea && !touching.has(group)) touching.set(group, other);
           }
         }
       }
@@ -406,6 +410,20 @@ function meshFromMeshShape(m: MeshShape): { faces: MeshedFaces; edges: MeshedEdg
       }
       const into = best >= 0 ? best : bestSpeck;
       if (into >= 0 && owner(into) !== owner(speck)) host[owner(speck)] = owner(into);
+      // A hairline wall left where two flush parts were a hair apart (a union
+      // of boxes placed 0.0005 mm out) splits one flat face in two, and the
+      // border between them showed as a seam. When the faces on either side
+      // of the speck lie in one plane, they are one face.
+      const intoTri = touching.get(best);
+      if (best >= 0 && intoTri !== undefined) {
+        for (const [group, tri] of touching) {
+          if (owner(group) === owner(best)) continue;
+          const dot = triNormals[intoTri * 3] * triNormals[tri * 3] +
+                      triNormals[intoTri * 3 + 1] * triNormals[tri * 3 + 1] +
+                      triNormals[intoTri * 3 + 2] * triNormals[tri * 3 + 2];
+          if (dot > 0.999 && Math.abs(triPlanes[intoTri] - triPlanes[tri]) < 0.1) host[owner(group)] = owner(best);
+        }
+      }
     }
     const absorbed: number[][] = [];
     const indexOfHost = new Map<number, number>();

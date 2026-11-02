@@ -1,0 +1,16 @@
+import assert from 'node:assert/strict';
+import {readFileSync} from 'node:fs';
+import ts from 'typescript';
+const source=readFileSync(new URL('../src/import/savedFiles.ts',import.meta.url),'utf8');
+const parsed=ts.createSourceFile('saved.ts',source,ts.ScriptTarget.Latest,true);
+const js=ts.transpile(parsed.statements.filter(n=>!ts.isImportDeclaration(n)).map(n=>n.getFullText(parsed)).join(''),{target:ts.ScriptTarget.ES2022,module:ts.ModuleKind.CommonJS});
+const original=new Uint8Array([80,75,3,4,255,0]).buffer;
+let rows=[{id:'a',name:'Template.3MF',mimeType:'application/octet-stream',size:6,updatedAt:123}],local=original,downloads=0,cached=0,status='signedIn';
+const api=new Function('exports','attachmentBytes','cacheAttachmentBytes','listAttachments','driveApi','useDrive',js+';return exports;')({},async()=>local,async(_id,bytes)=>{cached++;local=bytes;},async()=>rows,()=>({downloadBytes:async()=>{downloads++;return original;}}),{getState:()=>({status})});
+const file=await api.savedFileForImport(rows[0]);assert.equal(file.name,'Template.3MF');assert.deepEqual(new Uint8Array(await file.arrayBuffer()),new Uint8Array(original));assert.equal(downloads,0);assert.equal(rows[0].name,'Template.3MF');
+local=undefined;rows[0]={...rows[0],driveId:'drive'};await api.savedFileForImport(rows[0]);assert.equal(downloads,1);assert.equal(cached,1);
+local=undefined;status='signedOut';await assert.rejects(api.savedFileForImport(rows[0]),/Connect Google Drive/);
+rows[0]={...rows[0],size:201*1024*1024};await assert.rejects(api.savedFileForImport(rows[0]),/too large/);assert.equal(downloads,1);
+rows[0]={...rows[0],size:6,name:'notes.txt'};await assert.rejects(api.savedFileForImport(rows[0]),/STL, 3MF or SVG/);
+rows[0].deleted=true;await assert.rejects(api.savedFileForImport(rows[0]),/removed/);
+console.log('Saved imports: original bytes preserved, cached/local and remote files, offline errors, size and format limits passed.');

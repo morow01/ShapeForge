@@ -16,9 +16,9 @@ import { clearHighlights, getEdgeIndex, getFaceIndex, highlightInGeometry, syncG
 import type { ReplicadMesh, ThreeGeometry } from "replicad-threejs-helper";
 import type { CellPart, FaceInfo, KernelMesh, PreviewBuild, ScenePart } from "../kernel/types";
 import type { CameraMode, GroupNode, PrimitiveKind, SceneNode, Vec3 } from "../document/types";
-import { DEFAULT_OBJECT_COLOR, isGroup, TRI_BY_SIDE_ANGLE } from "../document/types";
+import { DEFAULT_OBJECT_COLOR, isGroup, MIN_PUSH_PULL_MM, TRI_BY_SIDE_ANGLE } from "../document/types";
 import { findNode, resolveNodeColor, resolveNodeHideLines, resolveNodeTransparent } from "../document/tree";
-import { loadCameraState, saveCameraState } from "../document/persist";
+import { getActiveProjectId, loadCameraState, saveCameraState } from "../document/persist";
 import { getEffectiveDefaults } from "../document/store";
 import { snapBounds, snapFace } from "../snapping/snap";
 import type { Bounds3, SnapResult, SnapTarget } from "../snapping/snap";
@@ -124,6 +124,8 @@ function thinPoints(points: THREE.Vector3[], limit: number): THREE.Vector3[] {
  *  one is a real OCCT/manifold call, not free, so this bounds how often a
  *  fast mouse-move can ask for a new one. Short enough to read as live. */
 const PUSH_PULL_PREVIEW_MS = 120;
+/** A push/pull drag snaps in steps of this many mm. */
+const PUSH_PULL_DRAG_STEP_MM = 0.1;
 const PUSH_PULL_HANDLE_SCALE = 1.7;
 
 /**
@@ -1032,6 +1034,8 @@ interface CollisionGroup {
 }
 
 export class Scene {
+  // Keep teardown writes attached to the project this viewport was opened for.
+  private readonly cameraProjectId = getActiveProjectId();
   private solidMaterialCache = new Map<string, THREE.MeshStandardMaterial>();
   private placementPreview: THREE.Mesh | null = null;
   /** Armed on pointerdown for a drag-sizable placement, before it's known
@@ -1504,6 +1508,11 @@ export class Scene {
     // Frame the whole model for the picture, then put the camera back exactly as it was.
     const savedPosition = this.camera.position.clone();
     const savedTarget = this.controls.target.clone();
+    const savedZoom = this.camera.zoom;
+    const dampingWasEnabled = this.controls.enableDamping;
+    // Thumbnail framing must never be persisted as the editor view.
+    this.controls.removeEventListener("change", this.onCameraChange);
+    this.controls.enableDamping = false;
     const savedFrustum = this.camera instanceof THREE.OrthographicCamera
       ? { left: this.camera.left, right: this.camera.right, top: this.camera.top, bottom: this.camera.bottom }
       : null;
@@ -1582,7 +1591,11 @@ export class Scene {
         Object.assign(this.camera, savedFrustum);
         this.camera.updateProjectionMatrix();
       }
+      this.camera.zoom = savedZoom;
+      this.camera.updateProjectionMatrix();
       this.controls.update();
+      this.controls.enableDamping = dampingWasEnabled;
+      this.controls.addEventListener("change", this.onCameraChange);
     }
   }
 
@@ -2202,7 +2215,7 @@ export class Scene {
     this.scene.add(this.cutPreviewGroup);
     this.scene.add(this.spacingGhostGroup);
 
-    const savedCam = loadCameraState();
+    const savedCam = loadCameraState(this.cameraProjectId);
     const mode = savedCam?.mode ?? "perspective";
     const pos = savedCam?.position ?? [150, -150, 115];
     const tgt = savedCam?.target ?? [0, 0, 0];
@@ -2211,7 +2224,9 @@ export class Scene {
     const distance = posVec.distanceTo(tgtVec);
 
     if (mode === "orthographic") {
-      const halfH = Math.tan(THREE.MathUtils.degToRad(45 / 2)) * distance;
+      const halfH = savedCam?.orthoHeight
+        ? savedCam.orthoHeight / 2
+        : Math.tan(THREE.MathUtils.degToRad(45 / 2)) * distance;
       const halfW = halfH * this.aspect();
       const cam = new THREE.OrthographicCamera(-halfW, halfW, halfH, -halfH, 0.1, 50000);
       cam.up.set(0, 0, 1);
@@ -7108,12 +7123,12 @@ export class Scene {
     return geom.map((g) => ({ faces: g.faces.clone(), lines: g.lines.clone() }));
   }
 
-  /** Distance (mm) the pointer currently represents, snapped to 0.5mm. */
+  /** Distance (mm) the pointer currently represents, snapped to PUSH_PULL_DRAG_STEP_MM. */
   private pushPullDistance(e: PointerEvent, drag: PushPullDrag): number {
     const dx = e.clientX - drag.downScreen.x;
     const dy = e.clientY - drag.downScreen.y;
     const along = dx * drag.screenDir.x + dy * drag.screenDir.y;
-    return Math.round((drag.baseDistance + along / drag.pixelsPerUnit) * 2) / 2;
+    return Math.round((drag.baseDistance + along / drag.pixelsPerUnit) / PUSH_PULL_DRAG_STEP_MM) * PUSH_PULL_DRAG_STEP_MM;
   }
 
   /**
@@ -7260,10 +7275,10 @@ export class Scene {
   /** Pushes or pulls the selected face by a distance in WORLD millimetres,
    *  through the same path (and the same scale conversion and position
    *  correction) a drag would take. Returns false when no face is armed, or
-   *  when the distance is below the same 0.5mm floor a drag uses. */
+   *  when the distance is below the MIN_PUSH_PULL_MM floor a drag uses. */
   pushSelectedFace(worldDistance: number): boolean {
     const armed = this.armedFace;
-    if (!armed || !Number.isFinite(worldDistance) || Math.abs(worldDistance) < 0.5) return false;
+    if (!armed || !Number.isFinite(worldDistance) || Math.abs(worldDistance) < MIN_PUSH_PULL_MM) return false;
     this.unappliedDistance = null;
     // Back to the saved shape first: the edit is measured from it, and its
     // pivot is what keeps the rest of the part in place (applyPushPull).
@@ -7328,7 +7343,7 @@ export class Scene {
     if (!pending) return;
 
     const distance = toMillimetres(Number(this.pushPullLabelEl.value), this.displayUnit);
-    const valid = apply && Number.isFinite(distance) && Math.abs(distance) >= 0.5;
+    const valid = apply && Number.isFinite(distance) && Math.abs(distance) >= MIN_PUSH_PULL_MM;
     if (valid) this.unappliedDistance = null;
     if (valid && this.pendingIsCurved(pending)) {
       void this.commitCheckedPushPull(pending, distance);
@@ -7406,7 +7421,7 @@ export class Scene {
 
   /** Tells the panel the distance, and remembers it for the next face. */
   private reportPushPullDistance(worldDistance: number) {
-    this.unappliedDistance = Number.isFinite(worldDistance) && Math.abs(worldDistance) >= 0.5 ? worldDistance : null;
+    this.unappliedDistance = Number.isFinite(worldDistance) && Math.abs(worldDistance) >= MIN_PUSH_PULL_MM ? worldDistance : null;
     this.onPushPullDistanceChange?.(worldDistance);
   }
 
@@ -7552,7 +7567,7 @@ export class Scene {
    */
   async previewTypedPushPull(worldDistance: number | null): Promise<string | null> {
     const armed = this.armedFace;
-    const valid = worldDistance !== null && Number.isFinite(worldDistance) && Math.abs(worldDistance) >= 0.5;
+    const valid = worldDistance !== null && Number.isFinite(worldDistance) && Math.abs(worldDistance) >= MIN_PUSH_PULL_MM;
     // null only ends the preview; a number (even 0) is what the panel holds.
     if (worldDistance !== null) this.unappliedDistance = valid ? worldDistance : null;
     if (!valid || !armed || !this.facePushPullEnabled || this.pushPullDrag || this.pushPullPending) {
@@ -11916,7 +11931,7 @@ export class Scene {
       // Keep the drag reviewable until Apply/Enter or Cancel resolves it.
       this.showPushPullInput(drag, distance);
       this.pushPullLabelEl.classList.remove("blocked");
-      if (drag.curved && drag.active && Math.abs(distance) >= 0.5) {
+      if (drag.curved && drag.active && Math.abs(distance) >= MIN_PUSH_PULL_MM) {
         // Say why now, not only after Apply, if the drag went further than
         // this curved face can move. Checked on every release, not only when
         // a preview failed: a quick drag can end before any preview ran.
@@ -12492,7 +12507,7 @@ export class Scene {
     this.saveCameraNow();
   };
 
-  private saveCameraNow() {
+  saveCameraNow() {
     const mode: CameraMode = this.camera instanceof THREE.OrthographicCamera ? "orthographic" : "perspective";
     const pos = this.camera.position;
     const tgt = this.controls.target;
@@ -12502,7 +12517,9 @@ export class Scene {
       position: [roundCoord(pos.x), roundCoord(pos.y), roundCoord(pos.z)],
       target: [roundCoord(tgt.x), roundCoord(tgt.y), roundCoord(tgt.z)],
       zoom: this.camera.zoom !== 1 ? this.camera.zoom : undefined,
-    });
+      orthoHeight: this.camera instanceof THREE.OrthographicCamera
+        ? this.camera.top - this.camera.bottom : undefined,
+    }, this.cameraProjectId);
   }
 
   setCameraMode(mode: CameraMode) {

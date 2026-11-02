@@ -274,6 +274,7 @@ export function parseProjectData(raw: unknown): ProjectData | null {
         position: c.position,
         target: c.target,
         zoom: typeof c.zoom === "number" ? c.zoom : undefined,
+        orthoHeight: typeof c.orthoHeight === "number" && Number.isFinite(c.orthoHeight) && c.orthoHeight > 0 ? c.orthoHeight : undefined,
       };
     }
   }
@@ -878,11 +879,14 @@ export interface StoredCamera {
   position: Vec3;
   target: Vec3;
   zoom?: number;
+  /** Full orthographic frustum height, before zoom. */
+  orthoHeight?: number;
 }
 
-export function loadCameraState(): StoredCamera | null {
+export function loadCameraState(projectId = getActiveProjectId()): StoredCamera | null {
   try {
-    const raw = localStorage.getItem(CAMERA_KEY);
+    const raw = localStorage.getItem(CAMERA_KEY + "." + projectId)
+      ?? JSON.stringify(loadProject(projectId)?.camera ?? null);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<StoredCamera>;
     if (!parsed || typeof parsed !== "object") return null;
@@ -897,15 +901,16 @@ export function loadCameraState(): StoredCamera | null {
       position: parsed.position,
       target: parsed.target,
       zoom,
+      orthoHeight: typeof parsed.orthoHeight === "number" && Number.isFinite(parsed.orthoHeight) && parsed.orthoHeight > 0 ? parsed.orthoHeight : undefined,
     };
   } catch {
     return null;
   }
 }
 
-export function saveCameraState(state: StoredCamera): boolean {
+export function saveCameraState(state: StoredCamera, projectId = getActiveProjectId()): boolean {
   try {
-    localStorage.setItem(CAMERA_KEY, JSON.stringify(state));
+    localStorage.setItem(CAMERA_KEY + "." + projectId, JSON.stringify(state));
     return true;
   } catch {
     return false;
@@ -1020,6 +1025,7 @@ export function parseProjectFile(content: string, fallbackName = "Imported Proje
           position: c.position,
           target: c.target,
           zoom: typeof c.zoom === "number" ? c.zoom : undefined,
+        orthoHeight: typeof c.orthoHeight === "number" && Number.isFinite(c.orthoHeight) && c.orthoHeight > 0 ? c.orthoHeight : undefined,
         };
       }
     }

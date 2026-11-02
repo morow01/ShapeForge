@@ -1,3 +1,7 @@
+import { HomeContextMenu } from './HomeContextMenu';
+import type { FileDragStart } from './FolderFiles';
+import { listAttachments } from '../document/attachments';
+import { FolderFiles } from './FolderFiles';
 import { useEffect, useRef, useState } from "react";
 import { useDoc } from "../document/store";
 import { binCount as countBin, collectFolderTree, exportProjectFile, hasProjectContents, loadProject, loadThumbnail, locationOf } from "../document/persist";
@@ -37,6 +41,7 @@ function timeAgo(timestamp: number): string {
 type View = { kind: "folder"; id: string | null } | { kind: "recent" } | { kind: "draft" } | { kind: "browser" } | { kind: "drive" } | { kind: "bin" } | { kind: "starred" } | { kind: "tags"; tags: string[] };
 
 type HomePageProps = {
+  onImportSavedFile: (id: string) => void;
   open: boolean;
   /** Close Home and go to the editor, which is showing whichever design is open. */
   onClose: () => void;
@@ -95,7 +100,7 @@ type MenuState = {
 } | null;
 
 /** A design being dragged to a folder: follows the pointer until it is let go. */
-type DragState = { ids: string[]; name: string; thumb: string | null; x: number; y: number; /** Set when a tag, not designs, is being dragged. */ tag?: string; /** Set when a folder is being dragged. */ folderId?: string } | null;
+type DragState = { ids: string[]; name: string; thumb: string | null; x: number; y: number; /** Set when a tag, not designs, is being dragged. */ tag?: string; /** Set when a folder is being dragged. */ folderId?: string; fileFolders?: (string | null)[] } | null;
 
 const DRAG_START_DISTANCE = 6;
 
@@ -202,6 +207,7 @@ function projectMetaSubtitle(
 }
 
 export function HomePage({
+  onImportSavedFile,
   open,
   onClose,
   onNewDesign,
@@ -234,7 +240,7 @@ export function HomePage({
   const [drag, setDrag] = useState<DragState>(null);
   const dragRef = useRef<DragState>(null);
   dragRef.current = drag;
-  const pressRef = useRef<{ ids: string[]; name: string; thumb: string | null; x: number; y: number; tag?: string; folderId?: string } | null>(null);
+  const pressRef = useRef<{ ids: string[]; name: string; thumb: string | null; x: number; y: number; tag?: string; folderId?: string; fileFolders?: (string | null)[]; fileDrop?: (folderId: string | null) => void } | null>(null);
   const moveFolder = useDoc((s) => s.moveFolder);
   const [movingFolder, setMovingFolder] = useState<FolderMeta | null>(null);
   const [folderMoveTarget, setFolderMoveTarget] = useState<string | null>(null);
@@ -355,7 +361,7 @@ export function HomePage({
       if (!press) return;
       if (!dragRef.current && Math.hypot(e.clientX - press.x, e.clientY - press.y) < DRAG_START_DISTANCE) return;
       setMenu(null);
-      setDrag({ ids: press.ids, name: press.name, thumb: press.thumb, x: e.clientX, y: e.clientY, tag: press.tag, folderId: press.folderId });
+      setDrag({ ids: press.ids, name: press.name, thumb: press.thumb, x: e.clientX, y: e.clientY, tag: press.tag, folderId: press.folderId, fileFolders: press.fileFolders });
       setDropTarget(dropAt(e.clientX, e.clientY, !!press.tag));
     };
     const onUp = (e: PointerEvent) => {
@@ -367,6 +373,10 @@ export function HomePage({
       window.setTimeout(() => { suppressClickRef.current = false; }, 80);
       setDrag(null);
       setDropTarget("none");
+      if (press.fileDrop) {
+        if (e.type === "pointerup" && target !== "none" && !(typeof target === "string" && target.startsWith("design:"))) press.fileDrop(target);
+        return;
+      }
       if (press.folderId) {
         // A folder dropped on another folder (or on All designs) moves inside it.
         if (e.type === "pointerup" && target !== "none" && !(typeof target === "string" && target.startsWith("design:"))) {
@@ -410,28 +420,6 @@ export function HomePage({
   useEffect(() => {
     setSelected(new Set());
   }, [view, search]);
-
-  // The right-click menu closes on any click elsewhere, Escape, scrolling or resizing.
-  useEffect(() => {
-    if (!menu) return;
-    const close = () => setMenu(null);
-    const onDown = (e: PointerEvent) => {
-      if (!(e.target as Element | null)?.closest(".home-menu")) close();
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") close();
-    };
-    window.addEventListener("pointerdown", onDown, true);
-    window.addEventListener("keydown", onKey);
-    window.addEventListener("resize", close);
-    window.addEventListener("scroll", close, true);
-    return () => {
-      window.removeEventListener("pointerdown", onDown, true);
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("resize", close);
-      window.removeEventListener("scroll", close, true);
-    };
-  }, [menu]);
 
   if (!open) return null;
 
@@ -634,6 +622,10 @@ export function HomePage({
 
   const handleDeleteFolder = async (f: FolderMeta) => {
     const tree = collectFolderTree(f.id);
+    if ((await listAttachments()).some(file => !file.deleted && file.folderId && tree.includes(file.folderId))) {
+      await ask({ title: "Folder contains files", message: "Move or delete the files in this folder and its subfolders before deleting the folder.", confirmLabel: "OK", cancelLabel: null });
+      return;
+    }
     const designCount = projects.filter((p) => p.folderId && tree.includes(p.folderId)).length;
     const hasSubfolders = folders.some((x) => x.parentId === f.id);
     const word = `${designCount} ${designCount === 1 ? "design" : "designs"}`;
@@ -672,6 +664,10 @@ export function HomePage({
     }
     const inTrees = new Set<string>();
     for (const f of list) for (const id of collectFolderTree(f.id)) inTrees.add(id);
+    if ((await listAttachments()).some(file => !file.deleted && file.folderId && inTrees.has(file.folderId))) {
+      await ask({ title: "Folders contain files", message: "Move or delete the files in these folders before deleting the folders.", confirmLabel: "OK", cancelLabel: null });
+      return;
+    }
     const designCount = projects.filter((p) => p.folderId && inTrees.has(p.folderId)).length;
     const hasSubfolders = inTrees.size > list.length;
     let withDesigns = true;
@@ -743,6 +739,7 @@ export function HomePage({
    *  would change nothing, so it should not look like a target. */
   const dropProps = (folderId: string | null): { "data-drop"?: string } => {
     if (drag?.tag) return {};
+    if (drag?.fileFolders) return drag.fileFolders.every(id => id === folderId) ? {} : { "data-drop": folderId ?? "root" };
     if (drag?.folderId) {
       // Not onto itself, its own subfolders, or where it already is.
       if (folderId !== null && folderSubtree(drag.folderId).includes(folderId)) return {};
@@ -777,6 +774,12 @@ export function HomePage({
     const group = selected.has(p.id) && selectedDesigns.length > 1 ? selectedDesigns.map((d) => d.id) : [p.id];
     const label = group.length > 1 ? `${group.length} designs` : p.name;
     pressRef.current = { ids: group, name: label, thumb, x: e.clientX, y: e.clientY };
+  };
+
+  const beginFileDrag: FileDragStart = (e, files, onDrop) => {
+    setMenu(null);
+    pressRef.current = { ids: files.map(f => f.id), name: files.length > 1 ?       `${files.length} files` : files[0].name, thumb: null,
+      x: e.clientX, y: e.clientY, fileFolders: files.map(f => f.folderId), fileDrop: onDrop };
   };
 
   const openMenu = (e: React.MouseEvent, target: NonNullable<MenuState>["target"]) => {
@@ -1104,6 +1107,12 @@ export function HomePage({
             </div>
           )}
 
+          {(view.kind === "folder" || view.kind === "browser" || view.kind === "drive" || searching) && view.kind !== "bin" && (
+            <FolderFiles onImportFile={onImportSavedFile} onBeginDrag={beginFileDrag} draggedIds={drag?.fileFolders ? drag.ids : []} folderId={searching ? null : viewFolderId} folders={folders} search={search}
+              storage={!searching && (view.kind === "browser" || view.kind === "drive") ? view.kind : undefined}
+              canAdd={view.kind === "folder"} />
+          )}
+
           {subfolders.length > 0 && (
             <div className={`home-folders${selectedFolderList.length ? " has-selection" : ""}`}>
               {subfolders.map((f) => (
@@ -1160,6 +1169,10 @@ export function HomePage({
               )}
               <button className="modal-btn" onClick={() => setSelectedFolders(new Set())}>Clear</button>
             </div>
+          )}
+
+          {designs.length > 0 && (view.kind === "folder" || view.kind === "browser" || view.kind === "drive" || searching) && view.kind !== "bin" && (
+            <div className="home-project-divider"><h2>ShapeForge projects</h2></div>
           )}
 
           {selectedDesigns.length > 0 && (
@@ -1483,11 +1496,7 @@ export function HomePage({
       {toast && <div className="home-toast" role="status">{toast}</div>}
 
       {menu && (
-        <div
-          className="home-menu"
-          role="menu"
-          style={{ left: Math.max(8, Math.min(menu.x, window.innerWidth - 210)), top: Math.max(8, Math.min(menu.y, window.innerHeight - 280)) }}
-        >
+        <HomeContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}>
           {menu.target.kind === "design" ? (
             (() => {
               const p = menu.target.project;
@@ -1537,7 +1546,7 @@ export function HomePage({
               );
             })()
           )}
-        </div>
+        </HomeContextMenu>
       )}
 
       <EditDialog designs={tagging} known={allTags} onClose={() => setTagging(null)} />

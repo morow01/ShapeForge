@@ -39,11 +39,15 @@ export function bakeScale(node: ObjectNode): ObjectNode | null {
   let height: number;
   if (node.kind === "box") {
     height = p.height;
+    // Exact, not rounded to 0.01: the position correction below uses the exact
+    // size, and a rounded one left every resized face up to 0.005 mm off the
+    // face it had been snapped or aligned to — a seam across the top of two
+    // parts whose tops were aligned.
     params = {
       ...p,
-      width: Math.round(p.width * sx * 100) / 100,
-      depth: Math.round(p.depth * sy * 100) / 100,
-      height: Math.round(p.height * sz * 100) / 100,
+      width: p.width * sx,
+      depth: p.depth * sy,
+      height: p.height * sz,
     };
   } else if (
     node.kind === "cylinder" && sx === sy &&

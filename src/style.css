@@ -5479,15 +5479,15 @@ button.stepper-btn:disabled {
 .home-folder-actions { display: flex; gap: 4px; opacity: 0; transition: opacity 0.12s; }
 .home-folder:hover .home-folder-actions, .home-folder:focus-within .home-folder-actions { opacity: 1; }
 .home-nav-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.home-card[draggable="true"] { cursor: grab; }
+.home-card[draggable="true"] { cursor: default; }
 .move-list { display: flex; flex-direction: column; gap: 2px; max-height: 260px; overflow-y: auto; border: 1px solid #e2e8f0; border-radius: 10px; padding: 4px; }
 .move-row { display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 8px; cursor: pointer; font-size: 14px; }
 .move-row:hover { background: #f0f4f7; }
 .move-row.on { background: #e6f7f7; color: #00807e; font-weight: 600; }
 .home-cap .home-tag { position: static; align-self: flex-start; margin-top: 6px; padding: 1px 8px; }
 
-.home-card { user-select: none; touch-action: manipulation; cursor: grab; }
-.home-page.is-dragging, .home-page.is-dragging * { cursor: grabbing !important; user-select: none; }
+.home-card { user-select: none; touch-action: manipulation; cursor: default; }
+.home-page.is-dragging, .home-page.is-dragging * { cursor: move !important; user-select: none; }
 .home-page.is-dragging [data-drop] { outline: 2px dashed #00a7a5; outline-offset: 2px; background-color: #f0fafa; }
 .home-page.is-dragging .home-folder.drop,
 .home-page.is-dragging .home-nav.drop { outline: 2px solid #00a7a5; background-color: #d7f1f0; }
@@ -5921,7 +5921,7 @@ button.stepper-btn:disabled {
 .home-viewtoggle button.on { background: #e6f7f7; color: #00807e; }
 
 .home-list { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; overflow: hidden; }
-.home-row { display: grid; grid-template-columns: 30px 54px minmax(170px, 2.4fr) minmax(90px, 1fr) minmax(130px, 1.6fr) 64px 104px 96px 64px; align-items: center; gap: 10px; padding: 6px 14px 6px 12px; border-bottom: 1px solid #eef2f5; font-size: 13px; color: #1f2a33; position: relative; user-select: none; cursor: grab; }
+.home-row { display: grid; grid-template-columns: 30px 54px minmax(170px, 2.4fr) minmax(90px, 1fr) minmax(130px, 1.6fr) 64px 104px 96px 64px; align-items: center; gap: 10px; padding: 6px 14px 6px 12px; border-bottom: 1px solid #eef2f5; font-size: 13px; color: #1f2a33; position: relative; user-select: none; cursor: default; }
 .home-row:last-child { border-bottom: 0; }
 .home-row:not(.home-row-head):hover { background: #f6fafb; }
 .home-row.current { box-shadow: inset 3px 0 0 #00a7a5; }
@@ -6081,3 +6081,7 @@ span.status-btn { cursor: default; }
 .history-snapshot-tool.remove:hover { color: #b3261e; background: #fbeceb; }
 .adaptive-row { position: relative; }
 .adaptive-corner-mark { right: 2px; bottom: 2px; }
+
+/* Separate editable projects from supporting files in Home. */
+.home-project-divider { border-top:1px solid #cbd5df; margin:28px 0 8px; padding-top:20px; }
+.home-project-divider h2 { margin:0; font-size:16px; font-weight:650; color:#1f2a33; }

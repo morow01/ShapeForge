@@ -1,3 +1,4 @@
+import { syncAttachments } from './attachments';
 import { useDoc, driveHooks } from "../document/store";
 import {
   addRemoteProject,
@@ -1189,6 +1190,7 @@ export async function syncNow(): Promise<void> {
     for (const f of listFolders()) if (!f.driveId) await driveFolderFor(f.id);
     const staleOpen = await pullIndex(useDoc.getState().currentProjectId);
     if (staleOpen) await refreshOpenDesign(staleOpen);
+    await syncAttachments(driveApi(), driveFolderFor);
     try {
       await syncThumbnails();
     } catch (error) {

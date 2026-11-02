@@ -5916,7 +5916,7 @@ function combineShape(
   let result = solids[0].solid.clone();
   for (let i = 1; i < solids.length; i++) {
     try {
-      result = result.fuse(solids[i].solid.clone()) as Shape3D;
+      result = fuseTolerant(result, solids[i].solid.clone());
     } catch {
       const meshed = children.map((c) => ({
         solid: isMesh(c.solid) ? c.solid : (c.solid as Shape3D).meshShape(FALLBACK_MESH_QUALITY),
@@ -5957,6 +5957,33 @@ function combineShape(
 }
 
 /**
+ * Fuse that treats faces within 0.01 mm of each other as one. Snapped parts
+ * end up a few microns apart — a size is stored rounded to 0.01 while the
+ * position keeps the exact value, so a bar snapped flush with a box's top sat
+ * 0.004 mm below it — and a plain fuse keeps that as a hairline step wall
+ * whose edges draw as a seam across a face that should be flat. 0.01 mm is far
+ * below anything printable. Falls back to the plain fuse.
+ */
+function fuseTolerant(a: Shape3D, b: Shape3D): Shape3D {
+  const oc = getOC();
+  let op: { delete(): void } | null = null;
+  try {
+    const fuse = new oc.BRepAlgoAPI_Fuse(a.wrapped, b.wrapped);
+    op = fuse;
+    fuse.SetFuzzyValue(0.01);
+    fuse.Build();
+    fuse.SimplifyResult(true, true, 0.001);
+    const fused = cast(fuse.Shape());
+    if ("fuse" in fused) return fused as Shape3D;
+  } catch {
+    /* fall through to the plain fuse */
+  } finally {
+    op?.delete();
+  }
+  return a.fuse(b) as Shape3D;
+}
+
+/**
  * A boolean leaves the faces of its operands as separate faces even where they
  * lie in one plane — a bar whose end is flush with a cube's face shows up as a
  * square outlined on that face, as if the two had not really joined. Merging
@@ -5973,6 +6000,10 @@ function unifyCoplanarFaces(shape: Shape3D): Shape3D {
   try {
     const unifier = new (getOC()).ShapeUpgrade_UnifySameDomain(shape.wrapped, true, true, false);
     unifier.SetLinearTolerance(1e-5);
+    // OCCT's own angular tolerance is 1e-12 rad. A box turned "90 degrees" by
+    // dragging is really 89.9999985, so its faces are 1e-8 rad off parallel —
+    // too much for 1e-12 — and a bar flush with a box's top kept an edge there.
+    unifier.SetAngularTolerance(1e-6);
     unifier.Build();
     const merged = cast(unifier.Shape()) as Shape3D;
     unifier.delete();

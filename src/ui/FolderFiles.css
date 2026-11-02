@@ -1,0 +1,59 @@
+.folder-files { margin:20px 0; padding:16px; border:1px solid #d8e0e9; border-radius:12px; background:#fff; }
+.folder-files-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.folder-files-heading h2 { margin:0; font-size:16px; }
+.folder-files-heading-actions { display:flex; align-items:center; gap:12px; }
+.folder-files-note { color:#64748b; font-size:12px; line-height:1.5; }
+.folder-files-list { padding:0; margin:0; list-style:none; }
+.folder-files-list li { display:flex; gap:12px; align-items:center; padding:12px 0; border-top:1px solid #e2e8f0; cursor:default; user-select:none; }
+.folder-files-list li.lifted { opacity:.4; }
+.folder-files-list li.selected { background:#e6f7f7; }
+.folder-file-type { padding:9px 5px; min-width:42px; border-radius:6px; background:#e8f5f4; color:#167b79; text-align:center; font-size:10px; font-weight:700; }
+.folder-file-info { flex:1; min-width:0; overflow-wrap:anywhere; }
+.folder-file-info strong { display:block; font-size:13px; }
+.folder-file-info small { display:block; margin-top:4px; color:#64748b; font-size:11px; }
+.folder-files-error { color:#b91c1c; font-size:12px; }
+.home-main:has(.folder-files-list li) .home-empty { display:none; }
+.attachment-thumbnail { aspect-ratio:3/2; background:#eef2f5; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:8px; overflow:hidden; color:#64748b; }
+.attachment-thumbnail img { display:block; width:100%; height:100%; object-fit:contain; pointer-events:none; }
+.attachment-thumbnail small { font-size:11px; text-align:center; }
+.attachment-extension { font-size:12px; font-weight:700; letter-spacing:1px; }
+.files-grid { background:transparent; padding:0; border:0; }
+.files-grid .folder-files-list li.attachment-card { display:block; padding:0; border:1px solid #e2e8f0; cursor:default; overflow:hidden; }
+.files-grid .folder-files-list li.selected { border-color:#00a7a5; box-shadow:0 0 0 1px #00a7a5; }
+.files-grid .attachment-thumbnail { border-radius:12px 12px 0 0; }
+.files-grid .folder-file-info { padding:12px; min-height:74px; }
+.files-grid .folder-file-type { position:absolute; bottom:8px; left:8px; padding:4px 7px; min-width:0; background:#ffffffdf; border:1px solid #d5e3e3; }
+.folder-files .attachment-check { opacity:0; flex-shrink:0; transition:opacity .12s; }
+.files-list .attachment-check, .files-compact .attachment-check { position:static; width:20px; height:20px; }
+.attachment-more { opacity:0; transition:opacity .12s; border:1px solid #d3dde4; border-radius:6px; background:#ffffffeb; color:#64748b; cursor:pointer; flex-shrink:0; font-weight:700; }
+.attachment-more:hover { color:#00807e; border-color:#9fb8b8; }
+.files-grid .attachment-more { position:absolute; top:8px; right:8px; }
+.files-list .folder-files-list li, .folder-files-columns { display:grid; grid-template-columns:24px 64px minmax(110px,1fr) minmax(130px,1fr) 32px; gap:12px; align-items:center; padding:10px 0; }
+.folder-files-columns { font-size:11px; font-weight:600; color:#64748b; background:#f6f9fb; border-radius:6px; padding-left:4px; }
+.files-list .attachment-thumbnail { width:64px; height:44px; aspect-ratio:auto; }
+.files-list .attachment-thumbnail svg { width:22px; height:24px; }
+.files-list .attachment-thumbnail .attachment-extension, .files-list .attachment-thumbnail small { display:none; }
+.files-list .attachment-thumbnail button { font-size:9px; padding:2px; }
+.files-list .folder-file-type { display:none; }
+.files-list .folder-file-info { display:contents; }
+.files-list .folder-file-info small { margin:0; }
+@media(max-width:650px) {
+  .folder-files-heading { align-items:flex-start; }
+  .folder-files-heading-actions { flex-wrap:wrap; justify-content:flex-end; gap:6px; }
+  .files-list .folder-files-list li, .folder-files-columns { grid-template-columns:22px 44px minmax(90px,1fr) 32px; gap:8px; }
+  .files-list .attachment-thumbnail { width:44px; }
+  .files-list .folder-file-info small { grid-column:3; }
+  .files-list .attachment-more { grid-column:4; grid-row:1 / span 2; }
+  .folder-files-columns span:nth-child(4) { display:none; }
+}
+
+.attachment-visual { position:relative; }
+.folder-files-list li:hover .attachment-check,
+.folder-files-list li:focus-within .attachment-check,
+.folder-files .attachment-check.on,
+.folder-files-list li:hover .attachment-more,
+.folder-files-list li:focus-within .attachment-more,
+.attachment-more[aria-expanded="true"] { opacity:1; }
+@media (hover:none) {
+  .folder-files .attachment-check, .folder-files .attachment-more { opacity:1; }
+}

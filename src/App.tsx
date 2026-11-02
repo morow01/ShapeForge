@@ -1,3 +1,6 @@
+import { SavedFileImportDialog } from './ui/SavedFileImportDialog';
+import { savedFileForImport } from './import/savedFiles';
+import type { Attachment } from './document/attachments';
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import * as THREE from "three";
@@ -114,7 +117,7 @@ import {
   useDoc,
   useTemporal,
 } from "./document/store";
-import { MAX_BUILD_SOURCES, PRIMITIVES, PRIMITIVE_CATEGORIES, SKETCH_CURVE_SEGMENTS, isGroup } from "./document/types";
+import { MAX_BUILD_SOURCES, MIN_PUSH_PULL_MM, PRIMITIVES, PRIMITIVE_CATEGORIES, SKETCH_CURVE_SEGMENTS, isGroup } from "./document/types";
 import { findAssemblyOwner, findNode, parentOf, resolveNodeTransparent, resolveNodeColor, updateNode, walk } from "./document/tree";
 import { bakeScale } from "./document/bake";
 import { getDefaultClearance } from "./document/clearance";
@@ -723,6 +726,9 @@ export function App() {
    *  which node it is waiting on instead of quietly removing more. */
   const autoSkipRef = useRef({ shapeKey: "", count: 0 });
   const [cameraMode, setCameraMode] = useState<CameraMode>(() => loadCameraState()?.mode ?? "perspective");
+  useEffect(() => {
+    setCameraMode(loadCameraState(currentProjectId)?.mode ?? "perspective");
+  }, [currentProjectId]);
   const [toolMode, setToolMode] = useState<ToolMode>("select");
   const [mirrorMenuOpen, setMirrorMenuOpen] = useState(false);
   const mirrorMenuRef = useRef<HTMLDivElement>(null);
@@ -1217,6 +1223,7 @@ export function App() {
   const [autoJointCustomSpacing, setAutoJointCustomSpacing] = useState<number | null>(null);
   const [autoJointCustomVerticalSpacing, setAutoJointCustomVerticalSpacing] = useState<number | null>(null);
   const [autoJointVerticalOffset, setAutoJointVerticalOffset] = useState<number>(0);
+  const [autoJointHorizontalOffset, setAutoJointHorizontalOffset] = useState<number>(0);
   const [autoJointOrientation, setAutoJointOrientation] = useState<"horizontal" | "vertical" | "grid">("horizontal");
   const [autoJointDominoRotation, setAutoJointDominoRotation] = useState<number>(0);
   const [autoJointHingeEdge, setAutoJointHingeEdge] = useState<"left" | "right" | "top" | "bottom">("left");
@@ -1558,6 +1565,7 @@ export function App() {
     setAutoJointCustomSpacing(null);
     setAutoJointCustomVerticalSpacing(null);
     setAutoJointVerticalOffset(0);
+    setAutoJointHorizontalOffset(0);
     setAutoJointHingeEdge("left");
   }, [autoJointShape, selectedIds[0], selectedIds[1], connectorSwapped]);
 
@@ -1571,9 +1579,10 @@ export function App() {
     dovetailStopped = true,
     dovetailStopEnd = 0,
     hingeEdge: "left" | "right" | "top" | "bottom" = "left",
-    orientation: "horizontal" | "vertical" | "grid" = "horizontal",
+    requestedOrientation: "horizontal" | "vertical" | "grid" = "horizontal",
     dominoRotation: number = 0,
     verticalOffset: number = 0,
+    horizontalOffset: number = 0,
   ) => {
     const { axis, point, normal, footprint } = seam;
 
@@ -1588,7 +1597,7 @@ export function App() {
     const rotMatrix = new THREE.Matrix4().makeBasis(localX, localY, zAxis);
     const euler = new THREE.Euler().setFromRotationMatrix(rotMatrix, "XYZ");
     let rotZDeg = (euler.z / Math.PI) * 180;
-    if (shape === 3 && dominoRotation === 90) {
+    if ((shape === 3 || shape === 0) && dominoRotation === 90) {
       rotZDeg = (rotZDeg + 90) % 360;
     }
     const rotationDeg: Vec3 = [
@@ -1604,7 +1613,7 @@ export function App() {
     const plugRotMatrix = new THREE.Matrix4().makeBasis(plugLocalX, plugLocalY, plugZAxis);
     const plugEuler = new THREE.Euler().setFromRotationMatrix(plugRotMatrix, "XYZ");
     let plugRotZDeg = (plugEuler.z / Math.PI) * 180;
-    if (shape === 3 && dominoRotation === 90) {
+    if ((shape === 3 || shape === 0) && dominoRotation === 90) {
       plugRotZDeg = (plugRotZDeg + 90) % 360;
     }
     const plugRotationDeg: Vec3 = [
@@ -1658,12 +1667,20 @@ export function App() {
       ? autoJointCustomHeight
       : (shape === 6 ? Math.min(0.55, Math.max(0.30, 2 * 0.12)) : autoHeight);
 
-    const autoDovetailW = effectiveCount === 1
-      ? clampSize((wallWidth - 2 * wallMargin) * 0.45, 4, 25)
-      : clampSize(((wallWidth - 2 * wallMargin) / effectiveCount) * 0.55, 3, 25);
+    // A dovetail lying horizontally runs along the face's width, so its rail
+    // length comes from the width and its base width from the height.
+    const railAcross = shape === 0 && dominoRotation === 90;
+    const crossAvail = railAcross ? wallHeight : wallWidth;
+    const railAvail = railAcross ? wallWidth : wallHeight;
+    // A horizontal rail runs along the face, so several of them can only sit one
+    // above the other: spreading them along the face would put them end to end.
+    const orientation: "horizontal" | "vertical" | "grid" = railAcross ? "vertical" : requestedOrientation;
+    const autoDovetailW = effectiveCount === 1 || railAcross
+      ? clampSize((crossAvail - 2 * wallMargin) * 0.45, 4, 25)
+      : clampSize(((crossAvail - 2 * wallMargin) / effectiveCount) * 0.55, 3, 25);
 
     let pinRadius = 0;
-    let dovetailLen = Math.max(4, Math.round(wallHeight));
+    let dovetailLen = Math.max(4, Math.round(railAvail));
     let dovetailShift = 0;
     let entryExtension = 0;
 
@@ -1684,8 +1701,8 @@ export function App() {
         ? autoJointCustomSize
         : autoDovetailW;
       if (dovetailStopped) {
-        const stopThickness = Math.max(3.0, Math.min(12.0, Math.round(wallHeight * 0.25)));
-        dovetailLen = Math.max(4.0, wallHeight - stopThickness);
+        const stopThickness = Math.max(3.0, Math.min(12.0, Math.round(railAvail * 0.25)));
+        dovetailLen = Math.max(4.0, railAvail - stopThickness);
         dovetailShift = dovetailStopEnd === 0 ? stopThickness / 2 : -stopThickness / 2;
         entryExtension = dovetailStopEnd === 0
           ? (seam.socketTopExtension ?? 0)
@@ -1694,8 +1711,14 @@ export function App() {
         entryExtension = (seam.socketTopExtension ?? 0) + (seam.socketBottomExtension ?? 0);
       }
       const flankFlare = 2 * effHeight * Math.tan((effTaper * Math.PI) / 180);
-      itemWidth = baseW + flankFlare + 2 * clearance;
-      itemHeight = dovetailLen;
+      const crossSize = baseW + flankFlare + 2 * clearance;
+      // The rail the user sized, not the automatic one, decides how much room
+      // is left to move it up or down the face.
+      const railSize = (autoJointCustomLength !== undefined && autoJointCustomLength !== null && autoJointCustomLength > 0)
+        ? autoJointCustomLength
+        : dovetailLen;
+      itemWidth = railAcross ? railSize : crossSize;
+      itemHeight = railAcross ? crossSize : railSize;
     } else if (shape === 3) {
       itemWidth = isUpright ? effDominoT : effDominoW;
       itemHeight = isUpright ? effDominoW : effDominoT;
@@ -1746,26 +1769,17 @@ export function App() {
     const maxVerticalShift = Math.max(0, Math.round(((wallHeight - 2 * wallMargin - occupiedHeight) / 2) * 10) / 10);
     const effVOffset = Math.max(-maxVerticalShift, Math.min(maxVerticalShift, verticalOffset));
 
+    // Horizontal Position: the same idea across the face's width.
+    let occupiedWidth = itemWidth;
+    if (effectiveCount > 1) {
+      if (orientation === "horizontal") occupiedWidth = centerSpanX + itemWidth;
+      else if (orientation === "grid") occupiedWidth = gridPitchX + itemWidth;
+    }
+    const maxHorizontalShift = Math.max(0, Math.round(((wallWidth - 2 * wallMargin - occupiedWidth) / 2) * 10) / 10);
+    const effHOffset = Math.max(-maxHorizontalShift, Math.min(maxHorizontalShift, horizontalOffset));
+
     const targetPoints: Vec3[] = [];
-    if (shape === 0) {
-      if (effectiveCount === 1) {
-        targetPoints.push([
-          point[0] + yAxis.x * (dovetailShift + effVOffset),
-          point[1] + yAxis.y * (dovetailShift + effVOffset),
-          point[2] + yAxis.z * (dovetailShift + effVOffset),
-        ]);
-      } else {
-        for (let i = 0; i < effectiveCount; i++) {
-          const frac = -0.5 + i / (effectiveCount - 1);
-          const offset = frac * centerSpanX;
-          targetPoints.push([
-            point[0] + yAxis.x * (dovetailShift + effVOffset) + xAxis.x * offset,
-            point[1] + yAxis.y * (dovetailShift + effVOffset) + xAxis.y * offset,
-            point[2] + yAxis.z * (dovetailShift + effVOffset) + xAxis.z * offset,
-          ]);
-        }
-      }
-    } else if (shape === 5) {
+    if (shape === 5) {
       const alongX = hingeEdge === "left" || hingeEdge === "right";
       const offsetAxis = alongX ? xAxis : yAxis;
       const offsetDistance = (alongX ? wallWidth : wallHeight) / 2;
@@ -1776,50 +1790,45 @@ export function App() {
         point[1] + offsetAxis.y * hingeOffset,
         point[2] + offsetAxis.z * hingeOffset,
       ]);
-    } else if (effectiveCount === 1) {
-      targetPoints.push([
-        point[0] + yAxis.x * effVOffset,
-        point[1] + yAxis.y * effVOffset,
-        point[2] + yAxis.z * effVOffset,
-      ]);
-    } else if (orientation === "grid" && effectiveCount >= 4) {
-      // 2x2 Grid arrangement with vertical offset
-      const halfGX = gridPitchX / 2;
-      const halfGY = gridPitchY / 2;
-      const gridOffsets = [
-        [-halfGX, -halfGY + effVOffset],
-        [halfGX, -halfGY + effVOffset],
-        [-halfGX, halfGY + effVOffset],
-        [halfGX, halfGY + effVOffset],
-      ];
-      for (const [gx, gy] of gridOffsets) {
-        targetPoints.push([
-          point[0] + xAxis.x * gx + yAxis.x * gy,
-          point[1] + xAxis.y * gx + yAxis.y * gy,
-          point[2] + xAxis.z * gx + yAxis.z * gy,
-        ]);
-      }
-    } else if (orientation === "vertical") {
-      // Vertical arrangement (along yAxis) with vertical offset
-      for (let i = 0; i < effectiveCount; i++) {
-        const frac = -0.5 + i / (effectiveCount - 1);
-        const offset = frac * centerSpanY + effVOffset;
-        targetPoints.push([
-          point[0] + yAxis.x * offset,
-          point[1] + yAxis.y * offset,
-          point[2] + yAxis.z * offset,
-        ]);
-      }
     } else {
-      // Horizontal arrangement (along xAxis) with vertical offset
-      for (let i = 0; i < effectiveCount; i++) {
-        const frac = -0.5 + i / (effectiveCount - 1);
-        const offset = frac * centerSpanX;
-        targetPoints.push([
-          point[0] + spacingVec.x * offset + yAxis.x * effVOffset,
-          point[1] + spacingVec.y * offset + yAxis.y * effVOffset,
-          point[2] + spacingVec.z * offset + yAxis.z * effVOffset,
-        ]);
+      // Where the whole group sits: centred on the face, moved by the Horizontal
+      // and Vertical Position sliders. A dovetail with a stop shelf is also
+      // shifted off-centre along the rail so the shelf has room.
+      // The stop shelf sits at one end of the rail: up/down the face for a
+      // vertical rail, and along the width (rail's local y turned 90 deg) for a horizontal one.
+      const shelfShift = shape === 0 ? dovetailShift : 0;
+      const shiftY = (railAcross ? 0 : shelfShift) + effVOffset;
+      const baseX = effHOffset + (railAcross ? -shelfShift : 0);
+      // A dovetail spreads along the face's width; the other shapes along its longer side.
+      const rowAxis = shape === 0 ? xAxis : spacingVec;
+      const put = (gx: number, gy: number, axisX: THREE.Vector3 = xAxis): Vec3 => [
+        point[0] + axisX.x * gx + yAxis.x * gy,
+        point[1] + axisX.y * gx + yAxis.y * gy,
+        point[2] + axisX.z * gx + yAxis.z * gy,
+      ];
+      if (effectiveCount === 1) {
+        targetPoints.push(put(baseX, shiftY));
+      } else if (orientation === "grid" && effectiveCount >= 4) {
+        const halfGX = gridPitchX / 2;
+        const halfGY = gridPitchY / 2;
+        for (const [gx, gy] of [[-halfGX, -halfGY], [halfGX, -halfGY], [-halfGX, halfGY], [halfGX, halfGY]]) {
+          targetPoints.push(put(baseX + gx, shiftY + gy));
+        }
+      } else if (orientation === "vertical") {
+        for (let i = 0; i < effectiveCount; i++) {
+          targetPoints.push(put(baseX, shiftY + (-0.5 + i / (effectiveCount - 1)) * centerSpanY));
+        }
+      } else {
+        for (let i = 0; i < effectiveCount; i++) {
+          const along = (-0.5 + i / (effectiveCount - 1)) * centerSpanX;
+          const row = put(0, shiftY, rowAxis);
+          // rowAxis may differ from xAxis, so add the slider move along xAxis separately.
+          targetPoints.push([
+            row[0] + rowAxis.x * along + xAxis.x * baseX,
+            row[1] + rowAxis.y * along + xAxis.y * baseX,
+            row[2] + rowAxis.z * along + xAxis.z * baseX,
+          ]);
+        }
       }
     }
 
@@ -1839,7 +1848,9 @@ export function App() {
 
     // Hinge length runs along the face boundary, so it cannot punch through
     // the receiving wall in the way a pin, key, or pocket can.
-    const isPunchThrough = shape !== 5 && hasValidMaterialDepth && (effLength + clearance >= materialDepth!);
+    // A dovetail's rail runs ALONG the face; how far it cuts in is its flare height.
+    const cutDepth = shape === 0 ? effHeight : effLength;
+    const isPunchThrough = shape !== 5 && hasValidMaterialDepth && (cutDepth + clearance >= materialDepth!);
 
     // Auto diameter/width/radius:
     const autoRadius = (shape === 5 || shape === 1 || shape === 2 || shape === 6)
@@ -1916,6 +1927,8 @@ export function App() {
       maxPitchY,
       maxVerticalShift,
       effVOffset,
+      maxHorizontalShift,
+      effHOffset,
       isPunchThrough,
       warning,
       isValid,
@@ -1935,6 +1948,7 @@ export function App() {
     setAutoJointCustomSpacing(null);
     setAutoJointCustomVerticalSpacing(null);
     setAutoJointVerticalOffset(0);
+    setAutoJointHorizontalOffset(0);
     setAutoJointOrientation("horizontal");
     setAutoJointDominoRotation(0);
     setAutoJointHingeEdge("left");
@@ -1955,6 +1969,7 @@ export function App() {
       autoJointOrientation,
       autoJointDominoRotation,
       autoJointVerticalOffset,
+      autoJointHorizontalOffset,
     );
     if (!layout.isValid) return;
 
@@ -2190,7 +2205,7 @@ export function App() {
 
     sceneRef.current?.setJoineryPreview(null);
     setToolMode("select");
-  }, [connectorSeam, autoJointShape, autoJointStyle, autoJointGenerateLooseInserts, autoJointCount, autoJointClearance, autoJointDovetailStopped, autoJointDovetailStopEnd, autoJointHingeEdge, autoJointOrientation, autoJointDominoRotation, autoJointVerticalOffset, computeJoineryLayout, addPrimitive, setTransform, setParam, setHole, selectMany, combine, rename]);
+  }, [connectorSeam, autoJointShape, autoJointStyle, autoJointGenerateLooseInserts, autoJointCount, autoJointClearance, autoJointDovetailStopped, autoJointDovetailStopEnd, autoJointHingeEdge, autoJointOrientation, autoJointDominoRotation, autoJointVerticalOffset, autoJointHorizontalOffset, computeJoineryLayout, addPrimitive, setTransform, setParam, setHole, selectMany, combine, rename]);
 
   // Live Ghost Preview in 3D viewport while in "join" toolMode
   useEffect(() => {
@@ -2209,6 +2224,7 @@ export function App() {
       autoJointOrientation,
       autoJointDominoRotation,
       autoJointVerticalOffset,
+      autoJointHorizontalOffset,
     );
     sceneRef.current?.setJoineryPreview({
       plugId: connectorSeam.plugNode.id,
@@ -2225,7 +2241,7 @@ export function App() {
     return () => {
       sceneRef.current?.setJoineryPreview(null);
     };
-  }, [toolMode, connectorSeam, autoJointShape, autoJointStyle, autoJointCount, autoJointClearance, autoJointDovetailStopped, autoJointDovetailStopEnd, autoJointHingeEdge, autoJointOrientation, autoJointDominoRotation, autoJointVerticalOffset, computeJoineryLayout]);
+  }, [toolMode, connectorSeam, autoJointShape, autoJointStyle, autoJointCount, autoJointClearance, autoJointDovetailStopped, autoJointDovetailStopEnd, autoJointHingeEdge, autoJointOrientation, autoJointDominoRotation, autoJointVerticalOffset, autoJointHorizontalOffset, computeJoineryLayout]);
 
   // If selection changes away from 2 objects while in "join" toolMode, return to "select"
   useEffect(() => {
@@ -2265,8 +2281,13 @@ export function App() {
       autoJointOrientation,
       autoJointDominoRotation,
       autoJointVerticalOffset,
+      autoJointHorizontalOffset,
     );
-  }, [connectorSeam, autoJointShape, autoJointCount, autoJointClearance, autoJointDovetailStopped, autoJointDovetailStopEnd, autoJointHingeEdge, autoJointOrientation, autoJointDominoRotation, autoJointVerticalOffset, computeJoineryLayout]);
+  }, [connectorSeam, autoJointShape, autoJointCount, autoJointClearance, autoJointDovetailStopped, autoJointDovetailStopEnd, autoJointHingeEdge, autoJointOrientation, autoJointDominoRotation, autoJointVerticalOffset, autoJointHorizontalOffset, computeJoineryLayout]);
+
+  // A horizontal dovetail rail can only be stacked, so its spacing is the vertical one.
+  const dovetailLiesAcross = autoJointShape === 0 && autoJointDominoRotation === 90;
+  const arrangeOrientation = dovetailLiesAcross ? "vertical" : autoJointOrientation;
 
   const cutTargetNode = useMemo(() => {
     if (selectedIds.length !== 1) return null;
@@ -2702,6 +2723,10 @@ export function App() {
   const buildId = useRef(0);
   const textFontInputRef = useRef<HTMLInputElement>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
+  const [savedImportOpen, setSavedImportOpen] = useState(false);
+  const [savedImportId, setSavedImportId] = useState<string | null>(null);
+  const chooseSavedImport = (id: string | null = null) => { setSavedImportId(id); setSavedImportOpen(true); };
+  useEffect(() => { setSavedImportOpen(false); }, [currentProjectId]);
   const faceApplyButtonRef = useRef<HTMLButtonElement>(null);
   const edgePreviewRequestRef = useRef(0);
   // Push/Pull's Distance field previews its result on the part while it is
@@ -2712,7 +2737,7 @@ export function App() {
   const previewTypedPush = useCallback((valueMm: number | null) => {
     window.clearTimeout(pushPreviewTimer.current);
     const request = ++pushPreviewRequest.current;
-    if (valueMm === null || Math.abs(valueMm) < 0.5) {
+    if (valueMm === null || Math.abs(valueMm) < MIN_PUSH_PULL_MM) {
       // null just ends the preview; a typed 0 also clears the number the
       // scene carries on to the next face clicked.
       void sceneRef.current?.previewTypedPushPull(valueMm);
@@ -3352,6 +3377,15 @@ export function App() {
     }
   };
 
+  const importSavedAttachment = async (attachment: Attachment) => {
+    const destination = useDoc.getState().currentProjectId;
+    const file = await savedFileForImport(attachment);
+    if (useDoc.getState().currentProjectId !== destination) throw new Error('The open project changed. Choose Import again in the destination project.');
+    setSavedImportOpen(false);
+    setHomeOpen(false);
+    await importSTLFile(file);
+  };
+
   const confirmSvgImport = async (config: { width: number; height: number; thickness: number }) => {
     if (!pendingSvg) return;
     const { file, art } = pendingSvg;
@@ -3839,6 +3873,7 @@ export function App() {
 
   /** Back to the Home page, leaving a small picture of the design for its card. */
   const openHome = useCallback(() => {
+    sceneRef.current?.saveCameraNow();
     const state = useDoc.getState();
     if (state.nodes.length && sceneIsComplete()) {
       const shot = sceneRef.current?.captureThumbnail();
@@ -4993,7 +5028,11 @@ export function App() {
                   onClick={() => { setFileMenuOpen(false); importInputRef.current?.click(); }}
                 >
                   <ImportIcon className="topbar-icon" />
-                  <span className="item-label">Import…</span>
+                  <span className="item-label">Import from computer…</span>
+                </button>
+                <button role="menuitem" onClick={() => { setFileMenuOpen(false); chooseSavedImport(); }}>
+                  <ImportIcon className="topbar-icon" />
+                  <span className="item-label">Import from saved files…</span>
                 </button>
                 <hr />
                 <button
@@ -5781,6 +5820,7 @@ export function App() {
       <main className="workspace">
         {contextMenuAt && <ToolContextMenu at={contextMenuAt} suggestions={suggestions} onClose={() => setContextMenuAt(null)} />}
         <Viewport
+          key={currentProjectId}
           parts={parts}
           nodes={nodes}
           selectedIds={selectedIds}
@@ -6634,10 +6674,9 @@ export function App() {
                 }
                 if (faceOp === "push") {
                   const travel = faceValue;
-                  // The kernel ignores anything under half a millimetre, so
-                  // say that rather than letting the press look ignored.
-                  if (Math.abs(travel) < 0.5) {
-                    setError("Type a distance of at least 0.5 mm.");
+                  // Say so rather than letting a zero press look ignored.
+                  if (Math.abs(travel) < MIN_PUSH_PULL_MM) {
+                    setError(`Type a distance of at least ${MIN_PUSH_PULL_MM} mm.`);
                     return;
                   }
                   setError(null);
@@ -7754,15 +7793,17 @@ export function App() {
               </div>
             </div>
 
-            {/* Domino Mortise Slot Orientation (Flat vs Upright) */}
-            {autoJointShape === 3 && (
+            {/* Domino Mortise Slot Orientation (Flat vs Upright); a dovetail rail lies vertically or horizontally */}
+            {(autoJointShape === 3 || autoJointShape === 0) && (
               <div style={{ marginBottom: 12 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
                   <span className="field-label" style={{ fontSize: 11, fontWeight: 600, color: "#475569" }}>
-                    Domino Slot Orientation
+                    {autoJointShape === 0 ? "Dovetail Direction" : "Domino Slot Orientation"}
                   </span>
                   <span style={{ fontSize: 10, color: "#64748b" }}>
-                    {autoJointDominoRotation === 0 ? "0° Flat" : "90° Upright"}
+                    {autoJointShape === 0
+                      ? (autoJointDominoRotation === 0 ? "Vertical" : "Horizontal")
+                      : (autoJointDominoRotation === 0 ? "0° Flat" : "90° Upright")}
                   </span>
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
@@ -7775,9 +7816,9 @@ export function App() {
                   >
                     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                       <span style={{ fontSize: 15, lineHeight: 1 }}>▬</span>
-                      <span style={{ fontWeight: 600, fontSize: 11 }}>Flat</span>
+                      <span style={{ fontWeight: 600, fontSize: 11 }}>{autoJointShape === 0 ? "Vertical" : "Flat"}</span>
                     </div>
-                    <span style={{ fontSize: 9, opacity: 0.8 }}>Horizontal Slot (0°)</span>
+                    <span style={{ fontSize: 9, opacity: 0.8 }}>{autoJointShape === 0 ? "Rail runs up/down the face" : "Horizontal Slot (0°)"}</span>
                   </button>
                   <button
                     type="button"
@@ -7788,9 +7829,9 @@ export function App() {
                   >
                     <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                       <span style={{ fontSize: 15, lineHeight: 1 }}>▮</span>
-                      <span style={{ fontWeight: 600, fontSize: 11 }}>Upright</span>
+                      <span style={{ fontWeight: 600, fontSize: 11 }}>{autoJointShape === 0 ? "Horizontal" : "Upright"}</span>
                     </div>
-                    <span style={{ fontSize: 9, opacity: 0.8 }}>Vertical Slot (90°)</span>
+                    <span style={{ fontSize: 9, opacity: 0.8 }}>{autoJointShape === 0 ? "Rail runs along the face" : "Vertical Slot (90°)"}</span>
                   </button>
                 </div>
               </div>
@@ -7800,7 +7841,7 @@ export function App() {
             {autoJointCount > 1 && autoJointShape !== 5 && joineryLayout && (
               <div style={{ marginBottom: 12 }}>
                 {/* Arrangement Direction: Horizontal vs Vertical vs Grid */}
-                <div style={{ marginBottom: 8 }}>
+                {!dovetailLiesAcross && (<div style={{ marginBottom: 8 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
                     <span className="field-label" style={{ fontSize: 11, fontWeight: 600, color: "#475569" }}>
                       Arrangement Direction
@@ -7809,7 +7850,7 @@ export function App() {
                   <div style={{ display: "grid", gridTemplateColumns: autoJointCount >= 4 ? "1fr 1fr 1fr" : "1fr 1fr", gap: 6 }}>
                     <button
                       type="button"
-                      className={`tolerance-card ${autoJointOrientation === "horizontal" ? "active" : ""}`}
+                      className={`tolerance-card ${arrangeOrientation === "horizontal" ? "active" : ""}`}
                       onClick={() => setAutoJointOrientation("horizontal")}
                       style={{ padding: "5px 6px", textAlign: "center" }}
                       title="Distribute horizontally along seam width/length"
@@ -7818,7 +7859,7 @@ export function App() {
                     </button>
                     <button
                       type="button"
-                      className={`tolerance-card ${autoJointOrientation === "vertical" ? "active" : ""}`}
+                      className={`tolerance-card ${arrangeOrientation === "vertical" ? "active" : ""}`}
                       onClick={() => setAutoJointOrientation("vertical")}
                       style={{ padding: "5px 6px", textAlign: "center" }}
                       title="Distribute vertically along seam height/thickness (stacked)"
@@ -7828,7 +7869,7 @@ export function App() {
                     {autoJointCount >= 4 && (
                       <button
                         type="button"
-                        className={`tolerance-card ${autoJointOrientation === "grid" ? "active" : ""}`}
+                        className={`tolerance-card ${arrangeOrientation === "grid" ? "active" : ""}`}
                         onClick={() => setAutoJointOrientation("grid")}
                         style={{ padding: "5px 6px", textAlign: "center" }}
                         title="2×2 Grid distribution (both horizontal and vertical)"
@@ -7837,11 +7878,11 @@ export function App() {
                       </button>
                     )}
                   </div>
-                </div>
+                </div>)}
 
                 {/* Horizontal Spacing Slider */}
-                {(autoJointOrientation === "horizontal" || autoJointOrientation === "grid") && (
-                  <div style={{ marginBottom: autoJointOrientation === "grid" ? 8 : 0 }}>
+                {(arrangeOrientation === "horizontal" || arrangeOrientation === "grid") && (
+                  <div style={{ marginBottom: arrangeOrientation === "grid" ? 8 : 0 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
                       <span className="field-label" style={{ fontSize: 11, fontWeight: 600, color: "#475569" }}>
                         Horizontal Spacing
@@ -7884,7 +7925,7 @@ export function App() {
                 )}
 
                 {/* Vertical Spacing Slider */}
-                {(autoJointOrientation === "vertical" || autoJointOrientation === "grid") && (
+                {(arrangeOrientation === "vertical" || arrangeOrientation === "grid") && (
                   <div>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
                       <span className="field-label" style={{ fontSize: 11, fontWeight: 600, color: "#475569" }}>
@@ -7929,7 +7970,57 @@ export function App() {
               </div>
             )}
 
+            {/* Horizontal Position / Shift (Left / Right across the face) */}
+            {autoJointShape !== 5 && joineryLayout && joineryLayout.maxHorizontalShift > 0.2 && (
+              <div style={{ marginBottom: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+                  <span className="field-label" style={{ fontSize: 11, fontWeight: 600, color: "#475569" }}>
+                    Horizontal Position (Left ⇤ / Right ⇥)
+                  </span>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <span style={{ fontSize: 11, fontWeight: 600, color: autoJointHorizontalOffset === 0 ? "#64748b" : "#00a7a5" }}>
+                      {autoJointHorizontalOffset > 0 ? `+${autoJointHorizontalOffset.toFixed(decimalPlaces)} mm` : (autoJointHorizontalOffset < 0 ? `${autoJointHorizontalOffset.toFixed(decimalPlaces)} mm` : "Centered (0 mm)")}
+                    </span>
+                    {autoJointHorizontalOffset !== 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setAutoJointHorizontalOffset(0)}
+                        style={{ fontSize: 9, padding: "1px 5px", background: "#f1f5f9", border: "1px solid #cbd5e1", borderRadius: 3, cursor: "pointer", color: "#64748b" }}
+                        title="Reset to center of face"
+                      >
+                        Center
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <div className="pin-slider-row">
+                  <input
+                    type="range"
+                    min={-Number(joineryLayout.maxHorizontalShift.toFixed(decimalPlaces))}
+                    max={Number(joineryLayout.maxHorizontalShift.toFixed(decimalPlaces))}
+                    step={0.5}
+                    value={autoJointHorizontalOffset}
+                    onChange={(e) => setAutoJointHorizontalOffset(Number(e.target.value))}
+                  />
+                  <input
+                    type="number"
+                    min={-Number(joineryLayout.maxHorizontalShift.toFixed(decimalPlaces))}
+                    max={Number(joineryLayout.maxHorizontalShift.toFixed(decimalPlaces))}
+                    step={0.5}
+                    value={autoJointHorizontalOffset}
+                    onChange={(e) => setAutoJointHorizontalOffset(Number(e.target.value) || 0)}
+                  />
+                </div>
+              </div>
+            )}
+
             {/* Vertical Position / Shift (Up ⤒ / Down ⤓) */}
+            {autoJointShape !== 5 && joineryLayout && !(joineryLayout.maxVerticalShift > 0.2) && (
+              <div style={{ marginBottom: 12, fontSize: 11, color: "#64748b" }}>
+                Vertical Position: no room to move up or down on this {joineryLayout.wallHeight.toFixed(decimalPlaces)} mm face
+                {autoJointShape === 0 ? " — shorten the Rail Length to free some." : " — use a smaller joint to free some."}
+              </div>
+            )}
             {autoJointShape !== 5 && joineryLayout && joineryLayout.maxVerticalShift > 0.2 && (
               <div style={{ marginBottom: 12 }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
@@ -8629,6 +8720,7 @@ export function App() {
       </aside>
 
       <HomePage
+        onImportSavedFile={chooseSavedImport}
         open={homeOpen}
         onClose={() => setHomeOpen(false)}
         onNewDesign={newFromHome}
@@ -8647,6 +8739,9 @@ export function App() {
         }}
         onProjectLoadFailed={() => setFileOperation(null)}
       />
+
+      <SavedFileImportDialog open={savedImportOpen} initialId={savedImportId} projectName={projectName}
+        folders={useDoc.getState().folders} onClose={() => setSavedImportOpen(false)} onImport={importSavedAttachment} />
 
       <VersionHistoryDialog open={historyOpen} projectId={currentProjectId} onClose={() => setHistoryOpen(false)} />
       {confirmDialog}
