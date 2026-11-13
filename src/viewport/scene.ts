@@ -1985,9 +1985,11 @@ export class Scene {
   /**
    * Where the Move gizmo should sit so it can be grabbed. Normally on the
    * object's own origin — but zoomed in on a big board that origin is far off
-   * screen and the gizmo went with it. Then it goes to the point INSIDE the
-   * object's bounds nearest the middle of the view. Null when the origin is
-   * already comfortably in view (nothing to change).
+   * screen and the gizmo went with it. Then it goes INSIDE the object, in the
+   * middle of the part of it that is visible: not at its edge or corner, where
+   * neighbouring objects meet it and you cannot tell which one the gizmo
+   * belongs to. Null when the origin is already comfortably in view (nothing
+   * to change).
    */
   private visibleGizmoPoint(): THREE.Vector3 | null {
     if (this.selectedIds.length !== 1) return null;
@@ -2003,27 +2005,45 @@ export class Scene {
       ndc.copy(p).project(this.camera);
       return Math.abs(ndc.x) < margin && Math.abs(ndc.y) < margin && ndc.z > -1 && ndc.z < 1;
     };
-    if (inView(obj.position) && inView(box.getCenter(new THREE.Vector3()))) return null;
-    let best: THREE.Vector3 | null = null;
-    let bestScore = Infinity;
-    const steps = 8;
-    const p = new THREE.Vector3();
-    for (let i = 0; i <= steps; i++) {
-      for (let j = 0; j <= steps; j++) {
-        for (let k = 0; k <= steps; k++) {
-          p.set(
-            box.min.x + ((box.max.x - box.min.x) * i) / steps,
-            box.min.y + ((box.max.y - box.min.y) * j) / steps,
-            box.min.z + ((box.max.z - box.min.z) * k) / steps,
+    const centre = box.getCenter(new THREE.Vector3());
+    if (inView(obj.position) && inView(centre)) return null;
+
+    // Interior points only (never on a face, edge or corner of the bounds), kept
+    // when they are on screen. The visible part of the object is the spread of
+    // those; the gizmo goes to the point nearest the middle of that spread.
+    const steps = 10;
+    const visible: { point: THREE.Vector3; x: number; y: number }[] = [];
+    for (let i = 0; i < steps; i++) {
+      for (let j = 0; j < steps; j++) {
+        for (let k = 0; k < steps; k++) {
+          const point = new THREE.Vector3(
+            box.min.x + ((box.max.x - box.min.x) * (i + 0.5)) / steps,
+            box.min.y + ((box.max.y - box.min.y) * (j + 0.5)) / steps,
+            box.min.z + ((box.max.z - box.min.z) * (k + 0.5)) / steps,
           );
-          if (!inView(p)) continue;
-          const score = ndc.x * ndc.x + ndc.y * ndc.y;
-          if (score < bestScore) { bestScore = score; best = p.clone(); }
+          if (inView(point)) visible.push({ point, x: ndc.x, y: ndc.y });
         }
       }
     }
+    if (!visible.length) return null;
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const v of visible) {
+      minX = Math.min(minX, v.x); maxX = Math.max(maxX, v.x);
+      minY = Math.min(minY, v.y); maxY = Math.max(maxY, v.y);
+    }
+    const targetX = (minX + maxX) / 2;
+    const targetY = (minY + maxY) / 2;
+    let best: THREE.Vector3 | null = null;
+    let bestScore = Infinity;
+    for (const v of visible) {
+      // Nearest the middle of the visible part on screen; among points that
+      // look the same (depth in an orthographic view) prefer the object's middle.
+      const score = (v.x - targetX) ** 2 + (v.y - targetY) ** 2 + 1e-9 * v.point.distanceToSquared(centre);
+      if (score < bestScore) { bestScore = score; best = v.point; }
+    }
     return best;
   }
+
   private multiGizmoDrag: {
     center: THREE.Vector3;
     startGizmoPos: THREE.Vector3;
