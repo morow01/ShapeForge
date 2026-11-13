@@ -4621,30 +4621,15 @@ export class Scene {
       for (const pill of this.dimensionPills) pill.style.display = "none";
       return;
     }
+    // The three readouts and their lines are laid out on the WORLD axes
+    // (the cage is a world box and the pills read its world size), so the one
+    // to show is the one along the handle's own world direction: left/right
+    // = width, front/back = depth, bottom/top = height. It used to be worked
+    // out from the part's LOCAL axes, which only agrees with the world while
+    // the part is unrotated — on a turned board the drag showed some other
+    // dimension, and dragging the bottom handle did not show the height.
     let axis: number | null = null;
-    if (handleIndex >= 8) {
-      if (this.resizeDrag) {
-        axis = this.resizeDrag.axis;
-      } else {
-        const firstId = this.selectedIds[0];
-        const v = firstId ? this.parts.get(firstId) : null;
-        if (v) {
-          const invQuat = v.group.getWorldQuaternion(new THREE.Quaternion()).invert();
-          const worldDir = new THREE.Vector3(
-            handleIndex === 8 ? -1 : handleIndex === 9 ? 1 : 0,
-            handleIndex === 10 ? -1 : handleIndex === 11 ? 1 : 0,
-            handleIndex === 12 ? -1 : handleIndex === 13 ? 1 : 0,
-          );
-          const localDir = worldDir.applyQuaternion(invQuat);
-          const ax = Math.abs(localDir.x);
-          const ay = Math.abs(localDir.y);
-          const az = Math.abs(localDir.z);
-          axis = (ax >= ay && ax >= az) ? 0 : (ay >= ax && ay >= az) ? 1 : 2;
-        } else {
-          axis = Math.floor((handleIndex - 8) / 2);
-        }
-      }
-    }
+    if (handleIndex >= 8) axis = Math.floor((handleIndex - 8) / 2);
     this.dimensionEdges.geometry.setDrawRange(axis === null ? 0 : axis * 10, axis === null ? 30 : 10);
     for (let i = 0; i < this.dimensionPills.length; i++) {
       this.dimensionPills[i].style.display = axis === null || axis === i ? "flex" : "none";
