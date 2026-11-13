@@ -59,6 +59,7 @@ import type {
   EditNode,
   FolderMeta,
   GroupNode,
+  Hinge,
   ImportNode,
   SketchData,
   LowPoly,
@@ -817,6 +818,17 @@ function cloneSubtree(n: SceneNode, offset: Vec3): SceneNode {
   return isGroup(clone) ? { ...clone, children: clone.children.map((c) => cloneSubtree(c, [0, 0, 0])) } : clone;
 }
 
+/** A design's contents as one assembly group named after it, ready to add to
+ *  another design. Fresh ids, because the originals could collide with objects
+ *  already there (the same file imported twice, a copy of this very design). */
+function groupFromProject(proj: ProjectData): GroupNode {
+  return {
+    id: nextId(), name: proj.name, type: "group", op: "assembly",
+    children: proj.nodes.map((n) => cloneSubtree(n, [0, 0, 0])),
+    position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1], isHole: false,
+  };
+}
+
 interface DocState {
   currentProjectId: string;
   projectName: string;
@@ -865,6 +877,13 @@ interface DocState {
   editTags: (ids: string[], add: string[], remove: string[]) => boolean;
   exportCurrentProject: () => Promise<void>;
   importProjectFile: (file: File) => Promise<boolean>;
+  /** Adds the contents of a .shapeforge file to the design that is open, as one
+   *  group named after the file. Returns how many objects arrived, or null when
+   *  the file could not be read. */
+  mergeProjectFile: (file: File) => Promise<number | null>;
+  /** Same, for another design stored in this app. Null when it is the open one or its
+   *  contents are not on this computer. */
+  mergeDesign: (id: string) => number | null;
   importProjectData: (data: ProjectData) => string;
   refreshProjectsList: () => void;
 
@@ -942,6 +961,8 @@ interface DocState {
   setHideLines: (id: string, hideLines: boolean) => void;
   /** Faceted low-poly styling; undefined clears it back to full detail. */
   setLowPoly: (id: string, lowPoly: LowPoly | undefined) => void;
+  /** Sets, changes or (undefined) removes a part's swing-open pose. */
+  setHinge: (id: string, hinge: Hinge | undefined) => void;
   setGroupOp: (id: string, op: BooleanOp) => void;
   /** Millimetres the cut-away shapes of a group's boolean are grown by. */
   setGroupClearance: (id: string, clearance: number) => void;
@@ -1291,6 +1312,36 @@ export const useDoc = create<DocState>()(
         } catch {
           return false;
         }
+      },
+
+      mergeProjectFile: async (file) => {
+        try {
+          const text = await file.text();
+          const fallback = file.name.replace(/\.(shapeforge|json)$/i, "");
+          const proj = parseProjectFile(text, fallback);
+          if (!proj || !proj.nodes.length) return proj ? 0 : null;
+          await restoreProjectFileBlobs(text);
+          ownStep(`Import ${proj.name}`);
+          const group = groupFromProject(proj);
+          set((s) => ({ nodes: [...s.nodes, group], selectedIds: [group.id] }));
+          afterBatchedMutation();
+          return group.children.length;
+        } catch {
+          return null;
+        }
+      },
+
+      mergeDesign: (id) => {
+        if (id === get().currentProjectId) return null;
+        const proj = loadProject(id);
+        // A design known only from Drive's listing has no contents on this computer yet.
+        if (!proj) return null;
+        if (!proj.nodes.length) return 0;
+        ownStep(`Import ${proj.name}`);
+        const group = groupFromProject(proj);
+        set((s) => ({ nodes: [...s.nodes, group], selectedIds: [group.id] }));
+        afterBatchedMutation();
+        return group.children.length;
       },
 
       importProjectData: (proj) => {
@@ -1822,6 +1873,14 @@ export const useDoc = create<DocState>()(
         afterBatchedMutation();
       },
 
+      setHinge: (id, hinge) => {
+        ownStep(hinge ? "Hinge" : "Remove hinge");
+        set((s) => ({
+          nodes: updateNode(s.nodes, id, (n) => ({ ...n, hinge })),
+        }));
+        afterBatchedMutation();
+      },
+
       setLowPoly: (id, lowPoly) => {
         ownStep(lowPoly ? "Low poly" : "Full detail");
         set((s) => ({
@@ -2036,10 +2095,12 @@ export const useDoc = create<DocState>()(
                   // drops the group's half of that, so every child jumped by
                   // exactly however far the group had been moved, turned or
                   // scaled since it was made.
+                  // Always lifted, even without centres: liftOutOf then falls
+                  // back to scaling position and size by the group's scale.
+                  // Returning the child untouched here dropped the group's
+                  // scale altogether, so the model shrank to its unscaled size.
                   return n.children.map((child) =>
-                    n.scale.every((v) => v === 1) || (centres?.[n.id] && centres?.[child.id])
-                      ? liftOutOf(n, child, { group: centres?.[n.id], child: centres?.[child.id] })
-                      : child,
+                    liftOutOf(n, child, { group: centres?.[n.id], child: centres?.[child.id] }),
                   );
                 }
                 return [{ ...n, children: expand(n.children) }];

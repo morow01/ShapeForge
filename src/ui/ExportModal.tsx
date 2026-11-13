@@ -80,7 +80,7 @@ export function ExportModal({
       <section className="export-modal" role="dialog" aria-modal="true" aria-labelledby="export-modal-title">
         <header className="modal-header">
           <div className="modal-title-group">
-            <h2 id="export-modal-title">Export</h2>
+            <h2 id="export-modal-title">Export model</h2>
             <p className="modal-subtitle">
               {selectedCount
                 ? `${selectedCount} selected object${selectedCount > 1 ? "s" : ""}`
@@ -89,7 +89,7 @@ export function ExportModal({
           </div>
           <button className="modal-close-btn" onClick={onClose} aria-label="Close export">×</button>
         </header>
-        <div className="export-modal-body">
+        <div className="export-modal-body"><p className="export-purpose">Create a model file for 3D printing or another 3D app. For an editable ShapeForge copy, use File → Download project.</p>
           <div className="field">
             <span className="field-label">Quality</span>
             <div className="binary-choice three icon-choice labeled" role="group" aria-label="Export quality">
@@ -151,7 +151,7 @@ export function ExportModal({
             disabled={exporting}
           >
             <ExportIcon className="tool-icon" />
-            <span>{exporting ? "Exporting…" : readyExportUrl ? "Download" : `Export ${format.toUpperCase()}`}</span>
+            <span>{exporting ? "Preparing…" : readyExportUrl ? `Download ${format.toUpperCase()}` : `Prepare ${format.toUpperCase()} file`}</span>
           </button>
         </footer>
       </section>

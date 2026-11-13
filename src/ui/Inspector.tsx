@@ -21,7 +21,7 @@ import {
   solveScaledTriangle,
 } from "../geometry/triangle";
 import type { TriangleSolution } from "../geometry/triangle";
-import type { BooleanOp, LowPoly, ObjectNode, ParamField, PrimitiveKind, SceneNode, Vec3 } from "../document/types";
+import type { BooleanOp, Hinge, LowPoly, ObjectNode, ParamField, PrimitiveKind, SceneNode, Vec3 } from "../document/types";
 import type { LocalFontData } from "../text/systemFonts";
 import { displayStep, formatLength, fromMillimetres, toMillimetres } from "../measurement";
 import type { DisplayUnit } from "../measurement";
@@ -281,6 +281,18 @@ interface Props {
   globalHideAllLines?: boolean;
   /** Faceted low-poly styling; undefined restores full detail. */
   onLowPoly: (lowPoly: LowPoly | undefined) => void;
+  /** Swing-open pose (see Hinge): set, change or clear it. */
+  onHinge: (hinge: Hinge | undefined) => void;
+  /** Start (or cancel) "click the model to set the pivot". */
+  onPickPivot: () => void;
+  pickingPivot: boolean;
+  /** Show a draggable gizmo on the pivot. */
+  hingeGizmo: boolean;
+  onHingeGizmo: (on: boolean) => void;
+  /** Where a hinge would go along an edge of this part, or null if it has no mesh yet. */
+  onSuggestHinge: (side: HingeSide, level: "bottom" | "top") => { point: Vec3; axis: Vec3 } | null;
+  /** Overall height of the whole object this part belongs to, as drawn now. */
+  poseHeight: { name: string; height: number; top: number } | null;
   /** Imported artwork only: how far the outlines are extruded, in mm. */
   onSvgThickness: (mm: number) => void;
   /** Imported STL only: decimate mesh by given ratio. */
@@ -407,6 +419,13 @@ export function Inspector({
   onHideLines,
   globalHideAllLines = false,
   onLowPoly,
+  onHinge,
+  onPickPivot,
+  pickingPivot,
+  hingeGizmo,
+  onHingeGizmo,
+  onSuggestHinge,
+  poseHeight,
   onSvgThickness,
   onSimplifyMesh,
   onSmoothMesh,
@@ -938,6 +957,8 @@ export function Inspector({
               )}
             </span>
           </label>
+
+          <HingeSection hinge={node.hinge} position={node.position} onHinge={onHinge} onPickPivot={onPickPivot} pickingPivot={pickingPivot} hingeGizmo={hingeGizmo} onHingeGizmo={onHingeGizmo} onSuggestHinge={onSuggestHinge} poseHeight={poseHeight} displayUnit={displayUnit} decimalPlaces={decimalPlaces} />
 
           <LowPolySection lowPoly={node.lowPoly} onLowPoly={onLowPoly} decimalPlaces={decimalPlaces} />
         </>
@@ -2980,6 +3001,259 @@ function SketchQuality({
         )}
       </div>
     </div>
+  );
+}
+
+type HingeSide = "back" | "front" | "left" | "right" | "back-left" | "back-right" | "front-left" | "front-right";
+type HingeSuggest = (side: HingeSide, level: "bottom" | "top") => { point: Vec3; axis: Vec3 } | null;
+
+const HINGE_ANGLE_CHIPS = [0, 90, 180, 270, 360];
+const HINGE_EDGES: { side: HingeSide; label: string }[] = [
+  { side: "back", label: "Back" },
+  { side: "front", label: "Front" },
+  { side: "left", label: "Left" },
+  { side: "right", label: "Right" },
+];
+const HINGE_CORNERS: { side: HingeSide; label: string }[] = [
+  { side: "back-left", label: "Back L" },
+  { side: "back-right", label: "Back R" },
+  { side: "front-left", label: "Front L" },
+  { side: "front-right", label: "Front R" },
+];
+
+/** Which world axis the hinge line runs along: 0 = X, 1 = Y, 2 = Z. */
+function hingeAxisIndex(axis: Vec3): 0 | 1 | 2 {
+  const a = axis.map(Math.abs);
+  return (a[0] >= a[1] && a[0] >= a[2] ? 0 : a[1] >= a[2] ? 1 : 2) as 0 | 1 | 2;
+}
+
+/**
+ * Swing a part open about a line — a lid, a door, a flap — to see how much
+ * room it needs. A viewing aid only: nothing in the model changes and the part
+ * exports in its normal closed position.
+ */
+function HingeSection({
+  hinge,
+  position,
+  onHinge,
+  onPickPivot,
+  pickingPivot,
+  hingeGizmo,
+  onHingeGizmo,
+  onSuggestHinge,
+  poseHeight,
+  displayUnit,
+  decimalPlaces,
+}: {
+  hinge?: Hinge;
+  position: Vec3;
+  onHinge: (hinge: Hinge | undefined) => void;
+  onPickPivot: () => void;
+  pickingPivot: boolean;
+  hingeGizmo: boolean;
+  onHingeGizmo: (on: boolean) => void;
+  onSuggestHinge: HingeSuggest;
+  poseHeight: { name: string; height: number; top: number } | null;
+  displayUnit: DisplayUnit;
+  decimalPlaces: number;
+}) {
+  const [level, setLevel] = useState<"bottom" | "top">("bottom");
+  const [failed, setFailed] = useState(false);
+
+  const snapTo = (side: HingeSide, angle = hinge?.angle ?? 0) => {
+    const found = onSuggestHinge(side, level);
+    setFailed(!found);
+    if (found) onHinge({ point: found.point, axis: found.axis, angle });
+  };
+
+  if (!hinge) {
+    return (
+      <>
+        <h2>Hinge (swing open)</h2>
+        <div className="hinge-empty">
+          <p>
+            Swing this part open about a line, to see how much room a lid or
+            door needs. It only changes the view — your model and export stay
+            as they are.
+          </p>
+          <button type="button" className="hinge-add" onClick={() => snapTo("back", 0)}>
+            + Add hinge
+          </button>
+          {failed && <p className="hinge-warn">This part has no shape yet, so there is nothing to hinge.</p>}
+        </div>
+      </>
+    );
+  }
+
+  const axisIndex = hingeAxisIndex(hinge.axis);
+  const sign = hinge.axis[axisIndex] < 0 ? -1 : 1;
+  const unitAxis = (index: number, s: number): Vec3 => [0, 1, 2].map((i) => (i === index ? s : 0)) as Vec3;
+  const pivot = hinge.point.map((v, i) => position[i] + v) as Vec3;
+  const open = hinge.angle > 0;
+
+  return (
+    <>
+      <div className="h2-row">
+        <h2>Hinge (swing open)</h2>
+        <button type="button" className="hinge-remove" onClick={() => onHinge(undefined)} title="Remove this hinge">
+          Remove
+        </button>
+      </div>
+
+      <div className="sketch-quality-card">
+        <div className="sketch-quality-header">
+          <span className="field-label">Open</span>
+          <span className="sketch-quality-val">{Math.round(hinge.angle)}°</span>
+        </div>
+        <div className="sketch-quality-slider-row">
+          <input
+            type="range"
+            min={0}
+            max={360}
+            step={1}
+            value={Math.min(360, Math.max(0, hinge.angle))}
+            onPointerDown={beginHistoryBatch}
+            onPointerUp={endHistoryBatch}
+            onChange={(e) => onHinge({ ...hinge, angle: Number(e.target.value) })}
+            aria-label="Open angle"
+          />
+          <div className="num-stepper-wrap">
+            <MathNumInput
+              className="num"
+              min={-360}
+              max={360}
+              step={1}
+              value={Math.round(hinge.angle)}
+              onFocus={beginHistoryBatch}
+              onBlur={endHistoryBatch}
+              onCommit={(v) => onHinge({ ...hinge, angle: Math.max(-360, Math.min(360, v)) })}
+            />
+          </div>
+        </div>
+        <div className="sketch-quality-chips hinge-angle-chips">
+          {HINGE_ANGLE_CHIPS.map((deg) => (
+            <button
+              key={deg}
+              type="button"
+              className={`sketch-quality-chip ${Math.round(hinge.angle) === deg ? "active" : ""}`}
+              onClick={() => onHinge({ ...hinge, angle: deg })}
+            >
+              {deg === 0 ? "Closed" : `${deg}°`}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {poseHeight && (
+        <div className="hinge-readout">
+          <span className="hinge-readout-label">
+            {poseHeight.name} height{open ? " (open)" : ""}
+          </span>
+          <span className="hinge-readout-value">
+            {formatLength(poseHeight.height, displayUnit, decimalPlaces)} {displayUnit}
+          </span>
+        </div>
+      )}
+
+      <div className="sketch-quality-card">
+        <div className="sketch-quality-header">
+          <span className="field-label">Hinge line runs along</span>
+        </div>
+        <div className="sketch-quality-chips hinge-axis-row">
+          {(["X", "Y", "Z"] as const).map((label, i) => (
+            <button
+              key={label}
+              type="button"
+              className={`sketch-quality-chip ${axisIndex === i ? "active" : ""}`}
+              onClick={() => onHinge({ ...hinge, axis: unitAxis(i, sign) })}
+            >
+              {label}
+            </button>
+          ))}
+          <button
+            type="button"
+            className="sketch-quality-chip"
+            onClick={() => onHinge({ ...hinge, axis: unitAxis(axisIndex, -sign) })}
+            title="Swing the other way"
+          >
+            ⇅ Flip
+          </button>
+        </div>
+
+        <div className="sketch-quality-header">
+          <span className="field-label">Pivot point ({displayUnit})</span>
+        </div>
+        <label className="hinge-gizmo-toggle">
+          <input type="checkbox" checked={hingeGizmo} onChange={(e) => onHingeGizmo(e.target.checked)} />
+          <span>Drag the pivot with a gizmo in the viewport</span>
+        </label>
+        <button
+          type="button"
+          className={`hinge-pick ${pickingPivot ? "active" : ""}`}
+          onClick={onPickPivot}
+          title="Click a spot on the model to put the hinge pivot exactly there"
+        >
+          {pickingPivot ? "Click the model… (click here to cancel)" : "◎ Pick pivot on model"}
+        </button>
+        <div className="triple">
+          {["X", "Y", "Z"].map((label, i) => (
+            <label key={label} className={`axis-${i}`}>
+              <span className="field-label">{label}</span>
+              <MathNumInput
+                className="num"
+                step={displayStep(displayUnit, decimalPlaces)}
+                value={formatLength(pivot[i], displayUnit, decimalPlaces)}
+                onFocus={beginHistoryBatch}
+                onBlur={endHistoryBatch}
+                onCommit={(v) => {
+                  const point = [...hinge.point] as Vec3;
+                  point[i] = toMillimetres(v, displayUnit) - position[i];
+                  onHinge({ ...hinge, point });
+                }}
+              />
+            </label>
+          ))}
+        </div>
+
+        <details className="hinge-snap">
+          <summary>Snap pivot to an edge of this part</summary>
+          <div className="hinge-snap-body">
+            <div className="sketch-quality-chips hinge-level-row">
+              {(["bottom", "top"] as const).map((l) => (
+                <button
+                  key={l}
+                  type="button"
+                  className={`sketch-quality-chip ${level === l ? "active" : ""}`}
+                  onClick={() => setLevel(l)}
+                >
+                  {l === "bottom" ? "Bottom edge" : "Top edge"}
+                </button>
+              ))}
+            </div>
+            <div className="sketch-quality-chips">
+              {HINGE_EDGES.map(({ side, label }) => (
+                <button key={side} type="button" className="sketch-quality-chip" onClick={() => snapTo(side)}>
+                  {label}
+                </button>
+              ))}
+            </div>
+            <span className="field-label">Or a vertical edge (a door)</span>
+            <div className="sketch-quality-chips">
+              {HINGE_CORNERS.map(({ side, label }) => (
+                <button key={side} type="button" className="sketch-quality-chip" onClick={() => snapTo(side)}>
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </details>
+        {failed && <p className="hinge-warn">This part has no shape yet, so there is no edge to snap to.</p>}
+      </div>
+
+      <button type="button" className="hinge-remove-btn" onClick={() => onHinge(undefined)}>
+        Remove hinge
+      </button>
+    </>
   );
 }
 

@@ -6,6 +6,7 @@ import type {
   CameraMode,
   EditOp,
   FolderMeta,
+  Hinge,
   LowPoly,
   PrimitiveKind,
   ProjectData,
@@ -67,6 +68,14 @@ function parseLowPoly(raw: unknown): LowPoly | undefined {
   return { facet, even: typeof even === "number" && Number.isFinite(even) && even > 0 ? even : 0 };
 }
 
+function parseHinge(raw: unknown): Hinge | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const { point, axis, angle } = raw as { point?: unknown; axis?: unknown; angle?: unknown };
+  if (!isVec3(point) || !isVec3(axis) || typeof angle !== "number" || !Number.isFinite(angle)) return undefined;
+  if (Math.hypot(axis[0], axis[1], axis[2]) < 1e-6) return undefined;
+  return { point, axis, angle };
+}
+
 export function parseNode(raw: unknown): SceneNode | null {
   if (!raw || typeof raw !== "object") return null;
   const n = raw as Record<string, unknown>;
@@ -88,6 +97,7 @@ export function parseNode(raw: unknown): SceneNode | null {
     transparent: typeof n.transparent === "boolean" ? n.transparent : undefined,
     hideLines: n.hideLines === true ? true : undefined,
     lowPoly: parseLowPoly(n.lowPoly),
+    hinge: parseHinge(n.hinge),
     hidden: n.hidden === true,
   };
 
@@ -306,14 +316,18 @@ export function listProjects(): ProjectMeta[] {
 
   // Check legacy document or create initial project
   const initialNodes = loadLegacyDocument();
+  const initialId = `p-${Date.now()}`;
   const initialProject: ProjectData = {
     version: VERSION,
-    id: `p-${Date.now()}`,
+    id: initialId,
     name: initialNodes.length ? "My First Design" : "Untitled Project",
     createdAt: Date.now(),
     updatedAt: Date.now(),
     nodes: initialNodes,
-    camera: loadCameraState(),
+    // Passing the id matters: loadCameraState() with no argument asks for the
+    // active project, which with no saved projects calls listProjects() again —
+    // an endless loop that left a first launch (or cleared storage) on a blank page.
+    camera: loadCameraState(initialId),
   };
 
   saveProject(initialProject);

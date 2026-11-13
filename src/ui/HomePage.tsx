@@ -378,7 +378,7 @@ export function HomePage({
         return;
       }
       if (press.folderId) {
-        // A folder dropped on another folder (or on All designs) moves inside it.
+        // A folder dropped on another folder (or on Library) moves inside it.
         if (e.type === "pointerup" && target !== "none" && !(typeof target === "string" && target.startsWith("design:"))) {
           if (!useDoc.getState().moveFolder(press.folderId, target)) showToast("A folder can't go inside itself or one of its own folders.");
         }
@@ -852,7 +852,7 @@ export function HomePage({
   const atRoot = !searching && view.kind === "folder" && viewFolderId === null;
 
   return (
-    <div className={`home-page${drag ? " is-dragging" : ""}`} role="dialog" aria-label="All designs" data-previews={thumbVersion}>
+    <div className={`home-page${drag ? " is-dragging" : ""}`} role="dialog" aria-label="Library" data-previews={thumbVersion}>
       <header className="home-top">
         <div className="home-brand">
           <img className="brand-logo" src={`${import.meta.env.BASE_URL}logo.svg`} alt="" width={24} height={26} draggable={false} />
@@ -872,13 +872,13 @@ export function HomePage({
           <PlusIcon className="modal-btn-icon" />
           <span>New folder</span>
         </button>
-        <button className="modal-btn" onClick={() => fileInputRef.current?.click()} title="Open a .shapeforge or .json file from your computer">
+        <button className="modal-btn" onClick={() => fileInputRef.current?.click()} title="Open an editable .shapeforge project from your computer">
           <FolderOpenIcon className="modal-btn-icon" />
-          <span>Open file</span>
+          <span>Open project file…</span>
         </button>
         <button className="modal-btn primary" onClick={() => onNewDesign(view.kind === "folder" ? viewFolderId : null)}>
           <PlusIcon className="modal-btn-icon" />
-          <span>New design</span>
+          <span>New project</span>
         </button>
         <input ref={fileInputRef} type="file" accept=".shapeforge,.json" hidden onChange={handleFile} />
       </header>
@@ -916,7 +916,7 @@ export function HomePage({
             onClick={() => { setSearch(""); setView({ kind: "folder", id: null }); }}
             {...dropProps(null)}
           >
-            <span className="home-nav-main"><GridIcon className="home-nav-icon" /><span className="home-nav-name">All designs</span></span>
+            <span className="home-nav-main"><GridIcon className="home-nav-icon" /><span className="home-nav-name">Library</span></span>
             <span className="home-count">{projects.length}</span>
           </button>
           {folders.length === 0 && <p className="home-side-empty home-side-empty-tree">No folders yet</p>}
@@ -1078,7 +1078,7 @@ export function HomePage({
           )}
           {(kept.length > 0 || driveStatus !== "signedIn") && (
             <p className="home-side-note">
-              Designs kept in this browser live only on this computer. Download a backup file to keep a copy elsewhere.
+              Designs kept in this browser live only on this computer. Use Download project to keep an editable .shapeforge copy elsewhere.
             </p>
           )}
           <p className="home-side-links">
@@ -1094,7 +1094,7 @@ export function HomePage({
           ) : (
             <div className="home-crumbs" aria-label="Folder path">
               <button className="home-crumb" onClick={() => setView({ kind: "folder", id: null })} {...dropProps(null)}>
-                All designs
+                Library
               </button>
               {trail.map((f) => (
                 <span key={f.id} className="home-crumb-wrap">
@@ -1440,7 +1440,7 @@ export function HomePage({
             <h2>{nameDialog.mode === "new" ? "New folder" : nameDialog.mode === "renameDesign" ? "Rename design" : "Rename folder"}</h2>
             {nameDialog.mode === "new" && (
               <p className="save-label" style={{ margin: 0 }}>
-                In: {["All designs", ...folderPath(folders, nameDialog.parentId).map((f) => f.name)].join(" › ")}
+                In: {["Library", ...folderPath(folders, nameDialog.parentId).map((f) => f.name)].join(" › ")}
               </p>
             )}
             <input
@@ -1483,11 +1483,11 @@ export function HomePage({
           )}
           <div className="home-drag-hint" role="status">
             {drag.folderId
-              ? `Drop "${drag.name}" on a folder to put it inside. Drop on All designs to make it a top-level folder.`
+              ? `Drop "${drag.name}" on a folder to put it inside. Drop on Library to make it a top-level folder.`
               : drag.tag
               ? `Drop on a design to add the tag "${drag.tag}". Picked designs all get it.`
               : folders.length
-              ? `Drop ${drag.ids.length > 1 ? drag.name : `"${drag.name}"`} on a folder to move ${drag.ids.length > 1 ? "them" : "it"}. Drop on All designs to take ${drag.ids.length > 1 ? "them" : "it"} out of a folder.`
+              ? `Drop ${drag.ids.length > 1 ? drag.name : `"${drag.name}"`} on a folder to move ${drag.ids.length > 1 ? "them" : "it"}. Drop on Library to take ${drag.ids.length > 1 ? "them" : "it"} out of a folder.`
               : "Make a folder with New folder, then drag designs into it."}
           </div>
         </>
@@ -1511,7 +1511,7 @@ export function HomePage({
                     <button role="menuitem" onClick={() => { setMenu(null); setHistoryFor(p.id); }}><HistoryIcon className="menu-icon" />Version history…</button>
                   )}
                   {!many && <button role="menuitem" onClick={() => { setMenu(null); duplicateProject(p.id); }}><CopyIcon className="menu-icon" />Duplicate</button>}
-                  {!many && <button role="menuitem" onClick={() => { setMenu(null); handleDownload(p); }}><DownloadIcon className="menu-icon" />Download backup file</button>}
+                  {!many && <button role="menuitem" onClick={() => { setMenu(null); handleDownload(p); }}><DownloadIcon className="menu-icon" />Download project</button>}
                   <hr />
                   <button role="menuitem" className="danger-item" onClick={() => { setMenu(null); handleDeleteMany(group); }}><BinIcon className="menu-icon" />{many ? `Delete ${group.length} designs` : "Delete"}</button>
                 </>
@@ -1570,7 +1570,7 @@ export function HomePage({
             <div className="move-list">
               <label className={`move-row${folderMoveTarget === null ? " on" : ""}`}>
                 <input type="radio" name="move-folder-to" checked={folderMoveTarget === null} onChange={() => setFolderMoveTarget(null)} />
-                <span>All designs (top level)</span>
+                <span>Library (top level)</span>
               </label>
               {folderTree(folders)
                 .filter(({ folder }) => !folderSubtree(movingFolder.id).includes(folder.id))
@@ -1604,7 +1604,7 @@ export function HomePage({
             <div className="move-list">
               <label className={`move-row${moveTarget === null ? " on" : ""}`}>
                 <input type="radio" name="move-to" checked={moveTarget === null} onChange={() => setMoveTarget(null)} />
-                <span>All designs (no folder)</span>
+                <span>Library (no folder)</span>
               </label>
               {folderTree(folders).map(({ folder, depth }) => (
                 <label key={folder.id} className={`move-row${moveTarget === folder.id ? " on" : ""}`} style={{ paddingLeft: 10 + depth * 16 }}>

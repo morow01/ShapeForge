@@ -47,8 +47,8 @@ export function SaveDialog({ open, name, onClose, onSave }: SaveDialogProps) {
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="save-dialog" role="dialog" aria-label="Save design" onClick={(e) => e.stopPropagation()}>
-        <h2>Save design</h2>
+      <div className="save-dialog" role="dialog" aria-label="Save project" onClick={(e) => e.stopPropagation()}>
+        <h2>Save project</h2><p className="save-purpose">Keep your editable project in ShapeForge. To create a file on your computer, use Download project.</p>
         <label className="save-label" htmlFor="save-name">Name</label>
         <input
           id="save-name"
@@ -63,7 +63,7 @@ export function SaveDialog({ open, name, onClose, onSave }: SaveDialogProps) {
           <input type="radio" name="save-where" checked={location === "browser"} onChange={() => setLocation("browser")} />
           <span className="save-choice-text">
             <b>This browser</b>
-            <span>Stays on this computer. Clearing this site's data erases it, so download a backup now and then.</span>
+            <span>Stays on this computer. Clearing this site's data erases it, so use Download project to keep a copy now and then.</span>
           </span>
         </label>
         <label className={`save-choice${location === "drive" ? " on" : ""}${signedIn ? "" : " disabled"}`}>
@@ -86,7 +86,7 @@ export function SaveDialog({ open, name, onClose, onSave }: SaveDialogProps) {
         </label>
         <div className="save-buttons">
           <button className="modal-btn" onClick={onClose}>Cancel</button>
-          <button className="modal-btn primary" onClick={submit}>Save</button>
+          <button className="modal-btn primary" onClick={submit}>Save project</button>
         </div>
       </div>
     </div>

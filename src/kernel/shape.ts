@@ -11,6 +11,7 @@ import {
   importSTLAsMesh,
   loft,
   makeFace,
+  makePolygon,
   measureArea,
   measureDistanceBetween,
   measureVolume,
@@ -4192,8 +4193,10 @@ function findMeshFaceBoundaryAnchors(solid: MeshShape, point: Vec3, normal: Vec3
   // out from only the patch actually under the click, the same distinction
   // findFace()'s footprint check already draws for the B-Rep path.
   const coplanarTris: number[] = [];
+  const microStepTris: number[] = [];
   let seed = -1;
   let seedDist = Infinity;
+  const normals: Vec3[] = [];
 
   for (let t = 0; t < numTris; t++) {
     const i0 = raw.triVerts[t * 3] * 3;
@@ -4209,6 +4212,7 @@ function findMeshFaceBoundaryAnchors(solid: MeshShape, point: Vec3, normal: Vec3
     let tnz = abx * acy - aby * acx;
     const len = Math.hypot(tnx, tny, tnz) || 1;
     tnx /= len; tny /= len; tnz /= len;
+    normals.push([tnx, tny, tnz]);
     const dot = tnx * nx + tny * ny + tnz * nz;
     if (dot > 0.98) {
       const d = tnx * ax + tny * ay + tnz * az;
@@ -4218,6 +4222,15 @@ function findMeshFaceBoundaryAnchors(solid: MeshShape, point: Vec3, normal: Vec3
         const dist = Math.hypot(cx3 - point[0], cy3 - point[1], cz3 - point[2]);
         if (dist < seedDist) { seedDist = dist; seed = t; }
       }
+    } else if (Math.abs(dot) < 0.1 && [
+      nx * ax + ny * ay + nz * az,
+      nx * bx + ny * by + nz * bz,
+      nx * cx + ny * cy + nz * cz,
+    ].every((d) => Math.abs(d - targetD) <= 0.002)) {
+      // Bridge the microscopic vertical risers between a flush cover and
+      // the surrounding face, so clicking either surface finds the same
+      // complete border instead of an isolated cover with no real edges.
+      microStepTris.push(t);
     }
   }
   if (seed === -1) return [];
@@ -4225,9 +4238,10 @@ function findMeshFaceBoundaryAnchors(solid: MeshShape, point: Vec3, normal: Vec3
   // Flood-fill from the triangle nearest the click, through shared edges,
   // staying inside the coplanar set — this is what actually confines the
   // result to the one connected patch under the cursor.
-  const coplanarSet = new Set(coplanarTris);
+  const surfaceTris = [...coplanarTris, ...microStepTris];
+  const coplanarSet = new Set(surfaceTris);
   const edgeToTris = new Map<string, number[]>();
-  for (const t of coplanarTris) {
+  for (const t of surfaceTris) {
     const v0 = raw.triVerts[t * 3];
     const v1 = raw.triVerts[t * 3 + 1];
     const v2 = raw.triVerts[t * 3 + 2];
@@ -4271,11 +4285,50 @@ function findMeshFaceBoundaryAnchors(solid: MeshShape, point: Vec3, normal: Vec3
   }
 
   const anchors: Vec3[] = [];
+  const allEdgeTris = new Map<string, number[]>();
+  for (let t = 0; t < numTris; t++) for (let j = 0; j < 3; j++) {
+    const a = raw.triVerts[t * 3 + j], b = raw.triVerts[t * 3 + (j + 1) % 3];
+    const key = a < b ? `${a}:${b}` : `${b}:${a}`;
+    const list = allEdgeTris.get(key) ?? [];
+    list.push(t); allEdgeTris.set(key, list);
+  }
+  const dot = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+  const vertex = (id: number): Vec3 => [raw.vertProperties[id * 3], raw.vertProperties[id * 3 + 1], raw.vertProperties[id * 3 + 2]];
+  const isMicroStep = (key: string, a: number, b: number): boolean => {
+    const side = (allEdgeTris.get(key) ?? []).find((t) => !matchingTris.has(t));
+    if (side === undefined || Math.abs(dot(normals[side], normal)) > 0.1) return false;
+    const origin = vertex(a), end = vertex(b);
+    const length = Math.hypot(...end.map((v, i) => v - origin[i]));
+    if (length < 1e-9) return true;
+    const along = end.map((v, i) => (v - origin[i]) / length) as Vec3;
+    const seen = new Set([side]), pending = [side];
+    // Measure the whole adjacent planar wall, not just one tiny triangle.
+    // Filled holes often have a 0.001 mm placement offset: rounding that
+    // artificial step adds a full-radius band across the joined top face.
+    while (pending.length) {
+      const t = pending.pop()!;
+      for (let j = 0; j < 3; j++) {
+        const id = raw.triVerts[t * 3 + j];
+        const offset = vertex(id).map((v, i) => v - origin[i]) as Vec3;
+        const projection = dot(offset, along);
+        if (Math.hypot(...offset.map((v, i) => v - projection * along[i])) > 0.002) return false;
+        const other = raw.triVerts[t * 3 + (j + 1) % 3];
+        const edgeKey = id < other ? `${id}:${other}` : `${other}:${id}`;
+        for (const next of allEdgeTris.get(edgeKey) ?? []) {
+          if (!seen.has(next) && dot(normals[side], normals[next]) > 1 - 1e-8) {
+            seen.add(next); pending.push(next);
+          }
+        }
+      }
+    }
+    return true;
+  };
   for (const [key, count] of edgeCounts.entries()) {
     if (count === 1) {
       const colon = key.indexOf(":");
       const v0 = Number(key.slice(0, colon));
       const v1 = Number(key.slice(colon + 1));
+      if (isMicroStep(key, v0, v1)) continue;
       anchors.push([
         (raw.vertProperties[v0 * 3] + raw.vertProperties[v1 * 3]) / 2,
         (raw.vertProperties[v0 * 3 + 1] + raw.vertProperties[v1 * 3 + 1]) / 2,
@@ -4295,6 +4348,8 @@ function finishMeshEdge(
   anchors: Vec3[],
   distance: number,
   kind: "chamfer" | "fillet" = "chamfer",
+  cornerRegion = false,
+  faceBorder = false,
 ): MeshShape | null {
   if (Math.abs(distance) < 1e-6 || !anchors.length) return solid;
   /** How far past the face it ends on a cutter runs, in mm, so the boolean
@@ -4509,6 +4564,233 @@ function finishMeshEdge(
   }
 
   const manifold = getManifold();
+  // A miter cannot join circular profiles of different widths, or solve a
+  // mixed convex/concave vertex. Recover the planar mesh's faces and let
+  // OCCT build the junction as one finish, rather than splice independent
+  // cutter strips. Keep this bounded: curved STL tessellations are not CAD
+  // planes and must not turn into thousands of sewn faces.
+  const nearbyKink = [...matchedSegments].some((a) => [...matchedSegments].some((b) =>
+    a !== b && Math.abs(dot3(a.u, b.u)) > 0.1 && Math.abs(dot3(a.u, b.u)) < 0.99999 &&
+    [a.v0, a.v1].some((p) => [b.v0, b.v1].some((q) =>
+      Math.hypot(...p.map((v, i) => v - q[i])) < Math.min(0.05, Math.abs(distance) * 0.05))),
+  ));
+  // Closed face borders can include dozens of tessellated curve segments;
+  // keep their established miter path. Open chains and branching selections
+  // need the corner solver regardless of the number of selected edges.
+  const closedBorder = [...vertexToSharpEdges.values()].every((edges) => edges.length === 2);
+  const needsCornerBlend = !faceBorder && !closedBorder && (nearbyKink || [...vertexToSharpEdges.values()].some((edges) =>
+    edges.length >= 3 || edges.some((a) => edges.some((b) =>
+      a !== b && (Math.abs(dot3(a.nA, a.nB) - dot3(b.nA, b.nB)) > 1e-4 ||
+        (Math.abs(dot3(a.u, b.u)) > 0.1 && Math.abs(dot3(a.u, b.u)) < 0.99999)))),
+  ));
+  if (needsCornerBlend) {
+    try {
+      if (!cornerRegion) {
+        // Disconnected chains have independent corner neighborhoods. Solve
+        // each against the same original solid; one large bounding crop can
+        // otherwise pull unrelated curved facets between the chains into
+        // planar reconstruction. Combine their changes without replay order.
+        const remaining = new Set(matchedSegments);
+        const chains: SharpEdge[][] = [];
+        while (remaining.size) {
+          const first = remaining.values().next().value!;
+          remaining.delete(first);
+          const chain = [first];
+          for (let i = 0; i < chain.length; i++) {
+            const a = chain[i];
+            for (const b of remaining) {
+              if ([a.v0, a.v1].some((p) => [b.v0, b.v1].some((q) =>
+                Math.hypot(...p.map((v, k) => v - q[k])) < 0.05))) {
+                remaining.delete(b); chain.push(b);
+              }
+            }
+          }
+          chains.push(chain);
+        }
+        if (chains.length > 1) {
+          const results = chains.map((chain) => finishMeshEdge(solid,
+            chain.map((edge) => edge.v0.map((v, i) => (v + edge.v1[i]) / 2) as Vec3), distance, kind));
+          if (results.some((result) => !result)) return null;
+          const removals = results.map((result) => solid.wrapped.subtract(result!.wrapped));
+          const additions = results.map((result) => result!.wrapped.subtract(solid.wrapped));
+          let combined = solid.wrapped.add(manifold.Manifold.union(additions)).subtract(manifold.Manifold.union(removals));
+          if (combined.status() !== "NoError" || combined.isEmpty()) return null;
+          // The final union can create a zero-volume seam component even
+          // when each local result was clean. Apply the same speck cleanup
+          // used below before checking that the body stayed connected.
+          const parts = combined.decompose();
+          const meaningful = parts.filter((part) => Math.abs(part.volume()) > 1e-4);
+          if (!meaningful.length || meaningful.length > solid.wrapped.decompose().length) return null;
+          if (meaningful.length !== parts.length) combined = manifold.Manifold.union(meaningful);
+          return new MeshShape(combined);
+        }
+      }
+      if (!cornerRegion) {
+        const points = [...matchedSegments].flatMap((e) => [e.v0, e.v1]);
+        const margin = Math.abs(distance) * 2 + 0.1;
+        const lo = [0, 1, 2].map((i) => Math.min(...points.map((p) => p[i])) - margin) as Vec3;
+        const hi = [0, 1, 2].map((i) => Math.max(...points.map((p) => p[i])) + margin) as Vec3;
+        const region = manifold.Manifold.cube(hi.map((v, i) => v - lo[i]) as Vec3).translate(lo);
+        let local = solid.wrapped.intersect(region);
+        // Imported planar parts can have a microscopic ledge between what
+        // looks like one chain. Collapse only an actual short connecting
+        // edge, within 0.02 mm, before asking CAD to roll through the bend.
+        // Use its plane, not coordinate rounding, so rotated parts agree.
+        for (const a of matchedSegments) for (const b of matchedSegments) {
+          if (a === b || a.len <= b.len || Math.abs(dot3(a.u, b.u)) > 0.99999) continue;
+          for (const [p, pi] of [[a.v0, a.v0Idx], [a.v1, a.v1Idx]] as const) {
+            for (const [q, qi] of [[b.v0, b.v0Idx], [b.v1, b.v1Idx]] as const) {
+              const delta = q.map((v, i) => v - p[i]) as Vec3;
+              const gap = Math.hypot(...delta);
+              if (gap < 1e-5 || gap > 0.02 || !sharpEdges.some((e) =>
+                (e.v0Idx === pi && e.v1Idx === qi) || (e.v0Idx === qi && e.v1Idx === pi))) continue;
+              const normal = delta.map((v) => v / gap) as Vec3;
+              local = local.warp((point) => {
+                const offset = point.map((v, i) => v - q[i]) as Vec3;
+                if (Math.abs(dot3(offset, normal)) < 1e-5) {
+                  for (let i = 0; i < 3; i++) point[i] -= delta[i];
+                }
+              });
+            }
+          }
+        }
+        // Align the selected edges' shared support planes before recovering
+        // CAD faces. Float32 subdivisions can put one end a few microns off
+        // the other; sewing alone leaves an almost-flat seam that can break
+        // a rolling fillet. Prefer the longest edge's plane consistently.
+        const planes: { origin: Vec3; normal: Vec3 }[] = [];
+        for (const edge of [...matchedSegments].sort((a, b) => b.len - a.len)) {
+          for (const normal of [edge.nA, edge.nB]) {
+            if (!planes.some((plane) => dot3(plane.normal, normal) > 1 - 1e-8 &&
+              Math.abs(dot3(edge.v0.map((v, i) => v - plane.origin[i]) as Vec3, normal)) < 1e-4)) {
+              planes.push({ origin: edge.v0, normal });
+            }
+          }
+        }
+        local = local.warp((point) => {
+          for (const plane of planes) {
+            const offset = dot3(point.map((v, i) => v - plane.origin[i]) as Vec3, plane.normal);
+            if (Math.abs(offset) < 1e-4) {
+              for (let i = 0; i < 3; i++) point[i] -= offset * plane.normal[i];
+            }
+          }
+        });
+        const rounded = finishMeshEdge(new MeshShape(local.simplify(1e-5)), anchors, distance, kind, true);
+        if (!rounded) return null;
+        // Apply the change as cutters/fillers, leaving a collar of original
+        // material at the artificial crop. CAD tessellation can move a crop
+        // face by microns; replacing the entire crop would split the body.
+        const interior = manifold.Manifold.cube(hi.map((v, i) => v - lo[i] - 0.2) as Vec3)
+          .translate(lo.map((v) => v + 0.1) as Vec3);
+        const original = solid.wrapped.intersect(region);
+        const removed = original.subtract(rounded.wrapped).intersect(interior);
+        const added = rounded.wrapped.subtract(original).intersect(interior);
+        let result = solid.wrapped.subtract(removed).add(added);
+        if (result.status() !== "NoError" || result.isEmpty()) return null;
+        const parts = result.decompose();
+        const meaningful = parts.filter((p) => Math.abs(p.volume()) > 1e-4);
+        if (!meaningful.length || meaningful.length > solid.wrapped.decompose().length) return null;
+        if (meaningful.length !== parts.length) result = manifold.Manifold.union(meaningful);
+        return new MeshShape(result);
+      }
+      const visited = new Set<number>();
+      const faces: Face[] = [];
+      const pointAt = (id: number): Vec3 => [raw.vertProperties[id * 3], raw.vertProperties[id * 3 + 1], raw.vertProperties[id * 3 + 2]];
+      for (let seed = 0; seed < numTris; seed++) {
+        if (visited.has(seed)) continue;
+        if (faces.length >= 256) return null;
+        const pending = [seed];
+        visited.add(seed);
+        const border = new Map<string, [number, number]>();
+        while (pending.length) {
+          const t = pending.pop()!;
+          for (let j = 0; j < 3; j++) {
+            const a = raw.triVerts[t * 3 + j], b = raw.triVerts[t * 3 + (j + 1) % 3];
+            const key = a < b ? `${a}:${b}` : `${b}:${a}`;
+            const neighbor = (edgeToTris.get(key) ?? []).find((other) => other !== t);
+            if (neighbor !== undefined && dot3(triNormals[seed], triNormals[neighbor]) > 1 - 1e-10) {
+              if (!visited.has(neighbor)) { visited.add(neighbor); pending.push(neighbor); }
+            } else border.set(key, [a, b]);
+          }
+        }
+        const next = new Map<number, number>();
+        for (const [a, b] of border.values()) {
+          if (next.has(a)) throw new Error("Non-simple planar boundary");
+          next.set(a, b);
+        }
+        const loops: Vec3[][] = [];
+        while (next.size) {
+          const first = next.keys().next().value!;
+          let at = first;
+          const loop: Vec3[] = [];
+          do {
+            loop.push(pointAt(at));
+            const following = next.get(at);
+            if (following === undefined) throw new Error("Open planar boundary");
+            next.delete(at);
+            at = following;
+          } while (at !== first);
+          // Remove triangulation vertices on straight borders so the CAD
+          // fillet sees the same edges as the viewport selection.
+          let simplified = true;
+          while (simplified && loop.length > 3) {
+            simplified = false;
+            for (let i = 0; i < loop.length; i++) {
+              const a = loop[(i + loop.length - 1) % loop.length], b = loop[i], c = loop[(i + 1) % loop.length];
+              const ab = b.map((v, k) => v - a[k]) as Vec3, bc = c.map((v, k) => v - b[k]) as Vec3;
+              if (dot3(ab, bc) > 0 && Math.abs(dot3(ab, bc) / (Math.hypot(...ab) * Math.hypot(...bc)) - 1) < 1e-10) {
+                loop.splice(i, 1); simplified = true; break;
+              }
+            }
+          }
+          loops.push(loop);
+        }
+        // A collapsed Float32 sliver can leave a closed loop of collinear
+        // vertices. It encloses no surface and must not become a CAD face.
+        const polygons = loops.map((loop) => makePolygon(loop)).filter((face) => measureArea(face) > 1e-8);
+        polygons.sort((a, b) => measureArea(b) - measureArea(a));
+        if (!polygons.length) continue;
+        faces.push(polygons.length === 1 ? polygons[0] : makeFace(polygons[0].outerWire(), polygons.slice(1).map((p) => p.outerWire())));
+      }
+      let recovered = makeSolid(faces);
+      if (!isOcctValid(recovered)) {
+        // Recover Float32 plane seams within 0.0001 mm, then run the same
+        // validity and volume checks as the ordinary reconstruction.
+        const sewing = new (getOC()).BRepBuilderAPI_Sewing(1e-4, true, true, true, false);
+        try {
+          for (const face of faces) sewing.Add(face.wrapped);
+          sewing.Perform();
+          recovered = makeSolid([cast(sewing.SewedShape()) as import("replicad").Shell]);
+        } finally { sewing.delete(); }
+      }
+      if (!isOcctValid(recovered) || Math.abs(measureVolume(recovered) - solid.volume()) > Math.max(1e-3, solid.volume() * 1e-5)) return null;
+      const finishRecovered = (shape: Shape3D) => (kind === "fillet"
+        ? shape.fillet(distance, edgesAt(anchors))
+        : shape.chamfer(distance, edgesAt(anchors))) as Shape3D;
+      let blended = finishRecovered(recovered);
+      if (kind === "fillet" && !isOcctValid(blended)) {
+        // Sewing closes Float32 seams but leaves their nearly coplanar
+        // faces separate. Rolling across those tiny seams can produce an
+        // invalid fillet. Unify the support faces within the same bounded
+        // mesh tolerance, and require the retry to pass every normal check.
+        const unify = new (getOC()).ShapeUpgrade_UnifySameDomain(recovered.wrapped, true, true, false);
+        try {
+          unify.SetLinearTolerance(1e-4);
+          unify.SetAngularTolerance(1e-5);
+          unify.Build();
+          const clean = cast(unify.Shape()) as Shape3D;
+          if (!isOcctValid(clean) || Math.abs(measureVolume(clean) - measureVolume(recovered)) > 1e-3) return null;
+          blended = finishRecovered(clean);
+        } finally { unify.delete(); }
+      }
+      if (!isOcctValid(blended) || !isWatertight(blended) || !noNewSplit(recovered, blended)) return null;
+      return blended.meshShape(FALLBACK_MESH_QUALITY);
+    } catch {
+      // A failed corner solve must not be presented as a successful finish
+      // with square-ended bands, holes, or overlapping inside-corner fills.
+      return null;
+    }
+  }
   let currentSolid = solid;
   // Every cutter is built first and they go in together, in one boolean each.
   // Cutting them one at a time meant each cutter met the face the previous
@@ -5150,7 +5432,7 @@ async function replayEdit(
         if (op.face && !op.points?.length) {
           anchors = findMeshFaceBoundaryAnchors(solid, op.face.point, op.face.normal);
         }
-        const edited = finishMeshEdge(solid, anchors, op.distance, op.kind);
+        const edited = finishMeshEdge(solid, anchors, op.distance, op.kind, false, !!op.face);
         if (!edited) {
           onError?.(spec.id, `That ${op.kind} could not be applied at this size; the previous shape was kept.`);
         } else {
@@ -5468,7 +5750,7 @@ export async function survivingOps(
         if (op.face && !op.points?.length) {
           anchors = findMeshFaceBoundaryAnchors(solid, op.face.point, op.face.normal);
         }
-        const candidate = finishMeshEdge(solid, anchors, op.distance, op.kind);
+        const candidate = finishMeshEdge(solid, anchors, op.distance, op.kind, false, !!op.face);
         if (candidate) {
           solid = candidate;
           kept.push(op);

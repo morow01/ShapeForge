@@ -130,7 +130,7 @@ import type { EditSpec, ExportQuality, NodeSpec, PreviewBuild, ScenePart } from 
 import type { CameraMode, CollisionHighlightStyle, DuplicateResult, Scene, SketchPlaneChoice, ToolMode, WireframeMode } from "./viewport/scene";
 import { cellColour, DEFAULT_CELL_DISPLAY, type CellDisplay } from "./viewport/cellColours";
 import { APP_NAME, APP_VERSION } from "./version";
-import { CloudIcon, MonitorIcon } from "./ui/NavIcons";
+import { CloudIcon, DownloadIcon, MonitorIcon } from "./ui/NavIcons";
 import { FeedbackNotes } from "./ui/FeedbackNotes";
 
 /** Shown when Hollow is pressed with nothing selected; cleared as soon as a
@@ -632,6 +632,7 @@ export function App() {
     setTransparent,
     setHideLines,
     setLowPoly,
+    setHinge,
     setGroupOp,
     setGroupClearance,
     toggleCollapsed,
@@ -1377,6 +1378,38 @@ export function App() {
   // an editable millimetre field, not a bare percentage.
   const selectedLocalSize = useMemo((): Vec3 | null => {
     if (!selected) return null;
+    // A plain "Group" (assembly) builds no mesh of its own — its children
+    // build independently — so its size is the union of those children in
+    // the group's own frame (before the group's scale), found here.
+    if (isGroup(selected) && selected.op === "assembly") {
+      const min: Vec3 = [Infinity, Infinity, Infinity];
+      const max: Vec3 = [-Infinity, -Infinity, -Infinity];
+      const visit = (list: SceneNode[], scale: Vec3, offset: Vec3): boolean => {
+        for (const child of list) {
+          if (child.hidden) continue;
+          if (isGroup(child) && child.op === "assembly") {
+            // Nested group: scale/position only; a rotated one can't be
+            // boxed this cheaply, so give up (falls back to the % view).
+            if (child.rotation.some((r) => Math.abs(r) > 1e-6)) return false;
+            const s = child.scale.map((v, i) => v * scale[i]) as Vec3;
+            const o = child.position.map((v, i) => offset[i] + v * scale[i]) as Vec3;
+            if (!visit(child.children, s, o)) return false;
+            continue;
+          }
+          const part = parts.find((p) => p.id === child.id);
+          if (!part) continue;
+          const b = displayedMeshBounds(part.mesh, child);
+          for (let a = 0; a < 3; a++) {
+            min[a] = Math.min(min[a], offset[a] + b.min[a] * scale[a]);
+            max[a] = Math.max(max[a], offset[a] + b.max[a] * scale[a]);
+          }
+        }
+        return true;
+      };
+      if (!visit(selected.children, [1, 1, 1], [0, 0, 0]) || !min.every(Number.isFinite)) return null;
+      const size = max.map((v, i) => v - min[i]) as Vec3;
+      return size.every((v) => v > 1e-6) ? size : null;
+    }
     const part = parts.find((p) => p.id === selected.id);
     if (!part) return null;
     const bounds = localMeshBounds(part.mesh);
@@ -1384,6 +1417,44 @@ export function App() {
     const size = bounds.max.map((v, i) => v - bounds.min[i]) as Vec3;
     return size.every((v) => v > 1e-6) ? size : null;
   }, [selected, parts]);
+  // How tall the selected part's whole object is as currently drawn, for the
+  // Hinge panel. The viewport applies a changed hinge angle just AFTER React
+  // renders it, so this reads the scene on the next frame, not during render.
+  const [hingePose, setHingePose] = useState<{ name: string; height: number; top: number } | null>(null);
+  const [hingePicking, setHingePicking] = useState(false);
+  // Whether a hinged part shows the draggable pivot gizmo (off = the part's
+  // normal move gizmo, as before).
+  const [hingeGizmo, setHingeGizmoOn] = useState(true);
+  const hingeGizmoRef = useRef(true);
+  hingeGizmoRef.current = hingeGizmo;
+  useEffect(() => { sceneRef.current?.setHingeGizmo(hingeGizmo); }, [hingeGizmo]);
+  // Picking a pivot is only meaningful on the CLOSED part, so a part that is
+  // open is closed first and put back to the same angle afterwards.
+  const pickHingePivot = useCallback(() => {
+    const scene = sceneRef.current;
+    const state = useDoc.getState();
+    const id = state.selectedIds[state.selectedIds.length - 1];
+    const node = id ? findNode(state.nodes, id) : null;
+    if (!scene || !node) return;
+    if (hingePicking) { scene.cancelHingePick(); return; }
+    const previous = node.hinge;
+    const angle = previous?.angle ?? 0;
+    if (previous && angle > 0) state.setHinge(id, { ...previous, angle: 0 });
+    setHingePicking(true);
+    scene.beginHingePick(id, (point) => {
+      setHingePicking(false);
+      const base = previous ?? { point: [0, 0, 0] as Vec3, axis: [-1, 0, 0] as Vec3, angle: 0 };
+      useDoc.getState().setHinge(id, { ...base, point: point ?? base.point, angle });
+    });
+  }, [hingePicking]);
+  const hingeAngle = selected?.hinge?.angle;
+  useEffect(() => {
+    const id = selected?.id;
+    if (!id) { setHingePose(null); return; }
+    const frame = requestAnimationFrame(() => setHingePose(sceneRef.current?.poseHeight(id) ?? null));
+    return () => cancelAnimationFrame(frame);
+  }, [selected?.id, hingeAngle, parts, nodes]);
+
   /** Triangles in the selected object's built mesh, for the sketch quality readout. */
   const selectedTriangleCount = useMemo((): number | null => {
     if (!selected) return null;
@@ -2723,6 +2794,7 @@ export function App() {
   const buildId = useRef(0);
   const textFontInputRef = useRef<HTMLInputElement>(null);
   const importInputRef = useRef<HTMLInputElement>(null);
+  const openInputRef = useRef<HTMLInputElement>(null);
   const [savedImportOpen, setSavedImportOpen] = useState(false);
   const [savedImportId, setSavedImportId] = useState<string | null>(null);
   const chooseSavedImport = (id: string | null = null) => { setSavedImportId(id); setSavedImportOpen(true); };
@@ -3385,6 +3457,71 @@ export function App() {
     setHomeOpen(false);
     await importSTLFile(file);
   };
+
+  /** Adds another stored design to the open one, as one group named after it. */
+  const importSavedDesign = async (id: string) => {
+    const count = useDoc.getState().mergeDesign(id);
+    if (count === null) throw new Error('This design is not on this computer yet. Open it once from Library, then try again.');
+    if (count === 0) throw new Error('That design has no objects in it.');
+    setSavedImportOpen(false);
+  };
+
+  const isProjectFile = (file: File) => /\.(shapeforge|json)$/i.test(file.name);
+
+  /** Opens a .shapeforge file from disk as its own design (File → Open file…, or a drop on Home). */
+  const openProjectFromDisk = async (file: File) => {
+    setError(null);
+    setFileOperation({ label: `Opening ${file.name}`, startedAt: Date.now(), waitingForScene: false, sawSceneBusy: false });
+    if (await useDoc.getState().importProjectFile(file)) {
+      setFileOperation((current) => current ? { ...current, waitingForScene: true } : null);
+      setHomeOpen(false);
+      return;
+    }
+    setFileOperation(null);
+    setError(`${file.name} is not a ShapeForge (.shapeforge) or CAD JSON file.`);
+  };
+
+  /** Adds a .shapeforge file's contents to the open design as one group. */
+  const mergeProjectIntoDesign = async (file: File) => {
+    setError(null);
+    const count = await useDoc.getState().mergeProjectFile(file);
+    if (count === null) setError(`${file.name} is not a ShapeForge (.shapeforge) or CAD JSON file.`);
+    else if (count === 0) setError(`${file.name} has no objects in it.`);
+  };
+
+  /** File → Import: a ShapeForge file joins the open design; STL, 3MF and SVG are added as models. */
+  const importChosenFile = async (file: File) => {
+    if (isProjectFile(file)) await mergeProjectIntoDesign(file);
+    else await importSTLFile(file);
+  };
+
+  // A file dropped anywhere on the page: on Home it opens a design, in the
+  // editor it is imported into the open one. The handler is kept in a ref so
+  // the window listeners below always see the current state.
+  const dropFileRef = useRef<(file: File) => void>(() => {});
+  dropFileRef.current = (file) => {
+    if (homeOpen) {
+      if (isProjectFile(file)) void openProjectFromDisk(file);
+    } else {
+      void importChosenFile(file);
+    }
+  };
+  useEffect(() => {
+    const hasFiles = (e: DragEvent) => !!e.dataTransfer && Array.from(e.dataTransfer.types).includes("Files");
+    const over = (e: DragEvent) => { if (hasFiles(e)) e.preventDefault(); };
+    const drop = (e: DragEvent) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      const file = e.dataTransfer?.files?.[0];
+      if (file) dropFileRef.current(file);
+    };
+    window.addEventListener("dragover", over);
+    window.addEventListener("drop", drop);
+    return () => {
+      window.removeEventListener("dragover", over);
+      window.removeEventListener("drop", drop);
+    };
+  }, []);
 
   const confirmSvgImport = async (config: { width: number; height: number; thickness: number }) => {
     if (!pendingSvg) return;
@@ -4186,6 +4323,7 @@ export function App() {
   const regroupCentres = useCallback(async (): Promise<Record<string, Vec3>> => {
     const { nodes, selectedIds } = useDoc.getState();
     const wanted = new Map<string, NodeSpec>();
+    const known: Record<string, Vec3> = {};
     const isScaled = (group: GroupNode) => group.scale.some((value) => Math.abs(value - 1) > 1e-9);
     const collect = (list: SceneNode[], ancestors: GroupNode[]) => {
       for (const n of list) {
@@ -4201,21 +4339,41 @@ export function App() {
           // children are moving frames too. Unit-scale groups need no kernel
           // centres at all: their child offsets are already exact.
           if (selectedIds.includes(n.id) && isScaled(n)) {
-            wanted.set(n.id, { ...toSpec(n), position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] });
-            for (const child of n.children) wanted.set(child.id, toSpec(child));
+            if (n.op === "assembly") {
+              // A plain Group scales about its own origin (that is how the
+              // viewport draws it), so its centre in its own frame is the
+              // origin — nothing to measure. Each child's centre is read off
+              // the mesh already built for it. Asking the kernel instead
+              // rebuilt every child from scratch: ~2 minutes for a dense
+              // import, and when that timed out no centres came back and the
+              // children were handed over still unscaled — the model shrank.
+              known[n.id] = [0, 0, 0];
+              for (const child of n.children) {
+                // The viewport already places every child by exactly this
+                // centre (its position plus where its own bounds centre
+                // sits), so ask it rather than re-deriving it from a mesh
+                // whose frame is not the same on every build.
+                const c = isGroup(child) ? null : sceneRef.current?.partCentreInParent(child.id) ?? null;
+                if (c && c.every(Number.isFinite)) { known[child.id] = c; continue; }
+                wanted.set(child.id, toSpec(child));
+              }
+            } else {
+              wanted.set(n.id, { ...toSpec(n), position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] });
+              for (const child of n.children) wanted.set(child.id, toSpec(child));
+            }
           }
           collect(n.children, [...ancestors, n]);
         }
       }
     };
     collect(nodes, []);
-    if (!wanted.size) return {};
+    if (!wanted.size) return known;
     try {
-      return await kernel.centresOf([...wanted.values()]);
+      return { ...(await kernel.centresOf([...wanted.values()])), ...known };
     } catch {
       // No centres means a scaled group keeps its frame rather than being
       // flattened wrongly — see liftToWorld.
-      return {};
+      return known;
     }
   }, []);
 
@@ -4764,8 +4922,8 @@ export function App() {
   const tools = {
     addShape: { id: "addShape", label: "Add a shape", aria: "Add a shape", icon: <PrimitiveShapeIcon kind="box" />, enabled: true,
       run: showShapeLibrary },
-    importFile: { id: "importFile", label: "Import a file", tooltip: "Import STL, 3MF or SVG", aria: "Import a file", icon: <ImportIcon />, enabled: true,
-      run: () => importInputRef.current?.click() },
+    importFile: { id: "importFile", label: "Import", tooltip: "Add parts from a ShapeForge, STL, 3MF or SVG file", aria: "Import", icon: <ImportIcon />, enabled: true,
+      run: () => chooseSavedImport() },
     sketch: { id: "sketch", label: "Sketch", aria: "Sketch tool", icon: <SketchToolIcon />, enabled: true,
       active: toolMode === "place" && pendingPrimitive === "sketch",
       run: () => { setPendingPrimitive("sketch"); setToolMode("place"); select(null); } },
@@ -4925,8 +5083,8 @@ export function App() {
           <button
             className="topbar-logo-btn"
             onClick={openHome}
-            title="All designs (Ctrl+O)"
-            aria-label="All designs"
+            title="Library (Ctrl+O)"
+            aria-label="Library"
           >
             <img className="brand-logo" src={`${import.meta.env.BASE_URL}logo.svg`} alt="" width={24} height={26} draggable={false} />
           </button>
@@ -4985,7 +5143,7 @@ export function App() {
               {driveError ? <span>Not synced</span> : <span className="status-dot" aria-hidden="true" />}
             </button>
           ) : (
-            <span className="status-btn browser" title="Kept in this browser only. Download a backup file from the File menu." aria-label="Kept in this browser">
+            <span className="status-btn browser" title="Kept in this browser only. Use File → Download project to save an editable copy to your computer." aria-label="Kept in this browser">
               <MonitorIcon size={16} />
             </span>
           )}
@@ -5012,39 +5170,46 @@ export function App() {
                   }}
                 >
                   <NewDesignIcon className="topbar-icon" />
-                  <span className="item-label">New Design</span>
+                  <span className="item-label">New project</span>
                   <span className="item-key">Ctrl+Alt+N</span>
                 </button>
                 <button
                   role="menuitem"
-                  onClick={() => { setFileMenuOpen(false); openHome(); }}
+                  title="Open an editable .shapeforge file"
+                  onClick={() => { setFileMenuOpen(false); openInputRef.current?.click(); }}
                 >
                   <ProjectsIcon className="topbar-icon" />
-                  <span className="item-label">Open…</span>
-                  <span className="item-key">Ctrl+O</span>
+                  <span className="item-label">Open project file…</span>
                 </button>
                 <button
                   role="menuitem"
-                  onClick={() => { setFileMenuOpen(false); importInputRef.current?.click(); }}
+                  title="Your list of designs and folders"
+                  onClick={() => { setFileMenuOpen(false); openHome(); }}
                 >
-                  <ImportIcon className="topbar-icon" />
-                  <span className="item-label">Import from computer…</span>
-                </button>
-                <button role="menuitem" onClick={() => { setFileMenuOpen(false); chooseSavedImport(); }}>
-                  <ImportIcon className="topbar-icon" />
-                  <span className="item-label">Import from saved files…</span>
+                  <ProjectsIcon className="topbar-icon" />
+                  <span className="item-label">Library</span>
+                  <span className="item-key">Ctrl+O</span>
                 </button>
                 <hr />
                 <button
                   role="menuitem"
+                  title="Bring model parts into this project"
+                  onClick={() => { setFileMenuOpen(false); chooseSavedImport(); }}
+                >
+                  <ImportIcon className="topbar-icon" />
+                  <span className="item-label">Import…</span>
+                </button>
+                <hr />
+                <button title="Keep it in ShapeForge or Google Drive"
+                  role="menuitem"
                   onClick={() => { setFileMenuOpen(false); saveNow(); }}
                 >
                   <SaveFileIcon className="topbar-icon" />
-                  <span className="item-label">Save</span>
+                  <span className="item-label">Save project</span>
                   <span className="item-key">Ctrl+S</span>
                 </button>
                 {currentLocation === "drive" && (
-                  <button
+                  <button title="View and restore earlier saved versions"
                     role="menuitem"
                     onClick={() => { setFileMenuOpen(false); setHistoryOpen(true); }}
                   >
@@ -5052,19 +5217,19 @@ export function App() {
                     <span className="item-label">Version history…</span>
                   </button>
                 )}
-                <button
+                <button title="Editable .shapeforge copy for your computer"
                   role="menuitem"
                   onClick={() => { setFileMenuOpen(false); void exportBackup(); }}
                 >
-                  <ExportIcon className="topbar-icon" />
-                  <span className="item-label">Download backup file</span>
+                  <DownloadIcon className="topbar-icon" />
+                  <span className="item-label">Download project</span>
                 </button>
-                <button
+                <button title="STL or 3MF for printing and other 3D apps"
                   role="menuitem"
                   onClick={() => { setFileMenuOpen(false); setExportModalOpen(true); }}
                 >
                   <ExportIcon className="topbar-icon" />
-                  <span className="item-label">Export 3D…</span>
+                  <span className="item-label">Export model…</span>
                 </button>
                 <button
                   role="menuitem"
@@ -5283,11 +5448,11 @@ export function App() {
               }
             }}
             disabled={exporting}
-            title="Export 3D Model (STL / 3MF)"
-            aria-label="Export"
+            title="Export model — create an STL or 3MF for printing"
+            aria-label={readyExportUrl ? `Download ${exportFormat.toUpperCase()}` : "Export model"}
           >
             <ExportIcon className="topbar-icon" />
-            <span>{exporting ? "Exporting…" : readyExportUrl ? "Download" : "Export"}</span>
+            <span>{exporting ? "Preparing model…" : readyExportUrl ? `Download ${exportFormat.toUpperCase()}` : "Export model"}</span>
           </button>
 
           <button
@@ -5317,11 +5482,11 @@ export function App() {
                 quality, or export fewer objects at once for full detail.
               </span>
             ) : (
-              <span>You can download it now.</span>
+              <span>Download this model file for your slicer or another 3D app.</span>
             )}
           </div>
           <button className="export-ready-download" onClick={downloadReadySTL}>
-            Download
+            Download {exportFormat.toUpperCase()}
           </button>
           <button
             className="export-ready-dismiss"
@@ -5846,7 +6011,21 @@ export function App() {
           plateSize={plateSize}
           displayUnit={displayUnit}
           decimalPlaces={decimalPlaces}
-          onSceneReady={(scene) => { sceneRef.current = scene; if (scene && tapePanelRef.current) scene.setTapePanelHost(tapePanelRef.current); }}
+          onSceneReady={(scene) => {
+            sceneRef.current = scene;
+            if (scene && tapePanelRef.current) scene.setTapePanelHost(tapePanelRef.current);
+            if (scene) {
+              // Dragging the pivot gizmo edits the hinge live, as ONE undo step.
+              scene.onHingePivotChange = (id, point, phase) => {
+                if (phase === "start") { beginHistoryBatch(); return; }
+                if (phase === "end") { endHistoryBatch(); return; }
+                const state = useDoc.getState();
+                const node = findNode(state.nodes, id);
+                if (node?.hinge) state.setHinge(id, { ...node.hinge, point });
+              };
+              scene.setHingeGizmo(hingeGizmoRef.current);
+            }
+          }}
           onCellsChanged={setBuildCells}
           onSelect={onSelect}
           onSelectMany={onSelectMany}
@@ -7045,7 +7224,7 @@ export function App() {
               );
             })}
           </div>
-          <button className="import-btn" onClick={() => importInputRef.current?.click()}>↑ Import STL, 3MF or SVG</button>
+          <button className="import-btn" onClick={() => chooseSavedImport()}>↑ Import…</button>
         </section>
         )}
         <input
@@ -7062,12 +7241,23 @@ export function App() {
         <input
           ref={importInputRef}
           type="file"
-          accept=".stl,.3mf,.svg,image/svg+xml,model/3mf,model/stl,model/x.stl-binary,model/x.stl-ascii"
+          accept=".shapeforge,.json,.stl,.3mf,.svg,image/svg+xml,model/3mf,model/stl,model/x.stl-binary,model/x.stl-ascii"
           hidden
           onChange={(e) => {
             const file = e.target.files?.[0];
             e.target.value = ""; // so picking the same file twice still fires onChange
-            if (file) void importSTLFile(file);
+            if (file) void importChosenFile(file);
+          }}
+        />
+        <input
+          ref={openInputRef}
+          type="file"
+          accept=".shapeforge,.json"
+          hidden
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            e.target.value = "";
+            if (file) void openProjectFromDisk(file);
           }}
         />
         {toolMode !== "measure" && toolMode !== "face" && toolMode !== "edge" && toolMode !== "build" && toolMode !== "align" && !(toolMode === "place" && surfaceSource) && (rightPanelTab === "properties" || toolMode === "cut" || toolMode === "join") && (
@@ -7162,6 +7352,13 @@ export function App() {
               onHideLines={(hideLines) => setHideLines(selected.id, hideLines)}
               globalHideAllLines={hideAllLines}
               onLowPoly={(lowPoly) => setLowPoly(selected.id, lowPoly)}
+              onHinge={(hinge) => setHinge(selected.id, hinge)}
+              onPickPivot={pickHingePivot}
+              hingeGizmo={hingeGizmo}
+              onHingeGizmo={setHingeGizmoOn}
+              pickingPivot={hingePicking}
+              onSuggestHinge={(side, level) => sceneRef.current?.suggestHinge(selected.id, side, level) ?? null}
+              poseHeight={hingePose}
               onSvgThickness={(mm) => setSvgThickness(selected.id, mm)}
               onSimplifyMesh={handleSimplifyMesh}
               onSmoothMesh={handleSmoothMesh}
@@ -8741,7 +8938,10 @@ export function App() {
       />
 
       <SavedFileImportDialog open={savedImportOpen} initialId={savedImportId} projectName={projectName}
-        folders={useDoc.getState().folders} onClose={() => setSavedImportOpen(false)} onImport={importSavedAttachment} />
+        currentProjectId={currentProjectId} projects={useDoc.getState().projects}
+        folders={useDoc.getState().folders} onClose={() => setSavedImportOpen(false)} onImport={importSavedAttachment}
+        onImportDesign={importSavedDesign}
+        onBrowse={() => { setSavedImportOpen(false); importInputRef.current?.click(); }} />
 
       <VersionHistoryDialog open={historyOpen} projectId={currentProjectId} onClose={() => setHistoryOpen(false)} />
       {confirmDialog}

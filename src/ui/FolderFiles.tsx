@@ -134,10 +134,10 @@ export function FolderFiles({ folderId, folders, search, storage, canAdd = true,
           <button aria-label="Show files as a list" aria-pressed={!compact && viewMode === 'list'} className={!compact && viewMode === 'list' ? 'on' : ''} onClick={() => { setCompactView(false); setViewMode('list'); }} title="List"><ListIcon size={15} /></button>
           <button aria-label="Show compact file panel" aria-pressed={compact} className={compact ? 'on' : ''} onClick={() => setCompactView(true)} title="Compact panel">▤</button>
         </div>
-        {canAdd && <button className="modal-btn" disabled={busy} onClick={() => input.current?.click()}>Add files</button>}
+        {canAdd && <button className="modal-btn" disabled={busy} onClick={() => input.current?.click()} title="Store original files in this folder without adding them to a model">Store files…</button>}
       </div>
     </div>
-    <p className="folder-files-note">{looseFiles ? 'Files stored inside folders stay in their folders. Search finds files everywhere.' : 'Keep templates and supporting files here without adding them to your design. Any file type is welcome.'}</p>
+    <p className="folder-files-note">{looseFiles ? 'Files stored inside folders stay in their folders. Search finds files everywhere.' : 'Store templates and supporting files here. Use Import to bring a supported model into your design.'}</p>
     <input ref={input} type="file" multiple hidden aria-label="Add files to folder" onChange={e => {
       const chosen = Array.from(e.target.files ?? []); e.target.value = '';
       if (chosen.length) void run(async () => {
@@ -170,7 +170,7 @@ export function FolderFiles({ folderId, folders, search, storage, canAdd = true,
       <div className="folder-file-info">
         <strong title={file.name}>{file.name}</strong>
         <small>{fileSize(file.size)} · {file.driveId ? file.dirty ? 'Drive update pending' : 'Google Drive' : status === 'signedIn' ? 'Waiting for Drive sync' : 'On this computer'}
-          {file.folderId && ` · ${folders.find(f => f.id === file.folderId)?.name ?? 'Folder removed — kept in All designs'}`}</small>
+          {file.folderId && ` · ${folders.find(f => f.id === file.folderId)?.name ?? 'Folder removed — kept in Library'}`}</small>
       </div>
       <button className="home-act attachment-more" aria-label={`Actions for ${file.name}`} aria-haspopup="menu" aria-expanded={menu?.id === file.id} title="More" disabled={busy} onClick={e => {
         const rect = e.currentTarget.getBoundingClientRect();
@@ -178,10 +178,10 @@ export function FolderFiles({ folderId, folders, search, storage, canAdd = true,
       }}>•••</button>
     </li>)}</ul>
     {menu && menuFile && <HomeContextMenu x={menu.x} y={menu.y} onClose={() => setMenu(null)}>
-      {menuGroup.length === 1 && canImportSavedFile(menuFile.name) && <button role="menuitem" onClick={() => { setMenu(null); onImportFile(menuFile.id); }}><ImportIcon className="menu-icon" />Import into project…</button>}
+      {menuGroup.length === 1 && canImportSavedFile(menuFile.name) && <button role="menuitem" onClick={() => { setMenu(null); onImportFile(menuFile.id); }}><ImportIcon className="menu-icon" />Import…</button>}
       {menuGroup.length === 1 && <button role="menuitem" onClick={() => { setMenu(null); setName(menuFile.name); setRenaming(menuFile); }}><PencilIcon className="menu-icon" />Rename…</button>}
       <button role="menuitem" onClick={() => startMove(menuGroup)}><MoveFolderIcon className="menu-icon" />{menuGroup.length > 1 ? `Move ${menuGroup.length} files…` : 'Move to folder…'}</button>
-      {menuGroup.length === 1 && <button role="menuitem" onClick={() => { setMenu(null); void download(menuFile); }}><DownloadIcon className="menu-icon" />Download</button>}
+      {menuGroup.length === 1 && <button role="menuitem" onClick={() => { setMenu(null); void download(menuFile); }}><DownloadIcon className="menu-icon" />Download original file</button>}
       <hr />
       <button role="menuitem" className="danger-item" onClick={() => { setMenu(null); void deleteFiles(menuGroup); }}><BinIcon className="menu-icon" />{menuGroup.length > 1 ? `Delete ${menuGroup.length} files` : 'Delete'}</button>
     </HomeContextMenu>}
@@ -191,7 +191,7 @@ export function FolderFiles({ folderId, folders, search, storage, canAdd = true,
     }}><h2>Rename file</h2><input autoFocus value={name} aria-label="File name" onChange={e => setName(e.target.value)} /><div className="save-buttons"><button type="button" className="modal-btn" disabled={busy} onClick={() => setRenaming(null)}>Cancel</button><button className="modal-btn primary" disabled={busy || !name.trim()}>Save</button></div></form></div>}
     {moving && <div className="modal-backdrop" onClick={() => { if (!busy) setMoving(null); }}><div className="save-dialog" role="dialog" aria-label="Move files to folder" onClick={e => e.stopPropagation()}>
       <h2>Move {moving.length === 1 ? `“${moving[0].name}”` : `${moving.length} files`}</h2>
-      <div className="move-list"><label className={`move-row${moveTarget === null ? ' on' : ''}`}><input type="radio" name="move-files" checked={moveTarget === null} onChange={() => setMoveTarget(null)} /><span>All designs (top level)</span></label>
+      <div className="move-list"><label className={`move-row${moveTarget === null ? ' on' : ''}`}><input type="radio" name="move-files" checked={moveTarget === null} onChange={() => setMoveTarget(null)} /><span>Library (top level)</span></label>
         {[...folders].sort((a,b) => folderLabel(a,folders).localeCompare(folderLabel(b,folders))).map(f => <label key={f.id} className={`move-row${moveTarget === f.id ? ' on' : ''}`}><input type="radio" name="move-files" checked={moveTarget === f.id} onChange={() => setMoveTarget(f.id)} /><span>{folderLabel(f,folders)}</span></label>)}
       </div><div className="save-buttons"><button className="modal-btn" disabled={busy} onClick={() => setMoving(null)}>Cancel</button><button className="modal-btn primary" disabled={busy || moving.every(f => f.folderId === moveTarget)} onClick={() => void moveFiles(moving, moveTarget)}>Move</button></div>
     </div></div>}

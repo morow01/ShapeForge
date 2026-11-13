@@ -1,8 +1,15 @@
 import { createInfiniteGrid } from "./infiniteGrid";
 import { MeasuringTape } from "./MeasuringTape";
 import { mergedRenderGroups } from "./renderGroups";
+import { edgeInteriorAnchor } from "./edgeAnchor";
 import { readViewportQuality, viewportQualitySettings, type ViewportQuality } from "./quality";
 import * as THREE from "three";
+import { MeshBVH, acceleratedRaycast } from "three-mesh-bvh";
+
+// Meshes WITH a bounds tree (built on demand by ensureBVH, for dense imports
+// only) raycast through it; every other mesh falls straight back to three's
+// own raycast, so nothing else changes behaviour.
+THREE.Mesh.prototype.raycast = acceleratedRaycast;
 import type { BlueprintGeometry } from "../document/blueprint";
 import { cellColour, DEFAULT_CELL_DISPLAY, type CellDisplay } from "./cellColours";
 import { FaceResizeHandles, type FaceBounds, type FaceResizeFrame } from "./FaceResizeHandles";
@@ -3683,6 +3690,287 @@ export class Scene {
     return pieces.length > 0 && pieces.every((piece) => alive.has(piece.id));
   }
 
+  /** Swings a placed part open about its hinge line (see Hinge). Runs right
+   *  after the normal placement, so it only ever turns the part from where
+   *  the document put it; at 0 degrees it does nothing at all. */
+  private applyHinge(group: THREE.Object3D, node: SceneNode) {
+    const hinge = node.hinge;
+    if (!hinge || Math.abs(hinge.angle) < 1e-6) return;
+    const axis = new THREE.Vector3(...hinge.axis);
+    if (axis.lengthSq() < 1e-12) return;
+    const turn = new THREE.Quaternion().setFromAxisAngle(axis.normalize(), hinge.angle * DEG);
+    const pivot = new THREE.Vector3(
+      node.position[0] + hinge.point[0],
+      node.position[1] + hinge.point[1],
+      node.position[2] + hinge.point[2],
+    );
+    group.position.sub(pivot).applyQuaternion(turn).add(pivot);
+    group.quaternion.premultiply(turn);
+  }
+
+  /**
+   * Where a hinge would go along one edge of a part, for the Hinge panel: the
+   * line runs along the chosen side of the part's own box, at its bottom or top,
+   * with the axis signed so a positive angle swings the part up. Measured from
+   * the part as it stands CLOSED, so it ignores any swing already applied.
+   */
+  suggestHinge(
+    id: string,
+    side: "back" | "front" | "left" | "right" | "back-left" | "back-right" | "front-left" | "front-right",
+    level: "bottom" | "top",
+  ): { point: Vec3; axis: Vec3 } | null {
+    const node = findNode(this.lastNodes, id);
+    const view = this.parts.get(id);
+    // A plain Group has no part of its own; its container object is what moves.
+    const obj: THREE.Object3D | undefined = this.assemblyGroups.get(id) ?? view?.group;
+    if (!node || !obj) return null;
+    const saved = node.hinge;
+    // Measure closed: undo any current swing on the live object first.
+    obj.updateWorldMatrix(true, true);
+    const parent = obj.parent ?? this.scene;
+    const box = new THREE.Box3();
+    const corners = [] as THREE.Vector3[];
+    const closed = saved && Math.abs(saved.angle) > 1e-6;
+    let restore: (() => void) | null = null;
+    if (closed) {
+      const pos = obj.position.clone();
+      const quat = obj.quaternion.clone();
+      obj.rotation.set(node.rotation[0] * DEG, node.rotation[1] * DEG, node.rotation[2] * DEG);
+      const rotatedPivot = (view?.pivot ?? new THREE.Vector3()).clone().applyEuler(obj.rotation);
+      obj.position.set(node.position[0] + rotatedPivot.x, node.position[1] + rotatedPivot.y, node.position[2] + rotatedPivot.z);
+      restore = () => { obj.position.copy(pos); obj.quaternion.copy(quat); };
+    }
+    obj.updateWorldMatrix(true, true);
+    parent.updateWorldMatrix(true, false);
+    obj.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      const g = mesh.geometry;
+      if (!g.boundingBox) g.computeBoundingBox();
+      const b = g.boundingBox!;
+      for (const x of [b.min.x, b.max.x]) for (const y of [b.min.y, b.max.y]) for (const z of [b.min.z, b.max.z]) {
+        corners.push(parent.worldToLocal(new THREE.Vector3(x, y, z).applyMatrix4(mesh.matrixWorld)));
+      }
+    });
+    restore?.();
+    if (!corners.length) return null;
+    for (const c of corners) box.expandByPoint(c);
+    const centre = box.getCenter(new THREE.Vector3());
+    const z = level === "bottom" ? box.min.z : box.max.z;
+    let world: Vec3;
+    let axis: Vec3;
+    if (side === "back") { world = [centre.x, box.max.y, z]; axis = [-1, 0, 0]; }
+    else if (side === "front") { world = [centre.x, box.min.y, z]; axis = [1, 0, 0]; }
+    else if (side === "right") { world = [box.max.x, centre.y, z]; axis = [0, 1, 0]; }
+    else if (side === "left") { world = [box.min.x, centre.y, z]; axis = [0, -1, 0]; }
+    else {
+      // A vertical edge (a door's hinge): the line stands up at one corner of
+      // the part's box, halfway up it.
+      const zMid = (box.min.z + box.max.z) / 2;
+      world = [side.endsWith("left") ? box.min.x : box.max.x, side.startsWith("back") ? box.max.y : box.min.y, zMid];
+      axis = [0, 0, 1];
+    }
+    return {
+      point: [world[0] - node.position[0], world[1] - node.position[1], world[2] - node.position[2]],
+      axis,
+    };
+  }
+
+  /** Overall height (mm) of the whole top-level object this part belongs to —
+   *  the Group a lid sits in, or the part itself — with every part posed as
+   *  it is drawn right now. This is the figure that says how much headroom an
+   *  open lid needs. */
+  poseHeight(id: string): { name: string; height: number; top: number } | null {
+    const root = this.lastNodes.find((n) => n.id === id || findNode([n], id));
+    if (!root) return null;
+    const entry = this.movingEntry(root.id);
+    if (!entry) return null;
+    entry.obj.updateWorldMatrix(true, true);
+    const box = new THREE.Box3();
+    for (const { view } of entry.leaves) {
+      view.group.updateWorldMatrix(true, true);
+      box.expandByObject(view.group);
+    }
+    if (box.isEmpty()) return null;
+    return { name: root.name, height: box.max.z - box.min.z, top: box.max.z };
+  }
+
+  /** The hinge line itself, drawn across the selected part so you can see
+   *  exactly what it swings about. Only exists while a hinged part is the
+   *  single selection. */
+  private hingeLine: THREE.Line | null = null;
+
+  /** While set, the next click on the model chooses the hinge pivot instead
+   *  of selecting anything. See beginHingePick. */
+  private hingePick: { id: string; done: (point: Vec3 | null) => void } | null = null;
+
+  /**
+   * "Pick pivot on model": the next left click on any visible surface hands
+   * back that point, as an offset from the part's position in its parent
+   * frame (the form a Hinge stores). Call cancelHingePick to give up; a click
+   * on empty space also ends it with null.
+   */
+  beginHingePick(id: string, done: (point: Vec3 | null) => void) {
+    this.cancelHingePick();
+    this.hingePick = { id, done };
+    this.renderer.domElement.style.cursor = "crosshair";
+  }
+
+  cancelHingePick() {
+    const pick = this.hingePick;
+    this.hingePick = null;
+    this.renderer.domElement.style.cursor = "";
+    pick?.done(null);
+  }
+
+  /** Reports a hinge pivot being dragged with the pivot gizmo: the new pivot
+   *  as an offset from the part's position (the form a Hinge stores). */
+  onHingePivotChange: ((id: string, point: Vec3, phase: "start" | "move" | "end") => void) | null = null;
+
+  /** The little translate gizmo that sits ON the hinge pivot so it can be
+   *  dragged. Separate from the main gizmo, which keeps moving the part. */
+  private pivotGizmo: TransformControls | null = null;
+  private pivotMarker = new THREE.Object3D();
+  private pivotGizmoTarget: string | null = null;
+  private hingeGizmoEnabled = true;
+
+  /** Whether a hinged part shows the pivot gizmo (and hides its normal move
+   *  gizmo) — the "Move pivot with gizmo" switch in the Hinge panel. */
+  setHingeGizmo(enabled: boolean) {
+    if (this.hingeGizmoEnabled === enabled) return;
+    this.hingeGizmoEnabled = enabled;
+    this.updateHingeLine();
+    this.attachGizmo();
+  }
+
+  private ensurePivotGizmo(): TransformControls {
+    if (this.pivotGizmo) return this.pivotGizmo;
+    const gizmo = new TransformControls(this.camera, this.renderer.domElement);
+    gizmo.setMode("translate");
+    gizmo.setSize(0.75);
+    gizmo.showE = false;
+    gizmo.addEventListener("dragging-changed", (e: { value: unknown }) => {
+      const dragging = !!e.value;
+      this.controls.enabled = !dragging;
+      const id = this.pivotGizmoTarget;
+      if (id) this.emitPivotMove(id, dragging ? "start" : "end");
+    });
+    gizmo.addEventListener("objectChange", () => {
+      const id = this.pivotGizmoTarget;
+      if (id) this.emitPivotMove(id, "move");
+    });
+    this.scene.add(this.pivotMarker);
+    this.gizmoScene.add(gizmo.getHelper());
+    this.pivotGizmo = gizmo;
+    return gizmo;
+  }
+
+  private emitPivotMove(id: string, phase: "start" | "move" | "end") {
+    const node = findNode(this.lastNodes, id);
+    const obj = this.assemblyGroups.get(id) ?? this.parts.get(id)?.group;
+    if (!node || !obj) return;
+    const parent = obj.parent ?? this.scene;
+    parent.updateWorldMatrix(true, false);
+    this.pivotMarker.updateWorldMatrix(true, false);
+    const local = parent.worldToLocal(this.pivotMarker.getWorldPosition(new THREE.Vector3()));
+    this.onHingePivotChange?.(id, [
+      local.x - node.position[0],
+      local.y - node.position[1],
+      local.z - node.position[2],
+    ], phase);
+  }
+
+  private finishHingePick(e: PointerEvent) {
+    const pick = this.hingePick;
+    if (!pick) return;
+    this.hingePick = null;
+    this.renderer.domElement.style.cursor = "";
+    const node = findNode(this.lastNodes, pick.id);
+    const obj = this.assemblyGroups.get(pick.id) ?? this.parts.get(pick.id)?.group;
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    this.pointer.set(((e.clientX - rect.left) / rect.width) * 2 - 1, -((e.clientY - rect.top) / rect.height) * 2 + 1);
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+    const meshes = [...this.parts.values()].filter((v) => v.group.visible).map((v) => v.mesh);
+    const hit = this.raycaster.intersectObjects(meshes, false)[0];
+    if (!hit || !node || !obj) { pick.done(null); return; }
+    const parent = obj.parent ?? this.scene;
+    parent.updateWorldMatrix(true, false);
+    const local = parent.worldToLocal(hit.point.clone());
+    pick.done([local.x - node.position[0], local.y - node.position[1], local.z - node.position[2]]);
+  }
+
+  /** Puts the pivot gizmo on the selected part's hinge pivot, or takes it
+   *  away. Never moves it while it is being dragged. */
+  private syncPivotGizmo(id: string | null, node: SceneNode | null, obj: THREE.Object3D | null) {
+    const wanted = !!(id && node?.hinge && obj && this.hingeGizmoEnabled);
+    if (!wanted) {
+      if (this.pivotGizmo?.object) this.pivotGizmo.detach();
+      this.pivotGizmoTarget = null;
+    } else if (!this.pivotGizmo?.dragging) {
+      const hinge = node!.hinge!;
+      const parent = obj!.parent ?? this.scene;
+      parent.updateWorldMatrix(true, false);
+      const world = parent.localToWorld(new THREE.Vector3(
+        node!.position[0] + hinge.point[0],
+        node!.position[1] + hinge.point[1],
+        node!.position[2] + hinge.point[2],
+      ));
+      this.pivotMarker.position.copy(world);
+      this.pivotMarker.updateMatrixWorld(true);
+      const gizmo = this.ensurePivotGizmo();
+      this.pivotGizmoTarget = id;
+      if (gizmo.object !== this.pivotMarker) gizmo.attach(this.pivotMarker);
+    }
+    // The part's own gizmo steps aside while the pivot gizmo is in use, or
+    // the two would sit on top of each other.
+    const suppress = wanted;
+    if (this.mainGizmoSuppressed !== suppress) {
+      this.mainGizmoSuppressed = suppress;
+      this.attachGizmo();
+    }
+  }
+
+  private mainGizmoSuppressed = false;
+
+  private updateHingeLine() {
+    const id = this.selectedIds.length === 1 ? this.selectedIds[0] : null;
+    const node = id ? findNode(this.lastNodes, id) : null;
+    const obj = id ? (this.assemblyGroups.get(id) ?? this.parts.get(id)?.group) : null;
+    const hinge = node?.hinge;
+    this.syncPivotGizmo(id, node ?? null, obj ?? null);
+    if (!node || !obj || !hinge) {
+      if (this.hingeLine) {
+        this.scene.remove(this.hingeLine);
+        this.hingeLine.geometry.dispose();
+        (this.hingeLine.material as THREE.Material).dispose();
+        this.hingeLine = null;
+      }
+      return;
+    }
+    const parent = obj.parent ?? this.scene;
+    parent.updateWorldMatrix(true, false);
+    const pivotLocal = new THREE.Vector3(
+      node.position[0] + hinge.point[0],
+      node.position[1] + hinge.point[1],
+      node.position[2] + hinge.point[2],
+    );
+    const axis = new THREE.Vector3(...hinge.axis).normalize();
+    // Long enough to read against the part, short enough not to dominate.
+    obj.updateWorldMatrix(true, true);
+    const size = new THREE.Box3().setFromObject(obj).getSize(new THREE.Vector3());
+    const half = Math.max(20, Math.max(size.x, size.y, size.z) * 0.6);
+    const a = parent.localToWorld(pivotLocal.clone().addScaledVector(axis, -half));
+    const b = parent.localToWorld(pivotLocal.clone().addScaledVector(axis, half));
+    if (!this.hingeLine) {
+      const material = new THREE.LineBasicMaterial({ color: 0xf59e0b, depthTest: false, transparent: true });
+      this.hingeLine = new THREE.Line(new THREE.BufferGeometry(), material);
+      this.hingeLine.renderOrder = 50;
+      this.hingeLine.frustumCulled = false;
+      this.scene.add(this.hingeLine);
+    }
+    this.hingeLine.geometry.setFromPoints([a, b]);
+  }
+
   private applyPlacements() {
     const activeAssemblyIds = new Set<string>();
 
@@ -3718,6 +4006,7 @@ export class Scene {
             groupObj.position.set(...node.position);
             groupObj.rotation.set(node.rotation[0] * DEG, node.rotation[1] * DEG, node.rotation[2] * DEG);
             groupObj.scale.set(...node.scale);
+            this.applyHinge(groupObj, node);
           }
         }
 
@@ -3745,6 +4034,7 @@ export class Scene {
             child.position[1] + rotatedPivot.y,
             child.position[2] + rotatedPivot.z,
           );
+          this.applyHinge(childView.group, child);
 
           // Apply assembly explode displacement outward from childCentroid
           if (this.explodeAmount > 0 && node.children.length > 1) {
@@ -3785,6 +4075,7 @@ export class Scene {
           node.position[1] + rotatedPivot.y,
           node.position[2] + rotatedPivot.z,
         );
+        this.applyHinge(view.group, node);
         const previewing = this.pushPullDrag ?? this.pushPullPending ??
           (this.typedPreview?.snapshot ? { id: this.typedPreview.id, originalPivot: this.typedPreview.snapshot.originalPivot } : null);
         if (previewing?.id === node.id) {
@@ -3820,6 +4111,8 @@ export class Scene {
         }
       }
     }
+
+    this.updateHingeLine();
   }
 
   private applyMaterials() {
@@ -4053,8 +4346,12 @@ export class Scene {
     }
     // Black one-axis handles sit at the middle of the four bottom edges,
     // matching TinkerCAD's resize controls. The final pair controls height.
-    this.resizeHandleMeshes[8].position.set(min.x, centre.y, min.z);
-    this.resizeHandleMeshes[9].position.set(max.x, centre.y, min.z);
+    // The left/right (width) pair stands at mid-height on the side faces
+    // instead: in a front or back view the bottom-edge spot is exactly where
+    // the bottom corners are, so the corner took every grab and there was no
+    // handle to stretch the width on its own.
+    this.resizeHandleMeshes[8].position.set(min.x, centre.y, centre.z);
+    this.resizeHandleMeshes[9].position.set(max.x, centre.y, centre.z);
     this.resizeHandleMeshes[10].position.set(centre.x, min.y, min.z);
     this.resizeHandleMeshes[11].position.set(centre.x, max.y, min.z);
     this.resizeHandleMeshes[12].position.set(centre.x, centre.y, min.z);
@@ -7909,32 +8206,88 @@ export class Scene {
    */
   dropSelected(): { id: string; position: Vec3 }[] {
     this.scene.updateMatrixWorld(true);
+    this.ensureBVH();
     const falling = this.selectedIds
-      .map((id) => ({ id, view: this.parts.get(id) }))
-      .filter((entry): entry is { id: string; view: PartView } => !!entry.view)
-      .map((entry) => ({
-        ...entry,
-        node: findNode(this.lastNodes, entry.id),
-        minZ: new THREE.Box3().setFromObject(entry.view.group).min.z,
-      }))
-      .filter((entry) => !!entry.node)
+      .map((id) => this.movingEntry(id))
+      .filter((entry): entry is NonNullable<typeof entry> => !!entry)
+      .map((entry) => ({ ...entry, minZ: new THREE.Box3().setFromObject(entry.obj).min.z }))
       .sort((a, b) => a.minZ - b.minZ);
 
     const updates: { id: string; position: Vec3 }[] = [];
-    for (const { id, view, node } of falling) {
-      const drop = this.dropDistance(id, view);
+    for (const { id, obj, node, leaves } of falling) {
+      // A Group moves as one rigid piece: it falls until its FIRST part
+      // lands, each part measured against everything except its siblings.
+      const own = new Set(leaves.map((l) => l.id));
+      let drop: number | null = null;
+      for (const leaf of leaves) {
+        const d = this.dropDistance(leaf.id, leaf.view, own);
+        if (d === null) continue;
+        drop = drop === null ? d : Math.min(drop, d);
+      }
       if (drop === null || drop <= Scene.DROP_EPS) continue;
       // Move the view now so anything still to fall measures against where
       // this part actually ended up. setPlacements() re-applies the document's
       // own numbers moments later either way.
-      view.group.position.z -= drop;
-      view.group.updateMatrixWorld(true);
+      obj.position.z -= drop;
+      obj.updateMatrixWorld(true);
       // Rounded so a landing reads as the round number it visually is (10, not
       // 9.999999999999998) — the raw distance comes off float matrix maths.
-      const landed = Math.round((node!.position[2] - drop) * 1e6) / 1e6;
-      updates.push({ id, position: [node!.position[0], node!.position[1], landed] });
+      const landed = Math.round((node.position[2] - drop) * 1e6) / 1e6;
+      updates.push({ id, position: [node.position[0], node.position[1], landed] });
     }
     return updates;
+  }
+
+  /** Gives every dense part a bounds tree, once. The drop tools fire hundreds
+   *  of rays per part; against a 300k-triangle import each ray tested every
+   *  triangle, which froze the page for ~18 s on a real AMS model. The tree
+   *  lives on the geometry, so a rebuilt part (new geometry) simply gets a
+   *  fresh one on its next drop. */
+  private ensureBVH() {
+    for (const view of this.parts.values()) {
+      const geometry = view.mesh.geometry as THREE.BufferGeometry & { boundsTree?: MeshBVH };
+      if (geometry.boundsTree) continue;
+      const position = geometry.getAttribute("position");
+      const triangles = geometry.index ? geometry.index.count / 3 : (position?.count ?? 0) / 3;
+      if (triangles < 20000) continue;
+      geometry.boundsTree = new MeshBVH(geometry);
+    }
+  }
+
+  /** Where a part's bounds centre sits in its parent's frame (the assembly
+   *  group's own frame for a child of a Group) — position plus the part's
+   *  pivot, exactly as the viewport places it. Ungrouping a scaled Group needs
+   *  this to move each child without it jumping. Null while parts are
+   *  exploded, since the explode offset is not part of the document. */
+  partCentreInParent(id: string): Vec3 | null {
+    const view = this.parts.get(id);
+    if (!view || this.explodeAmount > 0) return null;
+    // A swung-open part is not where the document puts it.
+    const hinge = findNode(this.lastNodes, id)?.hinge;
+    if (hinge && Math.abs(hinge.angle) > 1e-6) return null;
+    return view.group.position.toArray() as Vec3;
+  }
+
+  /** What the drop tools move for one selected id: the object to translate
+   *  and the built parts whose geometry it carries. A plain Group has no part
+   *  of its own — its children are the parts, inside its assembly container —
+   *  so looking the id up in `parts` alone found nothing and dropped nothing. */
+  private movingEntry(id: string): { id: string; node: SceneNode; obj: THREE.Object3D; leaves: { id: string; view: PartView }[] } | null {
+    const node = findNode(this.lastNodes, id);
+    if (!node) return null;
+    const leaves: { id: string; view: PartView }[] = [];
+    const collect = (n: SceneNode) => {
+      if (isGroup(n) && n.op === "assembly") {
+        for (const child of n.children) collect(child);
+        return;
+      }
+      const view = this.parts.get(n.id);
+      if (view && view.group.visible) leaves.push({ id: n.id, view });
+    };
+    collect(node);
+    const obj = this.assemblyGroups.get(id) ?? this.parts.get(id)?.group;
+    if (!obj || !leaves.length) return null;
+    return { id, node, obj, leaves };
   }
 
   /**
@@ -7950,28 +8303,31 @@ export class Scene {
     if (axis === 2 && sign < 0) return this.dropSelected();
 
     this.scene.updateMatrixWorld(true);
-    const selected = new Set(this.selectedIds);
+    this.ensureBVH();
     const moving = this.selectedIds
-      .map((id) => ({ id, view: this.parts.get(id), node: findNode(this.lastNodes, id) }))
-      .filter((entry): entry is { id: string; view: PartView; node: SceneNode } =>
-        !!entry.view && entry.view.group.visible && !!entry.node);
+      .map((id) => this.movingEntry(id))
+      .filter((entry): entry is NonNullable<typeof entry> => !!entry);
     if (!moving.length) return [];
+    const selected = new Set<string>(this.selectedIds);
+    for (const { leaves } of moving) for (const leaf of leaves) selected.add(leaf.id);
 
     const movingBox = new THREE.Box3();
-    for (const { view } of moving) movingBox.expandByObject(view.group);
+    for (const { obj } of moving) movingBox.expandByObject(obj);
     const perpendicular = [0, 1, 2].filter((candidate) => candidate !== axis);
     let distance = Infinity;
     const travel = new THREE.Vector3(direction[0], direction[1], direction[2]).normalize();
     const targetMeshes = [...this.parts]
       .filter(([id, target]) => !selected.has(id) && target.group.visible && !target.isHole)
       .map(([, target]) => target.mesh);
-    const movingMeshes = moving.map(({ view }) => view.mesh);
+    const movingMeshes = moving.flatMap(({ leaves }) => leaves.map(({ view }) => view.mesh));
     const normalMatrix = new THREE.Matrix3();
     const hitNormal = new THREE.Vector3();
     const rayOrigins: THREE.Vector3[] = [];
 
-    for (const { view } of moving) {
-      rayOrigins.push(...this.sampleDirectionalFacePoints(view, travel, Scene.DROP_SAMPLES));
+    for (const { leaves } of moving) {
+      for (const { view } of leaves) {
+        rayOrigins.push(...this.sampleDirectionalFacePoints(view, travel, Scene.DROP_SAMPLES));
+      }
     }
 
     // Vertices alone miss a recess whose opening lies in the middle of a
@@ -8093,9 +8449,9 @@ export class Scene {
 
     if (!Number.isFinite(distance)) return [];
     const delta = sign * distance;
-    const updates = moving.map(({ id, view, node }) => {
-      view.group.position.setComponent(axis, view.group.position.getComponent(axis) + delta);
-      view.group.updateMatrixWorld(true);
+    const updates = moving.map(({ id, obj, node }) => {
+      obj.position.setComponent(axis, obj.position.getComponent(axis) + delta);
+      obj.updateMatrixWorld(true);
       const position = [...node.position] as Vec3;
       position[axis] = Math.round((position[axis] + delta) * 1e6) / 1e6;
       return { id, position };
@@ -8311,11 +8667,11 @@ export class Scene {
    * landed on a cone took dozens of presses and stalled on the ledge beneath
    * instead of ever reaching the plate.
    */
-  private dropDistance(movingId: string, view: PartView): number | null {
-    const contact = this.measureDrop(movingId, view, null);
+  private dropDistance(movingId: string, view: PartView, ignore?: Set<string>): number | null {
+    const contact = this.measureDrop(movingId, view, null, ignore);
     if (!contact.resting) return contact.distance;
     const bottom = new THREE.Box3().setFromObject(view.group).min.z;
-    return this.measureDrop(movingId, view, bottom).distance;
+    return this.measureDrop(movingId, view, bottom, ignore).distance;
   }
 
   /**
@@ -8328,12 +8684,13 @@ export class Scene {
     movingId: string,
     view: PartView,
     levelBelow: number | null,
+    ignore?: Set<string>,
   ): { distance: number | null; resting: boolean } {
     let resting = false;
     const faceReach = new Map<THREE.Object3D, { regionOf: Int32Array; nearest: Map<number, number> }>();
     const targets = [...this.parts]
       // A hole is subtractive: landing on one would be landing on nothing.
-      .filter(([id, v]) => id !== movingId && v.group.visible && !v.isHole)
+      .filter(([id, v]) => id !== movingId && !ignore?.has(id) && v.group.visible && !v.isHole)
       .map(([, v]) => v);
     const meshes = targets.map((t) => t.mesh);
     const movingBox = new THREE.Box3().setFromObject(view.group);
@@ -8863,10 +9220,17 @@ export class Scene {
 
     if (targetIds && targetIds.length > 0) {
       for (const id of targetIds) {
-        const view = this.parts.get(id);
-        if (view) {
-          box.union(new THREE.Box3().setFromObject(view.group));
-          count++;
+        // A plain Group has no part of its own — its children live inside
+        // its assembly container — so look there first, or selecting a
+        // group fell through to "frame everything".
+        const obj = this.assemblyGroups.get(id) ?? this.parts.get(id)?.group;
+        if (obj) {
+          obj.updateWorldMatrix(true, true);
+          const b = new THREE.Box3().setFromObject(obj);
+          if (!b.isEmpty()) {
+            box.union(b);
+            count++;
+          }
         }
       }
     }
@@ -9147,7 +9511,7 @@ export class Scene {
 
   private attachGizmo() {
     if (this.gizmo.dragging) return;
-    if (this.selectedIds.length === 0 || this.showResult || (this.toolMode !== "move" && this.toolMode !== "rotate")) {
+    if (this.mainGizmoSuppressed || this.selectedIds.length === 0 || this.showResult || (this.toolMode !== "move" && this.toolMode !== "rotate")) {
       if (this.gizmo.object) this.gizmo.detach();
       return;
     }
@@ -10868,6 +11232,10 @@ export class Scene {
   }
 
   private onPointerDown = (e: PointerEvent) => {
+    if (this.hingePick && e.button === 0) { this.finishHingePick(e); return; }
+    // A press that lands on the pivot gizmo's handle belongs to that drag, not
+    // to selection.
+    if (e.button === 0 && this.pivotGizmo?.object && this.pivotGizmo.axis) return;
     if (this.toolMode === "measure" && e.button === 0) { this.tape.click(e); return; }
     // Only the left button ever selects/drags — right/middle are reserved
     // for orbit/pan and must never be misread as a click on release.
@@ -11161,17 +11529,9 @@ export class Scene {
     const group = view.wire.geometry.groups[groupIndex];
     const positions = view.wire.geometry.getAttribute("position");
     if (!group || !positions) return null;
-    let displayPoint: THREE.Vector3;
-    if (group.count <= 2) {
-      displayPoint = new THREE.Vector3(
-        (positions.getX(group.start) + positions.getX(group.start + 1)) / 2,
-        (positions.getY(group.start) + positions.getY(group.start + 1)) / 2,
-        (positions.getZ(group.start) + positions.getZ(group.start + 1)) / 2,
-      );
-    } else {
-      const middle = group.start + Math.min(group.count - 1, Math.floor(group.count / 2));
-      displayPoint = new THREE.Vector3(positions.getX(middle), positions.getY(middle), positions.getZ(middle));
-    }
+    const anchor = edgeInteriorAnchor(positions, group.start, group.count);
+    if (!anchor) return null;
+    const displayPoint = new THREE.Vector3(...anchor);
     const local = displayPoint.add(view.pivot);
     return [local.x, local.y, local.z];
   }
@@ -11523,17 +11883,31 @@ export class Scene {
         // drag instead of collapsing both dimensions into one radial ratio.
         const dx = e.clientX - this.resizeDrag.startX;
         const dy = e.clientY - this.resizeDrag.startY;
-        const [xx, xy] = this.resizeDrag.basisX;
-        const [yx, yy] = this.resizeDrag.basisY;
-        const determinant = xx * yy - xy * yx;
+        const bases = [this.resizeDrag.basisX, this.resizeDrag.basisY, this.resizeDrag.basisZ];
+        // A corner resizes the object's width and depth — unless the view looks
+        // straight along one of them (an orthographic front/side view), where that
+        // axis has no length on screen and the corner did nothing at all. Then
+        // it resizes the two axes that can be seen, e.g. width and height.
+        let axisA = 0;
+        let axisB = 1;
+        const length = (axis: number) => Math.hypot(bases[axis][0], bases[axis][1]);
+        if (Math.abs(bases[0][0] * bases[1][1] - bases[0][1] * bases[1][0]) <= 1e-6 * Math.max(1, length(0) * length(1))
+          || length(0) < 1e-3 || length(1) < 1e-3) {
+          const seen = [0, 1, 2].sort((p, q) => length(q) - length(p));
+          axisA = Math.min(seen[0], seen[1]);
+          axisB = Math.max(seen[0], seen[1]);
+        }
+        const [ax, ay] = bases[axisA];
+        const [bx, by] = bases[axisB];
+        const determinant = ax * by - ay * bx;
         if (Math.abs(determinant) > 1e-6) {
-          const worldX = (dx * yy - dy * yx) / determinant;
-          const worldY = (dy * xx - dx * xy) / determinant;
-          const nextX = Math.max(0.01, this.resizeDrag.startSize[0] + 2 * worldX * this.resizeDrag.cornerSigns[0]);
-          const nextY = Math.max(0.01, this.resizeDrag.startSize[1] + 2 * worldY * this.resizeDrag.cornerSigns[1]);
-          factors[0] = Math.max(0.01, nextX / this.resizeDrag.startSize[0]);
-          factors[1] = Math.max(0.01, nextY / this.resizeDrag.startSize[1]);
-          factors[2] = 1;
+          const worldA = (dx * by - dy * bx) / determinant;
+          const worldB = (dy * ax - dx * ay) / determinant;
+          const signs = this.resizeDrag.handleSigns;
+          const nextA = Math.max(0.01, this.resizeDrag.startSize[axisA] + 2 * worldA * signs[axisA]);
+          const nextB = Math.max(0.01, this.resizeDrag.startSize[axisB] + 2 * worldB * signs[axisB]);
+          factors[axisA] = Math.max(0.01, nextA / this.resizeDrag.startSize[axisA]);
+          factors[axisB] = Math.max(0.01, nextB / this.resizeDrag.startSize[axisB]);
         }
       } else if (this.resizeDrag.axis !== null) {
         const axis = this.resizeDrag.axis;
@@ -11676,7 +12050,12 @@ export class Scene {
             else if (drag.lockAspectXY) {
               if (drag.axis === 2) faceAxes = [2];
               else uniform = (u) => [u, u, 1];
-            } else if (drag.cornerSigns) faceAxes = [0, 1];
+            } else if (drag.cornerSigns) {
+              // Width and depth, or whichever two axes the view shows when it
+              // looks straight along one of them.
+              const moved = [0, 1, 2].filter((i) => Math.abs(factors[i] - 1) > 1e-9);
+              faceAxes = moved.length ? moved : [0, 1];
+            }
             else if (drag.axis !== null) faceAxes = [drag.axis];
             else uniform = (u) => [u, u, u];
             const apply = (f: Vec3) => { placed = place(f); };
@@ -12364,11 +12743,15 @@ export class Scene {
    * registration order), so it never starts a drag in the first place.
    */
   private onGlobalPointerDown = (e: PointerEvent) => {
-    if (e.button !== 0) this.gizmo.enabled = false;
+    if (e.button !== 0) {
+      this.gizmo.enabled = false;
+      if (this.pivotGizmo) this.pivotGizmo.enabled = false;
+    }
   };
 
   private onGlobalPointerUp = () => {
     this.gizmo.enabled = true;
+    if (this.pivotGizmo) this.pivotGizmo.enabled = true;
   };
 
   /** How far from the target a rotate drag should feel calibrated for — see
@@ -12564,6 +12947,7 @@ export class Scene {
     this.controls.update();
     this.controls.addEventListener("change", this.onCameraChange);
     this.gizmo.camera = next;
+    if (this.pivotGizmo) this.pivotGizmo.camera = next;
     this.saveCameraNow();
   }
 

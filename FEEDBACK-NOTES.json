@@ -1,16 +1,16 @@
 [
   {
-    "id": "1791550734983",
-    "text": "TEST 2",
-    "version": "0.4.54",
-    "at": 1791550734983,
-    "done": false
-  },
-  {
     "id": "1790869939136",
     "text": "move object along the path",
     "version": "0.4.40",
     "at": 1790869939136,
+    "done": false
+  },
+  {
+    "id": "1790841629543",
+    "text": "On the mobile when I click on the object the menu doesn't appear",
+    "version": "0.4.40",
+    "at": 1790841629543,
     "done": false
   },
   {

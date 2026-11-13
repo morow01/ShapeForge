@@ -146,7 +146,7 @@ Local development remains available through `npm run dev`.
 
 ### Folder files
 
-Open a folder on the Home page and choose **Add files** to keep original 3MF
+Open a folder on the Home page and choose **Store files…** to keep original 3MF
 prototyping templates, STL models, PDFs, images, ZIPs or other supporting files
 alongside your designs. Multiple files can be added at once. Attachments are
 stored separately from project geometry, so saving one does not import it into
@@ -177,10 +177,20 @@ selected file onto a folder in the sidebar or main area, or onto a breadcrumb
 (including All designs) to move the selection. Move to folder is also available
 from the shared-style menu and selection toolbar.
 
-Use **File → Import from saved files…** to choose a stored STL, 3MF or SVG and add
+Use **File → Import…** to choose a stored STL, 3MF or SVG and add
 it to the currently open project. The picker supports search and folder filters,
 shows the destination project's name, and downloads a Drive-only original on
-demand. The same picker is available through **Import into project…** in a
+demand. The same picker is available through **Import…** in a
 supported attachment's context menu. It uses the normal model importer (including
 3MF assemblies, SVG options and complexity limits), leaving the saved original
 untouched. PDF, text and other reference files remain download-only attachments.
+
+
+### File actions
+
+- **Open project file…** opens an editable `.shapeforge` file as a separate project.
+- **Import…** copies model parts from a file or another saved project into the current one.
+- **Save project** keeps it in ShapeForge (this browser or Google Drive).
+- **Download project** saves an editable `.shapeforge` copy to your computer.
+- **Export model…** prepares an STL or 3MF for printing or another 3D app, then offers **Download STL/3MF**.
+- **Store files…** keeps originals in a Home folder without adding geometry. **Download original file** retrieves that attachment unchanged.

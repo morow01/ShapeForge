@@ -1572,9 +1572,28 @@ export interface LowPoly {
   even: number;
 }
 
+/**
+ * A swing-open pose for a part, for judging clearances (a lid, a door). Display
+ * only: it rotates the part about a line in the viewport and nothing else — the
+ * kernel, exports and booleans never see it, so the part prints in its normal
+ * closed position.
+ */
+export interface Hinge {
+  /** A point on the hinge line, as an offset from the node's position, in
+   *  the node's parent frame — so moving the part carries its hinge with it. */
+  point: Vec3;
+  /** Unit direction of the hinge line, chosen so a positive angle swings the
+   *  part UP. */
+  axis: Vec3;
+  /** Degrees open; 0 is closed. */
+  angle: number;
+}
+
 interface NodeBase {
   id: string;
   name: string;
+  /** Swing-open pose, see Hinge. */
+  hinge?: Hinge;
   /** Position of the node's origin, in mm. */
   position: Vec3;
   /** Euler angles in degrees, applied X then Y then Z about the origin. */

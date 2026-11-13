@@ -1,7 +1,7 @@
 {
   "name": "shapeforge",
   "private": true,
-  "version": "0.6.9",
+  "version": "0.6.23",
   "description": "ShapeForge 3D CAD modeling application",
   "author": "ShapeForge Team",
   "type": "module",
@@ -47,6 +47,7 @@
     "replicad-threejs-helper": "^1.0.0",
     "svgpath": "^2.6.0",
     "three": "^0.185.1",
+    "three-mesh-bvh": "^0.9.18",
     "zundo": "^2.3.0",
     "zustand": "^5.0.15"
   },
