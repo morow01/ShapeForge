@@ -1978,6 +1978,52 @@ export class Scene {
   private assemblyPivots: Map<string, THREE.Object3D> = new Map();
   private assemblyDragStart: { center: THREE.Vector3; position: Vec3; rotation: Vec3 } | null = null;
   private multiGizmoPivot = new THREE.Object3D();
+  /** True while the Move gizmo of ONE selected object is parked on a visible
+   *  point of it (through multiGizmoPivot) because its own origin is off screen. */
+  private singleProxy = false;
+
+  /**
+   * Where the Move gizmo should sit so it can be grabbed. Normally on the
+   * object's own origin — but zoomed in on a big board that origin is far off
+   * screen and the gizmo went with it. Then it goes to the point INSIDE the
+   * object's bounds nearest the middle of the view. Null when the origin is
+   * already comfortably in view (nothing to change).
+   */
+  private visibleGizmoPoint(): THREE.Vector3 | null {
+    if (this.selectedIds.length !== 1) return null;
+    const id = this.selectedIds[0];
+    const obj = this.assemblyGroups.get(id) ?? this.parts.get(id)?.group;
+    if (!obj || !obj.visible) return null;
+    obj.updateWorldMatrix(true, true);
+    const box = new THREE.Box3().setFromObject(obj);
+    if (box.isEmpty()) return null;
+    const margin = 0.8;
+    const ndc = new THREE.Vector3();
+    const inView = (p: THREE.Vector3) => {
+      ndc.copy(p).project(this.camera);
+      return Math.abs(ndc.x) < margin && Math.abs(ndc.y) < margin && ndc.z > -1 && ndc.z < 1;
+    };
+    if (inView(obj.position) && inView(box.getCenter(new THREE.Vector3()))) return null;
+    let best: THREE.Vector3 | null = null;
+    let bestScore = Infinity;
+    const steps = 8;
+    const p = new THREE.Vector3();
+    for (let i = 0; i <= steps; i++) {
+      for (let j = 0; j <= steps; j++) {
+        for (let k = 0; k <= steps; k++) {
+          p.set(
+            box.min.x + ((box.max.x - box.min.x) * i) / steps,
+            box.min.y + ((box.max.y - box.min.y) * j) / steps,
+            box.min.z + ((box.max.z - box.min.z) * k) / steps,
+          );
+          if (!inView(p)) continue;
+          const score = ndc.x * ndc.x + ndc.y * ndc.y;
+          if (score < bestScore) { bestScore = score; best = p.clone(); }
+        }
+      }
+    }
+    return best;
+  }
   private multiGizmoDrag: {
     center: THREE.Vector3;
     startGizmoPos: THREE.Vector3;
@@ -9625,8 +9671,13 @@ export class Scene {
       return;
     }
 
-    if (this.selectedIds.length > 1) {
-      const center = this.computeSelectionCenter(this.selectedIds);
+    // One object whose gizmo would be off screen is driven through the same
+    // movable pivot a multi-selection uses, parked where it can be seen.
+    const proxyPoint = this.gizmo.getMode() === "translate" ? this.visibleGizmoPoint() : null;
+    this.singleProxy = !!proxyPoint;
+
+    if (this.selectedIds.length > 1 || proxyPoint) {
+      const center = proxyPoint ?? this.computeSelectionCenter(this.selectedIds);
       this.multiGizmoPivot.position.copy(center);
       this.multiGizmoPivot.rotation.set(0, 0, 0);
       this.multiGizmoPivot.quaternion.identity();
@@ -9689,6 +9740,8 @@ export class Scene {
         this.multiGizmoPivot.quaternion.identity();
         this.multiGizmoPivot.scale.set(1, 1, 1);
         this.multiGizmoPivot.updateMatrixWorld(true);
+      } else if (this.singleProxy) {
+        this.attachGizmo();
       }
       this.flushCollisionRefresh();
     } else {
@@ -9834,7 +9887,7 @@ export class Scene {
         this.clearMoveReadout();
       }
 
-      if (this.selectedIds.length > 1) {
+      if (this.selectedIds.length > 1 || this.singleProxy) {
         const center = this.multiGizmoPivot.position.clone();
         const effectiveIds = this.selectedIds.filter((id) => {
           const root = this.findRootOwner(id);
@@ -9898,7 +9951,7 @@ export class Scene {
     const obj = this.gizmo.object;
     if (!obj) return;
 
-    if (this.multiGizmoDrag && this.selectedIds.length > 1) {
+    if (this.multiGizmoDrag && (this.selectedIds.length > 1 || this.singleProxy)) {
       const drag = this.multiGizmoDrag;
       const deltaPos = this.multiGizmoPivot.position.clone().sub(drag.startGizmoPos);
       const deltaQuat = this.multiGizmoPivot.quaternion.clone().multiply(drag.startGizmoQuat.clone().invert());
@@ -10220,7 +10273,12 @@ export class Scene {
     // centre alignment on another axis; that must not suppress this contact.
     const featureDistance = featureDelta ? Math.hypot(...featureDelta) : Infinity;
     const boundsDistance = Math.hypot(...result.delta);
-    const featureWins = !!featureDelta && (
+    // A contact that needs NO movement (two boards already touching along an
+    // edge reports a zero delta) has nothing to offer, yet "zero is closer than
+    // the alignment snap" let it win — and the edge alignment, such as the
+    // bottoms lining up, never happened for objects that touched. It only wins
+    // when it actually moves the object.
+    const featureWins = !!featureDelta && featureDistance > 1e-6 && (
       (this.gizmo.dragging && !!this.gizmo.axis) ||
       boundsDistance <= 1e-6 || featureDistance < boundsDistance
     );
@@ -10468,9 +10526,14 @@ export class Scene {
             mins[component] = Math.min(...values);
             maxs[component] = Math.max(...values);
           }
+          // Touching counts (>= -0.01, not > 0.01). Two objects standing side by
+          // side share no area along the axis between them, so requiring real
+          // overlap there threw away every face parallel to that axis — you
+          // could not snap one board's bottom to its neighbour's bottom, or
+          // the tops together, unless the two overlapped.
           const overlaps = others.every((component) =>
             Math.min(moving.max[component], maxs[component]) -
-              Math.max(moving.min[component], mins[component]) > 0.01
+              Math.max(moving.min[component], mins[component]) > -0.01
           );
           if (!overlaps) continue;
           const plane = (planeMin + planeMax) / 2;
@@ -13054,6 +13117,9 @@ export class Scene {
 
   private onCameraChange = () => {
     this.orientSketchCorner();
+    // The Move gizmo of a big object stays on a visible part of it as the
+    // view pans and zooms.
+    if (!this.gizmo.dragging && this.selectedIds.length === 1 && this.toolMode === "move") this.attachGizmo();
     if (this.cameraSaveTimeout) clearTimeout(this.cameraSaveTimeout);
     this.cameraSaveTimeout = setTimeout(() => {
       this.saveCameraNow();
