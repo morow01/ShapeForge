@@ -4365,7 +4365,7 @@ export class Scene {
     // screen keeps growing, so it visibly balloons the closer the camera
     // gets. MIN_HANDLE_WORLD only guards the literal-zero case (camera at
     // the target), not a "keep it visible" floor.
-    const handleSize = Math.max(MIN_HANDLE_WORLD, this.worldSnapTolerance(centre) * 0.9);
+    const handleSize = Math.max(MIN_HANDLE_WORLD, this.screenWorldSize(centre, 0.9));
     for (let i = 0; i < this.resizeHandleMeshes.length; i++) {
       const handle = this.resizeHandleMeshes[i];
       handle.userData.baseScale = handleSize;
@@ -4384,7 +4384,7 @@ export class Scene {
     // model, and takes its pill off the object with it. The gap is derived
     // from the same screen-space helper the handles size themselves by, so it
     // stays constant on screen at any zoom.
-    const gap = Math.max(1, this.worldSnapTolerance(centre) * 2.1);
+    const gap = Math.max(1, this.screenWorldSize(centre, 2.1));
     // The lines go on whichever sides of the cage face the camera, re-chosen
     // every frame as it orbits. Fixed to the -Y and +X sides, they were only
     // in front from the default view; from anywhere else the width and depth
@@ -4681,7 +4681,7 @@ export class Scene {
 
       this.ensureAlignHandleCount(9);
       const centre = box.getCenter(new THREE.Vector3());
-      const offset = Math.max(2, this.worldSnapTolerance(centre) * 3.2);
+      const offset = Math.max(2, this.screenWorldSize(centre, 3.2));
       const anchors = (min: number, mid: number, max: number) => [min, mid, max];
       const xs = anchors(box.min.x, centre.x, box.max.x);
       const ys = anchors(box.min.y, centre.y, box.max.y);
@@ -4719,7 +4719,7 @@ export class Scene {
         this.alignHandleMeshes[idx].visible = false;
       }
 
-      const handleSize = Math.max(MIN_HANDLE_WORLD, this.worldSnapTolerance(centre) * 0.75);
+      const handleSize = Math.max(MIN_HANDLE_WORLD, this.screenWorldSize(centre, 0.75));
       for (let i = 0; i < 9; i++) {
         const handle = this.alignHandleMeshes[i];
         handle.userData.baseScale = handleSize;
@@ -4748,7 +4748,7 @@ export class Scene {
       }
       for (; handleIndex < this.alignHandleMeshes.length; handleIndex++) this.alignHandleMeshes[handleIndex].visible = false;
 
-      const handleSize = Math.max(MIN_HANDLE_WORLD, this.worldSnapTolerance(union.getCenter(new THREE.Vector3())) * 0.62);
+      const handleSize = Math.max(MIN_HANDLE_WORLD, this.screenWorldSize(union.getCenter(new THREE.Vector3()), 0.62));
       for (let i = 0; i < this.alignHandleMeshes.length; i++) {
         const handle = this.alignHandleMeshes[i];
         handle.userData.baseScale = handleSize;
@@ -5250,7 +5250,7 @@ export class Scene {
     const handle = this.pushPullHandleMeshes[0];
     const at = face.planar ? this.renderedFaceCenter(view, faceIndex, face.point) : this.kernelLocalToWorld(view, anchor.point);
     const normal = this.kernelNormalToWorld(view, anchor.normal);
-    const scale = Math.max(MIN_HANDLE_WORLD, this.worldSnapTolerance(at) * PUSH_PULL_HANDLE_SCALE);
+    const scale = Math.max(MIN_HANDLE_WORLD, this.screenWorldSize(at, PUSH_PULL_HANDLE_SCALE));
     handle.position.copy(at).addScaledVector(normal, scale * 0.2);
     handle.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), normal);
     handle.scale.setScalar(scale * (this.pushPullHandleHovered ? 1.18 : 1));
@@ -7333,7 +7333,7 @@ export class Scene {
 
     // This temporary arrow follows the drag even when it started away from the
     // selected face's centre. The normal pooled arrow is restored on release.
-    const scale = Math.max(MIN_HANDLE_WORLD, this.worldSnapTolerance(at) * PUSH_PULL_HANDLE_SCALE);
+    const scale = Math.max(MIN_HANDLE_WORLD, this.screenWorldSize(at, PUSH_PULL_HANDLE_SCALE));
     const handle = makeArrow();
     handle.position.copy(at).addScaledVector(worldNormal, scale * 0.2);
     handle.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), worldNormal);
@@ -11115,6 +11115,26 @@ export class Scene {
   }
 
   /** Converts a stable screen-space snap radius into world millimetres. */
+  /**
+   * The world size that covers `factor` x the usual handle size ON SCREEN at
+   * point `at`, at any distance. worldSnapTolerance below is NOT this: it caps
+   * at 2 mm because magnetic snapping must never reach across more than that.
+   * Sizing the resize handles from it made them shrink to a pixel or two once
+   * an object was big enough to need the camera far away, leaving a huge
+   * object with handles nobody could see or grab.
+   */
+  private screenWorldSize(at: THREE.Vector3, factor: number): number {
+    const height = Math.max(1, this.renderer.domElement.clientHeight);
+    let worldHeight: number;
+    if (this.camera instanceof THREE.PerspectiveCamera) {
+      const distance = this.camera.position.distanceTo(at);
+      worldHeight = 2 * Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)) * distance;
+    } else {
+      worldHeight = (this.camera.top - this.camera.bottom) / this.camera.zoom;
+    }
+    return (worldHeight / height) * SNAP_TOLERANCE_PX * factor;
+  }
+
   private worldSnapTolerance(at: THREE.Vector3): number {
     const height = Math.max(1, this.renderer.domElement.clientHeight);
     let worldHeight: number;
