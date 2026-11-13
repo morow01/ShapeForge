@@ -316,6 +316,10 @@ interface ResizeDrag {
   batchOpened?: boolean;
   centreX: number;
   centreY: number;
+  /** Where the dragged handle, and the handle opposite it (the point that
+   *  stays still), were on screen when the press began. */
+  handleScreen: [number, number];
+  anchorScreen: [number, number];
   startDistance: number;
   startX: number;
   startY: number;
@@ -4636,6 +4640,50 @@ export class Scene {
     }
   }
 
+  /**
+   * The resize handle under a screen point, by screen distance. Handles that
+   * land on the same spot in the current view are told apart by which one can
+   * actually MOVE there: in an orthographic front view the height handle (bottom
+   * centre) and both depth handles (front and back bottom edge) all project to
+   * one pixel, and the depth handle, which slides along the view direction and
+   * so does nothing on screen, used to win, so the bottom point "did not work".
+   * A handle's reach is how far a step along its own direction travels on
+   * screen; the largest wins, and corners (free in every direction) win ties.
+   */
+  private pickResizeHandle(clientX: number, clientY: number): { index: number; distance: number } {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const distances: number[] = [];
+    let best = Infinity;
+    for (let i = 0; i < this.resizeHandleMeshes.length; i++) {
+      const p = this.resizeHandleMeshes[i].position.clone().project(this.camera);
+      const x = rect.left + ((p.x + 1) / 2) * rect.width;
+      const y = rect.top + ((1 - p.y) / 2) * rect.height;
+      const d = Math.hypot(clientX - x, clientY - y);
+      distances.push(d);
+      if (d < best) best = d;
+    }
+    if (!Number.isFinite(best)) return { index: -1, distance: Infinity };
+    let index = -1;
+    let bestReach = -Infinity;
+    for (let i = 0; i < distances.length; i++) {
+      if (distances[i] > best + 2) continue;
+      let reach = Infinity;
+      if (i >= 8) {
+        const dir = new THREE.Vector3(
+          i === 8 ? -1 : i === 9 ? 1 : 0,
+          i === 10 ? -1 : i === 11 ? 1 : 0,
+          i === 12 ? -1 : i === 13 ? 1 : 0,
+        );
+        const from = this.resizeHandleMeshes[i].position;
+        const a = from.clone().project(this.camera);
+        const b = from.clone().addScaledVector(dir, 100).project(this.camera);
+        reach = Math.hypot((b.x - a.x) * rect.width, (b.y - a.y) * rect.height);
+      }
+      if (reach > bestReach) { bestReach = reach; index = i; }
+    }
+    return { index, distance: distances[index] };
+  }
+
   /** TinkerCAD-style hover state for the eight corner resize points. Besides
    * making the active point unmistakable, it calls attention to the three
    * live size readouts without starting a resize gesture. Applies to both
@@ -4643,15 +4691,8 @@ export class Scene {
   private updateResizeHover(e: PointerEvent) {
     let next = -1;
     if (this.resizeHandles.visible && this.toolMode === "select") {
-      const rect = this.renderer.domElement.getBoundingClientRect();
-      let nearest = 16;
-      for (let i = 0; i < this.resizeHandleMeshes.length; i++) {
-        const p = this.resizeHandleMeshes[i].position.clone().project(this.camera);
-        const x = rect.left + ((p.x + 1) / 2) * rect.width;
-        const y = rect.top + ((1 - p.y) / 2) * rect.height;
-        const distance = Math.hypot(e.clientX - x, e.clientY - y);
-        if (distance < nearest) { nearest = distance; next = i; }
-      }
+      const hit = this.pickResizeHandle(e.clientX, e.clientY);
+      if (hit.distance < 16) next = hit.index;
     }
     if (next === this.resizeHoverIndex) return;
     if (this.resizeHoverIndex >= 0) {
@@ -9319,6 +9360,8 @@ export class Scene {
 
     const aspect = Math.max(this.aspect(), 0.1);
     let endPos: THREE.Vector3;
+    // Orthographic only: the camera's zoom to finish on (see below).
+    let endZoom: number | null = null;
 
     if (this.camera instanceof THREE.PerspectiveCamera) {
       const tanHalfFovV = Math.tan(THREE.MathUtils.degToRad(this.camera.fov) / 2);
@@ -9348,12 +9391,14 @@ export class Scene {
         maxHalfH = Math.max(maxHalfH, Math.abs(rel.dot(camY)));
       }
       const fitHalfH = Math.max(maxHalfH, maxHalfW / aspect) * 1.10;
-      const fitHalfW = fitHalfH * aspect;
-      this.camera.left = -fitHalfW;
-      this.camera.right = fitHalfW;
-      this.camera.top = fitHalfH;
-      this.camera.bottom = -fitHalfH;
-      this.camera.updateProjectionMatrix();
+      // An orthographic view is zoomed by the camera's own `zoom` (that is
+      // what the wheel and pinch change), and what is drawn is the view box
+      // divided by it. Rewriting the box to the fitted size while leaving
+      // `zoom` at whatever the user had scrolled to meant the fit only came out
+      // right at zoom 1: zoomed out first, Z stopped short of filling the
+      // screen. Keep the box and finish on the zoom that fits instead.
+      const boxHalfH = Math.max(1e-6, (this.camera.top - this.camera.bottom) / 2);
+      endZoom = boxHalfH / Math.max(1e-6, fitHalfH);
 
       const orthoDist = Math.max(3000, fitHalfH * 3);
       endPos = center.clone().add(camZ.clone().multiplyScalar(orthoDist));
@@ -9362,6 +9407,10 @@ export class Scene {
     // Jump straight there, without the animation or the camera save that follows it.
     if (instant) {
       this.camera.position.copy(endPos);
+      if (endZoom !== null && this.camera instanceof THREE.OrthographicCamera) {
+        this.camera.zoom = endZoom;
+        this.camera.updateProjectionMatrix();
+      }
       this.controls.target.copy(center);
       this.controls.update();
       return;
@@ -9369,10 +9418,15 @@ export class Scene {
 
     const duration = 350;
     const startTime = performance.now();
+    const startZoom = this.camera.zoom;
 
     const step = () => {
       const t = Math.min(1, (performance.now() - startTime) / duration);
       const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+      if (endZoom !== null && this.camera instanceof THREE.OrthographicCamera) {
+        this.camera.zoom = startZoom + (endZoom - startZoom) * eased;
+        this.camera.updateProjectionMatrix();
+      }
       this.camera.position.lerpVectors(startPos, endPos, eased);
       this.controls.target.lerpVectors(startTarget, center, eased);
       this.controls.update();
@@ -11888,8 +11942,28 @@ export class Scene {
         this.onDragChange?.(true);
       }
       this.updateScaleHint(e);
-      const d = Math.hypot(e.clientX - this.resizeDrag.centreX, e.clientY - this.resizeDrag.centreY);
-      const ratio = d / this.resizeDrag.startDistance;
+      // Scale factor that keeps the dragged handle under the cursor: how far the
+      // cursor is along the line from the point that stays still (the opposite
+      // handle, or the centre with Alt) through the handle's starting spot.
+      // Measuring from the box centre while the opposite corner stayed put made
+      // the handle run away from the cursor.
+      const fixedScreen: [number, number] = e.altKey
+        ? [this.resizeDrag.centreX, this.resizeDrag.centreY]
+        : this.resizeDrag.anchorScreen;
+      const lineX = this.resizeDrag.handleScreen[0] - fixedScreen[0];
+      const lineY = this.resizeDrag.handleScreen[1] - fixedScreen[1];
+      const lineLengthSq = lineX * lineX + lineY * lineY;
+      let ratio: number;
+      if (lineLengthSq > 4) {
+        ratio = ((e.clientX - fixedScreen[0]) * lineX + (e.clientY - fixedScreen[1]) * lineY) / lineLengthSq;
+      } else {
+        const d = Math.hypot(e.clientX - this.resizeDrag.centreX, e.clientY - this.resizeDrag.centreY);
+        ratio = d / this.resizeDrag.startDistance;
+      }
+      // Free (unlocked) drags change a size by the cursor's travel; with the
+      // opposite side fixed that travel is the handle's, with Alt (growing from
+      // the centre) both sides move, so the size changes twice as much.
+      const growth = e.altKey ? 2 : 1;
       const factors: Vec3 = [1, 1, 1];
       // Shift flips whichever way proportions currently lock, for exactly
       // the length of the drag — free resize for a quick one-off uniform
@@ -11938,10 +12012,21 @@ export class Scene {
           const worldA = (dx * by - dy * bx) / determinant;
           const worldB = (dy * ax - dx * ay) / determinant;
           const signs = this.resizeDrag.handleSigns;
-          const nextA = Math.max(0.01, this.resizeDrag.startSize[axisA] + 2 * worldA * signs[axisA]);
-          const nextB = Math.max(0.01, this.resizeDrag.startSize[axisB] + 2 * worldB * signs[axisB]);
-          factors[axisA] = Math.max(0.01, nextA / this.resizeDrag.startSize[axisA]);
-          factors[axisB] = Math.max(0.01, nextB / this.resizeDrag.startSize[axisB]);
+          // The sizes being changed are along the object's OWN axes (that is
+          // what bases and signs describe), so start from its own lengths. The
+          // world-box size used here before only agrees with them while the
+          // object is unrotated, and put the corner off its cursor when turned.
+          const own = this.resizeDrag.targets.length === 1;
+          const startA = Math.max(0.01, own
+            ? this.resizeDrag.rawSize[axisA] * this.resizeDrag.startScale[axisA]
+            : this.resizeDrag.startSize[axisA]);
+          const startB = Math.max(0.01, own
+            ? this.resizeDrag.rawSize[axisB] * this.resizeDrag.startScale[axisB]
+            : this.resizeDrag.startSize[axisB]);
+          const nextA = Math.max(0.01, startA + growth * worldA * signs[axisA]);
+          const nextB = Math.max(0.01, startB + growth * worldB * signs[axisB]);
+          factors[axisA] = Math.max(0.01, nextA / startA);
+          factors[axisB] = Math.max(0.01, nextB / startB);
         }
       } else if (this.resizeDrag.axis !== null) {
         const axis = this.resizeDrag.axis;
@@ -11971,7 +12056,7 @@ export class Scene {
           );
           const nextLength = Math.max(
             0.01,
-            startLength + travelled * this.resizeDrag.handleSigns[axis],
+            startLength + growth * travelled * this.resizeDrag.handleSigns[axis],
           );
           factors[axis] = nextLength / startLength;
         }
@@ -12449,19 +12534,9 @@ export class Scene {
     // Screen-space hit testing keeps the grab target comfortably clickable at
     // every zoom level; raycasting a tiny 3D cube made near-edge clicks fall
     // through to the object's body drag.
-    let nearest = Infinity;
-    let nearestIndex = -1;
-    for (let i = 0; i < this.resizeHandleMeshes.length; i++) {
-      const handle = this.resizeHandleMeshes[i];
-      const p = handle.position.clone().project(this.camera);
-      const x = rect.left + ((p.x + 1) / 2) * rect.width;
-      const y = rect.top + ((1 - p.y) / 2) * rect.height;
-      const distance = Math.hypot(e.clientX - x, e.clientY - y);
-      if (distance < nearest) {
-        nearest = distance;
-        nearestIndex = i;
-      }
-    }
+    const picked = this.pickResizeHandle(e.clientX, e.clientY);
+    const nearest = picked.distance;
+    const nearestIndex = picked.index;
     if (nearest > 16) return false;
 
     const selectedViews = this.selectedIds
@@ -12549,12 +12624,22 @@ export class Scene {
 
     const lockAspectXY = selectedViews.some(({ node }) => keepsXYRatio(node));
 
+    // The handle opposite this one stays still while it moves (corner i is
+    // opposite 7 - i; the face handles come in pairs 8/9, 10/11, 12/13).
+    const oppositeIndex = nearestIndex < 8 ? 7 - nearestIndex : nearestIndex ^ 1;
+    const screenOf = (i: number): [number, number] => {
+      const q = this.resizeHandleMeshes[i].position.clone().project(this.camera);
+      return [rect.left + ((q.x + 1) / 2) * rect.width, rect.top + ((1 - q.y) / 2) * rect.height];
+    };
+
     this.resizeDrag = {
       id: first.id,
       targets,
       startScale: [...first.node.scale] as Vec3,
       axis: localAxis,
       lockAspectXY,
+      handleScreen: screenOf(nearestIndex),
+      anchorScreen: screenOf(oppositeIndex),
       centreX,
       centreY,
       startDistance: Math.max(1, Math.hypot(e.clientX - centreX, e.clientY - centreY)),
