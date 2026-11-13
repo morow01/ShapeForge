@@ -164,6 +164,12 @@ interface BodyGrab {
    *  under the cursor at constant Z rather than dragging it down to Z=0. */
   plane: THREE.Plane;
   grabPoint: THREE.Vector3;
+  /** Looking nearly level (a front or side view), the horizontal plane is edge-on
+   *  and the pointer never meets it, so the drag uses an upright plane facing
+   *  the camera instead and moves the object sideways and up/down. */
+  vertical: boolean;
+  /** The horizontal direction lying in that upright plane (screen "right"). */
+  tangent: THREE.Vector3;
   startPos: THREE.Vector3;
   items: GrabItem[];
 }
@@ -2086,6 +2092,17 @@ export class Scene {
    */
   private duplicateTargets(ids: string[]): string[] {
     return [...new Set(ids.map((id) => this.findRootOwner(id)))];
+  }
+
+  /**
+   * The objects Align treats as ONE object each. A part inside a plain Group
+   * moves with that whole Group (see the gizmo and body drag), so aligning it
+   * means aligning the Group: with the parts of a Group in the selection, each
+   * part used to be its own align target — measured and shifted on its own, so
+   * a grouped object came apart in Align.
+   */
+  private alignTargets(): string[] {
+    return [...new Set(this.selectedIds.map((id) => this.findRootOwner(id)))];
   }
 
   onSelectObject: ((id: string | null, additive: boolean) => void) | null = null;
@@ -4724,7 +4741,7 @@ export class Scene {
    *  alignMoves already targets instead of the union, the dots now show
    *  where that reference actually is, not the union's own extent. */
   private updateAlignOverlay() {
-    const entries = this.selectedIds
+    const entries = this.alignTargets()
       .map((id): { id: string; obj: THREE.Group | undefined; view: PartView | undefined } => {
         const g = this.assemblyGroups.get(id);
         if (g) return { id, obj: g, view: undefined };
@@ -5026,7 +5043,7 @@ export class Scene {
    *  would actually move: an object already sitting on the target, or the
    *  fixed anchor object, contributes exactly zero delta and is left out. */
   private alignMoves(axis: AlignAxis, anchor: AlignAnchor): { id: string; obj: THREE.Group; delta: number }[] {
-    const selected = this.selectedIds
+    const selected = this.alignTargets()
       .map((id): { id: string; obj: THREE.Group | undefined; node: SceneNode | null } => ({
         id,
         obj: this.assemblyGroups.get(id) ?? this.parts.get(id)?.group,
@@ -11462,7 +11479,21 @@ export class Scene {
     }
 
     const planeZ = targetObj.position.z;
-    const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -planeZ);
+    let plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -planeZ);
+    // How level is the view? Looking down at the ground the object slides on a
+    // horizontal plane (constant height). Looking nearly horizontally that
+    // plane is seen edge-on: the ray runs parallel to it, never hits, and the
+    // drag silently did nothing — the orthographic front and side views.
+    const rayDown = this.pointerRayDirection(e);
+    const vertical = Math.abs(rayDown.z) < 0.3;
+    let tangent = new THREE.Vector3(1, 0, 0);
+    if (vertical) {
+      const normal = new THREE.Vector3(rayDown.x, rayDown.y, 0);
+      if (normal.lengthSq() < 1e-8) normal.set(0, 1, 0);
+      normal.normalize();
+      plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, targetObj.position);
+      tangent = new THREE.Vector3(-normal.y, normal.x, 0);
+    }
     const grabPoint = this.rayPlaneHit(e, plane);
     if (!grabPoint) return;
 
@@ -11472,6 +11503,8 @@ export class Scene {
       active: false,
       plane,
       grabPoint,
+      vertical,
+      tangent,
       startPos: targetObj.position.clone(),
       items: (this.selectedIds.includes(targetId) ? this.selectedIds : [targetId]).map((gId) => {
         const isAssembly = this.assemblyGroups.has(gId);
@@ -12301,7 +12334,22 @@ export class Scene {
     // rest of the drag once shift releases.
     let dx = hit.x - g.grabPoint.x;
     let dy = hit.y - g.grabPoint.y;
-    if (e.shiftKey) {
+    let dz = 0;
+    if (g.vertical) {
+      // Upright plane: the move is along the screen's horizontal direction
+      // (across the plane) plus straight up or down.
+      let across = dx * g.tangent.x + dy * g.tangent.y;
+      dz = hit.z - g.grabPoint.z;
+      if (e.shiftKey) {
+        const step = Math.PI / 4;
+        const angle = Math.round(Math.atan2(dz, across) / step) * step;
+        const dist = Math.hypot(across, dz);
+        across = Math.cos(angle) * dist;
+        dz = Math.sin(angle) * dist;
+      }
+      dx = g.tangent.x * across;
+      dy = g.tangent.y * across;
+    } else if (e.shiftKey) {
       const step = Math.PI / 4;
       const angle = Math.round(Math.atan2(dy, dx) / step) * step;
       const dist = Math.hypot(dx, dy);
@@ -12316,6 +12364,7 @@ export class Scene {
     if (this.gridSnapEnabled && !this.altDown && leadForGrid) {
       dx = Math.round(leadForGrid.startGroupPos.x + dx) - leadForGrid.startGroupPos.x;
       dy = Math.round(leadForGrid.startGroupPos.y + dy) - leadForGrid.startGroupPos.y;
+      if (g.vertical) dz = Math.round(leadForGrid.startGroupPos.z + dz) - leadForGrid.startGroupPos.z;
     }
 
     // Snap is resolved once, on the object under the cursor, and the answer
@@ -12332,7 +12381,7 @@ export class Scene {
         for (const item of g.items) {
           const obj = this.assemblyGroups.get(item.id) ?? this.parts.get(item.id)?.group;
           if (!obj) continue;
-          obj.position.set(item.startGroupPos.x + dx, item.startGroupPos.y + dy, item.startGroupPos.z);
+          obj.position.set(item.startGroupPos.x + dx, item.startGroupPos.y + dy, item.startGroupPos.z + dz);
           obj.updateWorldMatrix(true, true);
         }
         snap = this.snapGroup(g.items.map((item) => item.id));
@@ -12340,7 +12389,7 @@ export class Scene {
         leadObj.position.set(
           leadItem.startGroupPos.x + dx,
           leadItem.startGroupPos.y + dy,
-          leadItem.startGroupPos.z,
+          leadItem.startGroupPos.z + dz,
         );
         leadObj.updateWorldMatrix(true, true);
         snap = this.applySmartSnap(g.id, leadObj);
@@ -12353,7 +12402,7 @@ export class Scene {
       obj.position.set(
         item.startGroupPos.x + dx + snap[0],
         item.startGroupPos.y + dy + snap[1],
-        item.startGroupPos.z + snap[2],
+        item.startGroupPos.z + dz + snap[2],
       );
       obj.updateWorldMatrix(true, true);
       const isAssembly = this.assemblyGroups.has(item.id);
@@ -12788,6 +12837,17 @@ export class Scene {
       if (view.mesh === hit.object) return id;
     }
     return null;
+  }
+
+  /** The direction of the ray under the pointer (from the camera into the scene). */
+  private pointerRayDirection(e: { clientX: number; clientY: number }): THREE.Vector3 {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(
+      ((e.clientX - rect.left) / rect.width) * 2 - 1,
+      -((e.clientY - rect.top) / rect.height) * 2 + 1,
+    );
+    this.raycaster.setFromCamera(ndc, this.camera);
+    return this.raycaster.ray.direction.clone();
   }
 
   private rayPlaneHit(
