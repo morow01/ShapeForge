@@ -2073,6 +2073,17 @@ export class Scene {
     return check(this.lastNodes) ?? targetId;
   }
 
+  /**
+   * What an Alt-drag copy should actually duplicate. A part inside a plain
+   * Group is moved together with that whole Group, so copying it must copy the
+   * Group too: duplicating just the part lifted it out into a loose copy that
+   * had lost the Group's position, scale and transform — a copied AMS came
+   * out of the walls' selection with its lid and body in the wrong place.
+   */
+  private duplicateTargets(ids: string[]): string[] {
+    return [...new Set(ids.map((id) => this.findRootOwner(id)))];
+  }
+
   onSelectObject: ((id: string | null, additive: boolean) => void) | null = null;
   /** Marquee release: every id whose screen-space bounds landed fully inside
    *  the drawn rectangle, in no particular order. */
@@ -3688,6 +3699,48 @@ export class Scene {
     if (!was) return false;
     const pieces = was.type === "group" ? was.children : was.type === "build" ? was.sources : [];
     return pieces.length > 0 && pieces.every((piece) => alive.has(piece.id));
+  }
+
+  /**
+   * Turns where a part is DRAWN (group position X, orientation Q) back into the
+   * position and rotation the document stores for it.
+   *
+   * With no hinge that is just "take off the pivot offset". A part that is
+   * swung open is drawn at its closed placement turned about the hinge line,
+   * so writing the drawn position straight back baked the swing into the
+   * document and then swung it AGAIN — moving a selection with an open lid in
+   * it sent the lid flying. Here the swing is undone first:
+   *   drawn X = N + pt + H (rp - pt)   =>   N = X - pt - H (rp - pt)
+   * where H is the hinge turn, pt the hinge point, rp the part's pivot offset
+   * under its own (closed) rotation, and N the stored position.
+   */
+  private nodeTransformFromDrawn(
+    id: string,
+    X: THREE.Vector3,
+    Q: THREE.Quaternion,
+    pivot: THREE.Vector3 | null,
+  ): { position: Vec3; rotation: Vec3 } {
+    const hinge = findNode(this.lastNodes, id)?.hinge;
+    const swung = !!hinge && Math.abs(hinge.angle) > 1e-6 && new THREE.Vector3(...hinge.axis).lengthSq() > 1e-12;
+    let closed = Q;
+    let turn: THREE.Quaternion | null = null;
+    if (swung && hinge) {
+      turn = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(...hinge.axis).normalize(), hinge.angle * DEG);
+      closed = turn.clone().invert().multiply(Q);
+    }
+    const euler = new THREE.Euler().setFromQuaternion(closed, "XYZ");
+    const rp = pivot ? pivot.clone().applyEuler(euler) : new THREE.Vector3();
+    let position: THREE.Vector3;
+    if (swung && hinge && turn) {
+      const pt = new THREE.Vector3(...hinge.point);
+      position = X.clone().sub(pt).sub(rp.clone().sub(pt).applyQuaternion(turn));
+    } else {
+      position = X.clone().sub(rp);
+    }
+    return {
+      position: [position.x, position.y, position.z],
+      rotation: [euler.x / DEG, euler.y / DEG, euler.z / DEG],
+    };
   }
 
   /** Swings a placed part open about its hinge line (see Hinge). Runs right
@@ -9591,7 +9644,7 @@ export class Scene {
       // duplication and the drag that follows land in the same undo batch
       // because onDragChange(true) fires first.
       if (this.altDown) {
-        const idsToDuplicate = [...this.selectedIds];
+        const idsToDuplicate = this.duplicateTargets([...this.selectedIds]);
         this.onDragChange?.(true);                     // open undo batch early
         const res = this.onDuplicateObject?.(idsToDuplicate);
         if (res && res.copies && res.copies.length > 0) {
@@ -9814,26 +9867,10 @@ export class Scene {
         }
       }
       for (const item of drag.items) {
-        const newGroupPos = item.obj.position;
-        const euler = new THREE.Euler().setFromQuaternion(item.obj.quaternion, "XYZ");
-        const newRotDeg: Vec3 = [euler.x / DEG, euler.y / DEG, euler.z / DEG];
-
-        if (item.isAssembly) {
-          this.onTransformObject?.(item.id, {
-            position: [newGroupPos.x, newGroupPos.y, newGroupPos.z],
-            rotation: newRotDeg,
-          });
-        } else {
-          const rotatedPivot = item.pivot.clone().applyEuler(euler);
-          this.onTransformObject?.(item.id, {
-            position: [
-              newGroupPos.x - rotatedPivot.x,
-              newGroupPos.y - rotatedPivot.y,
-              newGroupPos.z - rotatedPivot.z,
-            ],
-            rotation: newRotDeg,
-          });
-        }
+        this.onTransformObject?.(
+          item.id,
+          this.nodeTransformFromDrawn(item.id, item.obj.position, item.obj.quaternion, item.isAssembly ? null : item.pivot),
+        );
       }
       this.refreshGroupCollisionContacts();
       this.updateResizeOverlay();
@@ -9865,15 +9902,7 @@ export class Scene {
       return;
     }
     const view = this.parts.get(id);
-    const rotatedPivot = view?.pivot.clone().applyEuler(obj.rotation) ?? new THREE.Vector3();
-    this.onTransformObject?.(id, {
-      position: [
-        obj.position.x - rotatedPivot.x,
-        obj.position.y - rotatedPivot.y,
-        obj.position.z - rotatedPivot.z,
-      ],
-      rotation: [obj.rotation.x / DEG, obj.rotation.y / DEG, obj.rotation.z / DEG],
-    });
+    this.onTransformObject?.(id, this.nodeTransformFromDrawn(id, obj.position, obj.quaternion, view?.pivot ?? null));
   };
 
   /** What the object `id` — at `moving` bounds — can snap to: the surfaces of
@@ -12126,7 +12155,7 @@ export class Scene {
       // render round-trip back through setPlacements().
       if (e.altKey) {
         this.onDragChange?.(true);
-        const idsToDuplicate = g.items.map((item) => item.id);
+        const idsToDuplicate = this.duplicateTargets(g.items.map((item) => item.id));
         const res = this.onDuplicateObject?.(idsToDuplicate);
         if (res && res.copies && res.copies.length > 0) {
           const { copies, nodes } = res;
@@ -12258,14 +12287,9 @@ export class Scene {
       );
       obj.updateWorldMatrix(true, true);
       const isAssembly = this.assemblyGroups.has(item.id);
-      const rotatedPivot = isAssembly ? new THREE.Vector3() : item.pivot.clone().applyEuler(obj.rotation);
-      this.onTransformObject?.(item.id, {
-        position: [
-          obj.position.x - rotatedPivot.x,
-          obj.position.y - rotatedPivot.y,
-          obj.position.z - rotatedPivot.z,
-        ],
-      });
+      // Position only: a body drag never turns the part.
+      const { position } = this.nodeTransformFromDrawn(item.id, obj.position, obj.quaternion, isAssembly ? null : item.pivot);
+      this.onTransformObject?.(item.id, { position });
     }
     if (g.items.length > 1) this.refreshGroupCollisionContacts();
     this.updateResizeOverlay();
