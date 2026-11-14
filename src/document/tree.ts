@@ -39,6 +39,10 @@ export function resolveNodeColor(node: SceneNode | null | undefined): string {
 /** Recursively resolves whether a node is translucent. */
 export function resolveNodeTransparent(node: SceneNode | null | undefined): boolean {
   if (!node) return false;
+  // A plain Group is as see-through as what is drawn inside it, not as its own
+  // flag says: its parts carry the real setting, and a part changed on its own
+  // afterwards must show in the Group's toggle too.
+  if (isGroup(node) && node.op === "assembly") return node.children.some(resolveNodeTransparent);
   if (node.transparent !== undefined) return node.transparent;
   if (node.type === "edit") {
     return resolveNodeTransparent(node.base);

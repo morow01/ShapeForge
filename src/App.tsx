@@ -4114,10 +4114,19 @@ export function App() {
       const s = useDoc.getState();
       if (!s.selectedIds.length) return;
       beginHistoryBatch();
+      // A plain Group has no surface of its own: each part inside it is drawn
+      // from its own setting, so marking only the Group changed nothing on
+      // screen. Set the whole subtree (holes keep their own look).
+      const setTree = (n: SceneNode) => {
+        setTransparent(n.id, value);
+        if (isGroup(n) && n.op === "assembly") {
+          for (const child of n.children) if (!child.isHole) setTree(child);
+        }
+      };
       for (const id of s.selectedIds) {
         const node = findNode(s.nodes, id);
         if (!node || node.isHole) continue;
-        setTransparent(id, value);
+        setTree(node);
         const parent = parentOf(s.nodes, id);
         if (parent && isGroup(parent)) setTransparent(parent.id, value);
       }
