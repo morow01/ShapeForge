@@ -9884,17 +9884,40 @@ export class Scene {
             const copyId = newSelectedIds[0];
             if (copyId) {
               if (this.assemblyGroups.has(copyId)) {
-                const pivotObj = this.assemblyPivots.get(copyId);
+                // A Group is dragged through a pivot object at its CENTRE, never by
+                // its container, whose origin is somewhere else. The copy has no
+                // pivot yet, so make one; the gizmo then rides on it and the drag
+                // record starts from it. Attaching the container instead made the
+                // gizmo drag it to the centre's position: the copy jumped by the
+                // gap between its origin and its centre, and the document was never
+                // updated, so the copy ended up drawn in one place and saved in
+                // another.
+                let pivotObj = this.assemblyPivots.get(copyId);
+                if (!pivotObj) {
+                  pivotObj = new THREE.Object3D();
+                  pivotObj.name = `AssemblyPivot-${copyId}`;
+                  this.scene.add(pivotObj);
+                  this.assemblyPivots.set(copyId, pivotObj);
+                }
                 const node = findNode(this.lastNodes, copyId);
-                if (pivotObj && node) {
+                // Start exactly where the gizmo being dragged started (the original's
+                // pivot): the drag's movement is measured from there, so the copy
+                // moves by precisely what the gizmo moved. The copy's own measured
+                // centre does not agree to the last millimetre while its parts are
+                // still being placed, which shifted the copy sideways.
+                pivotObj.position.copy(this.gizmo.object?.position ?? this.computeAssemblyCenter(copyId));
+                if (node) {
+                  pivotObj.rotation.set(node.rotation[0] * DEG, node.rotation[1] * DEG, node.rotation[2] * DEG);
+                }
+                pivotObj.updateMatrixWorld(true);
+                if (node) {
                   this.assemblyDragStart = {
                     center: pivotObj.position.clone(),
                     position: [...node.position],
                     rotation: [...node.rotation],
                   };
                 }
-                const asmGroup = this.assemblyGroups.get(copyId);
-                if (asmGroup) this.gizmo.attach(asmGroup);
+                this.gizmo.attach(pivotObj);
               } else {
                 const view = this.parts.get(copyId);
                 if (view) this.gizmo.attach(view.group);
