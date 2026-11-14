@@ -7348,8 +7348,19 @@ export function App() {
               onColor={(c) => {
                 beginHistoryBatch();
                 const ids = selectedIds.length ? selectedIds : (selected ? [selected.id] : []);
+                // A plain Group has no surface of its own: each part inside it is
+                // drawn in its own colour, so colouring only the Group changed
+                // nothing on screen. Colour the whole subtree.
+                const colourTree = (n: SceneNode) => {
+                  setColor(n.id, c);
+                  if (isGroup(n) && n.op === "assembly") {
+                    for (const child of n.children) if (!child.isHole) colourTree(child);
+                  }
+                };
                 for (const id of ids) {
-                  setColor(id, c);
+                  const node = findNode(nodes, id);
+                  if (node) colourTree(node);
+                  else setColor(id, c);
                   const parent = parentOf(nodes, id);
                   if (parent && isGroup(parent)) {
                     setColor(parent.id, c);

@@ -17,6 +17,15 @@ export function findNode(nodes: SceneNode[], id: string): SceneNode | null {
 /** Recursively resolves the display color for any node type (object, edit, group). */
 export function resolveNodeColor(node: SceneNode | null | undefined): string {
   if (!node) return DEFAULT_OBJECT_COLOR;
+  // A plain Group is drawn in the colours of its parts, so its swatch shows
+  // theirs rather than a flag of its own that a later change to a part leaves
+  // stale (the Group showed green while everything inside it was brown).
+  if (isGroup(node) && node.op === "assembly") {
+    for (const child of node.children) {
+      const c = resolveNodeColor(child);
+      if (c && c !== DEFAULT_OBJECT_COLOR) return c;
+    }
+  }
   if (node.color) return node.color;
   if (node.type === "edit") {
     return resolveNodeColor(node.base);
