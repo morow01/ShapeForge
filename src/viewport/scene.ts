@@ -1553,6 +1553,13 @@ export class Scene {
       }
       this.camera.updateProjectionMatrix();
       const visibleIds = [...this.parts.entries()].filter(([, view]) => view.group.visible).map(([id]) => id);
+      // Always the standard isometric corner view (the same one Home resets to),
+      // not whichever angle the editor happens to be at. The card used to be a
+      // snapshot of the live camera, so a design last left in a front, side or
+      // orbited view got a card that looked sideways, and no two cards agreed.
+      const isoDirection = new THREE.Vector3(150, -150, 115).normalize();
+      const distance = Math.max(1, savedPosition.distanceTo(savedTarget));
+      this.camera.position.copy(this.controls.target).addScaledVector(isoDirection, distance);
       if (visibleIds.length) this.zoomToFit(visibleIds, true);
       this.renderFrame();
       const source = this.renderer.domElement;
@@ -4492,8 +4499,16 @@ export class Scene {
     // handle to stretch the width on its own.
     this.resizeHandleMeshes[8].position.set(min.x, centre.y, centre.z);
     this.resizeHandleMeshes[9].position.set(max.x, centre.y, centre.z);
-    this.resizeHandleMeshes[10].position.set(centre.x, min.y, min.z);
-    this.resizeHandleMeshes[11].position.set(centre.x, max.y, min.z);
+    // The depth (Y) pair sits on the middle of the two bottom edges — unless the
+    // view looks along X (a side or right/left view). There those edge middles
+    // land exactly on the bottom corners, the corner handles take every grab,
+    // and nothing is left to stretch the depth on its own: a flat board seen
+    // from the side showed no handle at either end. Then they stand at
+    // mid-height on the ±Y faces instead, the same fix the width pair got.
+    const lookDirection = centre.clone().sub(this.camera.position).normalize();
+    const depthHandleZ = Math.abs(lookDirection.x) > 0.85 ? centre.z : min.z;
+    this.resizeHandleMeshes[10].position.set(centre.x, min.y, depthHandleZ);
+    this.resizeHandleMeshes[11].position.set(centre.x, max.y, depthHandleZ);
     this.resizeHandleMeshes[12].position.set(centre.x, centre.y, min.z);
     this.resizeHandleMeshes[13].position.set(centre.x, centre.y, max.z);
     // worldSnapTolerance already converts a fixed SCREEN size into whatever
