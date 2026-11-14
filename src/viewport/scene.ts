@@ -4267,7 +4267,24 @@ export class Scene {
     this.updateHingeLine();
   }
 
+  /** Ids hidden with the eye icon, counting every node inside a hidden Group: a
+   *  Group is hidden by switching off its container, which says nothing about
+   *  the visibility flags of the parts drawn inside it. */
+  private hiddenIds(): Set<string> {
+    const hidden = new Set<string>();
+    const visit = (nodes: SceneNode[], inherited: boolean) => {
+      for (const node of nodes) {
+        const isHidden = inherited || !!node.hidden;
+        if (isHidden) hidden.add(node.id);
+        if (isGroup(node)) visit(node.children, isHidden);
+      }
+    };
+    visit(this.lastNodes, false);
+    return hidden;
+  }
+
   private applyMaterials() {
+    const hiddenByTree = this.hiddenIds();
     for (const [id, view] of this.parts) {
       const isDirectlySelected = this.selectedIds.includes(id);
       const isPlacementSource = this.surfacePlacement?.source === id && !this.surfacePlacement.attachment;
@@ -4379,7 +4396,10 @@ export class Scene {
       // ScenePart of its own (see toSpec in App.tsx), so this only ever
       // fires for a TOP-LEVEL id — exactly the case where hiding can be a
       // free visibility toggle rather than a kernel rebuild.
-      const hiddenByUser = !!node?.hidden;
+      // Hidden itself, or inside a hidden Group: the part inside a hidden Group
+      // is drawn through its container, so it stayed pickable (clickable,
+      // draggable, a snap target) while nothing of it showed.
+      const hiddenByUser = hiddenByTree.has(id);
       if (hasActiveResult) {
         // Ghost the original part — still visible as a faint translucent
         // silhouette so the user can see what the merged result was built from.
