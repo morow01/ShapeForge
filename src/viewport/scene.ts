@@ -10100,7 +10100,7 @@ export class Scene {
    */
   private snapResizeFaces(
     drag: ResizeDrag,
-    view: PartView,
+    view: { group: THREE.Object3D },
     faceAxes: number[],
     factors: Vec3,
     apply: (factors: Vec3) => void,
@@ -10151,7 +10151,7 @@ export class Scene {
    */
   private snapUniformResize(
     drag: ResizeDrag,
-    view: PartView,
+    view: { group: THREE.Object3D },
     u0: number,
     build: (u: number) => Vec3,
     apply: (factors: Vec3) => void,
@@ -12321,7 +12321,10 @@ export class Scene {
         // contact when it lands, exactly as a move does. A resize that drags
         // one face (or an unlocked corner) snaps that face; a uniform scale
         // moves every face at once, so it snaps whichever one is nearest.
-        if (view) {
+        // A Group snaps exactly like a part: both helpers only look at the bounds
+        // of the object being resized, so its container stands in for `view`.
+        const snapView: { group: THREE.Object3D } | null = view ?? (drag.group ? { group: drag.group.obj } : null);
+        if (snapView) {
           if (this.snapEnabled) {
             let faceAxes: number[] = [];
             let uniform: ((u: number) => Vec3) | null = null;
@@ -12339,13 +12342,13 @@ export class Scene {
             else uniform = (u) => [u, u, u];
             const apply = (f: Vec3) => { placed = place(f); };
             const active = faceAxes.length
-              ? this.snapResizeFaces(drag, view, faceAxes, factors, apply, e.altKey)
+              ? this.snapResizeFaces(drag, snapView, faceAxes, factors, apply, e.altKey)
               : uniform
-                ? this.snapUniformResize(drag, view, factors[0], uniform, apply)
+                ? this.snapUniformResize(drag, snapView, factors[0], uniform, apply)
                 : [];
-            if (active.length) this.guides.show(active, this.boundsOf(view.group));
+            if (active.length) this.guides.show(active, this.boundsOf(snapView.group));
             else this.guides.clear();
-            if (this.showSelectedCollisionContacts) this.refreshCollisionContactsFor(drag.id, active);
+            if (view && this.showSelectedCollisionContacts) this.refreshCollisionContactsFor(drag.id, active);
           } else {
             this.guides.clear();
             this.collisionContactCache.delete(drag.id);
