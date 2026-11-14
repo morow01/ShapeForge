@@ -341,6 +341,11 @@ interface ResizeDrag {
   handleSigns: Vec3;
   rotation: THREE.Quaternion;
   handleIndex: number;
+  /** Set when the thing being resized is a plain Group: its container object and
+   *  the extent of its contents in the Group's own (unscaled) frame. A Group
+   *  scales about its own origin, not its centre, so the opposite side has to be
+   *  held still with this rather than with the centre shift a single part uses. */
+  group?: { obj: THREE.Object3D; localMin: Vec3; localMax: Vec3 };
 }
 
 /**
@@ -12274,6 +12279,30 @@ export class Scene {
               );
             }
           }
+          // A Group scales about its own origin. Keep the side opposite the handle
+          // where it was: its position in the Group's frame is held fixed by
+          // moving the origin by (old scale - new scale) x that position.
+          if (drag.group) {
+            const { localMin, localMax, obj } = drag.group;
+            const shift = new THREE.Vector3();
+            for (let i = 0; i < 3; i++) {
+              const anchor = e.altKey || drag.handleSigns[i] === 0
+                ? (localMin[i] + localMax[i]) / 2
+                : drag.handleSigns[i] > 0 ? localMin[i] : localMax[i];
+              shift.setComponent(i, (drag.startScale[i] - scale[i]) * anchor);
+            }
+            const groupShift = shift.applyQuaternion(drag.rotation);
+            obj.scale.fromArray(scale);
+            obj.position.copy(drag.startGroupPosition).add(groupShift);
+            return {
+              scale,
+              position: [
+                drag.startPosition[0] + groupShift.x,
+                drag.startPosition[1] + groupShift.y,
+                drag.startPosition[2] + groupShift.z,
+              ],
+            };
+          }
           const worldShift = localShift.applyQuaternion(drag.rotation);
           const position: Vec3 = [
             drag.startPosition[0] + worldShift.x,
@@ -12675,6 +12704,33 @@ export class Scene {
     this.pick(e, e.ctrlKey || e.metaKey || e.shiftKey);
   };
 
+  /** Extent of a Group's contents in the Group's OWN frame (before its scale
+   *  and rotation), which is what a resize scales. */
+  private groupLocalBounds(obj: THREE.Object3D): { min: Vec3; max: Vec3 } {
+    obj.updateWorldMatrix(true, true);
+    const inverse = obj.matrixWorld.clone().invert();
+    const min: Vec3 = [Infinity, Infinity, Infinity];
+    const max: Vec3 = [-Infinity, -Infinity, -Infinity];
+    const corner = new THREE.Vector3();
+    obj.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      const geometry = mesh.geometry;
+      if (!geometry.boundingBox) geometry.computeBoundingBox();
+      const b = geometry.boundingBox;
+      if (!b) return;
+      for (const x of [b.min.x, b.max.x]) for (const y of [b.min.y, b.max.y]) for (const z of [b.min.z, b.max.z]) {
+        corner.set(x, y, z).applyMatrix4(mesh.matrixWorld).applyMatrix4(inverse);
+        for (let i = 0; i < 3; i++) {
+          min[i] = Math.min(min[i], corner.getComponent(i));
+          max[i] = Math.max(max[i], corner.getComponent(i));
+        }
+      }
+    });
+    if (!min.every(Number.isFinite)) return { min: [0, 0, 0], max: [1, 1, 1] };
+    return { min, max };
+  }
+
   private beginResize(e: PointerEvent): boolean {
     if (!this.resizeHandles.visible || this.selectedIds.length === 0) return false;
     const rect = this.renderer.domElement.getBoundingClientRect();
@@ -12686,15 +12742,25 @@ export class Scene {
     const nearestIndex = picked.index;
     if (nearest > 16) return false;
 
-    const selectedViews = this.selectedIds
-      .map((id) => ({ id, view: this.parts.get(id), node: findNode(this.lastNodes, id) }))
-      .filter((item): item is { id: string; view: PartView; node: SceneNode } => !!item.view && !!item.node && item.view.group.visible);
+    // A lone Group can be resized too; it has no part of its own, only its
+    // container object, so it is carried as `assembly` next to `view`.
+    type ResizeItem = { id: string; view: PartView | undefined; assembly: THREE.Group | undefined; node: SceneNode };
+    const selectedViews: ResizeItem[] = this.selectedIds
+      .map((id) => ({
+        id,
+        view: this.parts.get(id),
+        assembly: this.selectedIds.length === 1 ? this.assemblyGroups.get(id) : undefined,
+        node: findNode(this.lastNodes, id),
+      }))
+      .filter((item): item is ResizeItem =>
+        !!item.node && ((!!item.view && item.view.group.visible) || (!!item.assembly && item.assembly.visible)));
     if (!selectedViews.length) return false;
+    const objOf = (item: ResizeItem): THREE.Object3D => (item.assembly ?? item.view!.group);
 
     const box = new THREE.Box3();
-    for (const { view } of selectedViews) {
-      view.group.updateWorldMatrix(true, true);
-      box.expandByObject(view.group);
+    for (const item of selectedViews) {
+      objOf(item).updateWorldMatrix(true, true);
+      box.expandByObject(objOf(item));
     }
     const worldCentre = box.getCenter(new THREE.Vector3());
     const project = (point: THREE.Vector3): [number, number] => {
@@ -12710,7 +12776,7 @@ export class Scene {
     // its handles follow the world axes, not whichever object came first.
     const quaternion = selectedViews.length > 1
       ? new THREE.Quaternion()
-      : first.view.group.getWorldQuaternion(new THREE.Quaternion());
+      : objOf(first).getWorldQuaternion(new THREE.Quaternion());
     const invQuat = quaternion.clone().invert();
     const [xPixelX, xPixelY] = project(worldCentre.clone().add(new THREE.Vector3(1, 0, 0).applyQuaternion(quaternion)));
     const [yPixelX, yPixelY] = project(worldCentre.clone().add(new THREE.Vector3(0, 1, 0).applyQuaternion(quaternion)));
@@ -12753,21 +12819,29 @@ export class Scene {
       }
     }
 
-    const targets: ResizeTarget[] = selectedViews.map(({ id, view, node }) => {
-      view.mesh.geometry.computeBoundingBox();
-      const rawSize = (view.mesh.geometry.boundingBox?.getSize(new THREE.Vector3()) ?? new THREE.Vector3(1, 1, 1)).toArray() as Vec3;
+    const groupBounds = first.assembly ? this.groupLocalBounds(first.assembly) : null;
+    const sizeOf = (item: ResizeItem): Vec3 => {
+      if (item.assembly) {
+        const b = item === first && groupBounds ? groupBounds : this.groupLocalBounds(item.assembly);
+        return [b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]];
+      }
+      item.view!.mesh.geometry.computeBoundingBox();
+      return (item.view!.mesh.geometry.boundingBox?.getSize(new THREE.Vector3()) ?? new THREE.Vector3(1, 1, 1)).toArray() as Vec3;
+    };
+    const targets: ResizeTarget[] = selectedViews.map((item) => {
+      const { id, node } = item;
+      const obj = objOf(item);
       return {
         id,
         startScale: [...node.scale] as Vec3,
         startPosition: [...node.position] as Vec3,
-        startGroupPosition: view.group.position.clone(),
-        rawSize,
-        rotation: view.group.getWorldQuaternion(new THREE.Quaternion()),
-        startCentre: new THREE.Box3().expandByObject(view.group).getCenter(new THREE.Vector3()).toArray() as Vec3,
+        startGroupPosition: obj.position.clone(),
+        rawSize: sizeOf(item),
+        rotation: obj.getWorldQuaternion(new THREE.Quaternion()),
+        startCentre: new THREE.Box3().expandByObject(obj).getCenter(new THREE.Vector3()).toArray() as Vec3,
       };
     });
-    first.view.mesh.geometry.computeBoundingBox();
-    const rawSize = (first.view.mesh.geometry.boundingBox?.getSize(new THREE.Vector3()) ?? new THREE.Vector3(1, 1, 1)).toArray() as Vec3;
+    const rawSize = sizeOf(first);
 
     const lockAspectXY = selectedViews.some(({ node }) => keepsXYRatio(node));
 
@@ -12799,11 +12873,14 @@ export class Scene {
       basisY: [yPixelX - centreX, yPixelY - centreY],
       basisZ: [zPixelX - centreX, zPixelY - centreY],
       startPosition: [...first.node.position] as Vec3,
-      startGroupPosition: first.view.group.position.clone(),
+      startGroupPosition: objOf(first).position.clone(),
       rawSize,
       handleSigns,
       rotation: quaternion,
       handleIndex: nearestIndex,
+      group: first.assembly && groupBounds
+        ? { obj: first.assembly, localMin: groupBounds.min, localMax: groupBounds.max }
+        : undefined,
     };
     this.updateDimensionVisibility(nearestIndex);
     this.controls.enabled = false;
