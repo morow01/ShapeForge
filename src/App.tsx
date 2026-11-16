@@ -4629,7 +4629,7 @@ export function App() {
   const borderPreviewShownRef = useRef(false);
   useEffect(() => {
     let cancelled = false;
-    const border = faceOp === "fillet" || faceOp === "chamfer" ? faceOp : null;
+    const border = faceOp === "fillet" || faceOp === "chamfer" || faceOp === "offset" ? faceOp : null;
     if (toolMode !== "face" || !border || !faceSelection || !borderPreview) {
       if (borderPreviewShownRef.current) {
         borderPreviewShownRef.current = false;
@@ -4652,12 +4652,15 @@ export function App() {
         if (!node || node.type === "import" || node.type === "build") {
           throw new Error("Preview is unavailable for this object.");
         }
-        const op: EditOp = {
-          kind: border,
-          point: faceSelection.point,
-          face: { point: faceSelection.point, normal: faceSelection.normal },
-          distance: Math.max(0.1, Math.abs(faceValue)),
-        };
+        if (border === "offset" && Math.abs(faceHeight) < 0.1) throw new Error("Type a height of at least 0.1 mm to preview the offset.");
+        const op: EditOp = border === "offset"
+          ? { kind: "offsetExtrude", inset: faceValue, height: faceHeight, point: faceSelection.point, normal: faceSelection.normal }
+          : {
+              kind: border,
+              point: faceSelection.point,
+              face: { point: faceSelection.point, normal: faceSelection.normal },
+              distance: Math.max(0.1, Math.abs(faceValue)),
+            };
         let base = toSpec(node);
         if (node.type !== "edit") {
           base = { ...base, position: [0, 0, 0] as Vec3, rotation: [0, 0, 0] as Vec3, scale: [1, 1, 1] as Vec3 };
@@ -4672,7 +4675,9 @@ export function App() {
           // does not work.
           clear();
           setBorderPreviewFailed(true);
-          setBorderPreviewStatus(`This face's border can't be ${border === "fillet" ? "rounded" : "bevelled"} at this size. Try a smaller value or another face.`);
+          setBorderPreviewStatus(border === "offset"
+            ? "That inset leaves nothing of the face to extrude. Try a smaller inset."
+            : `This face's border can't be ${border === "fillet" ? "rounded" : "bevelled"} at this size. Try a smaller value or another face.`);
           return;
         }
         borderPreviewShownRef.current = true;
@@ -4688,7 +4693,7 @@ export function App() {
       }
     }, 450);
     return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [toolMode, faceOp, faceSelection, faceValue, borderPreview, nodes]);
+  }, [toolMode, faceOp, faceSelection, faceValue, faceHeight, borderPreview, nodes]);
 
   // Edge finishing can be expensive, so wait until the value has paused for
   // a moment and coalesce stale requests. The preview never touches history.
@@ -6798,7 +6803,7 @@ export function App() {
                   : wallPreviewStatus || "Select a flat face to preview the opening."}
               </p>
             </>}
-            {(faceOp === "fillet" || faceOp === "chamfer") && <>
+            {(faceOp === "fillet" || faceOp === "chamfer" || faceOp === "offset") && <>
               <label className="border-preview-toggle">
                 <input type="checkbox" checked={borderPreview} onChange={e => setBorderPreview(e.target.checked)} />
                 <span>Live preview</span>
@@ -6810,8 +6815,8 @@ export function App() {
               >
                 {borderPreviewStatus === "BUILDING"
                   ? <span className="status-pill busy hollow-building-status" title="Recalculating the preview">Building…</span>
-                  : !borderPreview ? `Preview off — Apply to ${faceOp === "fillet" ? "round" : "bevel"} the border.`
-                  : borderPreviewStatus || `Select a flat face to preview its ${faceOp === "fillet" ? "rounded" : "bevelled"} border.`}
+                  : !borderPreview ? (faceOp === "offset" ? "Preview off — Apply to offset and extrude the face." : `Preview off — Apply to ${faceOp === "fillet" ? "round" : "bevel"} the border.`)
+                  : borderPreviewStatus || (faceOp === "offset" ? "Select a flat face to preview the offset." : `Select a flat face to preview its ${faceOp === "fillet" ? "rounded" : "bevelled"} border.`)}
               </p>
             </>}
             <div className="face-settings-actions">
