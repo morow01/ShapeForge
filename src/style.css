@@ -6170,3 +6170,29 @@ span.status-btn { cursor: default; }
 .hinge-remove-btn:hover { background: #fee2e2; }
 .hinge-angle-chips { grid-template-columns: repeat(5, 1fr); }
 .hinge-gizmo-toggle { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: #475569; cursor: pointer; }
+
+/* Properties > Edits: the values each applied edit was made with. */
+.edit-ops h2 { display: flex; align-items: center; gap: 8px; }
+.edit-ops-busy { font-size: 10px; }
+.edit-ops-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.edit-op { border: 1px solid #e3e8ec; border-radius: 6px; padding: 6px 8px 8px; }
+.edit-op-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; margin-bottom: 4px; }
+.edit-op-title { font-size: 12px; font-weight: 600; }
+.edit-op-remove { border: none; background: none; color: #7d8a93; font-size: 15px; line-height: 1; padding: 0 4px; cursor: pointer; }
+.edit-op-remove:hover { color: #c0392b; }
+.edit-op-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.edit-op-fields .num-stepper-wrap { min-width: 0; width: 100%; box-sizing: border-box; }
+.edit-op .hint { margin: 0; }
+
+/* Edge tool: rounds/bevels already applied to the object, still editable. */
+.existing-finishes { display: flex; flex-direction: column; gap: 8px; }
+.existing-finishes .border-panel-heading { display: flex; align-items: center; gap: 8px; }
+.existing-finish { border: 1px solid #e3e8ec; border-radius: 6px; padding: 6px 8px; }
+.existing-finish-head { display: flex; align-items: center; justify-content: space-between; font-size: 12px; font-weight: 600; margin-bottom: 6px; }
+.existing-finish-controls { display: flex; align-items: center; gap: 6px; }
+.existing-finish-kind { display: inline-flex; border: 1px solid #cfd8de; border-radius: 6px; overflow: hidden; flex-shrink: 0; }
+.existing-finish-kind button { border: none; background: #fff; padding: 4px 10px; font-size: 12px; cursor: pointer; }
+.existing-finish-kind button.active { background: #3f8590; color: #fff; }
+.existing-finish-controls .border-size-field { flex: 1; min-width: 0; }
+.existing-finish-unit { font-size: 11px; color: #7d8a93; }
+.existing-finishes small { color: #7d8a93; font-size: 11px; }

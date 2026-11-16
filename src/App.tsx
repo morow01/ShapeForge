@@ -124,7 +124,7 @@ import { getDefaultClearance } from "./document/clearance";
 import { ClearancePresets } from "./ui/ClearancePresets";
 import { missingBlobs, putBlob } from "./document/blobStore";
 import { loadCameraState, loadThumbnail, locationOf, saveThumbnail } from "./document/persist";
-import type { EditOp, GroupNode, ImportNode, PrimitiveKind, SceneNode, ShellOp, HollowRim, ResizeFaceOp, SketchData, Vec3 } from "./document/types";
+import type { EdgeOp, EditOp, GroupNode, ImportNode, PrimitiveKind, SceneNode, ShellOp, HollowRim, ResizeFaceOp, SketchData, Vec3 } from "./document/types";
 import { RETRYABLE_MESH_ERROR } from "./kernel/types";
 import type { EditSpec, ExportQuality, NodeSpec, PreviewBuild, ScenePart } from "./kernel/types";
 import type { CameraMode, CollisionHighlightStyle, DuplicateResult, Scene, SketchPlaneChoice, ToolMode, WireframeMode } from "./viewport/scene";
@@ -3230,6 +3230,52 @@ export function App() {
     }
   }, [setOps]);
 
+  // Changing a value on an edit that was already applied (a fillet's radius,
+  // a wall's thickness) from the Properties "Edits" list. The whole list is
+  // replayed first and only kept if EVERY edit still builds: a bigger radius
+  // can swallow the face a later edit was anchored to, and keeping that would
+  // quietly drop the later edit. Debounced so holding a stepper arrow checks
+  // once, and only the newest request may write.
+  const [opsPending, setOpsPending] = useState(false);
+  const opsChangeTimer = useRef<number | undefined>(undefined);
+  const opsChangeRequest = useRef(0);
+  const changeNodeOps = useCallback((id: string, ops: EditOp[], label: string) => {
+    const node = findNode(useDoc.getState().nodes, id);
+    if (!node || node.type !== "edit") return;
+    window.clearTimeout(opsChangeTimer.current);
+    const request = ++opsChangeRequest.current;
+    setOpsPending(true);
+    opsChangeTimer.current = window.setTimeout(async () => {
+      try {
+        // No edits left: the shape goes back to its original primitive,
+        // which always builds.
+        const kept = ops.length
+          ? await kernel.pruneDeadOps({ ...(toSpec(node) as EditSpec), ops })
+          : [];
+        if (request !== opsChangeRequest.current) return;
+        if (!kept) throw new Error("This shape could not be rebuilt.");
+        // An edit that was already broken before this change must not block
+        // every change after it: refuse only if MORE edits fail than did.
+        const brokenBefore = kept.length < ops.length
+          ? node.ops.length - ((await kernel.pruneDeadOps(toSpec(node) as EditSpec))?.length ?? node.ops.length)
+          : 0;
+        if (request !== opsChangeRequest.current) return;
+        if (ops.length - kept.length > brokenBefore) {
+          const keptKeys = new Set(kept.map((op) => JSON.stringify(op)));
+          const lost = ops.findIndex((op) => !keptKeys.has(JSON.stringify(op)));
+          setError(`Not applied: edit ${lost + 1} in the Edits list sits on a face this change would move or remove. Try a smaller value, or remove edit ${lost + 1} first.`);
+          return;
+        }
+        setError(null);
+        setOps(node.id, ops, label);
+      } catch (e) {
+        if (request === opsChangeRequest.current) setError(msg(e));
+      } finally {
+        if (request === opsChangeRequest.current) setOpsPending(false);
+      }
+    }, 350);
+  }, [setOps]);
+
   const handleSimplifyMesh = useCallback(async (nodeId: string, ratio: number) => {
     const s = useDoc.getState();
     const targetNode = findNode(s.nodes, nodeId);
@@ -4461,8 +4507,78 @@ export function App() {
     setError(null);
   }, []);
 
+  // Clicking the border edges of a round or bevel that is already on the
+  // object means "change that one", not "finish these two new edges". A
+  // finish of size d replaces its edge with border edges about d away on each
+  // side, so a clicked edge whose midpoint sits roughly d from a stored edge
+  // anchor belongs to that finish. Every clicked edge has to point at the
+  // same finish, or it is treated as a new one as before.
+  const edgeEditTarget = useMemo(() => {
+    if (!edgeSelection) return null;
+    const node = findNode(nodes, edgeSelection.id);
+    if (!node || node.type !== "edit") return null;
+    // How far an op's anchor (a point on the ORIGINAL sharp edge) is from a
+    // clicked edge. With the clicked edge's ends known, that is the distance
+    // to its line — a border edge of a finish runs parallel to the edge it
+    // replaced, d away — and the anchor must also lie alongside the segment.
+    // Without them, fall back to the distance to its midpoint.
+    const segments = sceneRef.current?.selectedEdgeSegments?.() ?? [];
+    const distanceFrom = (anchor: Vec3, i: number): number => {
+      const segment = segments.length === edgeSelection.points.length ? segments[i] : null;
+      const point = edgeSelection.points[i];
+      if (!segment) return Math.hypot(point[0] - anchor[0], point[1] - anchor[1], point[2] - anchor[2]);
+      const axis = segment.end.map((v, k) => v - segment.start[k]) as Vec3;
+      const length = Math.hypot(...axis);
+      if (length < 1e-6) return Infinity;
+      const u = axis.map((v) => v / length) as Vec3;
+      const rel = anchor.map((v, k) => v - segment.start[k]) as Vec3;
+      const along = rel[0] * u[0] + rel[1] * u[1] + rel[2] * u[2];
+      // Allow for the edge having been trimmed by finishes at its ends.
+      const slack = 1 + 2 * Math.max(...node.ops.map((op) => ("distance" in op ? Math.abs(op.distance) : 0)));
+      if (along < -slack || along > length + slack) return Infinity;
+      return Math.hypot(rel[0] - along * u[0], rel[1] - along * u[1], rel[2] - along * u[2]);
+    };
+    const owner = (i: number): number => {
+      let best = -1;
+      let bestError = Infinity;
+      node.ops.forEach((op, index) => {
+        if ((op.kind !== "fillet" && op.kind !== "chamfer") || op.face) return;
+        const tolerance = Math.max(0.5, op.distance * 0.35);
+        for (const anchor of op.points?.length ? op.points : [op.point]) {
+          const error = Math.abs(distanceFrom(anchor, i) - op.distance);
+          if (error < tolerance && error < bestError) {
+            bestError = error;
+            best = index;
+          }
+        }
+      });
+      return best;
+    };
+    const owners = edgeSelection.points.map((_, i) => owner(i));
+    const index = owners[0];
+    if (index < 0 || owners.some((other) => other !== index)) return null;
+    return { index, op: node.ops[index] as EdgeOp };
+  }, [edgeSelection, nodes]);
+  // Load the finish being edited into the tool's own controls once, when it
+  // is picked — after that the controls are the user's to change.
+  const edgeEditKey = edgeEditTarget ? `${edgeSelection?.id}|${edgeEditTarget.index}` : "";
+  useEffect(() => {
+    if (!edgeEditTarget) return;
+    setEdgeKind(edgeEditTarget.op.kind);
+    setEdgeDistance(edgeEditTarget.op.distance);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [edgeEditKey]);
+
   const edgeCandidate = useCallback(() => {
     if (!edgeSelection) return null;
+    if (edgeEditTarget) {
+      const node = findNode(useDoc.getState().nodes, edgeSelection.id);
+      if (!node || node.type !== "edit") return null;
+      const op: EdgeOp = { ...edgeEditTarget.op, kind: edgeKind, distance: edgeDistance };
+      const ops = node.ops.slice();
+      ops[edgeEditTarget.index] = op;
+      return { op, candidate: { ...(toSpec(node) as EditSpec), ops }, replaces: edgeEditTarget.index };
+    }
     const op = {
       kind: edgeKind,
       point: edgeSelection.points[0],
@@ -4492,8 +4608,8 @@ export function App() {
           scale: node.scale,
           isHole: node.isHole,
         };
-    return { op, candidate };
-  }, [edgeSelection, edgeKind, edgeDistance]);
+    return { op, candidate, replaces: -1 };
+  }, [edgeSelection, edgeEditTarget, edgeKind, edgeDistance]);
 
   const [resizeFrame, setResizeFrame] = useState<FaceResizeFrame | null>(null);
   const [resizeBounds, setResizeBounds] = useState<FaceBounds | null>(null);
@@ -4731,6 +4847,25 @@ export function App() {
     if (!edgeSelection) return;
     const pending = edgeCandidate();
     if (!pending) return;
+    if (pending.replaces >= 0) {
+      // Changing a finish that was already applied: the whole list must
+      // still build, exactly as when it is changed from the Edits list.
+      try {
+        const surviving = await kernel.pruneDeadOps(pending.candidate);
+        if (!surviving || surviving.length < pending.candidate.ops.length) {
+          setError("That size would break this object's edits, so it was not applied. Try a smaller value.");
+          return;
+        }
+        sceneRef.current?.setEdgePreview(null, null);
+        sceneRef.current?.clearSelectedEdges?.();
+        setError(null);
+        setOps(edgeSelection.id, pending.candidate.ops, pending.op.kind === "fillet" ? "Change round" : "Change bevel");
+        setEdgeSelection(null);
+      } catch (e) {
+        setError(msg(e));
+      }
+      return;
+    }
     try {
       const surviving = await kernel.pruneDeadOps(pending.candidate);
       const latestSurvived = !!surviving?.length &&
@@ -7051,13 +7186,86 @@ export function App() {
           // Bevel Face Border panel rather than a bar over the viewport.
           const assemblyGroup = edgeSelection ? findAssemblyOwner(nodes, edgeSelection.id) : null;
           const count = edgeSelection?.points.length ?? 0;
+          // Rounds and bevels already on this object, so one applied earlier
+          // can be resized or switched between round and bevel right here
+          // instead of being permanent.
+          const finishOwner = findNode(nodes, edgeSelection?.id ?? selected?.id ?? "");
+          const finishOps = finishOwner?.type === "edit" ? finishOwner.ops : [];
+          const finishes = finishOps
+            .map((op, index) => ({ op, index }))
+            .filter((entry): entry is { op: EdgeOp; index: number } => entry.op.kind === "fillet" || entry.op.kind === "chamfer");
+          const finishName = (op: EdgeOp) => {
+            const word = op.kind === "fillet" ? "Rounded" : "Bevelled";
+            if (op.face) return `${word} face border`;
+            const n = op.points?.length ?? 1;
+            return `${word} ${n} edge${n === 1 ? "" : "s"}`;
+          };
+          const changeFinish = (index: number, next: EdgeOp, label: string) => {
+            if (!finishOwner) return;
+            const ops = finishOps.slice();
+            ops[index] = next;
+            changeNodeOps(finishOwner.id, ops, label);
+          };
           return (
             <div className="face-settings-panel edge-settings-panel">
               <strong>Fillet / Chamfer Edges</strong>
 
+              {finishes.length > 0 && (
+                <div className="border-panel-section existing-finishes">
+                  <span className="border-panel-heading">
+                    Already on this object{opsPending && <span className="status-pill busy edit-ops-busy">Rebuilding…</span>}
+                  </span>
+                  {finishes.map(({ op, index }) => (
+                    <div key={index} className="existing-finish">
+                      <div className="existing-finish-head">
+                        <span>{finishName(op)}</span>
+                        <button
+                          type="button"
+                          className="edit-op-remove"
+                          title="Remove this finish"
+                          aria-label={`Remove: ${finishName(op)}`}
+                          onClick={() => finishOwner && changeNodeOps(finishOwner.id, finishOps.filter((_, i) => i !== index), "Remove edge finish")}
+                        >×</button>
+                      </div>
+                      <div className="existing-finish-controls">
+                        <div className="existing-finish-kind" role="group" aria-label="Finish type">
+                          {(["fillet", "chamfer"] as const).map((kind) => (
+                            <button
+                              key={kind}
+                              type="button"
+                              className={op.kind === kind ? "active" : ""}
+                              aria-pressed={op.kind === kind}
+                              onClick={() => op.kind !== kind && changeFinish(index, { ...op, kind }, kind === "fillet" ? "Change bevel to round" : "Change round to bevel")}
+                            >{kind === "fillet" ? "Round" : "Bevel"}</button>
+                          ))}
+                        </div>
+                        <span className="border-size-field">
+                          <SignedMeasurementInput
+                            valueMm={op.distance}
+                            unit={displayUnit}
+                            decimals={decimalPlaces}
+                            min={0.1}
+                            step={0.5}
+                            onValue={(v) => {
+                              const mm = Math.max(0.1, Math.abs(v));
+                              if (Math.abs(mm - op.distance) > 1e-9) changeFinish(index, { ...op, distance: mm }, op.kind === "fillet" ? "Change round radius" : "Change bevel size");
+                            }}
+                            onEnter={() => (document.activeElement as HTMLElement | null)?.blur()}
+                          />
+                        </span>
+                        <span className="existing-finish-unit">{displayUnit}</span>
+                      </div>
+                    </div>
+                  ))}
+                  <small>Change a size or switch Round/Bevel and it rebuilds. Below adds a new finish.</small>
+                </div>
+              )}
+
               <div className="edge-selection-row">
                 <span className="face-selection-state">
-                  {count ? `${count} edge${count === 1 ? "" : "s"} selected` : "Click edges to add or remove them"}
+                  {edgeEditTarget
+                    ? `Editing the existing ${edgeEditTarget.op.kind === "fillet" ? "round" : "bevel"} — change it below, then Apply`
+                    : count ? `${count} edge${count === 1 ? "" : "s"} selected` : "Click edges to add or remove them"}
                 </span>
                 {count > 0 && (
                   <button
@@ -7396,6 +7604,8 @@ export function App() {
               onRename={(n) => rename(selected.id, n)}
               onDelete={removeSelected}
               onPruneDeadOps={onPruneDeadOps}
+              onChangeOps={(ops, label) => changeNodeOps(selected.id, ops, label)}
+              opsPending={opsPending}
               onRetryNode={handleRetryNode}
               onDuplicateWithParams={(params, overrides) => duplicateWithParams(selected.id, params, overrides)}
               onText={(t) => setText(selected.id, t)}

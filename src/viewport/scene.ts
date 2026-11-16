@@ -11790,6 +11790,26 @@ export class Scene {
     return point ? { id, view, groupIndex, point } : null;
   }
 
+  /** The two ends of each selected edge, in the kernel's frame (the same one
+   *  edge ops store their anchors in). Lets the app tell which existing
+   *  round or bevel a clicked border edge belongs to by its whole line, not
+   *  just its midpoint — a neighbouring finish trims an edge and moves the
+   *  midpoint, but not the line. */
+  selectedEdgeSegments(): { start: Vec3; end: Vec3 }[] {
+    return this.selectedEdges.flatMap((edge) => {
+      const view = this.parts.get(edge.partId);
+      const group = view?.wire.geometry.groups[edge.groupIndex];
+      const positions = view?.wire.geometry.getAttribute("position");
+      if (!view || !group || !positions || group.count < 2) return [];
+      const at = (i: number): Vec3 => [
+        positions.getX(i) + view.pivot.x,
+        positions.getY(i) + view.pivot.y,
+        positions.getZ(i) + view.pivot.z,
+      ];
+      return [{ start: at(group.start), end: at(group.start + group.count - 1) }];
+    });
+  }
+
   /** A point in the middle of one of a part's edges, in the kernel's frame —
    *  what an edge op stores to find that edge again. */
   private edgeMidpoint(view: PartView, groupIndex: number): Vec3 | null {

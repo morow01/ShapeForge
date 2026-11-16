@@ -21,7 +21,7 @@ import {
   solveScaledTriangle,
 } from "../geometry/triangle";
 import type { TriangleSolution } from "../geometry/triangle";
-import type { BooleanOp, Hinge, LowPoly, ObjectNode, ParamField, PrimitiveKind, SceneNode, Vec3 } from "../document/types";
+import type { BooleanOp, EditOp, Hinge, LowPoly, ObjectNode, ParamField, PrimitiveKind, SceneNode, Vec3 } from "../document/types";
 import type { LocalFontData } from "../text/systemFonts";
 import { displayStep, formatLength, fromMillimetres, toMillimetres } from "../measurement";
 import type { DisplayUnit } from "../measurement";
@@ -313,6 +313,11 @@ interface Props {
    *  longer find their target face, instead of leaving them to keep
    *  re-failing (and re-showing `error`) on every future rebuild. */
   onPruneDeadOps: () => void;
+  /** Edit nodes only: replaces the op list after one edit's value was changed
+   *  or one edit removed; the app checks it rebuilds before keeping it. */
+  onChangeOps?: (ops: EditOp[], label: string) => void;
+  /** Edit nodes only: a changed op list is being checked. */
+  opsPending?: boolean;
   /** Object nodes only: makes an exact in-place copy of the selected node
    *  (same position/rotation/scale) with `params` merged over its own —
    *  the Connector's "Copy as Socket/Plug" button, so the copy always sits
@@ -439,6 +444,8 @@ export function Inspector({
   onDelete,
   onRetryNode,
   onPruneDeadOps,
+  onChangeOps,
+  opsPending = false,
   onDuplicateWithParams,
   onCreateMatchingThreadPart,
   onText,
@@ -711,6 +718,15 @@ export function Inspector({
           ) : node.type === "edit" ? (
             <>
               <EditInfo node={node} error={error} onPruneDeadOps={onPruneDeadOps} />
+              {onChangeOps && node.ops.length > 0 && (
+                <EditOpsList
+                  ops={node.ops}
+                  pending={opsPending}
+                  displayUnit={displayUnit}
+                  decimalPlaces={decimalPlaces}
+                  onChangeOps={onChangeOps}
+                />
+              )}
               {node.base.type === "object" && (
                 <ObjectParams
                   node={node.base}
@@ -1338,6 +1354,136 @@ function EditInfo({
         </>
       )}
     </>
+  );
+}
+
+/** One editable number on an edit: which field, its label, and its limits. */
+interface OpField {
+  label: string;
+  mm: number;
+  min?: number;
+  set: (mm: number) => EditOp;
+}
+
+/** A plain-language name for an edit, as the History panel would say it. */
+function opTitle(op: EditOp): string {
+  switch (op.kind) {
+    case "fillet":
+      return op.face ? "Round face border" : `Round ${op.points && op.points.length > 1 ? `${op.points.length} edges` : "edge"}`;
+    case "chamfer":
+      return op.face ? "Bevel face border" : `Bevel ${op.points && op.points.length > 1 ? `${op.points.length} edges` : "edge"}`;
+    case "shell":
+      return "Hollow";
+    case "resizeFace":
+      return "Resize face";
+    case "offsetExtrude":
+      return "Offset & extrude";
+    default:
+      return "Push/Pull";
+  }
+}
+
+/** The numbers an edit was made with that can be changed afterwards. */
+function opFields(op: EditOp): OpField[] {
+  switch (op.kind) {
+    case "fillet":
+    case "chamfer":
+      return [{ label: op.kind === "fillet" ? "Radius" : "Size", mm: op.distance, min: 0.1, set: (mm) => ({ ...op, distance: mm }) }];
+    case "shell": {
+      const fields: OpField[] = [
+        { label: "Wall", mm: op.thickness, min: 0.1, set: (mm) => ({ ...op, thickness: mm }) },
+        { label: "Bottom", mm: op.bottomThickness ?? op.thickness, min: 0, set: (mm) => ({ ...op, bottomThickness: mm }) },
+      ];
+      if (op.rim) {
+        const rim = op.rim;
+        fields.push(
+          { label: rim.kind === "ledge" ? "Ledge width" : "Lip width", mm: rim.width, min: 0.1, set: (mm) => ({ ...op, rim: { ...rim, width: mm } }) },
+          { label: rim.kind === "ledge" ? "Ledge depth" : "Lip depth", mm: rim.depth, min: 0.1, set: (mm) => ({ ...op, rim: { ...rim, depth: mm } }) },
+        );
+      }
+      return fields;
+    }
+    case "resizeFace":
+      // A handle-drag resize stores a 2D stretch, not one number.
+      return op.stretch ? [] : [{ label: "Offset", mm: op.offset, set: (mm) => ({ ...op, offset: mm }) }];
+    case "offsetExtrude":
+      return [
+        { label: "Inset", mm: op.inset, set: (mm) => ({ ...op, inset: mm }) },
+        { label: "Height", mm: op.height, set: (mm) => ({ ...op, height: mm }) },
+      ];
+    default:
+      return [{ label: "Distance", mm: op.distance, set: (mm) => ({ ...op, distance: mm }) }];
+  }
+}
+
+/**
+ * The edits on an edited shape, oldest first, each with the numbers it was
+ * made with — so a fillet radius or a wall thickness can be changed after the
+ * fact instead of undoing everything since. A change is checked by replaying
+ * the whole list before it is kept (see onChangeOps in the app), because a
+ * bigger radius can take away a face a later edit was anchored to.
+ */
+function EditOpsList({
+  ops,
+  pending,
+  displayUnit,
+  decimalPlaces,
+  onChangeOps,
+}: {
+  ops: EditOp[];
+  pending: boolean;
+  displayUnit: DisplayUnit;
+  decimalPlaces: number;
+  onChangeOps: (ops: EditOp[], label: string) => void;
+}) {
+  return (
+    <section className="edit-ops">
+      <h2>Edits{pending && <span className="status-pill busy edit-ops-busy">Rebuilding…</span>}</h2>
+      <ol className="edit-ops-list">
+        {ops.map((op, index) => {
+          const title = opTitle(op);
+          const fields = opFields(op);
+          return (
+            <li key={index} className="edit-op">
+              <div className="edit-op-head">
+                <span className="edit-op-title">{index + 1}. {title}</span>
+                <button
+                  type="button"
+                  className="edit-op-remove"
+                  title={`Remove this ${title.toLowerCase()} edit`}
+                  aria-label={`Remove edit ${index + 1}: ${title}`}
+                  onClick={() => onChangeOps(ops.filter((_, i) => i !== index), `Remove ${title.toLowerCase()}`)}
+                >×</button>
+              </div>
+              {fields.length > 0 ? (
+                <div className="edit-op-fields">
+                  {fields.map((field) => (
+                    <label key={field.label}>
+                      <span className="field-label">{field.label} ({displayUnit})</span>
+                      <MathNumInput
+                        className="num"
+                        min={field.min === undefined ? undefined : fromMillimetres(field.min, displayUnit)}
+                        step={displayStep(displayUnit, decimalPlaces)}
+                        value={formatLength(field.mm, displayUnit, decimalPlaces)}
+                        onCommit={(v) => {
+                          const mm = toMillimetres(v, displayUnit);
+                          if (Math.abs(mm - field.mm) < 1e-9) return;
+                          const next = ops.slice();
+                          next[index] = field.set(mm);
+                          onChangeOps(next, `Change ${title.toLowerCase()} ${field.label.toLowerCase()}`);
+                        }}
+                      />
+                    </label>
+                  ))}
+                </div>
+              ) : (
+                <p className="hint">Resized with the handles — no single value to change.</p>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+    </section>
   );
 }
 

@@ -949,7 +949,9 @@ interface DocState {
    *  that can never succeed again (see the kernel's pruneDeadOps/
    *  survivingOps), not to add one (pushPullFace does that). A no-op for
    *  any node that isn't an edit. */
-  setOps: (id: string, ops: EditOp[]) => void;
+  /** Replaces an edited shape's op list. `label` names the undo step; it
+   *  defaults to the broken-edit cleanup's wording. */
+  setOps: (id: string, ops: EditOp[], label?: string) => void;
   /** Appends one edit op to a node, turning an ordinary object or group into
    *  an EditNode the first time. Takes any EditOp — a fillet, a chamfer, or a
    *  hollow — since the node does not care which; only the kernel's replay
@@ -1786,8 +1788,8 @@ export const useDoc = create<DocState>()(
         afterBatchedMutation();
       },
 
-      setOps: (id, ops) => {
-        ownStep(ops.length ? "Drop edit" : "Remove edits");
+      setOps: (id, ops, label) => {
+        ownStep(label ?? (ops.length ? "Drop edit" : "Remove edits"));
         set((s) => ({
           nodes: updateNode(s.nodes, id, (n) => {
             if (n.type !== "edit") return n;
